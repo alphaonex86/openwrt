@@ -65,6 +65,30 @@
 			reg = <0x00 0x0bc48000 0x00 0x20000>;
 		};
 
+		/*
+		 * ★ CRASH TRACE (2026-08-20).  A reserved DRAM window pstore/ram
+		 * writes a panic and a rolling console tail into, read back from
+		 * /sys/fs/pstore on the NEXT boot.  Placed just above
+		 * ddr_cache_buffer (which ends at 0x0bc68000) and clear of both NI
+		 * DMA pools and of the 0x05000000 TFTP load region.
+		 *
+		 * NOT `no-map`, unlike its neighbours: those are carved OUT of the
+		 * linear map precisely so memremap(WC) succeeds for the NE rings,
+		 * whereas pstore/ram wants an ordinary mapping -- carving this one
+		 * out is what would break it.
+		 *
+		 * It survives a panic or a watchdog bite and NOT a power cut: the
+		 * records are DRAM.  Verified in place by
+		 *   python3 ONU-test-case/crash_trace.py --board=... --probe
+		 * which refuses a region falling outside this board's memory map.
+		 */
+		ramoops@bc80000 {
+			compatible = "ramoops";
+			reg = <0x00 0x0bc80000 0x00 0x20000>;	/* 128 KiB */
+			record-size  = <0x00004000>;	/*  16 KiB per oops/panic */
+			console-size = <0x00010000>;	/*  64 KiB rolling console */
+		};
+
 		ddr_noncache_buffer: buf@9000000 {
 			no-map;
 			reg = <0x00 0x09000000 0x00 0x1628800>;

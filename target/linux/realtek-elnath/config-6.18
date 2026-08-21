@@ -733,3 +733,24 @@ CONFIG_LOCKUP_DETECTOR=y
 CONFIG_SOFTLOCKUP_DETECTOR=y
 CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y
 # CONFIG_CORTINA_NI_REG_GUARD is not set
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ** CRASH TRACE -- pstore/ramoops.  Added 2026-08-20 alongside realtek-luna.
+# ** UNLIKE the two lockup detectors above, PSTORE is NOT a two-place symbol:
+# ** config/Config-kernel.in declares no PSTORE or RAMOOPS option, so these
+# ** lines take effect straight from this file.  The REGION is per-board and
+# ** lives in rtl9607f_x400axf.dts beside the DMA carveouts it must avoid.
+# ** Records are DRAM: they survive a panic or a watchdog bite, never a power
+# ** cut.  Compression is off on purpose -- an unreadable record is worse than
+# ** a short one.  Probe with:
+# **     python3 ONU-test-case/crash_trace.py --board=RTL9607F/HSGQ/X400AXF --probe
+CONFIG_PSTORE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
+# CONFIG_PSTORE_COMPRESS is not set
+# CONFIG_PSTORE_PMSG is not set
+# CONFIG_PSTORE_FTRACE is not set
+CONFIG_REED_SOLOMON=y
+CONFIG_REED_SOLOMON_ENC8=y
+CONFIG_REED_SOLOMON_DEC8=y
+# ═══════════════════════════════════════════════════════════════════════════

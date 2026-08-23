@@ -53,13 +53,17 @@ config RTL9602C_GPON
 	  Clean-room GPON MAC foundation driver for the RTL9602C. Maps the
 	  GPON MAC register block (SWCORE + 0x700000) and exposes /proc/gpon.
 
-config RTL9607C_ETH
-	tristate "Realtek RTL9607C (Luna) GMAC + switch"
+config RTL960X_ETH
+	tristate "Realtek Luna (interAptiv) GMAC + switch"
 	depends on REALTEK_LUNA
 	default y
 	help
-	  Clean-room driver for the RTL9607C GMAC0 CPU port plus the on-chip
-	  switch core (eth0 over the interAptiv SoC).
+	  Clean-room driver for the Luna GMAC0 CPU port plus the on-chip switch
+	  core (eth0 over an interAptiv SoC). One driver, a per-chip TABLE:
+	  RTL9607C (11 switch ports, 3 CPU GMACs, SerDes uplink) and RTL9603CVD
+	  (6 ports, 1 CPU GMAC, no SerDes). The MAC engine is identical on both;
+	  508 of 1361 switch registers move, which is why the table exists and
+	  why neither chip may borrow the other's offsets.
 
 config RTL9607C_GPON
 	tristate "Realtek RTL9607C GPON PON-MAC"

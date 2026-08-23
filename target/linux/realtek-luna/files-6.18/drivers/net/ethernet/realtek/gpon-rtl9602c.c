@@ -4226,7 +4226,27 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		{0x20c00, 0x20c3c}, {0x23000, 0x230fc}, {0x27000, 0x2703c}, {0x701000, 0x70101c},
 	};
 	static const u32 gm[][2] = {		/* absolute phys (separate ioremap) */
-		{0x18012000, 0x180120fc}, {0x18013400, 0x180134fc},
+		/* ★ 0x180133F0 not 0x18013400: the RX ring pointers sit just BELOW
+		 * the old floor -- R_RxFDP0 at 0x13F0 and R_RxCDO0 at 0x13F4, the
+		 * word carrying RxCDO[31:16] | RxRingSize[15:8]. Measured
+		 * 2026-08-23: with eth0 rx stuck at 0, NO dump ever taken on this
+		 * board contained 0x180133F4, so the one register that would say
+		 * whether the ring size was programmed had never been read. The
+		 * board's kernel has CONFIG_DEVMEM off (devmem gives ENXIO on a
+		 * hand-made /dev/mem), so this dump is the ONLY way to read it. */
+		/* ★ THE PER-PORT SWITCH MIB (SWCORE + 0x32620 + port*0x80: RX
+		 * unicast/multicast/broadcast, six ports) and the three ABILITY
+		 * arrays (FORCE_P_ABLTY 0x198 | P_ABLTY 0x1B8 | ABLTY_FORCE_MODE
+		 * 0x1DC, + port*4). MEASURED 2026-08-23: with eth0 rx stuck at 0,
+		 * the ONE question nothing could answer was whether frames still
+		 * ENTER the switch at all -- the driver's periodic diag stops after
+		 * `diag_count` dumps (writing the param does NOT re-arm it), and
+		 * CONFIG_DEVMEM is off, so there was no live route to these
+		 * counters. The ability block is here because P_ABLTY bit 4 is our
+		 * own FORCED bit read back while forcing is on, so the force-mode
+		 * word has to be readable beside it or the link bit means nothing. */
+		{0x1b000180, 0x1b0001fc}, {0x1b032600, 0x1b0328fc},
+		{0x18012000, 0x180120fc}, {0x180133f0, 0x180134fc},
 	};
 	u32 off, a, val;
 	int r;

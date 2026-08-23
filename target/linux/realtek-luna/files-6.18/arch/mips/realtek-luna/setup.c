@@ -104,6 +104,72 @@ static void luna_machine_halt(void)
 #define LUNA_L2_SIZE	(256 << 10)	/* 256 KB */
 #define LUNA_L2_LINE	32		/* bytes (Config2 SL reads 0 on this SoC) */
 
+/*
+ * THE ON-CHIP L2 IS HIDDEN AT RESET ON THE RTL9603CVD, AND THE VENDOR UN-HIDES
+ * IT BEFORE THE KERNEL EVER PROBES A CACHE.
+ *
+ * Tier 1, this board's own vendor kernel on its own console (dev/lanly.log,
+ * LANLY G24W, captured 2026-08-18), three consecutive lines:
+ *
+ *	II: Original CP0 CONFIG2: 80001307
+ *	II: _enable_l23
+ *	II: Configured CP0 CONFIG2: 80000347
+ *	...
+ *	MIPS secondary cache 128kB, 8-way, linesize 32 bytes.
+ *
+ * Decoding MIPS32 Config2 (SU [15:12], SS [11:8], SL [7:4], SA [3:0]):
+ *
+ *	reset      0x80001307  SU=1  SS=3  SL=0  SA=7   <- SL=0 means NO L2
+ *	programmed 0x80000347  SU=0  SS=3  SL=4  SA=7   <- 64<<3 sets x 2<<4
+ *	                                                   bytes x (7+1) ways
+ *	                                                   = 512 x 32 x 8 = 128 KB
+ *
+ * and 128 KB / 8-way / 32-byte is exactly what that kernel then prints. So on
+ * this silicon the L2 geometry fields read as ABSENT until the bypass bit is
+ * cleared -- which is why generic `mips_sc_probe()` finds no secondary cache on
+ * our image and the kernel then runs with the L2 bypassed.
+ *
+ * ★ THE READ IS DONE FIRST AND THE RESULT IS REPORTED. Only bit 12 is cleared
+ *   here, deliberately: whether the geometry fields then read out by themselves
+ *   is a question about the silicon, and the answer decides whether this
+ *   function ever has to spell 0x347 -- a per-board constant -- at all. It is
+ *   asked rather than assumed.
+ */
+#define LUNA_CONF2_L2_BYPASS	BIT(12)
+#define LUNA_CONF2_SL_SHIFT	4
+#define LUNA_CONF2_SL_MASK	(0xfu << LUNA_CONF2_SL_SHIFT)
+
+/*
+ * ★★★ NOTHING MAY TOUCH DRAM BETWEEN THE UN-BYPASS AND THE TAG INVALIDATE, AND
+ * THAT IS A MEASUREMENT, NOT A STYLE RULE (G24W, 2026-08-20).
+ *
+ * The un-bypass makes the L2 live while its tags are still whatever the boot
+ * loader left; `luna_l2_invalidate_tags()` below is what makes them safe. A
+ * `pr_info()` placed between the two -- announcing the very fix -- hung the
+ * board HARDER than the bug it was reporting: the boot stopped dead at `[M]`,
+ * i.e. earlier than the original defect, because printk's ring buffer is a
+ * large cached DRAM write and it landed on garbage-tagged L2 lines.
+ *
+ * So this records what it saw and says nothing. The value is REPORTED LATER,
+ * from device_tree_init(), which is well past the invalidate. `luna_conf2_reset`
+ * is written BEFORE the bypass bit is cleared -- while the L2 is still out of
+ * the way -- for the same reason.
+ */
+static unsigned int luna_conf2_reset __initdata;
+static unsigned int luna_conf2_now __initdata;
+
+static void __init luna_l2_unbypass(void)
+{
+	unsigned int c2 = read_c0_config2();
+
+	luna_conf2_reset = c2;
+	if (c2 & LUNA_CONF2_L2_BYPASS) {
+		write_c0_config2(c2 & ~LUNA_CONF2_L2_BYPASS);
+		back_to_back_c0_hazard();
+	}
+	luna_conf2_now = read_c0_config2();
+}
+
 static void __init luna_l2_invalidate_tags(void)
 {
 	unsigned long addr;
@@ -128,41 +194,6 @@ static void __init luna_l2_invalidate_tags(void)
 			:: "r" (addr) : "memory");
 
 	__asm__ __volatile__("sync" ::: "memory");
-}
-
-/* Synchronous hex via the early UART (bring-up probe; remove later). */
-static void __init prom_puthex(unsigned int v)
-{
-	int i;
-
-	for (i = 28; i >= 0; i -= 4) {
-		int d = (v >> i) & 0xf;
-
-		prom_putchar(d < 10 ? '0' + d : 'a' + (d - 10));
-	}
-}
-
-/*
- * Direct probe of the top usable-DRAM page (phys 0x11fff000, just under the
- * 0x12000000 / 288 MB cap), uncached then cached, with synchronous markers, to
- * confirm the capped top now responds: full "P1 2 3 <deadbeef> 4 5 6 <cafe>"
- * means the memory + cache are good there and the boot can proceed; output
- * stopping at "P1"/"P12" would mean the real top is still lower.
- * (bring-up diagnostic; remove later.)
- */
-static void __init luna_probe_top_page(void)
-{
-	local_irq_disable();
-	prom_putchar('\n');
-	prom_putchar('P'); prom_putchar('1');
-	*(volatile unsigned int *)0xb1fff000 = 0xdeadbeef;	/* KSEG1 uncached */
-	prom_putchar('2');
-	prom_putchar('3'); prom_puthex(*(volatile unsigned int *)0xb1fff000);
-	prom_putchar('4');
-	*(volatile unsigned int *)0x91fff000 = 0x0000cafe;	/* KSEG0 cached */
-	prom_putchar('5');
-	prom_putchar('6'); prom_puthex(*(volatile unsigned int *)0x91fff000);
-	prom_putchar('\n');
 }
 
 /*
@@ -193,6 +224,20 @@ static void __init luna_enable_userlocal(void)
 
 	if (cfg3 & MIPS_CONF3_ULRI)
 		current_cpu_data.options |= MIPS_CPU_ULRI;
+
+	/*
+	 * ★ THE L2's OWN WITNESS, emitted here rather than where the work was
+	 *   done -- see luna_l2_unbypass() for why that window must stay silent.
+	 *   It prints the VALUES rather than a conclusion, so a silicon revision
+	 *   that behaves differently is readable instead of merely broken.
+	 *   MEASURED on the G24W: 80001307 -> 80000347, after which the generic
+	 *   probe prints "MIPS secondary cache 128kB, 8-way, linesize 32 bytes"
+	 *   -- the same line, byte for byte, that this board's vendor kernel
+	 *   prints.
+	 */
+	if (luna_conf2_reset != luna_conf2_now)
+		pr_info("rtl960x: L2 un-bypassed: Config2 %08x -> %08x\n",
+			luna_conf2_reset, luna_conf2_now);
 }
 #endif /* CONFIG_MIPS_CM */
 
@@ -200,8 +245,27 @@ void __init plat_mem_setup(void)
 {
 	prom_putchar('['); prom_putchar('M'); prom_putchar(']');
 #ifdef CONFIG_MIPS_CM
+	luna_l2_unbypass();		/* the L2 is hidden at reset on the 9603CVD */
 	luna_l2_invalidate_tags();	/* clean the boot-time garbage L2 tags */
-	luna_probe_top_page();		/* bring-up: probe phys 0x1bfff000 */
+	/*
+	 * ★ THE TOP-OF-DRAM PROBE THAT USED TO RUN HERE IS GONE, and removing it
+	 * is a FIX, not tidying (measured 2026-08-20 on the LANLY G24W).
+	 *
+	 * It was a declared bring-up diagnostic ("remove later") that wrote and
+	 * read phys 0x11fff000 -- 288 MB, the RTL9607C engineering board's DRAM
+	 * top -- through KSEG1 and then through KSEG0. That address is a BOARD
+	 * fact spelled as a constant in code shared by every member of this
+	 * subtarget, and the G24W has 128 MB (0x08000000): measured at its own
+	 * U-Boot prompt, `bdinfo` -> memstart 0x80000000, memsize 0x08000000,
+	 * and its own kernel's DEBUG_MEM_AUTO says mem_size=0x08000000.
+	 *
+	 * The failure was silent and in the reassuring direction. Unmapped DRAM
+	 * ALIASES here, so the probe printed its full success sequence
+	 * ("P123deadbeef4560000cafe") on a board where that page does not exist
+	 * -- and left a DIRTY, CACHED line tagged for a physical address the
+	 * memory controller does not answer for. Nothing failed at the write;
+	 * the first whole-cache write-back afterwards is where it stopped.
+	 */
 #endif
 	/*
 	 * The preloader may arm the SoC hardware watchdog; a minimal kernel
@@ -238,6 +302,85 @@ void __init plat_mem_setup(void)
  * is present. On the single-threaded RLX parts CONFIG_SMP is off, these probes
  * compile out to no-ops and this is a plain DT unflatten.
  */
+#ifdef CONFIG_SMP
+/*
+ * UNIPROCESSOR SMP OPERATIONS FOR A PART WITH NO COHERENCE MANAGER.
+ *
+ * ★★★ THIS IS THE M1 BOOT HANG, AND THIS FILE'S OWN COMMENT PREDICTED IT.
+ * `plat_smp_setup()` UNCONDITIONALLY dereferences the registered ops vector, so
+ * a platform that registers none dies there -- silently, because trap_init()
+ * has not run yet, so the exception has nowhere to go and nothing is printed.
+ * MEASURED on the LANLY G24W, 2026-08-20: the boot stopped dead after
+ * device_tree_init() returned, with `MIPS CPS SMP unable to proceed without a
+ * CM` as its last words.
+ *
+ * WHY NOTHING WAS REGISTERED. The intended fallback, `register_up_smp_ops()`,
+ * is a no-op that returns -ENODEV unless CONFIG_SMP_UP is set -- and SMP_UP has
+ * no prompt, so it can only be `select`ed. Every MIPS platform that ships a
+ * uniprocessor-capable SMP kernel selects it; this platform's Kconfig selects
+ * SYS_SUPPORTS_SMP and SYS_SUPPORTS_MIPS_CPS and NOT SMP_UP, which is fine on a
+ * part that HAS a CM (CPS registers its own ops) and fatal on one that does
+ * not. The RTL9603CVD has no CM: its own vendor kernel says so on this board
+ * ("MIPS CPS SMP unable to proceed without a CM", "GIC isn't present!").
+ *
+ * WHY THE OPS LIVE HERE RATHER THAN IN THE KCONFIG. A platform's SMP ops are
+ * platform code, and this tree's standing rule is that kernel wiring is done in
+ * real source files under files-<ver>/ and never by editing a patch. Selecting
+ * SMP_UP would mean carrying a full copy of arch/mips/Kconfig -- 3200 lines,
+ * already modified by this target's platform patch -- to add one line, and that
+ * copy would silently diverge from upstream at every kernel bump.
+ *
+ * WHAT THIS IS NOT: it is not a claim that the part is single-core. This SoC
+ * has TWO VPEs of one interAptiv core and the vendor kernel brings both up
+ * through MIPS-MT (SMVP). Doing the same needs SYS_SUPPORTS_MULTITHREADING,
+ * which this platform does not select either. Until then the second VPE stays
+ * parked -- which is exactly what CONFIG_NR_CPUS=1 in the subtarget config
+ * already declares -- and the difference is a performance ceiling, not a
+ * correctness one.
+ */
+static void luna_up_send_ipi_single(int cpu, unsigned int action)
+{
+	/* Nothing to signal: there is no other CPU running. */
+}
+
+static void luna_up_send_ipi_mask(const struct cpumask *mask,
+				  unsigned int action)
+{
+}
+
+static void luna_up_init_secondary(void)
+{
+}
+
+static void luna_up_smp_finish(void)
+{
+}
+
+static int luna_up_boot_secondary(int cpu, struct task_struct *idle)
+{
+	/* Refuse rather than pretend: no secondary is brought up here. */
+	return -ENODEV;
+}
+
+static void luna_up_smp_setup(void)
+{
+}
+
+static void luna_up_prepare_cpus(unsigned int max_cpus)
+{
+}
+
+static const struct plat_smp_ops luna_up_smp_ops = {
+	.send_ipi_single	= luna_up_send_ipi_single,
+	.send_ipi_mask		= luna_up_send_ipi_mask,
+	.init_secondary		= luna_up_init_secondary,
+	.smp_finish		= luna_up_smp_finish,
+	.boot_secondary		= luna_up_boot_secondary,
+	.smp_setup		= luna_up_smp_setup,
+	.prepare_cpus		= luna_up_prepare_cpus,
+};
+#endif /* CONFIG_SMP */
+
 void __init device_tree_init(void)
 {
 	unflatten_and_copy_device_tree();
@@ -288,7 +431,13 @@ void __init device_tree_init(void)
 
 	if (!register_cps_smp_ops())
 		return;
-	register_up_smp_ops();
+	/*
+	 * No CM, so CPS declined. `register_up_smp_ops()` is a no-op on this
+	 * platform (CONFIG_SMP_UP is not selected), and leaving the vector NULL
+	 * is what hangs plat_smp_setup(). Register this platform's own.
+	 */
+	if (register_up_smp_ops())
+		register_smp_ops(&luna_up_smp_ops);
 }
 
 void __init plat_time_init(void)

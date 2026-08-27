@@ -55,6 +55,7 @@
 #include "cortina-gpon-serdes.h"
 #include "cortina-gpon-bosa.h"
 #include "cortina-gpon-ddm.h"	/* SFF-8472 A2h optical decode (functional core) */
+#include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
 #include "cortina-ni.h"		/* cortina_ni_pon_rx_hook_set + cortina_ni_pon_tx */
 
 /*
@@ -1091,48 +1092,29 @@ static u32 cg_sn_word(const u8 *p)
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
 }
 
-static int cg_hex_nibble(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 /*
- * "VVVVHHHHHHHH" -> the 8 wire bytes.  Rejects anything that is not exactly 4
- * printable non-space vendor-id characters followed by 8 hex digits, so a
- * truncated/garbled provisioning read can never be programmed as an identity.
+ * ★★★ THE SERIAL-NUMBER CODEC MOVED TO THE COMMON CORE (2026-08-27), operator:
+ * *"se deberia migrar ya todo los funciones del X400AXF a la familia ... el
+ * resto no funciona y X400AXF fue muy verificado y funciona"*.
+ *
+ * The G.984.3 ONU-SN format is a SPEC, not a property of this silicon, so it
+ * is decoded once in drivers/net/gpon/gpon_sn.c and both targets call it. The
+ * implementation promoted there is THIS one -- it validated length, the vendor
+ * characters and every hex digit, and refused a malformed string -- because
+ * the Luna copy it replaces silently turned a bad digit into 0xff.
+ *
+ * These two remain as one-line shims ONLY so the ten call sites below and the
+ * driver's -EINVAL contract are untouched by the move. Nothing else changed:
+ * that is what makes this step verifiable on the board rather than argued.
  */
 static int cg_sn_parse(const char *s, u8 out[8])
 {
-	int i, hi, lo;
-
-	if (!s || strlen(s) != 12)
-		return -EINVAL;
-	for (i = 0; i < 4; i++) {
-		if (!isprint(s[i]) || isspace(s[i]))
-			return -EINVAL;
-		out[i] = s[i];
-	}
-	for (i = 0; i < 4; i++) {
-		hi = cg_hex_nibble(s[4 + 2 * i]);
-		lo = cg_hex_nibble(s[5 + 2 * i]);
-		if (hi < 0 || lo < 0)
-			return -EINVAL;
-		out[4 + i] = (hi << 4) | lo;
-	}
-	return 0;
+	return gpon_sn_parse(s, out) ? -EINVAL : 0;
 }
 
-/* The 8 wire bytes -> the printable "VVVVHHHHHHHH" form. */
 static void cg_sn_format(const u8 sn[8], char out[13])
 {
-	snprintf(out, 13, "%c%c%c%c%02X%02X%02X%02X",
-		 sn[0], sn[1], sn[2], sn[3], sn[4], sn[5], sn[6], sn[7]);
+	gpon_sn_format(sn, out);
 }
 
 static bool cg_do_bosa_init = true;

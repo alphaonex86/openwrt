@@ -331,6 +331,18 @@ struct gpon_ploam_ops {
 
 	/* --- diagnostics: NEVER load-bearing, NULL is always legal --------- */
 	void (*trace)(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b);
+	/* ONE datum the FSM received and could not place: a downstream PLOAM
+	 * type we do not model, a value outside a declared domain.  Same
+	 * contract as `trace` -- NULL is legal and changes no decision and no
+	 * emitted byte -- but it carries a BUFFER, which `trace` cannot: two
+	 * u32s can say that an unhandled type went by and cannot say WHAT
+	 * went by, and a 13-octet PLOAM does not fit in them.  That gap is
+	 * why this exists: the dump is what makes the report the
+	 * specification for supporting a foreign vendor's OLT.
+	 * Spelled through the typedef in gpon_common.h so this member and the
+	 * one in struct gpon_shell_ops cannot drift apart before the two op
+	 * tables are unified (see the FOLLOW-UP note above this struct). */
+	gpon_unsup_fn unsupported;
 };
 
 /* ---------------------------------------------------------------------------

@@ -660,8 +660,18 @@ static void eth_hw_program(struct rtl9607c_eth *ep)
 	desnum = ((RX_RING_SIZE - 1) & 0xff) << 24 | (TH_ON_VAL & 0xff) << 16 |
 		 (TH_OFF_VAL & 0xff) << 8 | (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4;
 	ep_wr(ep, R_RxDesNum, desnum);
-	iowrite16(((RX_RING_SIZE - 1) & 0xff) << 8 |
-		  (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4, ep->base + R_RxCDO0);
+	/* ★★ 32-BIT. 0x13F4 is one 32-bit word: RxCDO[31:16] (hardware-owned)
+	 * | RxRingSize[15:8]. The shifts above SAY the value belongs in
+	 * bits 15:8, and on big-endian MIPS a 16-bit store lands in the UPPER
+	 * half -- measured on the G24W 2026-08-23, where this same line left
+	 * RxRingSize = 0 and killed the whole RX path. rtl9602c_eth.c, whose
+	 * RX works, has always stored this 32-bit.
+	 * ⚠ UNVERIFIED ON THIS CHIP: the RTL9607C is not a declared board, has
+	 * no instrument/ directory and no artifact, so nothing here can be
+	 * measured. Corrected because the 16-bit store cannot express what the
+	 * shifts ask for, not because a run proved it.	*/
+	ep_wr(ep, R_RxCDO0, ((RX_RING_SIZE - 1) & 0xff) << 8 |
+			    (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4);
 	/* route every RX class to ring 0. */
 	{
 		unsigned int k;

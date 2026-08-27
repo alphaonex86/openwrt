@@ -338,8 +338,18 @@ static int rtl960x_wdt_ping(struct watchdog_device *wdd)
 	 * MMIO writes under the driver's own spinlock -- against a 29.5 s window
 	 * fed every 5 s.
 	 */
-	rtl960x_wdt_stop(wdd);
-	return rtl960x_wdt_start(wdd);
+	struct rtl960x_wdt *wdt = to_rtl960x_wdt(wdd);
+
+	/* ⚠ THE RELOAD EXPERIMENTS ARE NOT KEPT. Both were tried on
+	 * 2026-08-27 and neither moved the deadline by a millisecond:
+	 * rewriting WDT_CTRL through start(), and toggling the enable
+	 * (stop then start). The measured findings above stay because
+	 * they are facts; the code that failed to act on them does not,
+	 * and a ping that disables the watchdog on every feed would be a
+	 * worse default than the one plain kick. */
+	rtl960x_wdt_kick(wdt);
+
+	return 0;
 }
 
 /*

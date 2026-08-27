@@ -181,6 +181,14 @@ ccflags-y += -O2
 # The UPSTREAM half of GEM provisioning: T-CONT/alloc and GEM-port lifecycle.
 # (The GEM FRAMER is deliberately absent -- it is silicon on both shipping
 # targets, so there is nothing to share.)
+# ITU-T G.984.3 ONU Serial Number codec. TWO consumers from the day it lands:
+# the Elnath GPON shell calls it directly, and the Luna shell is rebased onto
+# it -- so unlike gpon_ploam.o below, this one de-duplicates a real pair. The
+# two copies it replaces did not merely differ in style: the Elnath decoder
+# refuses a malformed string while the Luna one turned hex_to_bin()'s -1 into
+# 0xff bytes without a word, so the promoted copy is the VERIFIED one.
+obj-y += gpon_sn.o
+
 obj-y += gpon_gem_us.o
 
 # ITU-T G.988 OMCI baseline MESSAGE layer: parse, dispatch, response, MIC.

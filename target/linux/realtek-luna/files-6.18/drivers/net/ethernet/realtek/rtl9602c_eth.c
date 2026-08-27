@@ -3576,6 +3576,36 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	ep->closing = false;
 	ep->stall_since = 0;
 
+	/*
+	 * ★★★ THE FULL SWITCH BRING-UP IS A ONE-TIME COST, NOT A PER-ifup ONE
+	 * (measured 2026-08-27 on the X111W, and it cost 22 s and the GPON link).
+	 *
+	 * Everything below -- hw_stop, ipsel_cycle, uboot_swcore_bringup,
+	 * datapath_tables_init, hw_program -- re-initialises the whole switch
+	 * fabric.  This is `ndo_open`, so it ran on EVERY `ifup` of eth0, and a
+	 * normal boot opens it twice: once from preinit, once when netifd builds
+	 * br-lan.  The board's own boot log shows exactly what the second one
+	 * costs:
+	 *
+	 *   [ 7.036] datapath_tables_init done (tbl_ok=1)   <- first open, fine
+	 *   [12..29] Ranging_Time -> O5   x3   OLT assigned ONU-ID 1  x3
+	 *            T-CONT 16 <- alloc bound  x3            <- GPON re-ranging
+	 *   [29.212] datapath_tables_init done (tbl_ok=1)   <- second open
+	 *
+	 * Tearing the fabric down under a PON link that has already reached O5
+	 * drops it, so the ONU re-ranges -- three full cycles -- and the OLT sees
+	 * an ONU that keeps coming and going.  On a live PON that is not merely
+	 * slow, it is churn the operator's OLT pays for.
+	 *
+	 * ⇒ the heavy bring-up runs ONCE.  A later open re-arms the GMAC (rings
+	 *   are allocated above, hw_program below) and leaves the fabric and the
+	 *   PON link alone -- which is what `ndo_open` is supposed to do.
+	 *
+	 * ⚠ NOT AN OPTIMISATION OF A CORRECT PATH: the second run was actively
+	 *   harmful.  If a future board genuinely needs the fabric rebuilt on a
+	 *   re-open, that is a `gmac_reset` mode of its own with a measurement
+	 *   behind it, not the default.
+	 */
 	if (gmac_reset) {
 		/*
 		 * Stock-faithful cold start (the TX-park fix): halt the
@@ -3595,8 +3625,8 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		 * classify/ponmac. Hypothesis: the switch honoring the cpu-tag PSEL
 		 * directed-egress to the PON-MAC is an emergent property of the full
 		 * ordered/quiescent bring-up that piecemeal flat writes never reproduced.
-		 * Runs BEFORE hw_program arms the GMAC. Gated by full_sdk_init (revertible). */
-		rtl9602c_full_sdk_datapath_init();
+		 * Runs BEFORE hw_program arms the GMAC. Gated by full_datapath_init (revertible). */
+		rtl9602c_datapath_tables_init();
 		rtl9602c_hw_program(ep);
 		rtl9602c_tx_align(ep);	/* fresh engine: CDO=0 -> rot 0 */
 		/*
@@ -3634,6 +3664,28 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		 * idempotent (DRAM pool alloc is one-shot guarded).
 		 */
 		gpon_pbo_init();
+		/*
+		 * ★★★ DO NOT GATE THIS BLOCK ON A "RAN ONCE" FLAG. It was tried on
+		 * 2026-08-27 -- gating it on a per-device "already built" bool, to stop a
+		 * later ifup rebuilding the fabric under a live PON link -- and it WEDGED
+		 * THE CHIP. The comment above is the reason: the stock order is GMAC reset
+		 * THEN PON-NIC/PBO setup, so gating the block leaves gpon_pbo_init() un-run
+		 * against a GMAC that was reset anyway. The PON-IP page pool is then not
+		 * armed while the datapath is live, and the FIRST FORWARDED FRAME stalls a
+		 * bus access that never completes.
+		 *
+		 * ★ THE SIGNATURE, so it is recognised rather than re-diagnosed: a HARD
+		 * HANG at `br-lan: port 1(eth0) entered forwarding state` around 30 s --
+		 * no panic, no oops, no console, no network, and NOTHING from the
+		 * softlockup or hung-task detectors even though BOTH are compiled in.
+		 * That silence is the tell: the CPU is not executing, so no in-kernel
+		 * detector can ever report it.
+		 *
+		 * ★ MEASURED BOTH WAYS, same image otherwise unchanged: with the flag,
+		 * silent at ~30 s on every boot; without it, alive at 81 s, the LAN
+		 * answers on the first try and GPON walks O1 -> O2 -> O3. The re-ranging
+		 * cycles the flag was meant to avoid are a nicety; this was a wedge.
+		 */
 		goto hw_ready;
 	}
 

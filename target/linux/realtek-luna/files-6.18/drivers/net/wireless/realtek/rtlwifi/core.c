@@ -1871,8 +1871,28 @@ bool rtl_hal_pwrseqcmdparsing(struct rtl_priv *rtlpriv, u8 cut_version,
 					else
 						udelay(10);
 
-					if (polling_count++ > max_polling_cnt)
+					if (polling_count++ > max_polling_cnt) {
+						/* ★ NAME THE STEP THAT FAILED. This
+						 * return was SILENT, and it is the
+						 * branch that actually decides a
+						 * power sequence: rtl8192fe then
+						 * printed only "Init MAC failed",
+						 * which costs a rebuild-with-debug
+						 * to learn what the driver already
+						 * knew. It cannot flood -- it prints
+						 * only when a sequence has already
+						 * failed, i.e. when the radio is
+						 * dead -- and it is the difference
+						 * between a diagnosis and a guess.
+						 */
+						pr_err("rtlwifi: power sequence step %u TIMED OUT polling reg 0x%03x: wanted 0x%02x under mask 0x%02x, read 0x%02x after %u tries\n",
+						       ary_idx, offset,
+						       GET_PWR_CFG_VALUE(cfg_cmd) &
+						       GET_PWR_CFG_MASK(cfg_cmd),
+						       GET_PWR_CFG_MASK(cfg_cmd),
+						       value, polling_count);
 						return false;
+					}
 				} while (!polling_bit);
 				break;
 			case PWR_CMD_DELAY:

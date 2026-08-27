@@ -17,7 +17,11 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
-		bootargs = "console=ttyS0,115200";
+		/* bootargs: see rtl960x.dtsi -- the command line is FAMILY
+		 * configuration, and this board spelled its own until
+		 * 2026-08-27.  The two boards disagreed and only one could be
+		 * debugged: without ignore_loglevel this kernel prints nothing
+		 * between "Starting kernel" and userspace. */
 	};
 
 	aliases {
@@ -27,6 +31,39 @@
 	memory@0 {
 		device_type = "memory";
 		reg = <0x00000000 0x08000000>; /* 128 MB DDR2 */
+	};
+
+	/*
+	 * ★ CRASH TRACE (2026-08-20).  A reserved DRAM window the kernel writes
+	 * its dying words into, read back from /sys/fs/pstore on the NEXT boot.
+	 *
+	 * WHY HERE AND NOT IN A SHARED .dtsi: the address must land in real RAM on
+	 * THIS board, and the boards on this target do not share a memory map --
+	 * the X111W has one 128 MiB span, the G24W has two with PBO DL holes
+	 * between them.  One shared constant would put a panic into unbacked
+	 * address space on one of them, and every CONFIG_ symbol would still read
+	 * enabled.  It sits beside the memory node above so the two are checked
+	 * together; `crash_trace.py --probe` verifies containment and REFUSES a
+	 * region that crosses a hole.
+	 *
+	 * 0x06000000 is mid-DRAM on purpose: the kernel loads low and U-Boot
+	 * relocates itself to the top, so neither runs through it.
+	 *
+	 * NOT `no-map`: pstore/ram memremaps this window, and carving it out of the
+	 * linear map is what breaks that.  DRAM contents survive a warm reset, so
+	 * this answers a panic or a watchdog bite -- never a power cut.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ramoops@6000000 {
+			compatible = "ramoops";
+			reg = <0x06000000 0x00020000>;	/* 128 KiB */
+			record-size  = <0x00004000>;	/*  16 KiB per oops/panic */
+			console-size = <0x00010000>;	/*  64 KiB rolling console */
+		};
 	};
 };
 

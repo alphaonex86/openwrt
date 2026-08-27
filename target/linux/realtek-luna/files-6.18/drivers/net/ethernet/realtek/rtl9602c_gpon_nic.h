@@ -51,7 +51,7 @@ void gpon_anig_optical_omci(s16 *rx_level, s16 *tx_level);
 /* Faithful port of the stock SDK rtk_all_module_init() GPON datapath bring-up,
  * run on the quiescent switch in the eth reset path (after the GMAC reset + swcore
  * resync, before the GMAC is programmed/armed). Defined in gpon-rtl9602c.c. */
-void rtl9602c_full_sdk_datapath_init(void);
+void rtl9602c_datapath_tables_init(void);
 
 /* WAN data-GEM datapath. GPON_DATA_FLOW = the internal SID/flow the gpon0 WAN netdev
  * steers US frames to (tx_dst_stream_id).

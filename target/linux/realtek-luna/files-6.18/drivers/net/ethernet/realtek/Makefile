@@ -20,10 +20,36 @@
 # Operator hard rule: driver wiring is a browsable source file, never a
 # patches-<ver>/*.patch -- not even for Kconfig/Makefile.
 #
-# Content is byte-identical to what patch 103 produced (verified 2026-08-05
-# against build_dir/target-mips_mips32_musl/.../linux-6.18.31).
-# Nothing else changed: the object list is untouched by this migration.
+# ★ NO LONGER byte-identical to what patch 103 produced, and this line says so
+# rather than leaving a stale claim standing.  It WAS identical when it was
+# migrated (verified 2026-08-05 against
+# build_dir/target-mips_mips32_musl/.../linux-6.18.31); the ONE deliberate
+# difference since is the include path added below.  The object list and every
+# CFLAGS_ line are still untouched, so nothing that was compiled before is
+# compiled differently now.
 #
+# THE INCLUDE PATH: this directory's sources include headers authored in the
+# SHARED GPON tree, target/linux/gpon-common/files-6.18/drivers/net/gpon/, which
+# reaches the build through FILES_DIR (see this target's Makefile).  Without the
+# -I below, `#include "gpon_unsup.h"` (and "gpon_ploam.h", and the rest) simply
+# does not resolve from here -- which is exactly what gpon-rtl9602c.c:5097
+# recorded as reason 3 for why the PLOAM rewire could not land.
+#
+# WHY AN -I AND NOT A RELATIVE INCLUDE, and why this spelling: the shared tree is
+# a SEPARATE files- overlay merged into the kernel source where upstream's own
+# directories land, so its path relative to THIS file is an artefact of the
+# overlay mechanism, not a property of the source.  $(srctree) says what is
+# actually meant -- "the in-tree GPON core" -- and keeps working if either
+# overlay moves.  It is the SAME line realtek-elnath already carries
+# (files-6.18/drivers/net/ethernet/cortina/Makefile:22), deliberately spelled
+# identically so the two targets cannot drift.
+#
+# ccflags-y (whole directory) rather than one CFLAGS_<obj>.o per file: a
+# per-object list is a list somebody forgets to extend, and the next source that
+# includes a shared header would fail to compile with nothing here to see.  It
+# adds an include path and no code: an object that includes nothing from the
+# shared tree is byte-identical with and without it.
+ccflags-y += -I$(srctree)/drivers/net/gpon
 
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_eth.o
 obj-$(CONFIG_RTL9602C_GPON) += gpon-rtl9602c.o rtl960x_ponmac.o

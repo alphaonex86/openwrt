@@ -6516,6 +6516,28 @@ static void gpon_txpll_relock(void)
 }
 
 /*
+ * ★ LIFTED FOR THE CORE'S ops 2026-08-28.  The ACTION moves; the POLICY stays.
+ * The core's FSM decides WHEN to reseat the CDR and when to arm the key switch;
+ * whether this board should skip a reseat after a healthy O5, and whether a key
+ * is staged at all, are this shell's rules and remain at the call sites.
+ */
+static void gpon_cdr_reseat(void)
+{
+	/* Re-seat US-TX SerDes interface reset-B (softirq-safe, TX-only; the locked
+	 * DS RX framer is undisturbed) so the next re-range starts from a fresh
+	 * serializer lock instead of the prior marginal one. */
+	sw_field(WSDS_DIG_1D, 16, 16, 0);
+	udelay(500);
+	sw_field(WSDS_DIG_1D, 16, 16, 1);
+}
+
+static void gpon_aes_arm_switch(u32 fc)
+{
+	gpon_aes_switch_time = fc;
+	gpon_wr(0x3014, fc);	/* AES_KEY_SWITCH_TIME[29:0] */
+}
+
+/*
  * ★ LIFTED OUT OF gpon_fsm_set_state() 2026-08-28, BEHAVIOUR UNCHANGED: the
  * same code, called from the same place.  The core's PLOAM FSM reaches these
  * two moments through ops -- o5_rearm_burst() and on_below_o5() -- and a body
@@ -6781,6 +6803,37 @@ static void luna_op_install_data_gem(void *sh, u16 gem)
 				    gem, rc);
 }
 
+static void luna_op_cdr_reseat(void *sh)
+{
+	(void)sh;
+	gpon_cdr_reseat();
+}
+
+static void luna_op_aes_arm_switch(void *sh, u32 superframe)
+{
+	(void)sh;
+	gpon_aes_arm_switch(superframe);
+}
+
+static void luna_op_rng(void *sh, u8 *out, unsigned int len)
+{
+	(void)sh;
+	/* No extraction needed: the core wants a randomness SOURCE and this shell
+	 * already uses the kernel's.  gpon_send_key() calls get_random_bytes()
+	 * directly today; both reach the same generator. */
+	get_random_bytes(out, len);
+}
+
+static void luna_op_omci_report_oper_up(void *sh)
+{
+	(void)sh;
+	/* Already an EXPORT_SYMBOL'd cross-module call, and this driver already
+	 * makes it -- the ethernet driver owns the OMCI shell that reports the
+	 * VEIP oper-state AVC.  No design question here; an earlier note in this
+	 * file called it one and was wrong. */
+	rtl9602c_eth_omci_report_oper_up();
+}
+
 static void luna_op_analog_relock(void *sh)
 {
 	(void)sh;
@@ -6815,14 +6868,9 @@ static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
  * ⚠ THE OPS LEFT NULL, each for a stated reason -- never because they were
  * forgotten, and never filled with something that merely compiles:
  *
- *   on_below_o5,      the driver does these inside the FSM body rather than in
- *   o5_rearm_burst,   a callable helper.  Extracting them is part of the shape
- *   cdr_reseat        change, not of this signature check.
- *   rng               no randomness source is used on this path today.
- *   aes_arm_switch    the superframe-armed key switch is FSM-inline here.
- *   omci_report_oper_up  lives in the ETHERNET driver
- *                     (rtl9602c_eth_omci_report_oper_up), a different module.
- *   trace             optional diagnostic hook; nothing to bind yet.
+ *   trace             OPTIONAL BY CONTRACT, not owed: gpon_ploam.h calls it
+ *                     "NEVER load-bearing, NULL is always legal" and the core
+ *                     null-checks it before every call.
  */
 static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.ploam_tx	= luna_op_ploam_tx,
@@ -6835,6 +6883,10 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.on_below_o5	= luna_op_on_below_o5,
 	.o5_rearm_burst	= luna_op_o5_rearm_burst,
 	.install_data_gem = luna_op_install_data_gem,
+	.cdr_reseat	= luna_op_cdr_reseat,
+	.aes_arm_switch	= luna_op_aes_arm_switch,
+	.rng		= luna_op_rng,
+	.omci_report_oper_up = luna_op_omci_report_oper_up,
 	.analog_relock	= luna_op_analog_relock,
 	.o3_feed_reset	= luna_op_o3_feed_reset,
 	.aes_stage_key	= luna_op_aes_stage_key,
@@ -7033,9 +7085,7 @@ static void gpon_fsm_handle(const u8 *m)
 				/* re-seat US-TX SerDes interface reset-B (softirq-safe, TX-only; the
 				 * locked DS RX framer is undisturbed) so the next re-range starts from a
 				 * fresh serializer lock instead of the prior marginal one (cuts flapping). */
-				sw_field(WSDS_DIG_1D, 16, 16, 0);
-				udelay(500);
-				sw_field(WSDS_DIG_1D, 16, 16, 1);
+				gpon_cdr_reseat();
 				/* AND run the *correct* stock CDR-lock pulse (invert COM_REG12 bit15,
 				 * 10ms, restore) deferred to process context — the 10ms hold cannot run
 				 * here in softirq. The interface reset-B re-strobe above does not re-lock
@@ -7172,8 +7222,7 @@ static void gpon_fsm_handle(const u8 *m)
 			 * staged bank would promote a garbage key and corrupt AES. ACK either way
 			 * so the OLT sees the message handled. */
 			if (gpon_key_staged && fc != gpon_aes_switch_time) {
-				gpon_aes_switch_time = fc;
-				gpon_wr(0x3014, fc);	/* AES_KEY_SWITCH_TIME[29:0] */
+				gpon_aes_arm_switch(fc);
 				pr_info("rtl9602c-gpon: Key_Switching_Time -> arm switch @superframe %u\n",
 					fc);
 			}

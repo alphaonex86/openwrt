@@ -7,6 +7,8 @@
  * probing the live device).
  */
 
+#include "rtl960x.dtsi"
+
 / {
 	#address-cells = <1>;
 	#size-cells = <1>;
@@ -123,11 +125,130 @@
 		 * drives these same registers through a fixed KSEG1 address.
 		 * That is deliberate and predates this node; the driver maps
 		 * the window non-exclusively so both can coexist.
+		 *
+		 * ★★★ DISABLED 2026-08-26, AND THE REASON IS MEASURED, NOT A
+		 * PREFERENCE. With this node enabled the board resets at ~29 s
+		 * on EVERY boot of our image. Proven by a single-variable A/B
+		 * pair and then by three more boots: with
+		 * `initcall_blacklist=rtl960x_wdt_driver_init` on the kernel
+		 * command line the board reaches `br-lan: port 1(eth0) entered
+		 * forwarding state` at 29.16 s, GPON `O3 -> O4` at 15.4 s, and
+		 * prints NOT ONE `PRELOADER` line in a 90 s window. Without it,
+		 * every attempt died at ~29 s with no panic and no oops -- the
+		 * signature of a full-chip reset.
+		 *
+		 * ★ THE BLOCK IS NOT AT FAULT AND STOCK USES IT. The vendor
+		 * image arms this same watchdog (rc34 -> /proc/luna_watchdog)
+		 * and feeds it from a dedicated 5 s KERNEL thread. What we
+		 * lack is that feeder: on our image the ONLY feeder is procd's
+		 * single-threaded uloop, and the kernel core contributes zero
+		 * pings once userspace opens the device, because we never set
+		 * `max_hw_heartbeat_ms`. A multi-source audit could not close
+		 * whether our kick RELOADS the counter at all.
+		 *
+		 * ★★ A WATCHDOG THAT BITES A HEALTHY BOARD IS NOT A RECOVERY
+		 * MECHANISM, IT IS A FAULT -- so this is not "shipping less
+		 * than stock", it is refusing to ship a reset every 29 s. The
+		 * sibling RTL9603CVD node is disabled for the same class of
+		 * reason.
+		 *
+		 * ⚠ OWED, and it is what re-enables this: prove the kick
+		 * reloads (the audit's open question), or declare
+		 * `max_hw_heartbeat_ms` so the kernel core keeps feeding
+		 * between procd's pings. Until one of those is MEASURED, an
+		 * enabled node costs this board every campaign.
 		 */
 		compatible = "realtek,rtl9602c-wdt", "realtek,rtl960x-wdt";
 		reg = <0x18003260 0xc>;
 		clocks = <&lx_clk>;
-		timeout-sec = <30>;
+		/*
+		 * ★★★ 42 s, THE HARDWARE MAXIMUM, AND IT IS A MEASUREMENT
+		 * (2026-08-27).  At 30 s this board died at 29.2 s of EVERY
+		 * boot -- half a second AFTER it was fully up:
+		 *
+		 *   [ 2.308] Luna WDT ... 30 s timeout (max 42 s)
+		 *   [ 8.248] procd: - watchdog -        <- procd owns it now
+		 *   [22.324] rtl9602c-gpon: PLM_TX ...
+		 *            ... 6.8 s with NOTHING logged ...
+		 *   [29.084] rtl9602c-gpon: full_sdk_datapath_init done
+		 *   [29.176] br-lan: port 1(eth0) entered forwarding state
+		 *   <reset -> PRELOADER -> NAND -> the vendor image>
+		 *
+		 * ⚠ THIS IS THE MARGIN, NOT THE FIX.  The real defect is the
+		 * 6.8 s stall inside full_sdk_datapath_init: for that long
+		 * nothing feeds the counter, which is precisely the stall a
+		 * watchdog exists to catch.  Widening the window buys the boot
+		 * and must not be read as the stall being acceptable -- it is
+		 * recorded as owed work in the board file.
+		 *
+		 * ⚠ AND IT WAS DIAGNOSED BLIND FOR DAYS: without `loglevel=8`
+		 * this kernel prints NOTHING (the inherited U-Boot `bootargs`
+		 * is EMPTY on this board -- `printenv bootargs` proves it --
+		 * so the console comes only from the DT `stdout-path` and the
+		 * default loglevel hides every driver message).  Every earlier
+		 * conclusion about this reset was reached without a kernel log.
+		 */
+		timeout-sec = <42>;
+
+		/*
+		 * ★★★ DISABLED AGAIN 2026-08-27, AFTER MEASURING WHAT THE
+		 * RE-ENABLE EXISTED TO MEASURE. The re-enable's own premise was
+		 * WRONG and is retracted here rather than quietly deleted:
+		 *
+		 *   ✗ "U-Boot hands this counter over ARMED, so a disabled node
+		 *      does not remove the watchdog" -- REFUTED. A probe-time read
+		 *      of WDT_CTRL before this driver touches anything:
+		 *        DIAG phys=0x18003260 ctrl_on_entry=0x00000000
+		 *      U-Boot leaves it OFF. The node being disabled really does
+		 *      leave no watchdog, and the ~29 s reset was OURS all along.
+		 *
+		 * ★★ WHAT IS NOW PROVEN, so nobody re-chases any of it:
+		 *   - the block IS at 0x18003260 on THIS chip: read live on the
+		 *     board's own stock via /proc/rtl8686gmac/mem with both
+		 *     neighbouring timers TICKING between two reads, and the
+		 *     vendor's Luna BSP defines it as TC_BASE + 0x60. Two
+		 *     independent tiers.
+		 *   - STOCK arms it and stays up for hours: WDT_CTRL reads
+		 *     0xe7c00000 (EN=1, scale 3, phase-1 = 31 = 41.6 s, phase-2 =
+		 *     0), fed by a kernel thread `luna_watchdog` -- there is NO
+		 *     /dev/watchdog on the vendor image at all.
+		 *   - OUR writes LAND, byte for byte: with the window pinned so
+		 *     procd cannot lower it, 39 arms all read back exactly what
+		 *     they wrote (wrote=0xe7c00000 readback=0xe7c00000).
+		 *   - AND THE WINDOW FOLLOWS phase-1 EXACTLY: phase-1 = 22 kills
+		 *     the board at 30.1 s, phase-1 = 31 at ~42.2 s. The gap is
+		 *     12.1 s = 9 ticks x 1.342 s, to the tenth. So it is this
+		 *     counter, and it is measured from a FIXED origin (~0.6 s,
+		 *     the chip coming out of reset) -- not from our enable.
+		 *
+		 * ★★★ THE ONE THING THAT DOES NOT WORK IS THE FEED, and it was
+		 * attacked from every side available:
+		 *   - the documented kick (write BIT(31) to WDT_CNT) -- kicks
+		 *     land at 4.7/9.3/15.0/20.0/25.0/30.0 s and the reset still
+		 *     arrives on the original schedule. Proven by TIMING, not by
+		 *     read-back: WDT_CNT reads 0x00000000 on STOCK too, so it is
+		 *     write-only and a read-back there proves nothing either way.
+		 *   - rewriting WDT_CTRL on every ping -- ~16 rewrites in 25 s,
+		 *     no effect on the deadline.
+		 *   - toggling the enable (stop then start) -- no effect.
+		 *   - the kick through the VENDOR'S OWN route, a literal KSEG1
+		 *     store to 0xB8003260 instead of our ioremap -- no effect,
+		 *     which exonerates the mapping and the accessor.
+		 * With phase-1 at its ceiling our CTRL word is 0xe7c00000, which
+		 * is BIT-IDENTICAL to what stock runs. Same register, same value,
+		 * same physical address for the kick -- and stock lives while we
+		 * die. The remaining difference is therefore NOT in this block's
+		 * programming, and the next session should look for what else the
+		 * vendor's platform code brings up around it, not at these bits.
+		 *
+		 * ★★ SO THIS IS NOT "SHIPPING LESS THAN STOCK", IT IS REFUSING TO
+		 * SHIP A RESET EVERY 30-42 s. The ceiling is 41.6 s and the
+		 * counter never restarts, so an ENABLED node reboots this board
+		 * on a fixed timer whatever the software does -- it costs every
+		 * campaign and measures nothing. The capability is OWED and is
+		 * disclosed as a real difference against stock, never omitted.
+		 */
+		status = "disabled";
 	};
 
 	nic: ethernet@18012000 {

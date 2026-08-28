@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Realtek Luna (RTL960x) -- what every part of the family shares.
+ *
+ * ★★★ THE KERNEL COMMAND LINE IS FAMILY CONFIGURATION, NOT A BOARD FACT, AND
+ * IT MUST NOT BE INHERITED FROM THE BOOTLOADER (measured 2026-08-27 on the
+ * X111W).  `printenv bootargs` at that board's U-Boot prompt answers with an
+ * EMPTY value -- the vendor bootloader passes the kernel NOTHING -- so
+ * everything the kernel gets has to come from here.  `uboot.py`'s own comment
+ * assumed the opposite ("the existing line carries console=, mtdparts= and
+ * root="); that assumption is refuted for this family.
+ *
+ * ★★ WHAT IT COST: the two boards in this tree disagreed, and only one of them
+ * could be debugged.
+ *
+ *     rtl9602c_x111w.dts     bootargs = "console=ttyS0,115200"
+ *     rtl9607c_engboard.dts  bootargs = "console=ttyS0,115200 earlycon
+ *                                        ignore_loglevel keep_bootcon"
+ *
+ * With the first line the X111W's kernel prints NOTHING between "Starting
+ * kernel ..." and OpenWrt's userspace preinit: no version banner, no memory
+ * map, not one driver probe.  The UART works throughout -- the arch code's own
+ * putchar markers come out and userspace reaches /dev/console -- so the board
+ * looks alive and says nothing, and every conclusion drawn about its ~29 s
+ * reset was reached WITHOUT A KERNEL LOG.  The moment `ignore_loglevel` was
+ * added by hand the cause was visible in one boot.
+ *
+ * ⇒ so the line lives ONCE, here, and the whole family gets a kernel that can
+ *   be read.  A board that needs something else adds it to its own `chosen`;
+ *   the properties merge by node path.
+ *
+ * ★ WHY THESE FOUR:
+ *   console=ttyS0,115200  the family's UART: serial@18002000 at the same
+ *                         address and the same rate on every Luna part here.
+ *   earlycon              printk before the 8250 driver binds -- without it a
+ *                         fault in early init is silent by construction.
+ *   keep_bootcon          do NOT drop the early console when the real one
+ *                         registers; the hand-over window is exactly where an
+ *                         early driver failure would otherwise vanish.
+ *   ignore_loglevel       the default level hides driver messages, which is
+ *                         what made this board undebuggable.
+ *
+ * ⚠ THIS IS A DEVELOPMENT DEFAULT AND IT IS DELIBERATE.  These units are being
+ *   brought up and certified; a silent kernel costs days, and the cost of the
+ *   verbosity is console bytes.  When a board ships, drop `ignore_loglevel`
+ *   from its own `chosen` -- and say so there, so the next reader knows the
+ *   silence was chosen rather than inherited.
+ */
+
+/ {
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon keep_bootcon ignore_loglevel";
+	};
+};

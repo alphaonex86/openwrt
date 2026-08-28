@@ -17,7 +17,11 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
-		bootargs = "console=ttyS0,115200";
+		/* bootargs: see rtl960x.dtsi -- the command line is FAMILY
+		 * configuration, and this board spelled its own until
+		 * 2026-08-27.  The two boards disagreed and only one could be
+		 * debugged: without ignore_loglevel this kernel prints nothing
+		 * between "Starting kernel" and userspace. */
 	};
 
 	aliases {

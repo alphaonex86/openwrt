@@ -51,6 +51,13 @@
 # shared tree is byte-identical with and without it.
 ccflags-y += -I$(srctree)/drivers/net/gpon
 
+# ★ THIS BOARD'S OMCI CAPACITIES. The core defaults (64 MEs / 72 MIB rows) are
+# the Elnath's; the Luna shell has always carried 128/200 and rebasing it onto
+# the common store at the smaller size would DROP provisioned MEs. The limit is
+# a per-board value, the store's logic is not -- so it is set here, next to the
+# board, and the common code stays one copy.
+ccflags-y += -DOMCI_STORE_MAX=128 -DOMCI_MIB_ROWS_MAX=200
+
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_eth.o
 obj-$(CONFIG_RTL9602C_GPON) += gpon-rtl9602c.o rtl960x_ponmac.o
 obj-$(CONFIG_RTL9607C_GPON) += rtl9607c_gpon.o rtl960x_ponmac.o

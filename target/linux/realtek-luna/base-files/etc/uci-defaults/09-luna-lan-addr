@@ -38,13 +38,39 @@ board=""
 [ -r /tmp/sysinfo/board_name ] && board=$(cat /tmp/sysinfo/board_name)
 
 case "$board" in
+hsgq,x111w)
+	# bench onu2. Declared ONU_LAN_IP = 192.168.1.12.
+	#
+	# ★★★ THIS ENTRY WAS MISSING AND IT COST A NIGHT. This file was written
+	# for the G24W and named only that board, so the X111W kept the shipped
+	# 192.168.1.1 -- the address the X400AXF holds on bench `onu`. MEASURED
+	# 2026-08-25, with the X111W freshly TFTP-booted on our image:
+	#
+	#     ping 192.168.1.1   -> answered, MAC 98:c7:a4:6c:af:cb  (X400AXF)
+	#     ping 192.168.1.10  -> no reply, no ARP entry
+	#
+	# so `onu_lan_addr` -- the step whose whole job is to move this board off
+	# the shipped address -- was talking to the OTHER BOARD, and the run
+	# reported "the board did not answer 192.168.1.10 within 420s", which
+	# reads like a dead device and is nothing of the kind.
+	#
+	# ⚠ AND IT IS ACTIVE HARM, not just a failed measurement: every cold boot
+	# of this board put a SECOND host on a live bench's address and ARP-flapped
+	# it. A boot-reliability run was cut mid-flight on 2026-08-25 for exactly
+	# that reason.
+	# ★ MOVED .10 -> .12 (operator, 2026-08-25): .2-.10 is the DHCP band in the
+	#   lab address plan and .11-.20 is the ONU band. The G24W holds .11.
+	uci -q set network.lan.ipaddr='192.168.1.12'
+	uci -q commit network
+	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.12 (.1 is BANNED and .10 is the DHCP band)"
+	;;
 lanly,g24w)
-	# bench onu3. Declared ONU_LAN_IP = 192.168.1.11, and stock on this unit
+	# bench onu3. Declared ONU_LAN_IP = 192.168.1.13, and stock on this unit
 	# answers telnet at the same address -- so the board keeps ONE identity
 	# across both firmwares.
-	uci -q set network.lan.ipaddr='192.168.1.11'
+	uci -q set network.lan.ipaddr='192.168.1.13'
 	uci -q commit network
-	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.11 (the shipped default 192.168.1.1 belongs to another bench)"
+	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.13 (the shipped default 192.168.1.1 belongs to another bench)"
 	;;
 "")
 	# THREE STATES: we could not ask which board this is. Change NOTHING --

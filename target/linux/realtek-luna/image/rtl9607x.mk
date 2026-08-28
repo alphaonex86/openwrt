@@ -35,11 +35,57 @@ define Device/lanly_g24w
   # build checks the two agree, so they are changed together or not at all.
   KERNEL_SIZE := 3280k
   IMAGE_SIZE := 10880k
-  # M1 is a headless run-from-RAM bring-up: serial console + initramfs shell,
-  # nothing else is proven on this board yet (no Ethernet driver match, no
-  # PCIe/WiFi bus identified, no GPON). Device/Default leaves IMAGES empty, so
-  # this builds the initramfs uImage only -- no flashable artifact is produced
-  # for a board whose flash controller base is still unverified. The router /
-  # GPON / WiFi package set is added once each of those lands.
+  # Device/Default leaves IMAGES empty, so this builds the initramfs uImage only
+  # -- no flashable artifact is produced for a SINGLE-BANK board whose only k0
+  # holds the stock ORACLE. Do not "fix" that.
+  #
+  # ★★★ THE PACKAGE SET IS DECLARED HERE, NOT IN A .config (2026-08-27).
+  #
+  # MEASURED: this device declared NO DEVICE_PACKAGES at all, so the built image
+  # carried exactly ONE kmod (kmod-gpio-button-hotplug) against the X111W's 18,
+  # and the 17 absent ones are the netfilter and PPP stacks -- i.e. NAT, the
+  # firewall and PPPoE could not work here, each surfacing as its own
+  # unrelated-looking test failure rather than as one cause.
+  #
+  # An earlier sitting reached for `.config` instead (dnsmasq, odhcpd-ipv6only,
+  # wpad-basic-mbedtls, hostapd-common were selected there by hand). That works
+  # for one build and leaves nothing behind: a `.config` is a session artifact,
+  # while DEVICE_PACKAGES is the record every future build of this device reads.
+  # The list is the X111W's own, minus the luci/gpon-provision half that depends
+  # on drivers this board does not have yet, plus hostapd-common.
+  #
+  # ⚠ wpad-basic-mbedtls and hostapd-common ship the AP daemons; they do NOT
+  # give this board a radio. There is no 802.11 PHY here at all -- CONFIG_PCI is
+  # OFF in this subtarget's kernel config, so no PCI bus exists, no PCIe host
+  # driver for this SoC exists, and no DT node declares one. That is three
+  # stacked gaps, and none of them is a package.
+  # (2026-08-27: all three closed -- CONFIG_PCI=y, pcie-rtl960x.c, phy0 up.)
+  #
+  # ★★★ wifi-scripts IS the AP bring-up, and it was MISSING (2026-08-27).
+  # MEASURED on this board with phy0 registered and hostapd running: hostapd's
+  # ucode glue died with `Unable to resolve path for module 'common'` (that
+  # module is /usr/share/ucode/wifi/common.uc, shipped by wifi-scripts along
+  # with /lib/netifd/wireless/mac80211.sh), netifd said `Wireless module not
+  # found`, network.wireless never existed, and wlan0 stayed `type managed`,
+  # DOWN, 0 dBm -- no beacon, wifi_ap_onair FAIL after the full 180 s wait.
+  # The X111W's working AP rests on CONFIG_PACKAGE_wifi-scripts=y selected BY
+  # HAND in its build tree's .config -- a session artifact this device list
+  # (copied from the X111W's DECLARED list) never contained. Same trap as
+  # firewall4 above: the .config also carried the explicit deselection lines,
+  # which `make defconfig` preserves; they were removed with it.
+  #
+  # ★ wireless-regdb: same story -- =y by hand in the X111W's .config, absent
+  # here; without it cfg80211 logs `regulatory.db is malformed or signature is
+  # missing/invalid` and country BO cannot be applied (the suite's regdomain
+  # rules read from the official regdb, never hand-written).
+  #
+  # ★ gpon-provision: ALREADY in this image via .config =y (another session
+  # artifact) and RUNNING -- it is the mechanism that applies this unit's own
+  # MAC from the factory config partition (rtk_factory reads ELAN_MAC_ADDR out
+  # of the Realtek MIB container on this product). Declared here so the record
+  # matches the image.
+  DEVICE_PACKAGES := dnsmasq firewall4 odhcpd-ipv6only odhcp6c \
+	ppp ppp-mod-pppoe wpad-basic-mbedtls hostapd-common \
+	wifi-scripts wireless-regdb gpon-provision
 endef
 TARGET_DEVICES += lanly_g24w

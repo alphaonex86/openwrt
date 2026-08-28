@@ -54,6 +54,8 @@
 #include <linux/gfp.h>		/* __get_free_pages / GFP_KERNEL for the US PBO DRAM pool */
 #include <linux/mm.h>		/* virt_to_phys */
 #include <linux/kernel.h>
+#include <linux/limits.h>	/* S32_MIN: the "no optical reading" sentinel */
+#include <linux/string.h>	/* strscpy for the n/a fields in /proc/gpon */
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -93,6 +95,7 @@
 #define GPON_GTC_DS_LOS_CFG_STS	0x1040		/* downstream LOS status/cfg  */
 #define   GPON_CDR_LOS_SIG	BIT(10)		/* 1 = CDR not recovering clk */
 #define   GPON_OPTIC_LOS_SIG	BIT(8)		/* 1 = no optical signal      */
+#define   GPON_CDR_LOS_EN	BIT(2)		/* enable CDR-LOS monitor     */
 #define   GPON_OPTIC_LOS_POLAR	BIT(1)		/* invert optical-LOS input   */
 #define   GPON_OPTIC_LOS_EN	BIT(0)		/* enable optical-LOS monitor */
 #define GPON_GTC_DS_ONU_STATUS	0x1010
@@ -180,10 +183,10 @@
 #define SDS_CFG			0x001d0		/* [4:0] CFG_SDS_MODE          */
 #define   SDS_MODE_OFF		0x1fu
 #define   SDS_MODE_GPON		0x08u
-#define SDS_FIB_STATUS		0x001e4		/* [17] SDS_SDET [2] FIB100_SDET */
+/* [17] SDS_SDET [2] FIB100_SDET -- the OFFSET moves per chip, the FIELD does
+ * not (9602C 0x1e4, 9603CVD 0x214, 9607C 0x28c: see struct gpon_swc_map). */
 #define   SDS_FIB_SDS_SDET	BIT(17)		/* SDS-level optical sig-detect */
-#define FIB_REG16		0x22c40		/* [10] FP_CFG_FRC_SD [2] SEL_RX_SD */
-#define   FIB_FP_CFG_FRC_SD	BIT(10)
+#define   FIB_FP_CFG_FRC_SD	BIT(10)		/* FIB_REG16[10] force sig-detect */
 
 /*
  * SoC hardware I2C master (SWCORE register file). The external RTL8290B BOSA
@@ -240,7 +243,16 @@
 #define WSDS_DIG_01		0x22034		/* [31:0] CFG_DMY0 (force-SDS)  */
 #define WSDS_DIG_02		0x22038		/* [10]  EN_PDOWN_BEN          */
 #define WSDS_DIG_03		0x2203c		/* [6:4] CFG_TXDIS_SEL_DLY     */
-#define WSDS_DIG_18		0x22090		/* [12]  BEN_OE                */
+/* [15] CFG_OPTIC_LOS_SEL_EPON [14] CFG_FRC_OPTIC_LOS [13] CFG_FRCV_OPTIC_LOS
+ * [12] BEN_OE -- the OFFSET moves per chip (9602C 0x22090, 9603CVD/9607C
+ * 0x40090), so it is selected through gpon_swc_map like the rest. Until
+ * 2026-08-26 /proc read 0x22090 on every chip, which on the 9603CVD is inside
+ * the switch's EXTG_ACTYPE table: the `dig18=` field was a manufactured value,
+ * and it is the one register that can say whether the optic-LOS input is
+ * FORCED rather than sampled. */
+#define   WSDS_OPTIC_LOS_SEL_EPON	BIT(15)
+#define   WSDS_FRC_OPTIC_LOS		BIT(14)
+#define   WSDS_FRCV_OPTIC_LOS		BIT(13)
 #define WSDS_DIG_1D		0x220a4		/* interface reset-B releases  */
 #define   WSDS_SFT_RSTB_INF	BIT(14)		/* interface soft reset-B (FIFO r/w ptr re-sync) */
 #define   WSDS_SFT_RSTB_INF_RX	BIT(15)		/* RX interface soft reset-B   */
@@ -258,12 +270,14 @@
 #define SDS_ANA_GPON_REG46	0x22738		/* [9:7]KI [6:4]KP1 [3:1]KP2   */
 #define SDS_ANA_MISC_REG00	0x22500		/* [5] FRC_RX_EN_VAL [4] _ON   */
 #define SDS_ANA_MISC_REG01	0x22504		/* [7:5] SPDSEL_VAL [4] _ON    */
-#define SDS_ANA_MISC_REG02	0x22508		/* [13] SD_VAL [12] SD_FORCE   */
-#define FIB_EXT_REG21		0x22e54		/* [13]  FEP_V2ANALOG (lock)   */
-#define   SDS_ANALOG_READY	BIT(13)
+/* ⚠ RENAMED 2026-08-26: [13]/[12] are FRC_BER_NOTIFY_VAL / FRC_BER_NOTIFY_ON on
+ * BOTH the RTL9602C and the RTL9603CVD, per each die's own register map -- not
+ * signal-detect. Nothing in this driver forces SDS_SDET, on any chip, which is
+ * what makes a measured sdet=0 a real optical statement rather than our own. */
+#define SDS_ANA_MISC_REG02	0x22508		/* [13] FRC_BER_NOTIFY_VAL [12] _ON */
+#define   SDS_ANALOG_READY	BIT(13)		/* FIB_EXT_REG21[13] FEP_V2ANALOG */
 #define SDS_LOCK_POLL_MAX	1000		/* x200us = up to 200 ms       */
-#define SDS_REG0		0x22800		/* [1] SP_SDS_EN_RX (RX enable)*/
-#define   SP_SDS_EN_RX		BIT(1)
+#define   SP_SDS_EN_RX		BIT(1)		/* SDS_REG0[1] RX enable       */
 /* Stock link-state polling behavior: when GPON_GTC_DS_INTR_STS reads this
  * exact sentinel the DS CDR is wedged; stock recovers by toggling SP_SDS_EN_RX
  * 1->0->1 (SDS_REG0[1]), waiting 10ms, then re-reading. */
@@ -279,9 +293,6 @@
  * OPTIC_LOS_SIG reads "loss" even with real light. Releasing GPIO 13 (function
  * disabled) routes the pad to the optical-SD input.
  */
-#define SOC_IO_MODE_EN		0x23018		/* [19] OEM_EN (optical pads)  */
-#define   IO_OEM_EN		BIT(19)
-#define SOC_IO_GPIO_EN		0x00048		/* GPIO func-enable, 1 bit/pin */
 #define SOC_IO_GPIO_EN_W0	0x40202006u	/* enable GPIO 1,2,13,21,30    */
 #define SOC_IO_GPIO_EN_W1	0x00000819u	/* enable GPIO 32,35,36,43     */
 
@@ -487,6 +498,94 @@ module_param(i2c_proxy, bool, 0644);
  * PON-MAC/GTC/PLOAM core but uses the c7 rev-C SerDes path, needs the rev>A
  * PON-IP power bit, and has NO external BOSA (internal SerDes front-end). */
 static bool is_9607c;
+/* The THIRD chip. Stock treats the RTL9603CVD as its own silicon (its own
+ * DAL, its own register table, PON SerDes at SWCORE +0x040000), and this
+ * tree already carries its table -- see the note at the assignment. */
+static bool is_9603cvd;
+
+/*
+ * ★ THE SWCORE OFFSETS THAT MOVE BETWEEN FAMILY MEMBERS.
+ *
+ * The GPON GTC block (phys 0x1b70xxxx) has the same layout on all three chips,
+ * so the driver's GPON_* offsets are shared. The SWCORE register file
+ * (0x1b0xxxxx) does NOT: the IO pad-mux, the GPIO function-enable array and the
+ * whole PON SerDes bank sit at different offsets per chip, and the SerDes moved
+ * by 0x1e000 between the 9602C and its two siblings.
+ *
+ * Using one chip's literal on another does not fault -- the SWCORE window
+ * decodes the whole range -- it silently reads or WRITES a different register.
+ * Measured on the G24W (RTL9603CVD) 2026-08-26: the 9602C IO_MODE_EN literal
+ * 0x23018 is EFUSE_BOND_CONTENT there, so the I2C_EN and OEM_EN writes landed
+ * in a fuse-shadow register; 0x23014 (the real IO_MODE_EN) read 0x0000b0c2 with
+ * OEM_EN clear, i.e. the optical pads were never enabled and every BOSA I2C
+ * transaction failed. Likewise the 9602C IO_GPIO_EN literal 0x48 is CFG_PCSXF
+ * on the 9603CVD and 0x4c is CFG_PHY_CTRL -- our GPIO write was corrupting the
+ * switch's PHY-address base, which the Ethernet driver then repaired 6.3 s
+ * later, so the damage was invisible in a resting-state dump.
+ *
+ * Every value below is from THAT chip's own register map (register name ->
+ * offset, field name -> bit), never transferred from a sibling.
+ */
+struct gpon_swc_map {
+	const char *chip;
+	u32 io_mode_en;		/* IO_MODE_EN                                  */
+	u8  io_i2c_en_bus0;	/* IO_MODE_EN.I2C_EN low bit == I2C bus 0      */
+	u8  io_oem_en;		/* IO_MODE_EN.OEM_EN bit (optical e-mode pads) */
+	u32 io_gpio_en;		/* IO_GPIO_EN word 0; 0 = not declared here    */
+	u32 sds_fib_status;	/* SDS_FIB_STATUS; 0 = not declared here       */
+	u32 sds_reg0;		/* SDS_REG0    [1] SP_SDS_EN_RX                */
+	u32 fib_reg16;		/* FIB_REG16   [10] FRC_SD [2] SEL_RX_SD       */
+	u32 fib_ext_reg21;	/* FIB_EXT_REG21 [13] analog-ready             */
+	u32 wsds_dig_18;	/* WSDS_DIG_18 [15:12] optic-LOS force + BEN_OE */
+};
+
+static const struct gpon_swc_map gpon_swc_9602c = {
+	.chip = "RTL9602C",
+	.io_mode_en = 0x23018, .io_i2c_en_bus0 = 13, .io_oem_en = 19,
+	.io_gpio_en = 0x00048,
+	.sds_fib_status = 0x001e4,
+	.sds_reg0 = 0x22800, .fib_reg16 = 0x22c40, .fib_ext_reg21 = 0x22e54,
+	.wsds_dig_18 = 0x22090,
+};
+
+static const struct gpon_swc_map gpon_swc_9603cvd = {
+	.chip = "RTL9603CVD",
+	.io_mode_en = 0x23014, .io_i2c_en_bus0 = 11, .io_oem_en = 16,
+	.io_gpio_en = 0x0003c,
+	.sds_fib_status = 0x00214,
+	.sds_reg0 = 0x40800, .fib_reg16 = 0x40c40, .fib_ext_reg21 = 0x40e54,
+	.wsds_dig_18 = 0x40090,
+};
+
+static const struct gpon_swc_map gpon_swc_9607c = {
+	.chip = "RTL9607C",
+	.io_mode_en = 0x23014, .io_i2c_en_bus0 = 13, .io_oem_en = 19,
+	/* IO_GPIO_EN is 0x38 here, but this chip's optical front-end is internal
+	 * and none of the 9602C pad recipe applies, so it is left undeclared:
+	 * nothing may write a GPIO pad-enable word on the 9607C. */
+	.io_gpio_en = 0,
+	/* SDS_FIB_STATUS is a 3-lane ARRAY here (0x28c, stride 0x20); lane 0 is
+	 * the one the GPON RX uses. ddm_probe_9607c() scans all three. */
+	.sds_fib_status = 0x0028c,
+	.sds_reg0 = 0x40800, .fib_reg16 = 0x40c40, .fib_ext_reg21 = 0x40e54,
+	.wsds_dig_18 = 0x40090,
+};
+
+/* Resolved from the DT compatible in probe(), BEFORE any sw_rd/sw_wr of a
+ * chip-selected offset. Defaults to the 9602C so a boot on an undeclared board
+ * behaves exactly as this driver did before the table existed. */
+static const struct gpon_swc_map *swc = &gpon_swc_9602c;
+
+/* Keep the register NAMES at the call sites; the value is now per chip. */
+#define SOC_IO_MODE_EN		(swc->io_mode_en)
+#define IO_I2C_EN_BUS0		(swc->io_i2c_en_bus0)
+#define IO_OEM_EN		(1u << (swc)->io_oem_en)
+#define SOC_IO_GPIO_EN		(swc->io_gpio_en)
+#define SDS_FIB_STATUS		(swc->sds_fib_status)
+#define SDS_REG0		(swc->sds_reg0)
+#define FIB_REG16		(swc->fib_reg16)
+#define FIB_EXT_REG21		(swc->fib_ext_reg21)
+#define WSDS_DIG_18		(swc->wsds_dig_18)
 /* Open the DS GEM unicast/broadcast pass gate (GEM_DS_MC_CFG). Default OFF: without
  * the PON-IP->GMAC-NIC OMCI drain, opening it backs up the DS path and stalls the US
  * (deactivate ~48s). Set =1 only when drain-path testing. */
@@ -1162,6 +1261,8 @@ static u32 gpon_led_los_val = ~0u;
 /* Drive one LED index's 2-bit parallel force value (0=off 1=on 2=blink). */
 static void gpon_led_force(unsigned int idx, u32 val)
 {
+	if (is_9603cvd)		/* Board-C offsets/indices -- see gpon_led_init() */
+		return;
 	sw_field(LED_FORCE_VALUE, idx * 2 + 1, idx * 2, val);
 }
 
@@ -1213,6 +1314,26 @@ static void gpon_led_init(void)
 {
 	if (!gpon_leds)
 		return;
+	/* ★★ EVERY CONSTANT IN THIS BLOCK IS BOARD C's, AND ON THE RTL9603CVD ONE
+	 * OF THEM LANDS IN A PIN-FUNCTION MUX. MEASURED 2026-08-27 from the two
+	 * stored SWCORE captures: IO_MODE_EN (0x23014) reads 0x08c0 on stock and
+	 * 0xb8c2 on ours -- OUR kernel adds bits {1,12,13,15}, which are EXACTLY
+	 * this block's LED indices (GE=1, PON=12, LOS=13, FE=15) written through
+	 * LED_IO_EN = 0x23014, the Board-C literal that is IO_MODE_EN on this die.
+	 * Each "LED pad enable" is a pin-function STEAL here: bit1=HS_UART_FC_EN,
+	 * bit12=I2C_EN[1], bit13=SLIC_ISI_EN, bit15=DYING_EN.
+	 * ⚠ AND IT IS NOT THE GPON-RX GATE: poke-clearing the four bits back to
+	 * stock's 0x08c0 on the live board (with and without a CDR re-sample) left
+	 * SDS_SDET at 0 -- consistent with SDS_SDET being the SerDes-internal
+	 * comparator on dedicated, un-muxed RX pins (COM03.RX_SD_POR_SEL=0 on both
+	 * firmwares). The steal is a real defect all the same; this die's LED
+	 * bring-up needs its OWN offsets and indices, RE'd from ITS stock, before
+	 * any LED write may run here. */
+	if (is_9603cvd) {
+		pr_info("rtl9602c-gpon: panel LEDs skipped (%s: Board-C LED map; LED_IO_EN 0x23014 is IO_MODE_EN here -- measured steal of HS_UART_FC/I2C1/SLIC_ISI/DYING pins)\n",
+			swc->chip);
+		return;
+	}
 	sw_field(LED_PARA_EN, LED_SERI_DATA_EN_BIT, LED_SERI_DATA_EN_BIT, 0);
 	sw_field(LED_PARA_EN, LED_SERI_CLK_EN_BIT, LED_SERI_CLK_EN_BIT, 0);
 	sw_field(LED_IO_EN, LED_SERI_OUT_EN_BIT, LED_SERI_OUT_EN_BIT, 0);
@@ -1307,6 +1428,26 @@ module_param_cb(poke, &poke_ops, poke_buf, 0644);
 MODULE_PARM_DESC(poke, "DEV: <g|G|p|P> <hexoff> [hexval] live GTC/PON-IP reg read/write");
 
 /* RTL8290B BOSA state captured at probe for /proc display (-1 = not read). */
+/* ★★ IS THE OPTICAL MODULE ACTUALLY AN RTL8290B? (2026-08-26)
+ *
+ * This driver's whole BOSA register model -- the 0x50/0x51/0x54/0x55 page
+ * mapping, the analog RSSI/APC banks, the laser-servo writes -- is the
+ * RTL8290B's. The G24W's module is NOT one, and the board said so plainly once
+ * the I2C pads were routed: slave 0x50 answers real SFF-8472 identity bytes
+ * (Identifier 0x02 "soldered to motherboard", Ext-ID 0x04, Connector 0x0b
+ * "optical pigtail", BR-nominal 0x0c = 1200 MBd, a space-padded ASCII vendor
+ * name at bytes 20..35) while the RTL8290B chip-ID at 0x390 reads 0x0000. The
+ * "pages" 0x54/0x55 are the SAME device answering: all 19 bytes we sampled
+ * there decode to A0 offsets inside space-padded ASCII fields, which is why
+ * they all read 0x20.
+ *
+ * READS off a wrong model are merely wrong. WRITES are not: bosa_i2c_write8()
+ * would put laser-servo values into the module's identity EEPROM. So the write
+ * path is gated on a POSITIVE identification, and it fails SAFE -- an RTL8290B
+ * reads 0x8290 and nothing changes; only a module that positively identifies as
+ * something else is protected.
+ */
+static bool bosa_not_8290b;		/* set by bosa_probe() on a positive mismatch */
 static int bosa_id_num __ro_after_init = -1;
 static int bosa_id_vid __ro_after_init = -1;
 static int bosa_w41 __ro_after_init = -1;
@@ -1332,14 +1473,17 @@ static u8 bosa_slave_for(u16 reg)
  */
 static int bosa_i2c_read8(u8 slave, u8 reg)
 {
-	u32 cfg, pad_off = is_9607c ? SW_IO_MODE_EN_9607C : SOC_IO_MODE_EN;
+	u32 cfg, pad_off = SOC_IO_MODE_EN;	/* per-chip: gpon_swc_map */
+	u32 i2c_bus0 = IO_I2C_EN_BUS0;
 	u32 ind_adr = is_9607c ? 0xBCu : I2C_IND_ADR;	/* 9607C i2c-ind regs are +4 */
 	u32 ind_cmd = is_9607c ? 0xC4u : I2C_IND_CMD;
 	u32 ind_rd  = is_9607c ? 0xCCu : I2C_IND_RD;
 	int i, ret = -ETIMEDOUT;
 
-	/* Route I2C bus 0 to its pads (IO_MODE_EN.I2C_EN[14:13], bit13 = bus0). */
-	sw_field(pad_off, 13, 13, 1);
+	/* Route I2C bus 0 to its pads. I2C_EN is a 2-bit field (one bit per bus)
+	 * whose position MOVES: [14:13] on the 9602C/9607C, [12:11] on the
+	 * 9603CVD. Writing bit 13 on a 9603CVD hits SLIC_ISI_EN, not I2C. */
+	sw_field(pad_off, i2c_bus0, i2c_bus0, 1);
 
 	/* CONFIG: slave addr, 8-bit reg-addr + 8-bit data, ~100 kHz. Preserve the
 	 * electrical bits (open-drain / mode / delays) already programmed. */
@@ -1368,7 +1512,7 @@ static int bosa_i2c_read8(u8 slave, u8 reg)
 	/* Reconnect the shared optical-SD pad so optic_los stays live (see
 	 * bosa_i2c_restore_pad). */
 	if (bosa_i2c_restore_pad)
-		sw_field(pad_off, 13, 13, 0);
+		sw_field(pad_off, i2c_bus0, i2c_bus0, 0);
 	return ret;
 }
 
@@ -1619,7 +1763,15 @@ static int bosa_i2c_write8(u8 slave, u8 reg, u8 val)
 	u32 cfg;
 	int i, ret = -ETIMEDOUT;
 
-	sw_field(SOC_IO_MODE_EN, 13, 13, 1);
+	/* Refuse to write RTL8290B registers into a module that is not one -- see
+	 * the note at bosa_not_8290b. Reads are still allowed and still useful. */
+	if (bosa_not_8290b) {
+		pr_warn_once("rtl9602c-gpon: BOSA writes REFUSED -- the module is not an RTL8290B (id=0x%04x); reg 0x%02x@0x%02x not written\n",
+			     bosa_id_num, reg, slave);
+		return -ENODEV;
+	}
+
+	sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0, IO_I2C_EN_BUS0, 1);
 
 	cfg = sw_rd(I2C_CONFIG0);
 	cfg &= ~((((1u << 7) - 1) << I2C_CFG_DEV_ID_LSB) |
@@ -1646,7 +1798,7 @@ static int bosa_i2c_write8(u8 slave, u8 reg, u8 val)
 	/* Reconnect the shared optical-SD pad so optic_los stays live (see
 	 * bosa_i2c_restore_pad). */
 	if (bosa_i2c_restore_pad)
-		sw_field(SOC_IO_MODE_EN, 13, 13, 0);
+		sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0, IO_I2C_EN_BUS0, 0);
 	return ret;
 }
 
@@ -1727,6 +1879,15 @@ static int bosa_poll_bit(u16 reg, u8 bit, int want, unsigned int us, int cap)
  * timing. The raw 0x311 read and the optic_dbg tap dump are kept as permanent
  * instruments. All fixed-point (no kernel FPU); explicit byte math.
  * =================================================================== */
+
+/*
+ * "Could not measure" sentinels for the RX optical chain. bosa_rx_code() floors
+ * a genuine reading at 11, so 0 can never be a measurement and is free to mean
+ * "no reading". BOSA_RX_CDBM_NA is deliberately NOT -4000 (the dBm floor a real
+ * dark reading produces) -- the whole point is that the two must not look alike.
+ */
+#define BOSA_RX_CODE_NA		0u
+#define BOSA_RX_CDBM_NA		S32_MIN
 
 /* Per-board optical calibration. Stock loads this from rtl8290b.data into its
  * europa_param struct; the compiled defaults are Board-C's confirmed values
@@ -1815,15 +1976,33 @@ static u32 bosa_rx_code(void)
 	u32 rssi   = bosa_sdadc_read(0xC2);	/* single in-range gain */
 	u32 tap_lo = bosa_read24(0x314);
 	u32 tap_hi = bosa_read24(0x305);
-	u32 span   = (tap_hi > tap_lo) ? (tap_hi - tap_lo) : 1;
+	u32 span;
 	u64 v_uv, irssi, code;
 	u32 s1, q;
 
-	if (rssi <= tap_lo)
-		return 11;
+	/*
+	 * ★ A FLOOR CONSTANT IS NOT A MEASUREMENT.
+	 *
+	 * These three exits used to return 11, the same value the tail clamps a
+	 * genuine faint reading to -- and bosa_code_to_cdbm(11) is EXACTLY -2985,
+	 * so /proc/gpon published "rx=-29.85dBm" whenever the I2C bus was dead.
+	 * That constant was read as an optical measurement in three separate
+	 * project documents. It is now BOSA_RX_CODE_NA, which the printers render
+	 * as "n/a"; only the tail clamp still returns a real (floored) 11.
+	 *
+	 * tap_hi <= tap_lo is the direct dead-bus witness: a NACKing bus makes
+	 * bosa_read24() return 0 and a floating bus returns 0xffffff, so both
+	 * reference taps read alike. The old code papered over it with span = 1,
+	 * manufacturing a denominator out of a failed read.
+	 */
+	if (tap_hi <= tap_lo)			/* dead/floating I2C: taps read alike */
+		return BOSA_RX_CODE_NA;
+	span = tap_hi - tap_lo;
+	if (rssi <= tap_lo)			/* below the low reference tap        */
+		return BOSA_RX_CODE_NA;
 	v_uv = div64_u64((u64)(rssi - tap_lo) * BOSA_ADC_VREF_UV, span);
 	if (v_uv <= bosa_cal.rx_vthr)		/* at/below the dark level -> no light */
-		return 11;
+		return BOSA_RX_CODE_NA;
 	irssi = div64_u64((u64)(v_uv - bosa_cal.rx_vthr) * 1000 * (bosa_cal.rx_r1 + bosa_cal.rx_r2),
 			  (u64)bosa_cal.rx_r1 * bosa_cal.rx_r2);
 	s1 = (irssi < 65536) ? 10 : 100;
@@ -1864,10 +2043,55 @@ static u32 bosa_rx_code_median(void)
 	return a + b + c - lo - hi;
 }
 
-/* Public on-demand RX optical power in centi-dBm (for /proc + ubus + ANI-G). */
+/* Public on-demand RX optical power in centi-dBm (for /proc + ubus + ANI-G).
+ * Returns BOSA_RX_CDBM_NA when the chain could not produce a reading -- the
+ * caller MUST test for it and print "n/a", never a number. The median already
+ * does the right thing with a single glitched sample: BOSA_RX_CODE_NA is 0, so
+ * one NA is dropped as the minimum and only two or three make the median NA. */
+/*
+ * ★★ THE ONE OPTICAL MEASUREMENT NOTHING ON THE SoC SIDE CAN FAKE.
+ *
+ * SFF-8472 A2 (slave 0x51) bytes 104/105 are RX optical power, big-endian,
+ * 0.1 uW/LSB -- measured by the MODULE's own monitor, on the module's own
+ * photodiode. It does not pass through the SoC pad mux, the SerDes, the GPON
+ * LOS input, or this driver's register model, so it is independent of every
+ * failure this file has been chasing: a pad left in GPIO mode, a forced
+ * optic-LOS, an unarmed RX CDR AFE all leave this number untouched.
+ *
+ * That makes it the instrument that separates "our driver cannot see the light"
+ * from "there is no light" -- the question a fibre connector answers and a
+ * register dump cannot. 0x0000 and 0xffff are the standard "no reading"
+ * encodings and stay n/a rather than becoming -40 dBm.
+ *
+ * bosa_code_to_cdbm() already takes 0.1 uW and returns centi-dBm (1 mW = 10000
+ * units -> 0 dBm), so the A2 word feeds it directly.
+ */
+static s32 bosa_rx_power_sff8472_cdbm(void)
+{
+	int hi = bosa_i2c_read8(0x51, 104);
+	int lo = bosa_i2c_read8(0x51, 105);
+	u32 uw;
+
+	if (hi < 0 || lo < 0)
+		return BOSA_RX_CDBM_NA;
+	uw = ((u32)(hi & 0xff) << 8) | (u32)(lo & 0xff);
+	if (uw == 0 || uw == 0xffffu)
+		return BOSA_RX_CDBM_NA;
+	return bosa_code_to_cdbm(uw);
+}
+
 static s32 bosa_rx_power_cdbm(void)
 {
-	return bosa_code_to_cdbm(bosa_rx_code_median());
+	u32 code;
+
+	/* A module that is not an RTL8290B has no RTL8290B analog RSSI chain to
+	 * read -- the "registers" that chain samples are bytes of its identity
+	 * EEPROM. Ask it the standard way instead. */
+	if (bosa_not_8290b)
+		return bosa_rx_power_sff8472_cdbm();
+
+	code = bosa_rx_code_median();
+	return code == BOSA_RX_CODE_NA ? BOSA_RX_CDBM_NA : bosa_code_to_cdbm(code);
 }
 
 /* Module temperature in deci-degC. Kelvin code from the temp ADC
@@ -2862,6 +3086,36 @@ static void __init bosa_probe(void)
 	bosa_w41     = bosa_read_reg(BOSA_REG_W41);
 	bosa_ctrl2   = bosa_read_reg(BOSA_REG_CONTROL2);
 	bosa_status2 = bosa_read_reg(BOSA_REG_STATUS2);
+
+	/* An "UNEXPECTED" id used to be logged and then ignored. Ask the module what
+	 * it IS instead: SFF-8472 A0 bytes 0/1/2/12 are the identifier, extended
+	 * identifier, connector and nominal bit rate, and bytes 20..35 the vendor
+	 * name. A plausible identifier byte (SFF-8024 assigns 0x01..0x2x) alongside
+	 * a non-0x8290 chip id is a POSITIVE identification of a different module,
+	 * which is what gates the write path. Nothing here writes. */
+	if (bosa_id_num != 0x8290) {
+		int ident = bosa_i2c_read8(0x50, 0);
+		int extid = bosa_i2c_read8(0x50, 1);
+		int conn  = bosa_i2c_read8(0x50, 2);
+		int br    = bosa_i2c_read8(0x50, 12);
+		char vend[17];
+		int k;
+
+		for (k = 0; k < 16; k++) {
+			int b = bosa_i2c_read8(0x50, 20 + k);
+
+			vend[k] = (b >= 0x20 && b < 0x7f) ? (char)b : '.';
+		}
+		vend[16] = 0;
+		if (ident > 0 && ident < 0x30 && extid >= 0) {
+			bosa_not_8290b = true;
+			pr_warn("rtl9602c-gpon: optical module is NOT an RTL8290B -- SFF-8472 A0 ident=0x%02x extid=0x%02x connector=0x%02x br=%d00MBd vendor='%s'. RTL8290B register writes are now REFUSED; DDM must come from A2 (slave 0x51) bytes 104/105, not the analog banks.\n",
+				ident, extid, conn, br, vend);
+		} else {
+			pr_warn("rtl9602c-gpon: BOSA id 0x%04x is not 0x8290 and SFF-8472 A0 did not identify it either (ident=%d) -- leaving the RTL8290B path enabled; this is 'could not tell', not 'it is an 8290B'\n",
+				bosa_id_num, ident);
+		}
+	}
 
 	pr_info("rtl9602c-gpon: BOSA RTL8290B num=0x%04x vid=0x%02x %s | w41=0x%02x(rxpwdn=%d) ctrl2=0x%02x(los_tri=%d) status2=0x%02x(rx_los=%d)\n",
 		bosa_id_num, bosa_id_vid,
@@ -4222,8 +4476,34 @@ static int pidump_proc_show(struct seq_file *s, void *v)
 static int swdump_proc_show(struct seq_file *s, void *v)
 {
 	static const u32 sw[][2] = {		/* offsets into swcore_base (phys 0x1b000000) */
-		{0x00000, 0x000fc}, {0x1c000, 0x1c0fc}, {0x20800, 0x2083c},
-		{0x20c00, 0x20c3c}, {0x23000, 0x230fc}, {0x27000, 0x2703c}, {0x701000, 0x70101c},
+		{0x00000, 0x000fc},
+		/* ★ 0x00100..0x002fc: the three per-port ABILITY arrays
+		 * (FORCE_P_ABLTY 0x198 | P_ABLTY 0x1b8 | ABLTY_FORCE_MODE 0x1dc),
+		 * SDS_CFG (0x200 on the RTL9603CVD) and SDS_FIB_STATUS (0x214).
+		 * MEASURED 2026-08-27: none of these was reachable through this
+		 * node -- the GPON RX-path question "does the SerDes report
+		 * signal-detect / link-ok" could be asked on STOCK (its vendor
+		 * node reads any address) and NOT on ours, so the one diff that
+		 * would settle it could never be taken. */
+		{0x00100, 0x002fc},
+		{0x1c000, 0x1c0fc}, {0x20800, 0x2083c},
+		{0x20c00, 0x20c3c}, {0x23000, 0x230fc}, {0x27000, 0x2703c},
+		/* ★ The RTL9603CVD PON SerDes page. On the RTL9602C the same block
+		 * sits at 0x022xxx; on this die it is at 0x040xxx (+0x1e000), which
+		 * is the offset error that kept the GTC in reset. Three sub-ranges
+		 * rather than the whole 4 KB page, because the STOCK route reads 16
+		 * bytes per console round-trip and a full page would cost ~4 min:
+		 *   0x40000..0x400fc  WSDS_DIG_00/02/18/1D, FORCE_BEN
+		 *   0x40500..0x405fc  SDS_ANA_MISC02, SDS_ANA_COM03/09/17/20/21/26/27
+		 *   0x40800..0x4083c  SDS_REG0 (bit1 SP_SDS_EN_RX, the CDR-wedge bit)
+		 *   0x40c00..0x40c7c  FIB_REG16 (FRC_SD / SEL_RX_SD)
+		 *   0x40e00..0x40e7c  FIB_EXT_REG21 (analog-ready status)
+		 * These five are exactly the offsets gpon_swc_9603cvd declares, so the
+		 * dump can answer every question that table can ask.
+		 */
+		{0x40000, 0x400fc}, {0x40500, 0x405fc}, {0x40800, 0x4083c},
+		{0x40c00, 0x40c7c}, {0x40e00, 0x40e7c},
+		{0x701000, 0x70101c},
 	};
 	static const u32 gm[][2] = {		/* absolute phys (separate ioremap) */
 		/* ★ 0x180133F0 not 0x18013400: the RX ring pointers sit just BELOW
@@ -4245,11 +4525,38 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		 * counters. The ability block is here because P_ABLTY bit 4 is our
 		 * own FORCED bit read back while forcing is on, so the force-mode
 		 * word has to be readable beside it or the link bit means nothing. */
-		{0x1b000180, 0x1b0001fc}, {0x1b032600, 0x1b0328fc},
+		/* ★ 0x1b000180..0x1b0001fc was here as a SECOND route to the ability
+		 * arrays; sw[] covers 0x00100..0x002fc since 2026-08-27, so keeping
+		 * it would print every one of those words TWICE and make a text diff
+		 * of two dumps unreadable. The swcore route is the same silicon. */
+		{0x1b032600, 0x1b0328fc},
 		{0x18012000, 0x180120fc}, {0x180133f0, 0x180134fc},
 	};
 	u32 off, a, val;
 	int r;
+
+	/*
+	 * ★★ THE DUMP DECLARES ITS OWN COVERAGE, FIRST (2026-08-27).
+	 *
+	 * Words are zero-suppressed (`if (val)`), so a reader cannot tell a
+	 * register that read zero from one this node never looked at -- and the
+	 * reader's answer to that question decides whether a stock-vs-ours diff
+	 * row is a finding or an artefact of our own instrument.
+	 *
+	 * MEASURED the day this was written: the board's declared capture blocks
+	 * asked for 0x22800..0x2280c and 0x23020..0x2302c; the host-side reader
+	 * filled every word it did not see with 0, and the resulting diff printed
+	 * `0x23024 STRAP_CFG stock 00040000 ours 00000000` as a DIFFERENCE. The
+	 * silicon had nothing to do with it.
+	 *
+	 * So the coverage is stated here, by the code that owns it, instead of
+	 * being duplicated in a host-side table that can drift from it.
+	 */
+	for (r = 0; r < (int)ARRAY_SIZE(sw); r++)
+		seq_printf(s, "#cover 0x%08x 0x%08x\n",
+			   0x1b000000u + sw[r][0], 0x1b000000u + sw[r][1]);
+	for (r = 0; r < (int)ARRAY_SIZE(gm); r++)
+		seq_printf(s, "#cover 0x%08x 0x%08x\n", gm[r][0], gm[r][1]);
 
 	for (r = 0; r < (int)ARRAY_SIZE(sw); r++)
 		for (off = sw[r][0]; off <= sw[r][1]; off += 4) {
@@ -4478,16 +4785,31 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	{
 		u32 los = gpon_rd(GPON_GTC_DS_LOS_CFG_STS);
 		s32 rx_cdbm = bosa_rx_power_cdbm();	/* calibrated ratiometric RX (was a linear 0x311 fit) */
+		char rx_s[16], sdet_s[8];
+
+		/* ★ NEITHER FIELD MAY PRINT A NUMBER IT DID NOT MEASURE. rx was a
+		 * hard floor constant (-29.85 dBm) on every failed I2C read, and
+		 * sdet was a read of whatever the 9602C's SDS_FIB_STATUS offset
+		 * happens to be on this chip. Three states each: value / n/a. */
+		if (rx_cdbm == BOSA_RX_CDBM_NA)
+			strscpy(rx_s, "n/a", sizeof(rx_s));
+		else
+			scnprintf(rx_s, sizeof(rx_s), "%d.%02ddBm", rx_cdbm / 100,
+				  (rx_cdbm < 0 ? -rx_cdbm : rx_cdbm) % 100);
+		if (SDS_FIB_STATUS)
+			scnprintf(sdet_s, sizeof(sdet_s), "%d",
+				  !!(sw_rd(SDS_FIB_STATUS) & SDS_FIB_SDS_SDET));
+		else
+			strscpy(sdet_s, "n/a", sizeof(sdet_s));
 
 		/* The two OLT-ASSIGNED identities of the WAN datapath are printed
 		 * beside their install flags: without them a "solicited=1
 		 * DATA_GEM_inst=1" line cannot tell a correct bind from a bind to
 		 * a retired Alloc-ID or to another board's gem-port. */
-		seq_printf(s, "fiber:       rerange=%u last_outage=%ums | optic_los=%d sdet=%d rx=%d.%02ddBm | omcc_inst=%d DATA_GEM_inst=%d solicited=%d gem=%u alloc=0x%x tcont_bound=%d\n",
+		seq_printf(s, "fiber:       rerange=%u last_outage=%ums | optic_los=%d sdet=%s rx=%s | omcc_inst=%d DATA_GEM_inst=%d solicited=%d gem=%u alloc=0x%x tcont_bound=%d\n",
 			   gpon_rerange_cnt, gpon_last_outage_ms,
 			   !!(los & GPON_OPTIC_LOS_SIG),
-			   !!(sw_rd(SDS_FIB_STATUS) & SDS_FIB_SDS_SDET),
-			   rx_cdbm / 100, (rx_cdbm < 0 ? -rx_cdbm : rx_cdbm) % 100,
+			   sdet_s, rx_s,
 			   gpon_omcc_installed, gpon_data_installed, gpon_data_gem_solicited,
 			   gpon_data_gem_port, gpon_data_alloc, gpon_data_tcont_installed);
 	}
@@ -4529,9 +4851,16 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	{
 		u32 los = gpon_rd(GPON_GTC_DS_LOS_CFG_STS);
 
-		seq_printf(s, "los_cfg_sts: 0x%08x (optic_los=%d cdr_los=%d en=%d polar=%d)\n",
+		/* ★ cdr_los IS ONLY A STATUS WHILE ITS MONITOR IS ON. The vendor's
+		 * chip-agnostic default leaves CDR_LOS_EN (bit 2) CLEAR -- measured
+		 * on the G24W: los_cfg_sts=0x103, i.e. bits 0,1,8 set and bit 2
+		 * clear -- so cdr_los printed the state of a DISABLED comparator as
+		 * though it were a reading. Say which it is. */
+		seq_printf(s, "los_cfg_sts: 0x%08x (optic_los=%d cdr_los=%s en=%d polar=%d)\n",
 			   los, !!(los & GPON_OPTIC_LOS_SIG),
-			   !!(los & GPON_CDR_LOS_SIG),
+			   (los & GPON_CDR_LOS_EN)
+				? ((los & GPON_CDR_LOS_SIG) ? "1" : "0")
+				: "disabled",
 			   !!(los & GPON_OPTIC_LOS_EN),
 			   !!(los & GPON_OPTIC_LOS_POLAR));
 	}
@@ -4881,8 +5210,23 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		}
 		seq_printf(s, "%s\n", n ? "" : " (NONE de-encap)");
 	}
-	seq_printf(s, "io: io_mode_en=0x%08x gpio_en0=0x%08x gpio_en1=0x%08x  (operational 0x12050/0x40202006/0x819)\n",
-		   sw_rd(SOC_IO_MODE_EN), sw_rd(SOC_IO_GPIO_EN), sw_rd(SOC_IO_GPIO_EN + 4));
+	/* The "operational" reference values are Board C's (RTL9602C) -- printing
+	 * them beside another chip's reading invites a diff that means nothing, so
+	 * they appear only on the chip they were measured on. Where the chip
+	 * declares no IO_GPIO_EN the words are not read at all. */
+	if (SOC_IO_GPIO_EN)
+		seq_printf(s, "io: io_mode_en=0x%08x@0x%05x gpio_en0=0x%08x gpio_en1=0x%08x%s\n",
+			   sw_rd(SOC_IO_MODE_EN), swc->io_mode_en,
+			   sw_rd(SOC_IO_GPIO_EN), sw_rd(SOC_IO_GPIO_EN + 4),
+			   swc == &gpon_swc_9602c
+				? "  (operational 0x12050/0x40202006/0x819)" : "");
+	else
+		seq_printf(s, "io: io_mode_en=0x%08x@0x%05x gpio_en=n/a (%s declares no optical GPIO pad map)\n",
+			   sw_rd(SOC_IO_MODE_EN), swc->io_mode_en, swc->chip);
+	seq_printf(s, "io: oem_en(bit%u)=%d i2c_en_bus0(bit%u)=%d\n",
+		   swc->io_oem_en, !!(sw_rd(SOC_IO_MODE_EN) & IO_OEM_EN),
+		   swc->io_i2c_en_bus0,
+		   !!(sw_rd(SOC_IO_MODE_EN) & (1u << swc->io_i2c_en_bus0)));
 
 	/*
 	 * SerDes RX/analog readback, for comparison against the known-good O5 values
@@ -4892,9 +5236,23 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	 */
 	seq_printf(s, "sds: dig00=0x%08x dig1d=0x%08x  (golden 0xf30 / 0x1c000)\n",
 		   sw_rd(WSDS_DIG_00), sw_rd(WSDS_DIG_1D));
-	seq_printf(s, "sds: com03=0x%08x com26=0x%08x gpon42=0x%08x dig18=0x%08x\n",
+	seq_printf(s, "sds: com03=0x%08x com26=0x%08x gpon42=0x%08x dig18=0x%08x@0x%05x\n",
 		   sw_rd(SDS_ANA_COM_REG03), sw_rd(SDS_ANA_COM_REG26),
-		   sw_rd(SDS_ANA_GPON_REG42), sw_rd(WSDS_DIG_18));
+		   sw_rd(SDS_ANA_GPON_REG42), sw_rd(WSDS_DIG_18), swc->wsds_dig_18);
+	/* ★ THE ONE LINE THAT SAYS WHETHER optic_los IS SAMPLED OR FORCED.
+	 * OPTIC_LOS_SIG in los_cfg_sts cannot tell you which: a forced input and a
+	 * dark fibre read identically. frc=1 means the GTC is ignoring the pad and
+	 * using frcv, so "optic_los=1 frc=1 frcv=1" is our own register, not the
+	 * fibre -- and "frc=0" is what makes optic_los=1 a real optical statement. */
+	{
+		u32 d18 = sw_rd(WSDS_DIG_18);
+
+		seq_printf(s, "optic_los_src: %s (dig18 frc=%d frcv=%d sel_epon=%d ben_oe=%d)\n",
+			   (d18 & WSDS_FRC_OPTIC_LOS) ? "FORCED -- the pad is NOT being sampled"
+						      : "the pad (sampled)",
+			   !!(d18 & WSDS_FRC_OPTIC_LOS), !!(d18 & WSDS_FRCV_OPTIC_LOS),
+			   !!(d18 & WSDS_OPTIC_LOS_SEL_EPON), !!(d18 & BIT(12)));
+	}
 	seq_printf(s, "sds: misc00=0x%08x misc01=0x%08x misc02=0x%08x fib21=0x%08x\n",
 		   sw_rd(SDS_ANA_MISC_REG00), sw_rd(SDS_ANA_MISC_REG01),
 		   sw_rd(SDS_ANA_MISC_REG02), sw_rd(FIB_EXT_REG21));
@@ -4902,13 +5260,16 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	seq_printf(s, "sds_tx: cfg=0x%08x com22_txamp=0x%08x reg24=0x%08x dig1e_d2a=0x%08x dig02_pdben=0x%08x dig03_txdis=0x%08x forceben=0x%08x\n",
 		   sw_rd(SDS_CFG), sw_rd(0x225d8), sw_rd(0x225e0),
 		   sw_rd(0x220a8), sw_rd(0x22038), sw_rd(0x2203c), sw_rd(0x220e4));
-	{
+	if (SDS_FIB_STATUS) {
 		u32 fibsts = sw_rd(SDS_FIB_STATUS);
 
-		seq_printf(s, "sds: fib_status=0x%08x (sds_sdet=%u fib100_sdet=%u link_ok=%u) fib_reg16=0x%08x\n",
-			   fibsts, !!(fibsts & SDS_FIB_SDS_SDET),
+		seq_printf(s, "sds: fib_status=0x%08x@0x%05x (sds_sdet=%u fib100_sdet=%u link_ok=%u) fib_reg16=0x%08x@0x%05x\n",
+			   fibsts, swc->sds_fib_status, !!(fibsts & SDS_FIB_SDS_SDET),
 			   !!(fibsts & BIT(2)), !!(fibsts & BIT(4)),
-			   sw_rd(FIB_REG16));
+			   sw_rd(FIB_REG16), swc->fib_reg16);
+	} else {
+		seq_printf(s, "sds: fib_status=n/a (%s declares no SDS_FIB_STATUS in this driver)\n",
+			   swc->chip);
 	}
 	seq_printf(s, "bosa: rtl8290b num=0x%04x vid=0x%02x w41=0x%02x ctrl2=0x%02x status2=0x%02x\n",
 		   bosa_id_num, bosa_id_vid, bosa_w41, bosa_ctrl2, bosa_status2);
@@ -4942,14 +5303,40 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * FPU: centi-dBm = code*2513/100 - 4100 (refine vs the rtl8290b.data table). */
 		int rxc = bosa_read_reg(0x311) & 0xff;	/* raw 8-bit RSSI tap: kept as instrument */
 		u32 rx_code = bosa_rx_code();
-		s32 rx_cdbm = bosa_code_to_cdbm(rx_code);	/* faithful RX chain -> centi-dBm */
 		u32 rssi_uv = bosa_rssi_uv();			/* ratiometric fraction*10000, info */
 		int txw = bosa_read16_median(0x166);
+		char cdbm_s[16];
 
-		seq_printf(s, "optic_rx_raw: 0x%02x optic_rx_cdbm: %d optic_tx_raw: 0x%04x\n",
-			   rxc, rx_cdbm, txw & 0xffff);
+		/* Same rule as the "fiber:" line: a chain that produced no reading
+		 * prints n/a, never the -4000 floor. */
+		if (rx_code == BOSA_RX_CODE_NA)
+			strscpy(cdbm_s, "n/a", sizeof(cdbm_s));
+		else
+			scnprintf(cdbm_s, sizeof(cdbm_s), "%d",
+				  bosa_code_to_cdbm(rx_code));
+		seq_printf(s, "optic_rx_raw: 0x%02x optic_rx_cdbm: %s optic_tx_raw: 0x%04x\n",
+			   rxc, cdbm_s, txw & 0xffff);
 		seq_printf(s, "optic_env:   temp_dc=%d bias_ua=%u tx_cdbm=%d\n",
 			   bosa_temp_dc(), bosa_bias_ua(), bosa_tx_power_cdbm());
+		/* ★ The module's OWN optical monitor, raw, beside the derived dBm --
+		 * the witness that is independent of the SoC pad mux and the SerDes.
+		 * Printed unconditionally so the raw words are visible even when the
+		 * conversion declines to produce a number. */
+		{
+			int a2h = bosa_i2c_read8(0x51, 104);
+			int a2l = bosa_i2c_read8(0x51, 105);
+			s32 a2c = bosa_rx_power_sff8472_cdbm();
+			char a2s[16];
+
+			if (a2c == BOSA_RX_CDBM_NA)
+				strscpy(a2s, "n/a", sizeof(a2s));
+			else
+				scnprintf(a2s, sizeof(a2s), "%d.%02ddBm", a2c / 100,
+					  (a2c < 0 ? -a2c : a2c) % 100);
+			seq_printf(s, "optic_a2:    rx_pwr_raw=%02x%02x (0.1uW) -> %s  [SFF-8472 A2 slave 0x51 b104/105 -- the MODULE's own monitor]\n",
+				   a2h < 0 ? 0xff : a2h & 0xff,
+				   a2l < 0 ? 0xff : a2l & 0xff, a2s);
+		}
 		{
 			s32 v = bosa_vmpd_mv(0x3B3);	/* one live MPD sample -> latch its taps */
 
@@ -4960,8 +5347,8 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		}
 		/* Full RX chain intermediates: a HW read at a known attenuation pins the exact
 		 * ref-tap roles + rx_thr against the -14 dBm anchor (code 398 = 0.1uW at -14 dBm). */
-		seq_printf(s, "optic_rxchain: rssi_uv=%u code=%u cdbm=%d | adcA=%06x ref305=%06x ref314=%06x\n",
-			   rssi_uv, rx_code, rx_cdbm, bosa_read24(0x30e), bosa_read24(0x305), bosa_read24(0x314));
+		seq_printf(s, "optic_rxchain: rssi_uv=%u code=%u cdbm=%s | adcA=%06x ref305=%06x ref314=%06x\n",
+			   rssi_uv, rx_code, cdbm_s, bosa_read24(0x30e), bosa_read24(0x305), bosa_read24(0x314));
 		seq_printf(s, "optic_dbg: 30c=%02x 30d=%02x 30e=%02x 30f=%02x 310=%02x 311=%02x 312=%02x | 166=%02x 167=%02x 168=%02x 169=%02x\n",
 			   bosa_read_reg(0x30c) & 0xff, bosa_read_reg(0x30d) & 0xff,
 			   bosa_read_reg(0x30e) & 0xff, bosa_read_reg(0x30f) & 0xff,
@@ -6836,7 +7223,11 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * O1 the state<2 guard stops counting until the FSM climbs back past O1 on relight. */
 	if (los_rerange_ticks && gpon_fsm_state >= 2) {
 		bool optic_los = !!(gpon_rd(GPON_GTC_DS_LOS_CFG_STS) & GPON_OPTIC_LOS_SIG);
-		bool sds_dark  = !(sw_rd(SDS_FIB_STATUS) & SDS_FIB_SDS_SDET);
+		/* A chip with no declared SDS_FIB_STATUS has no second witness, and
+		 * an absent witness may not be manufactured into one: leave sds_dark
+		 * false so the AND below never fires on evidence we do not have. */
+		bool sds_dark  = SDS_FIB_STATUS &&
+				 !(sw_rd(SDS_FIB_STATUS) & SDS_FIB_SDS_SDET);
 
 		/* Real DS-light loss = the GTC optical-LOS AND the SoC SerDes signal-detect both
 		 * gone. An I2C pad-steal perturbs optic_los alone (sds_sdet stays 1); an internal
@@ -7029,7 +7420,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * toggle (disable now, re-enable next tick ~10ms later) so no 10ms busy-wait
 	 * runs in this softirq. Self-limiting: only fires while wedged, and a bounded
 	 * consecutive-attempt cap yields to the LOS/re-range path on a dead link. */
-	if (cdr_stuck_recover) {
+	if (cdr_stuck_recover && SDS_REG0) {
 		static int cdr_pending, cdr_tries;
 		u32 sts = gpon_rd(GPON_GTC_DS_INTR_STS);
 
@@ -7166,6 +7557,80 @@ static int __init rtl9602c_gpon_init(void)
 	 * steps below are gated off too.
 	 */
 	is_9607c = of_machine_is_compatible("realtek,rtl9607c");
+	/* ★★★ THE THIRD CHIP, AND ITS TABLE WAS ALREADY HERE (2026-08-26).
+	 * RE of THIS board's own stock kernel (k0.vmlinux, Linux 4.4.140 with
+	 * kallsyms) shows the vendor treats the RTL9603CVD as its OWN chip --
+	 * dal_mgmt_initDevice dispatches 0x96030003 -> dal_rtl9603cvd_mapper_get
+	 * beside 0x96070001 -> dal_rtl9607c_*, with 840 dedicated 9603CVD
+	 * functions -- and its per-chip register table puts the PON SerDes at
+	 * SWCORE +0x040000, exactly where rtl960x_ponmac.c's C3_* constants
+	 * already put it (C3_WSDS_DIG_00 0x1b040030, C3_FIB_EXT_REG21
+	 * 0x1b040e54, C3_SDS_CFG 0x1b000200, C3_SOFTWARE_RST 0x1b0000e0).
+	 * Without this line the G24W fell to the ELSE branch below and ran the
+	 * RTL9602C recipe, whose SerDes offsets are 0x1E000 LOWER -- 0x22030
+	 * instead of 0x40030. On this silicon that page is not the SerDes at
+	 * all: it declares EXTG_ACTYPE0..7 (0x022000..0x0220c4), the switch's
+	 * extra-Ethertype match table, so the bring-up was writing into a LIVE
+	 * table on the working LAN path and the GTC never left reset. The
+	 * symptom we chased for days -- onu_state O15 with rst_done=0 -- is a
+	 * raw 4-bit field reading 0xF; stock's state vocabulary is O1..O7 and
+	 * contains no O15 at all.
+	 * ⚠ NOT A NEW TABLE: RTL960X_CHIP_9603CVD and its four dispatch cases
+	 *   (rtl960x_ponmac.c:2714/2733/2746/2766) have been in this tree all
+	 *   along, named by NOTHING outside rtl960x_ponmac.{c,h}. The missing
+	 *   element was never missing from the source; it was unwired.
+	 */
+	is_9603cvd = of_machine_is_compatible("realtek,rtl9603cvd");
+
+	/* Select this chip's SWCORE offsets BEFORE the first sw_rd/sw_wr of any
+	 * chip-selected register (the BOSA I2C pad-mux below is the first). */
+	swc = is_9607c ? &gpon_swc_9607c
+	    : is_9603cvd ? &gpon_swc_9603cvd : &gpon_swc_9602c;
+	pr_info("rtl9602c-gpon: SWCORE map = %s (io_mode_en=0x%05x i2c_en_bus0=%u oem_en=%u gpio_en=0x%05x fib_status=0x%05x sds_reg0=0x%05x)\n",
+		swc->chip, swc->io_mode_en, swc->io_i2c_en_bus0, swc->io_oem_en,
+		swc->io_gpio_en, swc->sds_fib_status, swc->sds_reg0);
+
+	/*
+	 * ★ ENABLE THE OPTICAL "e-mode" PADS (IO_MODE_EN.OEM_EN).
+	 *
+	 * This bit routes the optical front-end pads -- TX_DISABLE, the optical
+	 * TX signal-detect and the BOSA RX signal-detect -- to the GPON block.
+	 * It was DEFINED in this driver and written on no path at all, so the
+	 * driver depended on whatever the bootloader happened to leave. Measured
+	 * on the G24W 2026-08-26: IO_MODE_EN (0x1b023014) read 0x0000b0c2 with
+	 * OEM_EN (bit 16) CLEAR, so the pads were never routed and every BOSA
+	 * I2C transaction failed.
+	 *
+	 * Skipped on the 9607C: its optical front-end is internal (skip_bosa),
+	 * so there are no external optical pads to route.
+	 *
+	 * ★★★ AND SKIPPED ON THE RTL9603CVD SINCE 2026-08-27, BECAUSE THE ORACLE
+	 * SAYS STOCK DOES NOT SET IT. Stock on the G24W, at O5 [Operation,
+	 * SERVING], SWCORE 0x23014:
+	 *
+	 *     IO_MODE_EN = 0x000008c0   ->   OEM_EN (bit 16) = 0
+	 *                                    I2C_EN_BUS0 (bit 11) = 1
+	 *
+	 * captured in the same run that read SDS_FIB_STATUS = 0x00020008 with
+	 * SDS_SDET SET. So on this board the BOSA's signal-detect reaches the GPON
+	 * block with OEM_EN RESTING AT ZERO, and the premise of the write -- "the
+	 * pads were never routed, which is why every BOSA I2C transaction failed"
+	 * -- is refuted: stock's I2C works with the same bit clear, and it is
+	 * I2C_EN_BUS0 that stock holds set, which this driver already toggles
+	 * around each BOSA transaction.
+	 *
+	 * ⚠ THE 0x0000b0c2 THAT MOTIVATED IT WAS NOT WHAT THE BIT LOOKED LIKE ON
+	 * STOCK. It was read on OUR image, against nothing. This is the standing
+	 * rule applied literally: when blocked, set our value to stock's.
+	 */
+	if (!is_9607c && !is_9603cvd) {
+		u32 before = sw_rd(SOC_IO_MODE_EN);
+
+		sw_field(SOC_IO_MODE_EN, swc->io_oem_en, swc->io_oem_en, 1);
+		pr_info("rtl9602c-gpon: OEM_EN (optical pads) bit%u: io_mode_en 0x%08x -> 0x%08x\n",
+			swc->io_oem_en, before, sw_rd(SOC_IO_MODE_EN));
+	}
+
 	if (is_9607c) {
 		skip_bosa = true;
 		/* Enable the switch-internal SMI master so the PHY-10 proxy can reach
@@ -7183,8 +7648,15 @@ static int __init rtl9602c_gpon_init(void)
 		if (ipen) {
 			u32 mask = SOC_IP_EN_PON;
 
-			if (is_9607c)
-				mask |= SOC_IP_EN_PONPBO;	/* rev>A: PON-IP window decode */
+			/* ★ THE 9603CVD SETS BIT 25 UNCONDITIONALLY, not just the 9607C.
+			 * This board's own stock kernel (tier 2, dal_rtl9603cvd_switch_init
+			 * disassembled from k0.vmlinux) ORs 0x20 then 0x0200_0000 into
+			 * 0xb800063c with NO chip-rev conditional -- and the dying-gasp path
+			 * deliberately KEEPS bits 5 and 25 alive at power loss so the PON can
+			 * still transmit. Our driver gated bit 25 behind is_9607c, mirroring
+			 * the 9607C's rev>A conditional, so the 9603CVD never got it. */
+			if (is_9607c || is_9603cvd)
+				mask |= SOC_IP_EN_PONPBO;	/* PON-IP window / packet datapath */
 			writel(readl(ipen) | mask, ipen);
 			(void)readl(ipen);		/* post the write */
 			iounmap(ipen);
@@ -7224,9 +7696,27 @@ static int __init rtl9602c_gpon_init(void)
 	 * in the switch-core IO_GPIO_EN words; the direction/data live in the SoC
 	 * GPIO controller at phys 0x18003300 (its own window).
 	 */
-	/* 9602C-only optical-SD GPIO pad routing + LED pins; the 9607C uses the
-	 * internal SerDes SD and different LED pins, so these regs are wrong there. */
-	if (!is_9607c) {
+	/*
+	 * ★ GPIO PAD ROUTING IS BOARD-C's, AND ITS REGISTER MOVED.
+	 *
+	 * These two words and the GPIO-controller golden values are the RTL9602C
+	 * "Board C" optical-SD pad recipe: SOC_IO_GPIO_EN_W0/W1 are that board's
+	 * pin numbers and the direction/data words are its pinout. Two reasons a
+	 * chip must opt IN rather than be excluded one at a time:
+	 *
+	 *  - the REGISTER moves. IO_GPIO_EN is 0x48 on the 9602C, 0x3c on the
+	 *    9603CVD and 0x38 on the 9607C. On the 9603CVD our 0x48/0x4c writes
+	 *    landed on CFG_PCSXF and CFG_PHY_CTRL -- MEASURED 2026-08-26: the boot
+	 *    log shows "GPIO pads set (gpio_en1=0x00000019)" at t=0.75 s and then
+	 *    "rtl960x-eth: CFG_PHY_CTRL(0x04c): BASE_PHYAD 25 -> 0" at t=7.02 s.
+	 *    0x819 & 0x1f == 25: the PHY-address base the Ethernet driver spent
+	 *    6.3 s repairing was written by THIS driver, not by U-Boot.
+	 *  - the DATA is per board even where the register agrees.
+	 *
+	 * So this runs only where the recipe was derived and tested. Any other
+	 * chip needs its own pad map, from its own register map and its own board.
+	 */
+	if (!is_9607c && !is_9603cvd) {
 		sw_wr(SOC_IO_GPIO_EN, SOC_IO_GPIO_EN_W0);
 		sw_wr(SOC_IO_GPIO_EN + 4, SOC_IO_GPIO_EN_W1);
 		{
@@ -7243,9 +7733,22 @@ static int __init rtl9602c_gpon_init(void)
 		}
 		pr_info("rtl9602c-gpon: GPIO pads set (gpio_en0=0x%08x gpio_en1=0x%08x)\n",
 			sw_rd(SOC_IO_GPIO_EN), sw_rd(SOC_IO_GPIO_EN + 4));
-
-		gpon_led_init();
+	} else {
+		pr_info("rtl9602c-gpon: GPIO optical-SD pad recipe skipped (%s: not Board C's pinout)\n",
+			swc->chip);
 	}
+
+	/* ⚠ THE PANEL-LED BLOCK IS BOARD C's AND IS NOW GATED OFF ON THE 9603CVD
+	 * AT BOTH FUNNELS (gpon_led_init + gpon_led_force), because "knowingly
+	 * wrong" turned out to understate it: beyond LED_FORCE_VALUE landing in
+	 * LED_ACTIVE_LOW_CFG, the LED_IO_EN literal 0x23014 is IO_MODE_EN on that
+	 * die, and enabling the four Board-C LED indices {1,12,13,15} stole the
+	 * HS_UART_FC / I2C1 / SLIC_ISI / DYING pin functions (measured: stock
+	 * 0x08c0 vs ours 0xb8c2, and the XOR is exactly the four indices). The
+	 * runtime FSM setters are gated inside gpon_led_force(), so no LED write
+	 * of any kind reaches that chip until its own LED map is RE'd. */
+	if (!is_9607c)
+		gpon_led_init();
 
 	/*
 	 * Bring up the PON SerDes so the MAC core gets its clock, then confirm the
@@ -7256,8 +7759,24 @@ static int __init rtl9602c_gpon_init(void)
 		const char *via;
 		int sret;
 
-		if (!is_9607c)
-			rtl9602c_sc_ldo_init();	/* 9602C analog LDO/thermal — wrong regs on 9607C */
+		/* ★ AND THIS IS THE *SECOND* WRITER OF THE GPIO PAD ARRAY (2026-08-26).
+		  * Gating the pad recipe above was not enough: this function writes the
+		  * 9602C's SC-indirect engine at 0x3c/0x40/0x44, and on the RTL9603CVD
+		  * those three words ARE IO_GPIO_EN -- the 96-pin, one-bit-per-pin
+		  * function-enable array (base 0x3c, so words 0x3c/0x40/0x44). It
+		  * therefore stamps SC command words 0x0001fdca / 0x0003fdca straight
+		  * into the pad mux about 60 ms after we announced we were skipping it,
+		  * and copies whatever pins 64..95 held onto pins 0..31. Its 0x130
+		  * "THERMAL_CTRL_0" is not that register here either (THERMAL_STS_0 is
+		  * at 0x134 on this die). Per this file's own note above, a pin left in
+		  * GPIO mode keeps the BOSA signal-detect off the GPON LOS input, which
+		  * is exactly the optic_los=1 we measure. Same reasoning as the 9607C
+		  * exclusion, same evidence, one more chip. */
+		if (!is_9607c && !is_9603cvd)
+			rtl9602c_sc_ldo_init();	/* 9602C SC-indirect LDO/thermal — different registers on 9603CVD/9607C */
+		else if (is_9603cvd)
+			pr_info("rtl9602c-gpon: sc_ldo_init skipped (%s: 0x3c/0x40/0x44 are IO_GPIO_EN here, not SC_IND_*)\n",
+				swc->chip);
 		rtl960x_c2_postmode_perturb = serdes_postmode_perturb;	/* A/B: skip the post-GPON-mode US-TX perturbations (default = skip, stock rev-A) */
 		rtl960x_c2_sds_cfgrst = serdes_sds_cfgrst;	/* A/B: SDS reset = stock bit0-only (default) vs legacy bit7+bit0 */
 		rtl960x_c2_stock_analog = serdes_stock_analog;	/* A/B: match live-stock SDS REG01/REG11 post-reset (default) */

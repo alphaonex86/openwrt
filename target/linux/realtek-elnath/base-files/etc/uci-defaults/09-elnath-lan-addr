@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# ★★★ STOP THIS BOARD CLAIMING A BANNED ADDRESS.
+#
+# `/etc/config/network` in this target is a FIXED FILE shipped verbatim and it
+# hardcodes `network.lan.ipaddr = 192.168.1.1`.
+#
+# ★★ .1 IS BANNED IN THIS LAB (operator, 2026-08-25). It is the address every
+# vendor image and every fresh OpenWrt build ships, so a board can arrive on it
+# WITHOUT ANYBODY CHOOSING IT. Measured that day: the X111W booted our image
+# holding .1 while THIS board was live on .1, and the run reported "the board
+# did not answer within 420 s" -- which reads like a dead device and was two
+# boards ARP-flapping each other.
+#
+# The lab plan: .1 BANNED · .2-.10 DHCP · .11-.20 ONU · .21-.30 ONU WiFi ·
+# .31-.40 host ethernet · .41-.70 host wifi 1/2/3.
+#
+# ★ THE MECHANISM IS THE SIBLING TARGET'S, deliberately: realtek-luna already
+# carries `09-luna-lan-addr`, keyed on /tmp/sysinfo/board_name, additive, and
+# silent for any board it does not name. Same shape here so the two cannot
+# drift into two ways of doing one thing.
+#
+# ★ THE ADDRESS IS THIS BOARD'S OWN DECLARED VALUE (`ONU_LAN_IP` in
+# instrument/RTL9607F/HSGQ/X400AXF/config.xml), validated against
+# `ip_plan.check()` before it was written there.
+
+board=""
+[ -r /tmp/sysinfo/board_name ] && board=$(cat /tmp/sysinfo/board_name)
+
+case "$board" in
+hsgq,x400axf)
+	# bench onu. Declared ONU_LAN_IP = 192.168.1.11, inside the ONU band.
+	uci -q set network.lan.ipaddr='192.168.1.11'
+	uci -q commit network
+	logger -t elnath-lan-addr "board_name=$board -> lan 192.168.1.11 (the shipped default 192.168.1.1 is BANNED in this lab)"
+	;;
+"")
+	# THREE STATES: we could not ask which board this is. Change NOTHING --
+	# guessing is how the wrong address reaches the wrong board.
+	logger -t elnath-lan-addr "board_name unreadable -- LAN address left as shipped"
+	;;
+*)
+	logger -t elnath-lan-addr "board_name=$board has no declared LAN address -- left as shipped"
+	;;
+esac
+
+exit 0

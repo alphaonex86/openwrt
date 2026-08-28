@@ -96,6 +96,17 @@ module_param(rtl8221b_phy, bool, 0644);
 MODULE_PARM_DESC(rtl8221b_phy, "de-assert the RTL8221B 2.5G PHY reset (SerDes-6 uplink)");
 
 static unsigned int diag_ms = 3000;
+/* ★ DEFAULT 0 = do NOT assert the GPHY reset, which is what the vendor does.
+ * A param and not a deletion, so the OLD behaviour is one bootarg away and the
+ * A/B costs no rebuild -- and so a board that turns out to NEED it can have it.
+ */
+static bool gphy_reset;
+module_param(gphy_reset, bool, 0444);
+MODULE_PARM_DESC(gphy_reset,
+		 "assert SOFTWARE_RST.CMD_GPHY_RST_PS during copper PHY bring-up "
+		 "(default 0: the vendor never asserts it, and we run none of the "
+		 "re-initialisation that reset would require)");
+
 module_param(diag_ms, uint, 0644);
 MODULE_PARM_DESC(diag_ms, "period of the per-port real-link/rxpkts diagnostic (0 = off)");
 
@@ -103,7 +114,113 @@ static int diag_count = 12;
 module_param(diag_count, int, 0644);
 MODULE_PARM_DESC(diag_count, "number of periodic link/rxpkts diagnostic dumps");
 
-static int gphy_map;
+/* ★★★ DEFAULT 1 SINCE 2026-08-23, and the EMULATED vendor trace is why.
+ * Running `dal_rtl9603cvd_switch_init` under Unicorn showed the vendor write the
+ * PHY POWER register at OCP `0xA400` on **all of phy0..phy5**, and use the flat
+ * low addresses `0x0020`-`0x003E` ONLY for the FE *patch* register block on
+ * phy0/1/2. Those are two different register SETS, not two maps for one
+ * register -- which settles a contradiction this file's own comment called
+ * unresolved.
+ * With `gphy_map = 0` and this chip's `gphy_ports = 0x08`, our BMCR and
+ * AN-restart writes on THREE of the four copper ports went to flat `0x0000`
+ * where the vendor uses `0xA400`.
+ * ⚠ A SINGLE-VARIABLE EXPERIMENT, not a proven fix: the previous three
+ * candidates (the RxCDO store width, the force-every-UTP-port policy, the GPHY
+ * reset) were each plausible and each REFUTED by measurement. `gphy_map=0` is
+ * one bootarg away, so this is reversible without a rebuild.
+ */
+/* ★ How long to let an OCP transaction start before sampling BUSY. The vendor
+ * uses a flat mdelay(10) and no poll at all; 200 us is two orders of magnitude
+ * less and still far longer than a bus turnaround, and the poll below keeps the
+ * timeout safety the vendor's version does not have. 0 = the old behaviour.
+ */
+/* ★★ MEASURED 2026-08-24 -- STOCK vs OURS, the SAME register, same board.
+ * SWCORE 0x0000004C is CFG_PHY_CTRL, named and laid out by THIS chip's own
+ * chipdef (rtl9603cvd): MSK_MDI[8:5] | BASE_PHYAD[4:0].
+ *
+ *      stock  0x00000000  ->  BASE_PHYAD = 0
+ *      ours   0x00000019  ->  BASE_PHYAD = 25
+ *
+ * ⚠ CORRECTED 2026-08-26 -- IT WAS NOT THE BOOTLOADER, IT WAS OUR OWN GPON
+ * DRIVER, and blaming U-Boot sent this investigation to the wrong tree.
+ * gpon-rtl9602c.c used the RTL9602C literal SOC_IO_GPIO_EN = 0x48 for the
+ * optical-SD GPIO pad recipe. On the RTL9603CVD 0x48 is CFG_PCSXF and 0x4c is
+ * CFG_PHY_CTRL, so its second word landed HERE:
+ *
+ *      SOC_IO_GPIO_EN_W1 = 0x819,  0x819 & 0x1ff = 0x019
+ *      -> MSK_MDI[8:5] = 0, BASE_PHYAD[4:0] = 25
+ *
+ * which is bit-for-bit the 0x00000019 measured above. The boot log shows both
+ * halves in order: "gpon: GPIO pads set (gpio_en1=0x00000019)" at t=0.75 s,
+ * then this driver's "BASE_PHYAD 25 -> 0" at t=7.02 s -- a 6.3 s window in
+ * which the switch ran with the wrong MDIO base. The GPON driver now skips
+ * that recipe on this chip, so there is nothing left to repair and the write
+ * below is a no-op that merely asserts the value.
+ * Beside that, every PHY read here returns 0000 with BUSY never once
+ * asserting, while the identical window on stock holds a real datum
+ * (GPHY_IND_RD = 0x1940, a BMCR with PDOWN set). If the indirect GPHY access
+ * is addressed through the MDIO master BASE_PHYAD points at, our phyid 0..3
+ * land on MDIO 25..28, where nothing answers -- which is what a read of 0000
+ * with no BUSY looks like.
+ *
+ * -1 leaves the register exactly as the bootloader left it. That is how this
+ * gets FALSIFIED rather than believed. */
+/* Which receive FIFOs stay in reset. Stock holds NONE.
+ *
+ * ⚠ CORRECTED 2026-08-26, SAME CAUSE AS CFG_PHY_CTRL ABOVE: the one asserted
+ * FIFO was not the bootloader's either. The GPON driver's first pad word,
+ * SOC_IO_GPIO_EN_W0 = 0x40202006, landed on CFG_PCSXF (0x48 on this chip) and
+ * its writable bits are 0x2006 -> RST_RXFIFO[13:10] = 8, i.e. exactly one FIFO
+ * held in reset. Fixed at the source; -1 still = leave whatever was there. */
+static int rst_rxfifo;
+module_param(rst_rxfifo, int, 0644);
+MODULE_PARM_DESC(rst_rxfifo,
+	"CFG_PCSXF RST_RXFIFO mask to program (-1 = leave the bootloader's value)");
+
+/* ★★★ THE BOARD'S OWN MAC, HANDED IN AT BOOT (2026-08-24).
+ *
+ * The comment on the probe path below already records where this board's real
+ * address lives: the vendor's `config` MTD partition, in a MIB the vendor
+ * applies from USERSPACE -- not from the bootloader, whose environment carries
+ * only the shared default this driver refuses. Reading that partition in the
+ * kernel is a JFFS2 mount away and the value inside is zlib-compressed, so an
+ * `nvmem-cell` (which reads raw bytes at a fixed offset) cannot express it.
+ *
+ * What CAN be done today, and is the FIRST rung of this project's own declared
+ * precedence -- "U-Boot ethaddr bootarg -> DT/nvmem -> random LAA" -- is to
+ * hand the address in on the kernel command line:
+ *
+ *     rtl960x_eth.mac=5c:19:23:b3:ce:90
+ *
+ * ⚠ AND THE VALUE IS NOT WRITTEN HERE OR IN THE DTS. It is per-UNIT, and a DTS
+ * literal would hand the second G24W the first one's identity -- silently, on a
+ * segment where three ONUs already share one L2 domain. The boot tool reads it
+ * from THAT BOARD's own declaration and passes it; a board that declares none
+ * passes nothing and the random-LAA behaviour below is unchanged.
+ */
+static char *mac_param;
+module_param_named(mac, mac_param, charp, 0444);
+MODULE_PARM_DESC(mac,
+	"the board's own MAC, handed in at boot (xx:xx:xx:xx:xx:xx). Empty = "
+	"fall back to DT, then the engine, then a random locally-administered one");
+
+static int base_phyad = 0;
+module_param(base_phyad, int, 0644);
+MODULE_PARM_DESC(base_phyad,
+	"CFG_PHY_CTRL BASE_PHYAD to program (-1 = leave the bootloader's value)");
+
+/* The PHY survey is a probe-time dump, so testing one BASE_PHYAD used to cost
+ * one build and one boot. This lets a single image answer the whole sweep. */
+static struct luna_eth *survey_ep;
+
+static int gphy_settle_us = 200;
+module_param(gphy_settle_us, int, 0644);
+MODULE_PARM_DESC(gphy_settle_us,
+		 "microseconds to let an internal-PHY OCP transaction START before "
+		 "sampling BUSY (0 = sample immediately, which returns success "
+		 "before the transaction begins and reads a stale zero)");
+
+static int gphy_map = 1;
 module_param(gphy_map, int, 0644);
 MODULE_PARM_DESC(gphy_map, "internal-PHY OCP map: 0 = per the chip table, 1 = force GPHY page 0xA40 on every port, 2 = force the flat FE map (a bring-up experiment: the vendor SDK and its own OCP map disagree for the FE ports)");
 
@@ -218,6 +335,9 @@ struct luna_eth_chip {
 	/* --- switch port map ------------------------------------------------ */
 	u8	cpu_port;	/* the port this GMAC is				*/
 	u8	pon_port;	/* the fibre port (no copper PHY behind it)	*/
+	/* ★ Force the PON port's MAC link like the CPU port's -- 1 only on a
+	 * chip where STOCK was MEASURED doing it. See the write site. */
+	u8	force_pon_ablty;
 	u8	last_port;	/* highest port to iterate, INCLUSIVE		*/
 	u8	n_copper;	/* copper PHY ports, always 0..n_copper-1	*/
 	u8	gphy_ports;	/* bitmap: ports whose PHY is a GPHY, not FE	*/
@@ -235,6 +355,8 @@ struct luna_eth_chip {
 	u32	gphy_misc;	/* WRAP_GPHY_MISC: bit0 = PHY patch done	*/
 	u32	fephy_poll;	/* 0 on a chip with no FE-PHY auto-poller	*/
 	u32	cfg_phy_ini;	/* per-port PHY enable; U-Boot loads it from efuse*/
+	u32	cfg_phy_ctrl;	/* MSK_MDI[8:5] | BASE_PHYAD[4:0]; 0 = not known */
+	u32	cfg_pcsxf;	/* RST_RXFIFO[13:10] | MIIRX_IPG[9:5] | PCSXF[4:1] */
 
 	/* --- port-isolation packing, which differs in SHAPE not just offset -- */
 	u32	piso_base;
@@ -264,6 +386,14 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.name		= "RTL9607C",
 	.cpu_port	= 9,
 	.pon_port	= 5,
+	/* ⚠ 0 DELIBERATELY, and it is a scope statement rather than a
+	 * finding: nobody has diffed SWCORE 0x1cc/0x238 stock-vs-ours on the
+	 * RTL9607C engineering board, and this chip reaches its PON/PBO
+	 * abilities through the separate force_ablty_x trio below. The
+	 * acceptance test for this driver is that the 9607C sees a
+	 * byte-identical register sequence, so a value measured on another
+	 * die may not be applied here on the strength of the family name. */
+	.force_pon_ablty = 0,
 	.last_port	= 11,	/* 0..4,8 copper; 5 PON; 6,7 SerDes; 9 CPU; 11 PBO */
 	.n_copper	= 5,	/* ports 0..4 */
 	.gphy_ports	= 0x1f,	/* all five copper ports are GPHYs here	*/
@@ -323,6 +453,15 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.name		= "RTL9603CVD",
 	.cpu_port	= 5,
 	.pon_port	= 4,
+	/* ★★ MEASURED 2026-08-27, stock vs ours, SWCORE 0x180..0x1fc
+	 * (swcore_diff.py --board=RTL9603CVD/LANLY/G24W --diff):
+	 *     FORCE_P_ABLTY[4]     stock 0x00000016   ours 0x00000000
+	 *     ABLTY_FORCE_MODE[4]  stock 0x0000bfff   ours 0x00000000
+	 * i.e. stock forces the PON port up with EXACTLY the pair it applies
+	 * to the CPU port, and we leave it at reset. Both are portless
+	 * internal MAC links: there is no PHY to auto-negotiate with, so the
+	 * `leave a UTP port alone` rule below does not reach them. */
+	.force_pon_ablty = 1,
 	.last_port	= 5,	/* 0..2 FE; 3 GE; 4 PON; 5 CPU (6 = PBO loopback)*/
 	.n_copper	= 4,	/* ports 0..3					*/
 	.gphy_ports	= 0x08,	/* ONLY port 3 is a GPHY; 0..2 are FE PHYs	*/
@@ -338,6 +477,8 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.gphy_misc	= 0x000EC,
 	.fephy_poll	= 0x0000C,
 	.cfg_phy_ini	= 0x00050,
+	.cfg_phy_ctrl	= 0x0004C,
+	.cfg_pcsxf	= 0x00048,
 	.piso_base	= 0x27000,
 	.piso_per_word	= 2,
 	.piso_bits	= 12,
@@ -421,7 +562,13 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 #define   GPHY_CMD_EN	BIT(21)		/* start					*/
 #define   GPHY_WREN	BIT(22)		/* write strobe					*/
 #define   GPHY_RD_BUSY	BIT(16)		/* in the RD register				*/
-#define   GPHY_MACRO_RST	BIT(6)	/* in swcore_rst: GPHY-macro reset	*/
+#define   CMD_GPHY_RST_PS	BIT(6)	/* SOFTWARE_RST(0x0E0) bit 6	*/
+/* ★ RENAMED 2026-08-23. It was `GPHY_MACRO_RST`, a name this chip does not
+ * use: `MACRO` occurs ZERO times in the RTL9603CVD field list. The register
+ * at 0x0E0 is SOFTWARE_RST and bit 6 is CMD_GPHY_RST_PS (lsp 6, len 1),
+ * sibling to SW_RST / PONMAC_RST / CMD_CHIP_RST_PS. The offset and the bit
+ * were right; the name described a register that does not exist here, and a
+ * misleading name is renamed the day it is proven wrong.	*/
 #define   FEPHY_STOP_POLL	BIT(16)	/* in fephy_poll: 1 = auto-poller OFF	*/
 
 /* Live link / speed (genuine, independent of the MAC force). Copper genuine link
@@ -499,9 +646,35 @@ static inline void sw_or(struct luna_eth *ep, u32 r, u32 v) { sw_wr(ep, r, sw_rd
 static inline unsigned int tx_slot(unsigned int counter) { return counter % TX_RING_SIZE; }
 
 /* ---- internal GPHY MDIO (indirect window) --------------------------------- */
+/* ★★★ SETTLE BEFORE THE FIRST SAMPLE, OR THE POLL CANNOT FAIL.
+ * `gphy_wait` waits for BUSY to CLEAR and samples immediately after the CMD
+ * store. If BUSY has not yet ASSERTED -- the transaction has not started -- the
+ * very first read sees BUSY=0, the wait returns SUCCESS instantly, and the
+ * caller then reads RD_DAT holding whatever was there before: ZERO.
+ *
+ * MEASURED 2026-08-24 on the G24W, and it is uniform: EVERY copper port, on
+ * BOTH OCP maps, reads `bmcr=0000 bmsr=0000` -- and NOT ONE "read timeout"
+ * warning is emitted, because we never time out. We return zero and call it a
+ * register value. That is a check that cannot fail, in the reassuring
+ * direction, and it sits UPSTREAM of every candidate tested so far: the RxCDO
+ * store width, the force-every-UTP-port policy, the GPHY reset and the OCP map
+ * were all about WHAT we write to a PHY we were never reaching.
+ *
+ * ★ THE VENDOR DOES NOT POLL BUSY AT ALL. `_dal_rtl9603cvd_switch_phyPower_set`
+ * does CMD -> mdelay(10) -> read RD -> modify -> WD -> CMD -> mdelay(10). A
+ * flat settle, no handshake -- i.e. the vendor's own code treats BUSY as
+ * unusable for this.
+ *
+ * ⚠ SINGLE VARIABLE, and reversible: `gphy_settle_us=0` restores the old
+ * behaviour without a rebuild.
+ */
 static int gphy_wait(struct luna_eth *ep)
 {
 	int i;
+
+	/* let the transaction START before asking whether it has finished. */
+	if (gphy_settle_us)
+		udelay(gphy_settle_us);
 
 	for (i = 0; i < 10000; i++) {
 		if (!(sw_rd(ep, SW_GPHY_RD) & GPHY_RD_BUSY))
@@ -610,6 +783,87 @@ static void eth_phy_survey(struct luna_eth *ep)
 	}
 }
 
+/* Program CFG_PHY_CTRL, and SAY what was there before: the previous value is
+ * the measurement -- a silent write would destroy the evidence it rests on. */
+/* ★★★ RELEASE THE RECEIVE FIFOs. MEASURED 2026-08-24, stock vs ours, the same
+ * board within minutes, SWCORE 0x00048 = CFG_PCSXF (this chip's own chipdef:
+ * RST_RXFIFO[13:10] | CFG_MIIRX_IPG[9:5] | CFG_PCSXF[4:1] | COL_10M[0]):
+ *
+ *      stock  0x00000000  ->  RST_RXFIFO = 0     no FIFO held in reset
+ *      ours   0x00002006  ->  RST_RXFIFO = 0b1000   ONE held, and it is the
+ *                                                   cabled port's
+ *
+ * We never wrote that register: the value is the bootloader's, and stock clears
+ * it. Exactly the shape of the BASE_PHYAD defect found the same morning -- a
+ * register nobody on our side had ever read.
+ *
+ * It explains what nothing else did: the PHY answers, the port reports LINK=1
+ * with autoneg complete, and the switch's own per-port RX counter does not move
+ * by a single frame for traffic this host demonstrably delivers to that port on
+ * stock. A receive FIFO held in reset ingresses nothing and reports nothing.
+ *
+ * `rst_rxfifo` is a parameter, and -1 leaves the bootloader's value, which is
+ * how this claim gets FALSIFIED instead of believed. The witness is NOT the
+ * link -- that was already up. It is the switch MIB at SWCORE 0x32620 + 3*0x80
+ * moving past the 2824 frames U-Boot's own TFTP left frozen there.
+ */
+static void eth_rxfifo_release(struct luna_eth *ep)
+{
+	u32 was, now;
+
+	if (!ep->c->cfg_pcsxf || rst_rxfifo < 0)
+		return;
+
+	was = sw_rd(ep, ep->c->cfg_pcsxf);
+	if (((was >> 10) & 0xf) == (u32)(rst_rxfifo & 0xf)) {
+		dev_info(ep->dev,
+			 "CFG_PCSXF(%#05x) = %08x already has RST_RXFIFO %#x -- left alone\n",
+			 ep->c->cfg_pcsxf, was, rst_rxfifo & 0xf);
+		return;
+	}
+	sw_wr(ep, ep->c->cfg_pcsxf,
+	      (was & ~(0xfu << 10)) | ((u32)(rst_rxfifo & 0xf) << 10));
+	now = sw_rd(ep, ep->c->cfg_pcsxf);
+	dev_info(ep->dev,
+		 "CFG_PCSXF(%#05x): RST_RXFIFO %#x -> %#x (%08x -> %08x)\n",
+		 ep->c->cfg_pcsxf, (was >> 10) & 0xf, rst_rxfifo & 0xf, was, now);
+}
+
+static void eth_phy_ctrl_apply(struct luna_eth *ep)
+{
+	u32 was;
+
+	if (!ep->c->cfg_phy_ctrl || base_phyad < 0)
+		return;
+
+	was = sw_rd(ep, ep->c->cfg_phy_ctrl);
+	if ((was & 0x1f) == (u32)(base_phyad & 0x1f)) {
+		dev_info(ep->dev,
+			 "CFG_PHY_CTRL(%#05x) = %08x already carries BASE_PHYAD %u -- left alone\n",
+			 ep->c->cfg_phy_ctrl, was, base_phyad & 0x1f);
+		return;
+	}
+	sw_wr(ep, ep->c->cfg_phy_ctrl, (was & ~0x1fu) | (base_phyad & 0x1f));
+	dev_info(ep->dev,
+		 "CFG_PHY_CTRL(%#05x): BASE_PHYAD %u -> %u (%08x -> %08x)\n",
+		 ep->c->cfg_phy_ctrl, was & 0x1f, base_phyad & 0x1f,
+		 was, sw_rd(ep, ep->c->cfg_phy_ctrl));
+}
+
+/* Writing this re-applies BASE_PHYAD and dumps the survey again, so a whole
+ * sweep costs one boot instead of one build each. */
+static int resurvey_set(const char *val, const struct kernel_param *kp)
+{
+	if (!survey_ep)
+		return -ENODEV;
+	eth_phy_ctrl_apply(survey_ep);
+	eth_phy_survey(survey_ep);
+	return 0;
+}
+static const struct kernel_param_ops resurvey_ops = { .set = resurvey_set };
+module_param_cb(resurvey, &resurvey_ops, NULL, 0200);
+MODULE_PARM_DESC(resurvey, "write anything: re-apply base_phyad and re-dump the PHY survey");
+
 static void eth_copper_phy_up(struct luna_eth *ep)
 {
 	unsigned int p;
@@ -660,8 +914,35 @@ static void eth_copper_phy_up(struct luna_eth *ep)
 		u32 phy_ini = ep->c->cfg_phy_ini
 			      ? sw_rd(ep, ep->c->cfg_phy_ini) : 0;
 
-		sw_or(ep, ep->c->swcore_rst, GPHY_MACRO_RST);
-		msleep(50);
+		/* ★★★ THE VENDOR NEVER ASSERTS THIS, AND WE NEVER RE-INIT AFTER IT.
+		 * Measured 2026-08-23 by EMULATING `dal_rtl9603cvd_switch_init`
+		 * (0x802dcd04) under Unicorn with MMIO hooks -- it ran to
+		 * completion, returning 0, and logged 457 SWCORE writes, 442
+		 * reads, 209 internal-PHY writes and 40 same-value rewrites.
+		 * `SOFTWARE_RST.CMD_GPHY_RST_PS` is NOT among them.
+		 * Three independent confirmations: absent from that trace; the
+		 * 9603CVD DAL never writes the field at all (only the interactive
+		 * `switch reset ... gphy` diag command does); and where the 9607C
+		 * DOES write it, in `_dal_rtl9607c_gen2_switch_phyCal`, it pairs it
+		 * with mdelay(20) AND a full re-programming of every PHY.
+		 * We paired it with msleep(50) and nothing: no patch, no cal, no
+		 * vendor power sequence -- and it is an `sw_or` with no clear.
+		 * That is the shape this project's anti-repeat list names first: a
+		 * cal/bring-up is an FSM that must RUN and COMPLETE, not a reset to
+		 * assert. It explains every symptom at once -- all copper PHYs
+		 * dead, ZERO ingress on EVERY port (the switch MIB frozen on all
+		 * six), and counters that freeze exactly when our driver takes
+		 * over, while U-Boot's configuration worked because U-Boot never
+		 * asserts it.
+		 * ⚠ THIS IS THE FALSIFIER, NOT A PROVEN FIX. Removing one line and
+		 * re-measuring RX is the whole experiment: RX still dead ⇒
+		 * refuted, and the next candidates are already ranked (the FE-PHY
+		 * OCP map, the FEPHY_POLL polarity, the three absent patch loads).
+		 */
+		if (gphy_reset) {
+			sw_or(ep, ep->c->swcore_rst, CMD_GPHY_RST_PS);
+			msleep(50);
+		}
 
 		if (ep->c->cfg_phy_ini) {
 			u32 after_rst = sw_rd(ep, ep->c->cfg_phy_ini);
@@ -921,6 +1202,11 @@ static void eth_switch_init(struct luna_eth *ep)
 	 *    up + auto-neg the integrated PHYs. SerDes-6 (external RTL8221B 2.5G):
 	 *    release its reset so it runs (full HiSGMII SerDes bring-up is a larger
 	 *    sequence, added separately). */
+	survey_ep = ep;
+	/* BEFORE the power-up: the power-up itself talks to the PHYs through the
+	 * very bus this register addresses. */
+	eth_phy_ctrl_apply(ep);
+	eth_rxfifo_release(ep);
 	if (copper_phy)
 		eth_copper_phy_up(ep);
 	/* AFTER the power-up, so the survey reads the PHYs in the state the rest
@@ -941,9 +1227,27 @@ static void eth_switch_init(struct luna_eth *ep)
 		/* unknown-source-MAC action 0 = learn + forward */
 		sw_wr(ep, reg, sw_rd(ep, reg) & ~(3u << ((p % 16) * 2)));
 	}
-	sw_or(ep, SW_LUT_BC_FLOOD, ep->c->port_mask);
-	sw_or(ep, SW_LUT_UNKN_MC_FLOOD, ep->c->port_mask);
-	sw_or(ep, SW_LUT_UNKN_UC_FLOOD, ep->c->port_mask);
+	/*
+	 * ★ THE PON PORT IS NOT A FLOOD DESTINATION (2026-08-27).
+	 * Flooding LAN broadcast, unknown multicast and unknown unicast out of
+	 * the fibre port sends every ARP and every DHCP DISCOVER on the LAN
+	 * upstream to the OLT. Our RTL9602C sibling excludes it for exactly this
+	 * reason. It is invisible from the ONU -- only the OLT or a fibre capture
+	 * would ever see it -- which is why it is fixed now rather than after
+	 * ranging works and it becomes a real leak.
+	 * `pon_port` is only meaningful on a chip that declares one; the mask is
+	 * left untouched where force_pon_ablty is 0, so the RTL9607C engineering
+	 * board sees the identical write it saw before.
+	 */
+	{
+		u32 flood = ep->c->port_mask;
+
+		if (ep->c->force_pon_ablty)
+			flood &= ~BIT(ep->c->pon_port);
+		sw_or(ep, SW_LUT_BC_FLOOD, flood);
+		sw_or(ep, SW_LUT_UNKN_MC_FLOOD, flood);
+		sw_or(ep, SW_LUT_UNKN_UC_FLOOD, flood);
+	}
 	/* SW_SRC_PORT_PERMIT (0x1C114) is a per-source-port EGRESS-FILTER ENABLE
 	 * (EN, 1 bit/port), NOT a permit bitmap: EN=1 turns on source-port egress
 	 * filtering and DROPS the forwarded frame after lookup/flood selection. The
@@ -1052,6 +1356,43 @@ static void eth_switch_init(struct luna_eth *ep)
 	if (ep->c->force_ablty_x) {
 		sw_wr(ep, ep->c->force_ablty_x, ABLTY_1G_FULL_LINK);
 		sw_wr(ep, ep->c->ablty_force_x, ABLTY_FORCE_ALL);
+	}
+
+	/*
+	 * ★★★ 5b. THE PON PORT IS NOT A UTP PORT, AND THE RULE ABOVE DOES NOT
+	 * REACH IT.  Step 5 deliberately forces nothing on ports 0..last except
+	 * the CPU port, because overriding a live auto-negotiated copper link
+	 * kills CPU->LAN egress.  The PON port has NO PHY behind it -- there is
+	 * nothing to auto-negotiate with, and its P_ABLTY therefore never leaves
+	 * the reset value on its own.
+	 *
+	 * STOCK IS THE ORACLE AND IT WAS READ, not reasoned about.  On the G24W,
+	 * SWCORE 0x180..0x1fc, stock vs ours, same board, same bench:
+	 *
+	 *     FORCE_P_ABLTY[4]     stock 0x00000016   ours 0x00000000
+	 *     ABLTY_FORCE_MODE[4]  stock 0x0000bfff   ours 0x00000000
+	 *
+	 * 0x16 is ABLTY_1G_FULL_LINK and 0xbfff is ABLTY_CPU_FORCE -- the SAME
+	 * pair stock applies to the CPU port, which is the other portless
+	 * internal link.  So this is not a new recipe, it is the recipe already
+	 * in this function applied to the port it was always missing.
+	 *
+	 * ⚠ WHAT THIS DOES AND DOES NOT CLAIM.  It makes the switch side of the
+	 * PON path forward; it says NOTHING about ranging, and this board's PON
+	 * MAC is at O1.  A silent switch port would have hidden a working PON
+	 * MAC behind it, which is why it is repaired now rather than after.
+	 */
+	if (ep->c->force_pon_ablty) {
+		unsigned int pp = ep->c->pon_port;
+		u32 was = sw_rd(ep, SW_FORCE_ABLTY(ep, pp));
+
+		sw_wr(ep, SW_FORCE_ABLTY(ep, pp), ABLTY_1G_FULL_LINK);
+		sw_wr(ep, SW_ABLTY_FORCE(ep, pp), ABLTY_CPU_FORCE);
+		dev_info(ep->dev,
+			 "switch: PON port %u forced up like the CPU port (stock's own pair): FORCE_P_ABLTY %08x -> %08x, ABLTY_FORCE_MODE -> %08x, P_ABLTY reads %08x\n",
+			 pp, was, sw_rd(ep, SW_FORCE_ABLTY(ep, pp)),
+			 sw_rd(ep, SW_ABLTY_FORCE(ep, pp)),
+			 sw_rd(ep, SW_P_ABLTY(ep, pp)));
 	}
 
 	/* 6. CPU-tag engine. The switch frames RX to the CPU with the 0x8899 tag
@@ -1177,6 +1518,37 @@ static int eth_rx(struct luna_eth *ep, int budget)
 
 		if (ep->rx_dumped < rx_dump && len) {
 			ep->rx_dumped++;
+			/*
+			 * ★★★ THE DESCRIPTOR, BESIDE THE BYTES (2026-08-27).
+			 *
+			 * This driver has NEVER read opts2/opts3 on RX. On the
+			 * RTL9602C sibling those two words ARE the WAN demux:
+			 * opts3[19:16] is the ingress switch port and
+			 * opts3[31:20]==0x23e marks the PON-IP NIC drain, which
+			 * is how `gpon0` tells a downstream frame from a LAN one.
+			 * Whether the same layout holds on THIS die is unknown --
+			 * the two chips' TX word3 layouts already differ (SID at
+			 * [22:16] vs [6:0]), and assuming they matched cost this
+			 * project the US-OMCI wall once already.
+			 *
+			 * It is printed HERE, gated by the existing rx_dump, so
+			 * the answer arrives on a boot that was going to happen
+			 * anyway instead of costing one of its own. The bytes and
+			 * the descriptor on the same frame are what make it a
+			 * measurement: the DA tells you what the frame IS, and
+			 * opts3 tells you what the silicon SAID it was.
+			 *
+			 * ⚠ The in-band 0x8899 tag is NOT present on this board
+			 * today (every dump in results/ is [prefix][DA][SA][type]),
+			 * so the excision branch below has never fired and the tag
+			 * is not an available demux source without enabling the
+			 * switch's trap-tag insert first.
+			 */
+			dev_info(ep->dev,
+				 "rx0 desc: opts1=%08x opts2=%08x opts3=%08x len=%u (src_port_if_9602c_layout=%u reason=%u)\n",
+				 opts1, ep->rx_ring[i].opts2, ep->rx_ring[i].opts3,
+				 len, (ep->rx_ring[i].opts3 >> 16) & 0xf,
+				 (ep->rx_ring[i].opts2 >> 21) & 0xff);
 			print_hex_dump(KERN_INFO, "rx0: ", DUMP_PREFIX_OFFSET,
 				       16, 1, skb->data, min_t(u32, len, 32), false);
 		}
@@ -1388,6 +1760,27 @@ static void eth_set_rx_mode(struct net_device *ndev)
 	ep_wr(ep, R_RCR, rcr);
 }
 
+/* Parse "xx:xx:xx:xx:xx:xx" into `out`. -> true on success.
+ *
+ * ★ It REFUSES anything that is not exactly six colon-separated octets, and it
+ * refuses a multicast or all-zero address: a malformed parameter must leave the
+ * fallback chain intact rather than half-programme an interface.
+ */
+static bool mac_addr_from_param(const char *s, u8 *out)
+{
+	u8 v[ETH_ALEN];
+	int n;
+
+	if (!s || !*s)
+		return false;
+	n = sscanf(s, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+		   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+	if (n != ETH_ALEN || !is_valid_ether_addr(v))
+		return false;
+	memcpy(out, v, ETH_ALEN);
+	return true;
+}
+
 static int eth_set_mac_address(struct net_device *ndev, void *addr)
 {
 	struct luna_eth *ep = netdev_priv(ndev);
@@ -1530,7 +1923,13 @@ static int luna_eth_probe(struct platform_device *pdev)
 	 * so recovering it is flash-reading work, and OWED. Until then a unique
 	 * wrong address beats a shared one.
 	 */
-	if (of_get_ethdev_address(dev->of_node, ndev)) {
+	if (mac_param && mac_addr_from_param(mac_param, mac)) {
+		/* ★ FIRST RUNG, and it is the only one that can carry a PER-UNIT
+		 * value on this product today. Announced, because a MAC that
+		 * arrived from outside the device must be auditable in the log. */
+		eth_hw_addr_set(ndev, mac);
+		dev_info(dev, "MAC %pM taken from the `mac=` boot parameter\n", mac);
+	} else if (of_get_ethdev_address(dev->of_node, ndev)) {
 		eth_get_hwaddr(ep, mac);
 		if (is_valid_ether_addr(mac) && !luna_mac_is_default(mac)) {
 			eth_hw_addr_set(ndev, mac);

@@ -207,15 +207,35 @@
 	 * family driver already in this target binds on the generic
 	 * compatible, so no driver change is needed.
 	 *
-	 * ★ DISABLED ON PURPOSE, and it matches stock. The same dump reads
-	 * "WDT_E=0, (1-enable, 0-disable)": the vendor firmware does NOT arm
-	 * this watchdog at boot. Arming it here would make our first boot
-	 * strictly less forgiving than the firmware we are replacing -- a
-	 * bring-up kernel that stops before userspace would reset instead of
-	 * sitting at the console where it can be read.
+	 * ★★★ CORRECTED 2026-08-26 -- THIS COMMENT USED TO SAY "DISABLED ON
+	 * PURPOSE, AND IT MATCHES STOCK", CITING "WDT_E=0" FROM THE STOCK DUMP.
+	 * THAT WAS FALSE, AND THE DISPROOF IS FOUR LINES FURTHER DOWN THE SAME
+	 * BOOT LOG:
 	 *
-	 * ENABLE at M6 (soak/robustness), together with the LED and reboot
-	 * work, not before.
+	 *   [0.345419] WDT_E=0, (1-enable, 0-disable)        <- show_usage() reads it
+	 *   [0.382093] BSP_WDTCTRLR(0xb8003268): 0xe7c00000  <- 37 ms later, BIT 31 SET
+	 *
+	 * WDT_E *is* bit 31, and 0xe7c00000 has it set. The "WDT_E=0" line is a
+	 * PRINT-ORDER ARTEFACT: the vendor's watchdog_timeout_init() calls
+	 * set_rtk_wdt_ph1_threshold(), whose show_usage() reads the register
+	 * BEFORE the very next statement RTK_WDG_EN() runs. Nine seconds later
+	 * rc34 arms it a SECOND time. So this board's stock arms the hardware
+	 * watchdog TWICE per boot, at 0.38 s and at rc34 -- somebody read the
+	 * first line of the block and stopped.
+	 *
+	 * ⇒ THE OPERATOR'S HYPOTHESIS THAT A VENDOR-DISABLED WATCHDOG MIGHT MEAN
+	 * FAULTY SILICON IS DEAD AT ITS PREMISE ON THIS CHIP: stock enables it.
+	 * Nothing here is evidence of a hardware fault.
+	 *
+	 * ★ THE NODE STAYS DISABLED ANYWAY, for a REASON THAT SURVIVES the
+	 * correction: on this silicon the driver has never run, so its reload is
+	 * unproven here -- and on the SIBLING RTL9602C the same driver is
+	 * shipped ENABLED and resets that board every boot, with the evidence
+	 * pointing at a kick that does not reload. Enabling an unproven reload
+	 * on a second board would multiply the fault, not test it.
+	 *
+	 * ENABLE once the reload is isolated on the 9602C and re-proven here --
+	 * not at a milestone, at a MEASUREMENT.
 	 */
 	watchdog@18003260 {
 		compatible = "realtek,rtl9603cvd-wdt", "realtek,rtl960x-wdt";

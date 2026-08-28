@@ -429,6 +429,27 @@ void __init device_tree_init(void)
 	}
 #endif
 
+#ifdef CONFIG_SMP
+	/*
+	 * ★★★ THE WHOLE SMP REGISTRATION IS CONDITIONAL, and it was not until
+	 * 2026-08-28. `luna_up_smp_ops` is defined inside the `#ifdef CONFIG_SMP`
+	 * block above, and this used it unconditionally -- so the file simply did
+	 * not compile with CONFIG_SMP=n:
+	 *
+	 *   arch/mips/realtek-luna/setup.c:440: error: 'luna_up_smp_ops'
+	 *   undeclared (first use in this function)
+	 *
+	 * Both Luna boards on this bench are single-core and build with SMP off,
+	 * so this was broken for BOTH of them.
+	 *
+	 * ⚠ IT SURVIVED BECAUSE NOTHING COMPILED IT. Each Luna board built from
+	 * its own git worktree, and main's realtek-luna target was reached by no
+	 * sanctioned build command at all -- so this error sat in the shared tree
+	 * unseen. It surfaced within minutes of retiring the per-board branches
+	 * and building all three boards from one tree, which is exactly what that
+	 * change was for: the branches were not hiding a risk of divergence, they
+	 * were hiding a target that did not build.
+	 */
 	if (!register_cps_smp_ops())
 		return;
 	/*
@@ -438,6 +459,7 @@ void __init device_tree_init(void)
 	 */
 	if (register_up_smp_ops())
 		register_smp_ops(&luna_up_smp_ops);
+#endif /* CONFIG_SMP */
 }
 
 void __init plat_time_init(void)

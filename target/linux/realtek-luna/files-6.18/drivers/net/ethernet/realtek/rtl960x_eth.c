@@ -269,11 +269,21 @@ MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (
  * of a shared driver and never reaches the others.  The two drivers had no
  * symbol in common, so nothing could have flagged it.
  *
- * ⚠ AND IT IS A HYPOTHESIS ON *THIS* CHIP, NOT A RESULT.  The RTL9602C
- * measurement is tier-1 for the RTL9602C.  Whether forced flow control is what
- * holds this board's RX down is UNPROVEN until the board says so; the parameter
- * exists so the A/B can be run live (`msr_top=0xf0` restores the old value)
- * rather than argued about.
+ * ★★ THE A/B WAS RUN ON THIS BOARD, 2026-08-28, AND IT REFUTED THE TRANSFER.
+ * Two cold TFTP boots of the same image, one at 0x10 and one with
+ * `rtl960x_eth.msr_top=0xf0` in bootargs: the LAN answered 5/5 BOTH TIMES.  So
+ * the RTL9602C finding does NOT carry to the RTL9603CVD -- forced flow control
+ * is not what decides this board's datapath, and nobody should re-chase it.
+ *
+ * The default stays 0x10 because it is the only value anyone has MEASURED as
+ * safe on this family and it makes the two sibling drivers agree; it is NOT
+ * claimed as a fix, and on this chip both values were measured equal.
+ *
+ * ⚠ NOTE WHAT THIS ALSO SAYS: the LAN answered at all.  The board's standing
+ * "RX path exhausted" investigation describes a dead LAN->CPU ingress, and on
+ * this date that path carries pings on both settings -- so that document is
+ * either stale or the fault is intermittent.  Re-verify it before building on
+ * it; do not read this comment as "RX is fixed".
  */
 static unsigned int msr_top = 0x10;
 module_param(msr_top, uint, 0644);
@@ -305,16 +315,11 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
  * RTL9607C's highest named register sits at 0x42E7C, so the 0x42000 this file
  * used to map was 0xE7C SHORT — a register at the top of the block would have
  * been written into a hole with nothing to read. */
-#define SWCORE_SIZE		0x43000
 
 /* -- offsets that are the SAME on every Luna part covered here -------------- */
 #define SW_GPHY_WD		0x00000	/* internal-PHY indirect: write data	*/
 #define SW_GPHY_CMD		0x00004	/*   ... command (phy<<16 | ocp)		*/
 #define SW_GPHY_RD		0x00008	/*   ... read data + BUSY		*/
-#define SW_LUT_UNKN_SA		0x1C004	/* unknown-SA action, 2 bits/port	*/
-#define SW_LUT_BC_FLOOD		0x1C028	/* broadcast flood, 1 bit/port		*/
-#define SW_LUT_UNKN_MC_FLOOD	0x1C02C
-#define SW_LUT_UNKN_UC_FLOOD	0x1C030
 #define   STP_STATE_MASK	0x3
 #define   STP_FORWARDING	0x3
 
@@ -327,6 +332,11 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
  * --------------------------------------------------------------------------- */
 struct luna_eth_chip {
 	const char *name;
+
+	/* ★ The switch-core map for THIS chip.  Kept as a pointer into
+	 * rtl960x_eth_regs.h rather than copied in, so the sibling driver and
+	 * this one read the SAME numbers and a correction lands once. */
+	const struct rtl960x_sw_map *sw_map;
 
 	/* --- switch port map ------------------------------------------------ */
 	u8	cpu_port;	/* the port this GMAC is				*/
@@ -379,6 +389,7 @@ struct luna_eth_chip {
  * not of the new chip.
  * --------------------------------------------------------------------------- */
 static const struct luna_eth_chip luna_chip_rtl9607c = {
+	.sw_map		= &rtl9607c_sw_map,
 	.name		= "RTL9607C",
 	.cpu_port	= 9,
 	.pon_port	= 5,
@@ -446,6 +457,7 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
  * port that "links but forwards nothing" is what forgetting it looks like.
  * --------------------------------------------------------------------------- */
 static const struct luna_eth_chip luna_chip_rtl9603cvd = {
+	.sw_map		= &rtl9603cvd_sw_map,
 	.name		= "RTL9603CVD",
 	.cpu_port	= 5,
 	.pon_port	= 4,
@@ -500,10 +512,6 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 
 /* Per-port lookup-miss (unknown-DA) action, 2 bits/port; 0 = FORWARD. Needed for
  * the post-ARP unicast / IPv6-ND path (the first broadcast already floods). */
-#define SW_UNKN_UC_DA		0x1C00C
-#define SW_UNKN_L2_MC		0x1C018
-#define SW_UNKN_IP4_MC		0x1C01C
-#define SW_UNKN_IP6_MC		0x1C020
 #define   DA_ACT_PORTS		0x3FFFFF	/* ports 0..10, 2 bits each		*/
 
 #define ABLTY_1G_FULL_LINK	0x16	/* speed=1000, duplex=full, link=up	*/
@@ -1214,7 +1222,7 @@ static void eth_switch_init(struct luna_eth *ep)
 
 	/* 4. open the L2 forwarding plane. */
 	for (p = 0; p <= ep->c->cpu_port; p++) {
-		u32 reg = SW_LUT_UNKN_SA + (p / 16) * 4;
+		u32 reg = ep->c->sw_map->lut_unkn_sa + (p / 16) * 4;
 
 		/* unknown-source-MAC action 0 = learn + forward */
 		sw_wr(ep, reg, sw_rd(ep, reg) & ~(3u << ((p % 16) * 2)));
@@ -1236,9 +1244,9 @@ static void eth_switch_init(struct luna_eth *ep)
 
 		if (ep->c->force_pon_ablty)
 			flood &= ~BIT(ep->c->pon_port);
-		sw_or(ep, SW_LUT_BC_FLOOD, flood);
-		sw_or(ep, SW_LUT_UNKN_MC_FLOOD, flood);
-		sw_or(ep, SW_LUT_UNKN_UC_FLOOD, flood);
+		sw_or(ep, ep->c->sw_map->bc_flood, flood);
+		sw_or(ep, ep->c->sw_map->unkn_mc_flood, flood);
+		sw_or(ep, ep->c->sw_map->unkn_uc_flood, flood);
 	}
 	/* SW_SRC_PORT_PERMIT (0x1C114) is a per-source-port EGRESS-FILTER ENABLE
 	 * (EN, 1 bit/port), NOT a permit bitmap: EN=1 turns on source-port egress
@@ -1252,10 +1260,10 @@ static void eth_switch_init(struct luna_eth *ep)
 	 *      unknown-SOURCE action above; the unknown-DESTINATION action must also
 	 *      forward, else post-ARP unicast / IPv6-ND to a not-yet-learned MAC is
 	 *      dropped instead of flooded. Clear the 2-bit field for ports 0..10. */
-	sw_wr(ep, SW_UNKN_UC_DA,  sw_rd(ep, SW_UNKN_UC_DA)  & ~DA_ACT_PORTS);
-	sw_wr(ep, SW_UNKN_L2_MC,  sw_rd(ep, SW_UNKN_L2_MC)  & ~DA_ACT_PORTS);
-	sw_wr(ep, SW_UNKN_IP4_MC, sw_rd(ep, SW_UNKN_IP4_MC) & ~DA_ACT_PORTS);
-	sw_wr(ep, SW_UNKN_IP6_MC, sw_rd(ep, SW_UNKN_IP6_MC) & ~DA_ACT_PORTS);
+	sw_wr(ep, ep->c->sw_map->lut_unkn_uc_da,  sw_rd(ep, ep->c->sw_map->lut_unkn_uc_da)  & ~DA_ACT_PORTS);
+	sw_wr(ep, ep->c->sw_map->unkn_l2_mc,  sw_rd(ep, ep->c->sw_map->unkn_l2_mc)  & ~DA_ACT_PORTS);
+	sw_wr(ep, ep->c->sw_map->unkn_ip4_mc, sw_rd(ep, ep->c->sw_map->unkn_ip4_mc) & ~DA_ACT_PORTS);
+	sw_wr(ep, ep->c->sw_map->unkn_ip6_mc, sw_rd(ep, ep->c->sw_map->unkn_ip6_mc) & ~DA_ACT_PORTS);
 
 	/* 4a3. VLAN must not gate CPU<->LAN egress. The boot loader can leave VLAN
 	 *      filtering ON with the CPU port outside the member set, which silently
@@ -1888,7 +1896,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 	ep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ep->base))
 		return PTR_ERR(ep->base);
-	ep->sw = devm_ioremap(dev, SWCORE_PHYS, SWCORE_SIZE);
+	ep->sw = devm_ioremap(dev, SWCORE_PHYS, ep->c->sw_map->swcore_size);
 	if (!ep->sw)
 		return -ENOMEM;
 

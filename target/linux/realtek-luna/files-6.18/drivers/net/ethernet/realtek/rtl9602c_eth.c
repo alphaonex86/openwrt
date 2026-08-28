@@ -383,22 +383,17 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * SoC switch core (SWCORE), phys 0x1B000000. The switch has 4 ports (0-3); the
  * CPU port (where GMAC0 attaches) is port 3. Flood masks have one bit per port.
  */
-#define SWCORE_SIZE	0x40000	/* must cover MIB @0x32000 + PISO @0x27000 (was 0x24000 = too small, those fell outside the ioremap!) */
 #define SW_CPU_PORT		3
 /* per-port forced-ability value + force-mode (RTL9602C register map: base 0x180
  * / 0x1B4, stride 4). FORCE_P_ABLTY holds speed/duplex/link; ABLTY_FORCE_MODE
  * = 0xFFF forces all of them. */
 #define SW_FORCE_P_ABLTY(p)	(0x180 + ((p) << 2))
 #define SW_ABLTY_FORCE_MODE(p)	(0x1B4 + ((p) << 2))
-#define SW_LUT_BC_FLOOD		0x1C020	/* bit[port]: flood broadcast to port */
-#define SW_LUT_UNKN_MC_FLOOD	0x1C024
-#define SW_LUT_UNKN_UC_FLOOD	0x1C028
 #define SW_SRC_PORT_PERMIT	0x1C088	/* RTL9602C L2_SRC_PORT_PERMIT, 1 bit/port; 0 drops ingress.
 					 * WAS 0x1C114 (= QOS_PB_PRI on this chip — WRONG): the CPU
 					 * port's ingress permit was never set, so the fabric dropped
 					 * every CPU-injected frame after DMA (TX counter++ / no egress). */
 #define SW_SYS_LRN_LIMITNO	0x17018	/* system MAC-learn limit [10:0]; 0 = no learning */
-#define SW_LUT_UNKN_UC_DA_CTRL	0x1C008	/* per-port unknown-UC DLF action, 16-bit/port (2-byte stride); ACT[1:0]: 0=fwd 1=drop 2=trap2cpu */
 #define SW_DLF_ACT_TRAP2CPU	2
 #define SW_PISO_PORT		0x27000	/* per-port egress-forward (isolation) mask, 11b/port bit-packed; set bit = may forward to that port. all-1s = no isolation */
 /* Forced ability value: 1000M (speed[1:0]=2) + full duplex (b2) + link-up (b4) */
@@ -462,6 +457,13 @@ module_param(hw_nat, int, 0444);
 MODULE_PARM_DESC(hw_nat, "enable RTL9602C switch L34 hardware NAT offload (0=off)");
 
 struct rtl9602c_eth {
+	/* ★ THE PER-CHIP TABLE.  The switch LUT block MOVED between Luna
+	 * revisions, and one chip's constant on another's silicon does not
+	 * fault -- it configures the wrong behaviour (see rtl960x_eth_regs.h).
+	 * Reaching it through a pointer is what lets a shared function body
+	 * exist at all: a body that names a #define is a body that belongs to
+	 * one chip. */
+	const struct rtl960x_sw_map *swm;
 	void __iomem	*base;
 	void __iomem	*sw;	/* switch core */
 	void __iomem	*txgo;	/* network-engine TX-fetch page 0x18001000; +0x38 bit31 = per-packet GO */
@@ -783,12 +785,12 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * down the PSEL direct-TX path to the US-NIC (our measured symptom was OMCI
 	 * L2-flooding to p2 instead). LAN/CPU flood (host BC/ARP/DHCP reach the CPU) is
 	 * preserved; DS ingress from p2 and directed US GEM data are unaffected. */
-	iowrite32((ioread32(ep->sw + SW_LUT_BC_FLOOD) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
-		  ep->sw + SW_LUT_BC_FLOOD);
-	iowrite32((ioread32(ep->sw + SW_LUT_UNKN_MC_FLOOD) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
-		  ep->sw + SW_LUT_UNKN_MC_FLOOD);
-	iowrite32((ioread32(ep->sw + SW_LUT_UNKN_UC_FLOOD) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
-		  ep->sw + SW_LUT_UNKN_UC_FLOOD);
+	iowrite32((ioread32(ep->sw + ep->swm->bc_flood) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
+		  ep->sw + ep->swm->bc_flood);
+	iowrite32((ioread32(ep->sw + ep->swm->unkn_mc_flood) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
+		  ep->sw + ep->swm->unkn_mc_flood);
+	iowrite32((ioread32(ep->sw + ep->swm->unkn_uc_flood) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
+		  ep->sw + ep->swm->unkn_uc_flood);
 	/* Unknown-unicast that misses the L2 lookup (e.g. the host's NDP/ARP
 	 * reply to the not-yet-learned CPU MAC) must reach the CPU. Flooding via
 	 * uc_flood alone proved ineffective for unicast DLF on this switch, so set
@@ -796,9 +798,9 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * is a 16-bit field at 2-byte stride with ACT in bits[1:0]; one 32-bit
 	 * write covers two ports. */
 	iowrite32((SW_DLF_ACT_TRAP2CPU << 16) | SW_DLF_ACT_TRAP2CPU,
-		  ep->sw + SW_LUT_UNKN_UC_DA_CTRL);		/* ports 0,1 */
+		  ep->sw + ep->swm->lut_unkn_uc_da);		/* ports 0,1 */
 	iowrite32((SW_DLF_ACT_TRAP2CPU << 16) | SW_DLF_ACT_TRAP2CPU,
-		  ep->sw + SW_LUT_UNKN_UC_DA_CTRL + 4);		/* ports 2,3 */
+		  ep->sw + ep->swm->lut_unkn_uc_da + 4);		/* ports 2,3 */
 	/* NOTE: 0x27000 (PISO) is a 5-bit isolation-vector INDEX per port, NOT a
 	 * direct portmask — writing 0xffffffff selected index 0x1f and likely blocked
 	 * CPU->LAN forwarding. The bootloader leaves it at default (TX works), so we
@@ -3507,9 +3509,9 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 	if (ep->sw) {
 		seq_printf(m, "SW permit(1c088)=%08x flood bc/mc/uc=%08x/%08x/%08x\n",
 			   ioread32(ep->sw + SW_SRC_PORT_PERMIT),
-			   ioread32(ep->sw + SW_LUT_BC_FLOOD),
-			   ioread32(ep->sw + SW_LUT_UNKN_MC_FLOOD),
-			   ioread32(ep->sw + SW_LUT_UNKN_UC_FLOOD));
+			   ioread32(ep->sw + ep->swm->bc_flood),
+			   ioread32(ep->sw + ep->swm->unkn_mc_flood),
+			   ioread32(ep->sw + ep->swm->unkn_uc_flood));
 		seq_printf(m, "SW vlan_ctrl(13008)=%08x cputag_ctrl(23030)=%08x\n",
 			   ioread32(ep->sw + SW_VLAN_CTRL),
 			   ioread32(ep->sw + SW_MAC_CPU_TAG_CTRL));
@@ -3565,7 +3567,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 		return PTR_ERR(ep->base);
 
 	/* Switch core (best-effort; minimal L2 flood enabled at open). */
-	ep->sw = devm_ioremap(dev, SWCORE_PHYS, SWCORE_SIZE);
+	ep->swm = &rtl9602c_sw_map;
+	ep->sw = devm_ioremap(dev, SWCORE_PHYS, ep->swm->swcore_size);
 	/* network-engine TX-fetch GO register page (phys 0x18001000, a SEPARATE page
 	 * below the GMAC). The stock device sets bit31 of +0x38 then polls it clear on
 	 * EVERY submit to command the self-polling TX DMA to fetch the freshly-published

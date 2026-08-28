@@ -42,6 +42,14 @@
 #ifndef _RTL960X_ETH_REGS_H
 #define _RTL960X_ETH_REGS_H
 
+
+#include <linux/etherdevice.h>	/* ETH_ALEN, ether_addr_equal */
+#include <linux/delay.h>	/* udelay */
+#include <linux/dma-mapping.h>	/* dma_map_single, DMA_FROM_DEVICE */
+#include <linux/netdevice.h>	/* netdev_alloc_skb */
+#include <linux/skbuff.h>	/* struct sk_buff, dev_kfree_skb_any */
+#include <linux/io.h>		/* ioread32 / iowrite32 */
+#include <linux/kernel.h>	/* sscanf */
 #include <linux/types.h>
 #include <linux/bits.h>
 
@@ -153,12 +161,42 @@ struct rtl960x_sw_map {
 	u32 unkn_l2_mc;
 	u32 unkn_ip4_mc;
 	u32 unkn_ip6_mc;
+	/* ★★ CFG_UNHIOL, and it is IN THE TABLE for a measured reason: on the
+	 * RTL9602C this address is CFG_UNHIOL (bit0 = IPG_COMPENSATION), and on
+	 * the RTL9603CVD the SAME address is CPU_TAG_AWARE -- two different
+	 * blocks, one number.  A family #define here would configure CPU tagging
+	 * where IPG compensation was meant, without faulting and without reading
+	 * back wrong: the CFG_PHY_CTRL defect, re-created.  0 = this chip's
+	 * bring-up does not touch it. */
+	/* ★ WRAP_GPHY_MISC, bit0 = "PHY patch done" -- the sticky the stock
+	 * switch init asserts at completion.  THREE addresses for one job
+	 * (9602C 0x110, 9607C 0x114, 9603CVD 0xEC), so it is per-chip data.
+	 * It lives HERE and not in luna_eth_chip so that both Luna ethernet
+	 * drivers read the SAME number: the family driver reaches it through
+	 * its `sw_map` pointer, exactly as it already does for the port
+	 * numbers, and a correction lands once. */
+	/* ★ PER-PORT ABILITY TRIO -- per chip, and DEMONSTRABLY so: the RTL9603CVD
+	 * puts force_ablty at 0x198 and p_ablty at 0x1B8, while the RTL9602C's own
+	 * driver puts its force-ability array at 0x180 and its force-MODE array at
+	 * 0x1B4.  The numbers overlap between chips without meaning the same
+	 * thing, which is the third register block today found to do that.
+	 * 0 = this chip's driver does not use that member. */
+	u32 force_ablty;	/* + 4*port: forced ability values	*/
+	u32 p_ablty;		/* + 4*port: LIVE ability, read-only	*/
+	u32 ablty_force;	/* + 4*port: which fields are forced	*/
+	u32 gphy_misc;
+	u32 cfg_unhiol;
 	u32 bc_flood;
 	u32 unkn_mc_flood;
 	u32 unkn_uc_flood;
 };
 
 static const struct rtl960x_sw_map rtl9602c_sw_map = {
+	.force_ablty	= 0x00180,
+	.p_ablty	= 0,		/* this driver never reads it */
+	.ablty_force	= 0x001B4,
+	.gphy_misc	= 0x00110,
+	.cfg_unhiol	= 0x23040,	/* CFG_UNHIOL on THIS chip -- see the field */
 	.src_permit	= 0x1C088,
 	.piso_base	= 0x27000,
 	.cpu_port	= 3,
@@ -176,6 +214,11 @@ static const struct rtl960x_sw_map rtl9602c_sw_map = {
 };
 
 static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
+	.force_ablty	= 0x00198,
+	.p_ablty	= 0x001B8,
+	.ablty_force	= 0x001DC,
+	.gphy_misc	= 0x000EC,
+	.cfg_unhiol	= 0,		/* this chip's bring-up does not touch it */
 	.src_permit	= 0x1C0B0,
 	.piso_base	= 0x27000,
 	.cpu_port	= 5,
@@ -202,6 +245,11 @@ static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
  * carries the value that driver has been using.
  */
 static const struct rtl960x_sw_map rtl9607c_sw_map = {
+	.force_ablty	= 0x001CC,
+	.p_ablty	= 0x00200,
+	.ablty_force	= 0x00238,
+	.gphy_misc	= 0x00114,
+	.cfg_unhiol	= 0,		/* this chip's bring-up does not touch it */
 	/* ⚠ 0x1C114, NOT the RTL9603CVD's 0x1C0B0.  This was written as 0x1C0B0 by
 	 * copying the sibling's value; the driver's own table and this chip's
 	 * chipdef both say 0x1C114, and two guards caught it before it shipped.
@@ -225,5 +273,244 @@ static const struct rtl960x_sw_map rtl9607c_sw_map = {
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
 };
+
+
+/* ---- station address: the family's BRING-UP DEFAULT ----------------------- */
+/* The address the silicon/bootloader leaves in IDR0/IDR4 when nothing has
+ * programmed a real one.  It is a VALID unicast address, which is exactly why
+ * it has to be NAMED: `is_valid_ether_addr()` accepts it, so a plain validity
+ * check ships it and the random fallback never fires.
+ *
+ * ★ A FAMILY FACT, MEASURED ON TWO BOARDS OF DIFFERENT SILICON: the LANLY G24W
+ * (RTL9603CVD, 2026-08-20) and the HSGQ X111W (RTL9602C, 2026-08-28 -- read
+ * from the lab host's own ARP table while the board was answering pings, so
+ * the two readings are independent of each other and of any one driver).
+ * Two different chips holding ONE address is the whole problem: this lab runs
+ * three ONUs on ONE L2 segment, and two of them sharing a MAC raises no error
+ * anywhere -- it produces a switch that learns the address on whichever port
+ * spoke last, and measurements on somebody else's bench that fail for no
+ * visible reason.
+ *
+ * ⚠ IT LIVES IN THE FAMILY HEADER BECAUSE THE TWO-COPY VERSION ALREADY COST A
+ * LIVE DEFECT.  The refusal was written into rtl960x_eth.c alone, while the
+ * RTL9602C's own driver carried a byte-identical IDR reader and a plain
+ * `is_valid_ether_addr()` test -- so the 9602C shipped the shared default for
+ * as long as the two copies existed, and nothing anywhere said so.  A family
+ * fact kept in two chip shells is a repair with a delay fuse on it. */
+#define RTL960X_MAC_BRINGUP_DEFAULT	{ 0x00, 0xe0, 0x4c, 0x86, 0x70, 0x01 }
+
+static inline bool rtl960x_mac_is_bringup_default(const u8 *mac)
+{
+	static const u8 dflt[ETH_ALEN] = RTL960X_MAC_BRINGUP_DEFAULT;
+
+	return ether_addr_equal(mac, dflt);
+}
+
+
+/* ---- the station address in the MAC engine (IDR0/IDR4) -------------------- */
+/* ★ SHARED BY TAKING THE **MAPPED BASE**, NOT THE DRIVER STRUCT.  Both Luna
+ * ethernet drivers had a byte-identical pair of these, differing only in the
+ * struct they dereferenced to reach `->base`.  That is the whole obstacle to
+ * sharing driver code in this tree, and passing the io handle removes it: the
+ * register layout is a FAMILY fact (R_IDR0/R_IDR4 above are already shared),
+ * only the container was per-chip.
+ *
+ * ⚠ AND THE DUPLICATE PAIR IS WHY THE BRING-UP-DEFAULT REFUSAL BELOW REACHED
+ * ONLY ONE OF THEM for eight days.  Two copies of one fact do not merely cost
+ * lines; they cost the NEXT repair, which lands in whichever copy the author
+ * happened to be reading. */
+static inline void rtl960x_idr_get(void __iomem *base, u8 *mac)
+{
+	u32 lo = ioread32(base + R_IDR0), hi = ioread32(base + R_IDR4);
+
+	mac[0] = lo >> 24; mac[1] = lo >> 16; mac[2] = lo >> 8; mac[3] = lo;
+	mac[4] = hi >> 24; mac[5] = hi >> 16;
+}
+
+static inline void rtl960x_idr_set(void __iomem *base, const u8 *mac)
+{
+	iowrite32(((u32)mac[0] << 24) | ((u32)mac[1] << 16) |
+		  ((u32)mac[2] << 8) | mac[3], base + R_IDR0);
+	iowrite32(((u32)mac[4] << 24) | ((u32)mac[5] << 16), base + R_IDR4);
+}
+
+/* ---- a MAC handed in on the kernel command line --------------------------- */
+/* THE FIRST RUNG of this project's declared precedence (bootarg -> DT/nvmem ->
+ * random LAA).  On these products it is the ONLY rung that can carry a PER-UNIT
+ * value today: no DTS in this target declares `mac-address`, and the real
+ * address lives zlib-compressed inside the vendor MIB in the config partition,
+ * which the kernel cannot read (no JFFS2, and an nvmem cell cannot express a
+ * compressed value).  The suite hands it in from the BOARD's own declaration --
+ * `rig/bootmode.py:_mac_bootarg`, keyed on that board's ETH_MAC_BOOTARG.
+ *
+ * ⚠ NO ADDRESS IS EVER SPELLED IN THE KERNEL.  A literal here, or in a DTS,
+ * would hand the second unit of the same product the first one's identity. */
+static inline bool rtl960x_mac_from_param(const char *s, u8 *out)
+{
+	u8 v[ETH_ALEN];
+	int n;
+
+	if (!s || !*s)
+		return false;
+	n = sscanf(s, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+		   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+	if (n != ETH_ALEN || !is_valid_ether_addr(v))
+		return false;
+	memcpy(out, v, ETH_ALEN);
+	return true;
+}
+
+
+/* ---- GMAC stop, and the promiscuous bit -----------------------------------
+ * Two more bodies that were written twice, differing only in the struct they
+ * dereferenced to reach `->base`.  Both are pure register work, so the (hwio)
+ * conversion is the whole of it: take the mapped base.
+ *
+ * ★ THE COMMENT THAT EXPLAINS THE PROMISC BIT LIVED IN ONLY ONE OF THE TWO
+ * COPIES, which is the quieter half of duplication: the code survives the
+ * copy, the REASON does not, and the next reader of the poorer copy has to
+ * re-derive it or guess. */
+static inline void rtl960x_eth_hw_stop(void __iomem *base)
+{
+	iowrite32(0, base + R_IO_CMD);
+	iowrite32(0, base + R_IO_CMD1);
+	iowrite16(0, base + R_IMR);
+	iowrite32(0, base + R_IMR0);
+	iowrite16(0xffff, base + R_ISR);
+	iowrite32(0xffffffff, base + R_ISR1);
+	udelay(10);
+}
+
+/* A bridge enslaving the CPU netdev sets promisc; accept-all-physical (RCR
+ * bit0) is then REQUIRED to receive LAN-client frames whose DA is not our MAC.
+ * Without it a bridged port silently forwards nothing it did not address. */
+static inline void rtl960x_eth_set_promisc(void __iomem *base, bool on)
+{
+	u32 rcr = ioread32(base + R_RCR);
+
+	if (on)
+		rcr |= BIT(0);
+	else
+		rcr &= ~BIT(0);
+	iowrite32(rcr, base + R_RCR);
+}
+
+
+/* The DMA descriptor address bus window.  ZERO on this SoC, and it is a named
+ * knob rather than a bare 0 for a measured reason:
+ *
+ * ⚠ OR-ING A NON-ZERO WINDOW INTO A DESCRIPTOR ADDRESS IS HARMFUL HERE.  It was
+ * observed to be a NO-OP for TX egress and to DEGRADE RX -- `dma_alloc_coherent`
+ * already yields correct bus addresses on this SoC (an artifact of its 1:1 map),
+ * so or-ing the window CORRUPTS them.
+ *
+ * ★ THAT PARAGRAPH EXISTED IN ONE OF THE TWO COPIES ONLY.  Both drivers defined
+ * this constant, one as 0x00000000u with the warning above and one as 0u with a
+ * single line that says none of it.  The value survived being copied; the
+ * measurement behind it did not. */
+#define DMA_BUS_WINDOW		0x00000000u
+
+/* ---- the DMA descriptors ---------------------------------------------------
+ * ★ ONE TYPE, not two identical declarations.  Both Luna ethernet drivers
+ * declared `struct rx_desc` and `struct tx_desc` with the same names and the
+ * same layout, in their own files.  A duplicated TYPE is worse than a
+ * duplicated function: the compiler checks each copy against itself, so the day
+ * one of them gains a field the two silently describe different memory and the
+ * engine reads a ring nobody wrote.
+ *
+ * The layout is the SILICON's, which is why it belongs to the family and not to
+ * either chip: opts1 carries OWN/EOR and the buffer length, addr is the bus
+ * address (with DMA_BUS_WINDOW already or'd in), opts2/opts3 carry the per-frame
+ * classification words and opts4 the TX-only extension. */
+struct rx_desc { u32 opts1, addr, opts2, opts3; };
+struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
+
+/* ---- RX refill --------------------------------------------------------------
+ * Arm ONE RX slot with a fresh skb.  Shared because both drivers had it
+ * character for character apart from the struct they reached `->rx_ring`
+ * through; the pieces are passed explicitly rather than behind a new container,
+ * so neither driver has to change who owns its rings.
+ *
+ * ⚠ EOR IS SET ON THE LAST SLOT AND NOWHERE ELSE.  Getting that wrong does not
+ * fault: the engine simply walks off the end of the ring into whatever follows
+ * it, which is the quietest possible corruption.  `nr` is the ring's own entry
+ * count, passed in, never a #define read from whichever driver compiled last. */
+static inline int rtl960x_rx_refill(struct net_device *ndev, struct device *dev,
+				    struct rx_desc *ring, struct sk_buff **skbs,
+				    dma_addr_t *dmas, unsigned int idx,
+				    unsigned int nr, unsigned int buf_size)
+{
+	struct sk_buff *skb = netdev_alloc_skb(ndev, buf_size);
+	dma_addr_t da;
+	u32 opts1;
+
+	if (!skb)
+		return -ENOMEM;
+	da = dma_map_single(dev, skb->data, buf_size, DMA_FROM_DEVICE);
+	if (dma_mapping_error(dev, da)) {
+		dev_kfree_skb_any(skb);
+		return -ENOMEM;
+	}
+	skbs[idx] = skb;
+	dmas[idx] = da;
+	ring[idx].addr = da | DMA_BUS_WINDOW;
+	ring[idx].opts2 = 0;
+	ring[idx].opts3 = 0;
+	opts1 = D_OWN | buf_size;
+	if (idx == nr - 1)
+		opts1 |= D_EOR;
+	ring[idx].opts1 = opts1;
+	return 0;
+}
+
+
+/* ---- the GMAC0 clock/reset gate -------------------------------------------
+ * ★ ONE NAME FOR ONE BIT.  It was `IPSEL_GMAC0` in one driver and
+ * `IPSEL_EN_GMAC0` in the other, both BIT(1) of the same SOC_IP_SEL word this
+ * header already declared.  Two spellings of one register field is the shape
+ * this project has paid for repeatedly: a correction lands on one name and the
+ * other keeps the old behaviour, and nothing says so. */
+#define IPSEL_GMAC0		BIT(1)
+
+/* Power-cycle GMAC0's clock domain.
+ *
+ * ⚠ RESTORE ONLY THE GMAC BIT.  A trial that also OR'd the stock NIC bring-up
+ * mask 0x1805 here -- taken from a chip-id-0x6266-conditional stock path --
+ * coincided with a HARD SoC HANG on the RTL9602C: the sibling IP_SEL bits gate
+ * other clock domains and are not ours to touch.
+ *
+ * ★ THAT WARNING EXISTED IN ONLY ONE OF THE TWO COPIES, which is the expensive
+ * half of duplication -- the code survives being copied, the reason it is
+ * shaped that way does not, and the next author of the poorer copy has nothing
+ * to stop them re-running the experiment that hung the board. */
+static inline void rtl960x_ipsel_cycle_gmac0(void)
+{
+	writel(readl(SOC_IP_SEL) & ~IPSEL_GMAC0, SOC_IP_SEL);
+	msleep(12);
+	writel(readl(SOC_IP_SEL) | IPSEL_GMAC0, SOC_IP_SEL);
+	msleep(2);
+}
+
+
+/* ---- SoC peripheral clock/enable word -------------------------------------
+ * ⚠ THIS IS **NOT** `SOC_IP_SEL`.  They are 0x3c apart in the same SoC window,
+ * and one of the three places that used this address called its pointer
+ * `ipsel` -- which is the other register's name.  Two SoC control words a
+ * stone's throw apart, one of them wearing the other's name, is precisely the
+ * confusion this project renames on sight.
+ *
+ * ★ IT HAD THREE SPELLINGS: a #define here in one driver, a bare literal in the
+ * second, and a locally-named pointer in the third.  One home now.
+ *
+ * ⚠⚠ AND THE TWO DRIVERS DISAGREE ABOUT WHAT BIT 5 IS, which is recorded
+ * rather than resolved: rtl960x_eth.c calls it "switch-core enable" and
+ * gpon-rtl960x.c calls the SAME bit at the SAME address "PONPBO IP enable".
+ * Both set it.  Either one name is wrong, or the bit gates a block both need
+ * and neither name says so.  OWED: settle it from the chip's own SDK
+ * (tier 3) or a live read, and rename on the spot -- do NOT pick one by
+ * majority, which is how two wrong names cancel and survive. */
+#define SOC_SW_ENABLE	((void __iomem *)0xb800063cul)
+#define   SW_EN_BIT	BIT(5)		/* see the disagreement above	*/
+#define   SW_PBO_BIT	BIT(25)		/* required on rev > A		*/
 
 #endif /* _RTL960X_ETH_REGS_H */

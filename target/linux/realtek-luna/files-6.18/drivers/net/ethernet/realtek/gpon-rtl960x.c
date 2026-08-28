@@ -50,6 +50,7 @@
 
 #include <linux/delay.h>
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
+#include "gpon_ploam.h"	/* the core PLOAM FSM + its shell contract */
 #include "gpon_rtl9602c_logic.h"	/* hoisted logic */
 #include <linux/init.h>
 #include <linux/io.h>
@@ -6649,6 +6650,140 @@ static void gpon_cdr_reset_worker(struct work_struct *w)
  *   OMCI responder that had drifted into a weaker copy, and two decoders of one
  *   serial number that disagreed about what a serial number is.
  */
+/*
+ * ===== The core PLOAM shell: this driver, expressed as struct gpon_ploam_ops =====
+ *
+ * ★★ NOT INSTALLED YET, AND THAT IS THE POINT OF THIS STEP.  Nothing calls
+ * gpon_ploam_init() with these ops; the FSM below still runs.  What this buys
+ * is the one thing a design note cannot: the COMPILER checks that every
+ * callback the core demands can actually be expressed from this driver's
+ * existing primitives, with the right types, before a single line of the FSM
+ * moves.  A shim of stubs would prove nothing, so every op below either does
+ * the real work or is left NULL with the reason.
+ *
+ * ★ WHY THE SIGNATURES DIFFER WHERE THEY DO.  The core owns the ARITHMETIC and
+ * the shell owns the REGISTER.  gpon_set_eqd() here computes eqd1 from
+ * MIN_DELAY1 and then writes; the core splits that into get_min_delay() +
+ * set_eqd(multiframe, intraframe).  The two arithmetics were compared line by
+ * line on 2026-08-28 and are identical -- value + min_delay1*128, divided by
+ * the upstream frame length -- which is two independent expressions of one
+ * fact agreeing, not one copied from the other.
+ */
+static void luna_op_ploam_tx(void *sh, u8 queue, const u8 m[GPON_PLOAM_US_LEN])
+{
+	(void)sh;			/* single-instance driver: state is file-scope */
+	gpon_send_cpu_ploam(queue, m);
+}
+
+static void luna_op_boh_write(void *sh, u32 cfg_word, const u8 *oh, u8 size)
+{
+	u8 i;
+
+	(void)sh;
+	/* The write half of gpon_apply_boh(): the core composed cfg_word and the
+	 * overhead bytes, so only the registers are left here. */
+	gpon_wr(GPON_GTC_US_BOH_CFG, cfg_word);
+	for (i = 0; i < size; i++)
+		gpon_wr(GPON_GTC_US_BOH_DATA + i * 4, oh[i]);
+}
+
+static u32 luna_op_get_min_delay(void *sh)
+{
+	(void)sh;
+	return (gpon_rd(GPON_GTC_US_MIN_DELAY) >> 7) & 0x1ff;	/* MIN_DELAY1 */
+}
+
+static void luna_op_set_eqd(void *sh, u32 multiframe, u32 intraframe)
+{
+	(void)sh;
+	gpon_wr(GPON_GTC_US_EQD,
+		((multiframe & GPON_EQD_MF_MASK) << GPON_EQD_MF_SHIFT) |
+		(intraframe & GPON_EQD_INFRAME_MASK));
+}
+
+static void luna_op_us_ploam_flush(void *sh)
+{
+	(void)sh;
+	/* PLM_FLUSH_BUF is edge-triggered: 0 THEN 1.  Read-modify-write, because
+	 * CRC_GEN_EN|ONUID_OVRD live in the same word and must survive. */
+	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);
+	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);
+}
+
+static void luna_op_set_hw_state(void *sh, enum gpon_ostate st)
+{
+	(void)sh;
+	gpon_fsm_set_state((u8)st);
+}
+
+static void luna_op_set_hw_onu_id(void *sh, u8 onu_id)
+{
+	(void)sh;
+	gpon_field(GPON_GTC_DS_ONU_STATUS, 15, 8, onu_id);
+}
+
+static void luna_op_analog_relock(void *sh)
+{
+	(void)sh;
+	gpon_txpll_relock();
+}
+
+static void luna_op_o3_feed_reset(void *sh)
+{
+	(void)sh;
+	gpon_us_feed_rearm();
+}
+
+static void luna_op_aes_stage_key(void *sh, const u8 key[16])
+{
+	(void)sh;
+	gpon_aes_stage_key(key);
+}
+
+static int luna_op_install_omcc(void *sh, u16 gem)
+{
+	(void)sh;
+	return gpon_install_omcc(gem);
+}
+
+static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
+{
+	(void)sh;
+	return gpon_install_tcont(tcont, alloc);
+}
+
+/*
+ * ⚠ THE OPS LEFT NULL, each for a stated reason -- never because they were
+ * forgotten, and never filled with something that merely compiles:
+ *
+ *   install_data_gem  this driver's gpon_install_data_gem() takes NO port id;
+ *                     it uses one recorded elsewhere.  Wiring the op would
+ *                     DISCARD the gem the core passes -- plumb the value or do
+ *                     not plumb it at all.
+ *   on_below_o5,      the driver does these inside the FSM body rather than in
+ *   o5_rearm_burst,   a callable helper.  Extracting them is part of the shape
+ *   cdr_reseat        change, not of this signature check.
+ *   rng               no randomness source is used on this path today.
+ *   aes_arm_switch    the superframe-armed key switch is FSM-inline here.
+ *   omci_report_oper_up  lives in the ETHERNET driver
+ *                     (rtl9602c_eth_omci_report_oper_up), a different module.
+ *   trace             optional diagnostic hook; nothing to bind yet.
+ */
+static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
+	.ploam_tx	= luna_op_ploam_tx,
+	.boh_write	= luna_op_boh_write,
+	.get_min_delay	= luna_op_get_min_delay,
+	.set_eqd	= luna_op_set_eqd,
+	.us_ploam_flush	= luna_op_us_ploam_flush,
+	.set_hw_state	= luna_op_set_hw_state,
+	.set_hw_onu_id	= luna_op_set_hw_onu_id,
+	.analog_relock	= luna_op_analog_relock,
+	.o3_feed_reset	= luna_op_o3_feed_reset,
+	.aes_stage_key	= luna_op_aes_stage_key,
+	.install_omcc	= luna_op_install_omcc,
+	.install_tcont	= luna_op_install_tcont,
+};
+
 static void gpon_fsm_handle(const u8 *m)
 {
 	u8 onu_id = m[0], type = m[1];

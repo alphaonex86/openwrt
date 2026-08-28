@@ -1,0 +1,48 @@
+#!/bin/sh
+# Pin the LAN bridge to THIS UNIT's own MAC, from the boot parameter.
+#
+# ★★★ WHY. MEASURED 2026-08-25 on the G24W: the driver announces
+#   "MAC 5c:19:23:b3:ce:90 taken from the `mac=` boot parameter" at probe --
+#   and by the time userspace settles, /sys/class/net/eth0/address reads
+#   02:ce:4f:0a:a4:d4, a random locally-administered address, and
+#   /etc/config/network has grown `option macaddr` on the br-lan device
+#   section carrying it. The host then sees a DIFFERENT device on every boot:
+#   ARP caches, DHCP reservations and every MAC-keyed measurement describe
+#   something else, and the suite refused the whole campaign with
+#   "board identity: WRONG BOARD".
+#
+# ★ THE VALUE IS NOT SPELLED HERE. It comes from the kernel command line,
+#   which is where this product's per-unit MAC is delivered today (the real
+#   one lives in the vendor config partition and is not read yet). No board
+#   fact in this file, so it is correct for every board on this target.
+#
+# ★ IT RUNS LAST (99-) DELIBERATELY: the address is written by something that
+#   runs after the early defaults, so pinning it early would be overwritten.
+#
+# ★ AND IT DOES NOTHING WHEN IT HAS NOTHING. No `mac=` parameter, or one that
+#   is not a valid unicast address, means we do not know this unit's MAC --
+#   and inventing one is exactly the failure being repaired. Absent is absent.
+
+mac=$(sed -n 's/.*rtl960x_eth\.mac=\([0-9A-Fa-f:]\{17\}\).*/\1/p' /proc/cmdline)
+[ -n "$mac" ] || exit 0
+
+# reject a multicast/zero address: the first octet's low bit is the I/G bit
+first=$(echo "$mac" | cut -d: -f1)
+case "$first" in
+	*[13579bBdDfF]) exit 0 ;;      # I/G set -> not a unicast address
+esac
+[ "$mac" = "00:00:00:00:00:00" ] && exit 0
+
+lc=$(echo "$mac" | tr 'A-F' 'a-f')
+for i in $(seq 0 7); do
+	name=$(uci -q get "network.@device[$i].name") || break
+	[ -n "$name" ] || break
+	if [ "$name" = "br-lan" ]; then
+		uci -q set "network.@device[$i].macaddr=$lc"
+		uci -q commit network
+		logger -t onu-lan-mac "br-lan macaddr pinned to $lc (from the mac= boot parameter)"
+		exit 0
+	fi
+done
+logger -t onu-lan-mac "no br-lan device section found; nothing pinned"
+exit 0

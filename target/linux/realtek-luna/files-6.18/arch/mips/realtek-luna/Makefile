@@ -2,4 +2,4 @@
 # Realtek "Luna" GPON ONU (RTL960xC / RLX Taroko) platform support.
 
 obj-y := prom.o setup.o irq-rtl9602c.o irq-rtl9603cvd.o timer-rtl9602c.o
-obj-$(CONFIG_PCI) += pcie-rtl9602c.o
+obj-$(CONFIG_PCI) += pcie-rtl960x.o

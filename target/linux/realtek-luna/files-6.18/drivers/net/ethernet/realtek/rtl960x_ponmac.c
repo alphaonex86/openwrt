@@ -600,6 +600,7 @@ static int rtl9601b_serdes_cdr_reset(const struct rtl960x_ops *o)
 #define C3_PON_INBW_LBOUND	0x1b023180u /* DS in-band accumulation low bound  */
 #define C3_WSDS_DIG_00		0x1b040030u /* SerDes digital: clock control      */
 #define C3_WSDS_DIG_02		0x1b040038u /* SerDes digital: BEN power-down      */
+#define C3_SDS_REG7		0x1b04081cu /* [14] SP_CFG_NEG_CLKWR_A2D          */
 #define C3_WSDS_DIG_18		0x1b040090u /* SerDes digital: BEN output enable   */
 #define C3_WSDS_DIG_1D		0x1b0400a4u /* SerDes digital: interface FIFO rstb */
 #define C3_FORCE_BEN		0x1b0400e4u /* burst-enable force mode             */
@@ -663,6 +664,25 @@ static const struct r960_op c3_init[] = {
  * coefficients before switching the lane into GPON mode.
  */
 static const struct r960_op c3_sds_pre[] = {
+	/* ★ A2D SAMPLING CLOCK EDGE -- PER-CHIP, AND THIS DIE DIFFERS FROM THE 9602C.
+	 * SDS_REG7[14] SP_CFG_NEG_CLKWR_A2D selects the clock edge on which the RX
+	 * analog-to-digital sampler latches. The RTL9602C wants 0 (c2 path sets it
+	 * to 0 explicitly), but this board's OWN stock kernel sets it to 1 in
+	 * dal_rtl9603cvd_switch_init (tier 2, disassembled from the G24W's k0.vmlinux
+	 * @0x802dcd04: SDS_REG7 field SP_CFG_NEG_CLKWR_A2D = 1) -- BEFORE the ponmac
+	 * SerDes bring-up, and the value survives the SDS reset (stock reads
+	 * SDS_REG7 = 0x5359, bit14 set, at O5). Our C3 path never set it, so the RX
+	 * came up sampling on the wrong edge -> garbage samples -> SDS_SDET never
+	 * asserts and the FSM never leaves O1. Set it first, before the reset, so the
+	 * RX front end latches the right edge when it comes out of reset.
+	 * ⚠ MEASURED 2026-08-27, AND IT IS A CORRECTION, NOT THE FIX: this shipped in
+	 * a boot; the board read SDS_REG7 = 0x00005359 (bit14 set, = stock EXACTLY),
+	 * and SDS_SDET STILL stayed 0 at O1. So the A2D edge was a real stock-vs-ours
+	 * difference and is now closed, but it is NOT why the RX fails. Kept because it
+	 * matches this die's own stock kernel; the O1 wall is still open (the cause is
+	 * not any kernel SerDes/SoC register -- all now match stock -- so it lies in a
+	 * non-SWCORE block (GTC/PON-IP) or the physical RX). */
+	FLD(C3_SDS_REG7,      14, 14, 1),	/* A2D clock edge (9603CVD = 1)   */
 	FLD(C3_SDS_CFG,        4,  0, 0x1f),	/* lane mode: off (parked)        */
 	FLD(C3_WSDS_DIG_00,    4,  4, 1),	/* force 125 MHz reference clock   */
 	FLD(C3_WSDS_DIG_02,   10, 10, 0),	/* clear BEN power-down            */
@@ -706,6 +726,51 @@ static const struct r960_op c3_sds_post[] = {
 	FLD(C3_WSDS_DIG_1D,   15, 15, 0),	/* RX interface FIFO: assert rstb   */
 	FLD(C3_WSDS_DIG_1D,   15, 15, 1),	/* RX interface FIFO: release rstb  */
 	FLD(C3_WSDS_DIG_18,   12, 12, 1),	/* burst-enable output: on          */
+	/* ★ THE OPTIC-LOS FORCE MUST BE RELEASED, AND THIS CHIP'S TABLE NEVER DID.
+	 * The 9602C table (c2_sds_rx_arm) clears all three of these deliberately
+	 * -- "at O5 WSDS_DIG_18 = 0x1000 (no force) and the REAL pad drives LOS".
+	 * The 9603CVD table set BEN_OE and stopped, so [15:13] kept whatever reset
+	 * or the bootloader left. With CFG_FRC_OPTIC_LOS=1 the GTC stops sampling
+	 * the pad and substitutes CFG_FRCV_OPTIC_LOS, so FRC=1/FRCV=1 pins
+	 * OPTIC_LOS_SIG at 1 -- a permanent, unfalsifiable "no downstream light"
+	 * that no amount of real light can clear, and the PLOAM FSM never leaves
+	 * O1. Same class as CFG_PHY_CTRL's BASE_PHYAD: a register we never wrote,
+	 * left by the bootloader, that stock clears.
+	 * Bit positions are this chip's own (WSDS_DIG_18: OPTIC_LOS_SEL_EPON[15],
+	 * CFG_FRC_OPTIC_LOS[14], CFG_FRCV_OPTIC_LOS[13], BEN_OE[12]) -- they happen
+	 * to match the 9602C's, but they were re-read here rather than assumed. */
+	FLD(C3_WSDS_DIG_18,   15, 15, 0),	/* OPTIC_LOS_SEL_EPON = 0 (GPON)    */
+	FLD(C3_WSDS_DIG_18,   14, 14, 0),	/* CFG_FRC_OPTIC_LOS  = 0 (use pad) */
+	FLD(C3_WSDS_DIG_18,   13, 13, 0),	/* CFG_FRCV_OPTIC_LOS = 0           */
+	/* ★★★ THE "RX ARM" IS REMOVED, AND THE ORACLE IS WHAT REMOVED IT
+	 * (2026-08-27).
+	 *
+	 * This used to write REG_RX_SEL_CDR_AFEN = 1 here (COM03[13]), on the
+	 * reasoning that `c3_sds_pre` deselects the RX CDR AFE and nothing put it
+	 * back, and that the 9602C's own path sets the identically-named field on
+	 * its die. It shipped with its own condition attached: *"WHAT IS NOT
+	 * PROVEN: stock's resting value for this bit on THIS board. If a stock
+	 * capture later shows 0 here, this line is the first suspect."*
+	 *
+	 * THE CAPTURE WAS TAKEN. Stock, on THIS board, at O5 [Operation, SERVING],
+	 * SWCORE 0x4058c:
+	 *
+	 *     SDS_ANA_COM03 = 0x00001929   ->   bit 13 = 0
+	 *
+	 * and in the same capture SDS_FIB_STATUS (0x214) = 0x00020008, i.e. SDS_SDET
+	 * (bit 17) SET. So the RX front end raises signal-detect on this silicon
+	 * with COM03[13] resting at ZERO, and the premise of the arm -- that an
+	 * unselected AFE is why SDS_SDET stays 0 on our image -- is refuted by the
+	 * only source that could refute it.
+	 *
+	 * The board had already said the same thing more weakly: the arm was in the
+	 * image booted 2026-08-26 (provable -- the `optic_a2:` line only that build
+	 * prints appeared) and sds_sdet stayed 0, link_ok stayed 0, and the FSM
+	 * stayed at O1.
+	 *
+	 * ⇒ the value is left where c3_sds_pre puts it, which is also where stock
+	 * leaves it. The DLY(10) that settled the selection goes with it.
+	 */
 	FLD(C3_P_MISC_PON,     2,  2, 1),	/* PON port: accept undersize       */
 	FLD(C3_FORCE_BEN,      0,  0, 0),	/* burst-enable force mode: off     */
 };
@@ -1274,7 +1339,14 @@ static int rtl9607c_serdes_cdr_reset(const struct rtl960x_ops *o)
 #define C2_SDS_ANA_COM_REG22	0x1B0225D8u	/* [5:3] TX_AMP [2:0] TX_EMP   */
 #define C2_SDS_ANA_MISC_REG00	0x1B022500u	/* [5] FRC_RX_EN_VAL [4] _ON   */
 #define C2_SDS_ANA_MISC_REG01	0x1B022504u	/* [7:5] SPDSEL_VAL [4] _ON    */
-#define C2_SDS_ANA_MISC_REG02	0x1B022508u	/* [13] SD_VAL [12] SD_FORCE   */
+/* ⚠ RENAMED 2026-08-26. This was commented "[13] SD_VAL [12] SD_FORCE" and two
+ * of its three call sites called it "signal-detect". It is NOT signal-detect on
+ * either die: both the RTL9602C's and the RTL9603CVD's own register maps name
+ * [13] FRC_BER_NOTIFY_VAL and [12] FRC_BER_NOTIFY_ON, which is what the third
+ * call site and the whole 9603CVD path already called it. The wrong name
+ * mattered: it made this register look like a reason SDS_SDET could read 0,
+ * i.e. like an explanation for a dark fibre that it cannot provide. */
+#define C2_SDS_ANA_MISC_REG02	0x1B022508u	/* [13] FRC_BER_NOTIFY_VAL [12] _ON */
 #define C2_FIB_EXT_REG21	0x1B022E54u	/* [13] FEP_V2ANALOG (lock)    */
 #define   C2_SDS_ANALOG_READY	13u		/* FIB_EXT_REG21 ready bit      */
 #define C2_SDS_LOCK_POLL_MAX	1000u		/* x200us = up to 200 ms        */
@@ -1591,8 +1663,8 @@ int rtl960x_c2_skip_rstb_dance;
 int rtl960x_c2_sds_cfgrst;
 
 static const struct r960_op c2_sds_mode[] = {
-	FLD(C2_SDS_ANA_MISC_REG02, 13, 13, 1),	/* signal-detect value = 1        */
-	FLD(C2_SDS_ANA_MISC_REG02, 12, 12, 1),	/* force signal-detect            */
+	FLD(C2_SDS_ANA_MISC_REG02, 13, 13, 1),	/* FRC_BER_NOTIFY_VAL = 1         */
+	FLD(C2_SDS_ANA_MISC_REG02, 12, 12, 1),	/* FRC_BER_NOTIFY_ON  = 1         */
 	DLY(10),
 	FLD(C2_SDS_CFG, 4, 0, C2_SDS_MODE_GPON),/* select GPON mode (very last)   */
 	DLY(50),

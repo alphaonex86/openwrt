@@ -783,8 +783,14 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 	if (!rtl_hal_pwrseqcmdparsing(rtlpriv, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK,
 				      PWR_INTF_PCI_MSK,
 				      RTL8192F_NIC_ENABLE_FLOW)) {
-		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-			"init MAC Fail as rtl_hal_pwrseqcmdparsing\n");
+		/* pr_err, not rtl_dbg: this is a HARD FAILURE PATH and the caller
+		 * only prints the generic "Init MAC failed". A failure that cannot
+		 * say WHICH step failed forces a rebuild-with-debug to learn what
+		 * the driver already knew.  It costs nothing at runtime: it prints
+		 * only when the radio is already dead.
+		 */
+		pr_err("rtl8192fe: Init MAC failed at the power-on sequence "
+		       "(rtl_hal_pwrseqcmdparsing, RTL8192F_NIC_ENABLE_FLOW)\n");
 		return false;
 	}
 
@@ -807,8 +813,9 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 
 	if (!rtlhal->mac_func_enable) {
 		if (!_rtl92fe_llt_table_init(hw)) {
-			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-				"LLT table init fail\n");
+			/* pr_err: see the power-on sequence note above. */
+			pr_err("rtl8192fe: Init MAC failed at the LLT table "
+			       "(_rtl92fe_llt_table_init)\n");
 			return false;
 		}
 	}

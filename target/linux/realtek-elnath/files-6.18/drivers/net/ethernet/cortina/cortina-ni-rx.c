@@ -5211,6 +5211,37 @@ static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
 
 /* 1 Hz self-rearming poll, stock cadence ("recover check first").  Runs
  * between open and stop; each pass is one register read unless faulted. */
+/* THE BACKOFF LADDER for the decoupled LAN bring-up.  The recovery worker
+ * runs at 1 Hz, so these are seconds: every second for the first half
+ * minute, then one in 8, then one a minute - FOREVER.  There is
+ * deliberately no attempt ceiling: a bank that becomes lockable at minute
+ * 40 (a slow PHY, a cable inserted later, a cold-boot race) must still be
+ * picked up, and the cost of asking once a minute is one idempotent
+ * register walk. */
+#define CA_NI_RX_BRINGUP_FAST_TICKS	30u	/* 1/s for the first 30 s */
+#define CA_NI_RX_BRINGUP_MID_TICKS	300u	/* then 1/8 s out to 5 min */
+#define CA_NI_RX_BRINGUP_MID_PERIOD	8u
+#define CA_NI_RX_BRINGUP_SLOW_PERIOD	60u	/* then once a minute, forever */
+
+static unsigned int cortina_ni_rx_bringup_period(const struct cortina_ni_rx *rx)
+{
+	if (rx->bringup_ticks <= CA_NI_RX_BRINGUP_FAST_TICKS)
+		return 1u;
+	if (rx->bringup_ticks <= CA_NI_RX_BRINGUP_MID_TICKS)
+		return CA_NI_RX_BRINGUP_MID_PERIOD;
+	return CA_NI_RX_BRINGUP_SLOW_PERIOD;
+}
+
+static bool cortina_ni_rx_bringup_due(const struct cortina_ni_rx *rx)
+{
+	unsigned int period = cortina_ni_rx_bringup_period(rx);
+
+	/* `bringup_ticks` has already been incremented for THIS tick, so tick
+	 * 1 is due (1 % 1 == 0) and the ladder never leaves a silent gap at a
+	 * phase boundary. */
+	return (rx->bringup_ticks % period) == 0u;
+}
+
 static void cortina_ni_rx_recovery_work(struct work_struct *work)
 {
 	struct cortina_ni_rx *rx = container_of(to_delayed_work(work),
@@ -5233,15 +5264,62 @@ static void cortina_ni_rx_recovery_work(struct work_struct *work)
 	/* ★ Decoupled datapath bring-up: until every GPHY bank is patched, run the
 	 * full link-up bring-up here (1 Hz) so the LAN ports ingress even when
 	 * eth0's connected PHY has no cable and never fires link-up.  Idempotent;
-	 * the GPHY SRAM patch is one-shot per bank (ni->gphy_patched[]); capped via
-	 * rearms so a never-lockable bank cannot spin the full reconfig forever. */
+	 * the GPHY SRAM patch is one-shot per bank (ni->gphy_patched[]).
+	 *
+	 * RATE-BOUNDED, NEVER COUNT-CAPPED (2026-08-20).  This used to read
+	 * a COUNT CAP of thirty on `rearms`, with the comment
+	 * "capped via rearms so a never-lockable bank cannot spin the full
+	 * reconfig forever".  Two things were wrong with that, and together
+	 * they are the best candidate mechanism for this board's two worst
+	 * wired-LAN faults:
+	 *
+	 *   1. THE CALLER IS ALREADY 1 Hz, so the spin was rate-bounded for
+	 *      free.  What the cap actually did was ABANDON the bring-up.
+	 *   2. `rearms` is bumped by every REAL link-up as well, so it is not
+	 *      an attempt count at all: ~30 cable bounces exhausted it exactly
+	 *      as 30 seconds did.
+	 *
+	 * After the cap fired no GPHY bank was ever patched again,
+	 * `all_patched` never became true, `intf_done` was never set, and the
+	 * per-port INTF_RST+EN1_IF edge below never ran - so an RJ45 LINKS
+	 * (the PHY is fine, and the CPU-port carrier is re-asserted every tick
+	 * just below) while NOTHING ingresses into the L2FE.  That is exactly
+	 * the shape of both open faults on this board: "cold boot with no
+	 * eth0 carrier / no RJ45 ingress" and "wired LAN dies mid-session,
+	 * carrier=1 but l3fe_rx and l3qm_rx both 0, only a cold boot clears
+	 * it".  Intermittent because it is a race against boot timing;
+	 * permanent-for-the-boot because nothing ever resets the counter.
+	 *
+	 * => the recovery now SLOWS DOWN and never stops.  Deleting the cap
+	 * outright would install the other half of the defect - an unbounded
+	 * FAST retry - so the cadence grows to a ceiling and stays there.  The
+	 * counters below count ATTEMPTS only, never link-ups, so a cable
+	 * bounce cannot spend them.
+	 */
 	if (rx_decoupled_bringup && !rx->intf_done) {
 		unsigned int b;
 		bool all_patched;
 
 		/* keep driving the bring-up (patches the GPHY banks) until done */
-		if (rx->rearms < 30)
+		rx->bringup_ticks++;
+		/* ONE line when the cadence steps down, never per tick: a bring-up
+		 * still owed after the fast window is a real condition somebody
+		 * must be able to see, and a 1 Hz print would bury the log it has
+		 * to be found in.
+		 * It is OUTSIDE the due-check on purpose: neither boundary tick is
+		 * itself "due" (31 % 8 and 301 % 60 are both non-zero), so inside
+		 * it this warning could never fire - a dead notice about a silent
+		 * failure, which is the worst of both. */
+		if (rx->bringup_ticks == CA_NI_RX_BRINGUP_FAST_TICKS + 1 ||
+		    rx->bringup_ticks == CA_NI_RX_BRINGUP_MID_TICKS + 1)
+			dev_warn(ni->dev,
+				 "LAN bring-up still owed after %llu tick(s) (%llu attempt(s)); backing the cadence off to 1/%us - NOT giving up\n",
+				 rx->bringup_ticks, rx->bringup_calls,
+				 cortina_ni_rx_bringup_period(rx));
+		if (cortina_ni_rx_bringup_due(rx)) {
+			rx->bringup_calls++;
 			cortina_ni_rx_link_up(ni);
+		}
 
 		all_patched = true;
 		for (b = 0; b < CA_NI_GPHY_COUNT; b++)
@@ -6865,6 +6943,15 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	seq_printf(m, "gphy: fault=0x%04x last=0x%04x recoveries=%llu rearms=%llu\n",
 		   cortina_ni_rx_gphy_fault(ni), rx->last_fault,
 		   rx->recoveries, rx->rearms);
+	/* THE WITNESS FOR THE COUNT-CAP DEFECT (2026-08-20).  `intf_done` is
+	 * the single bit that says whether any RJ45 can ingress at all, and
+	 * the two bring-up counters say whether the recovery is still trying
+	 * and at what cadence.  Without these a board whose LAN is dead reads
+	 * exactly like a board with no cable: carrier up, no frames, nothing
+	 * to see. */
+	seq_printf(m, "bringup: intf_done=%d ticks=%llu calls=%llu period=%us\n",
+		   rx->intf_done ? 1 : 0, rx->bringup_ticks, rx->bringup_calls,
+		   cortina_ni_rx_bringup_period(rx));
 	seq_printf(m, "frames=%llu bytes=%llu polls=%llu swid=%llu pon=%llu wan=%llu wan_l3=%llu\n",
 		   rx->frames, rx->bytes, rx->polls, rx->swid_frames,
 		   rx->pon_frames, rx->wan_frames, rx->wan_l3_frames);

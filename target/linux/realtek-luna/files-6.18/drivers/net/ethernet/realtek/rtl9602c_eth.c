@@ -2330,7 +2330,24 @@ static struct omci_me_inst *omci_store_nth(u16 idx)
 	return NULL;
 }
 
-static void omci_store_put(u16 class_id, u16 inst, const u8 *body, int blen)
+/*
+ * Insert (or refresh) one OLT-created instance.  Returns FALSE when the store is
+ * FULL -- and the caller MUST then NAK.
+ *
+ * ★ IT USED TO RETURN void, so the caller could not know.  A dropped Create was
+ * answered OMCI_RC_OK and MIB-Data-Sync was advanced as if it had been applied,
+ * which keeps our rsync in LOCKSTEP with the OLT's lsync while our MIB is
+ * missing an ME the OLT believes it created -- so the OLT's ME 2 audit can never
+ * discover the divergence and no MIB-Reset is ever issued.  A dropped GEM-CTP or
+ * extended-VLAN ME is then a service the OLT thinks it configured and this ONU is
+ * not carrying, with a GREEN audit, until a reboot.  NAKing instead FREEZES MDS,
+ * the audit mismatches, and the OLT's own MIB-Reset wipes the store and
+ * re-provisions from empty -- the self-heal this responder already relies on
+ * everywhere else, and the behaviour the common core has (gpon_omci_me.c).
+ * Pinned by dev/rtl9607c-test/gpon_lifetime_test.c case [e] (suite step 23),
+ * SEEN to fail on the pre-fix source (rc=0x00, mds 128 -> 129).
+ */
+static bool omci_store_put(u16 class_id, u16 inst, const u8 *body, int blen)
 {
 	struct omci_me_inst *e = omci_store_find(class_id, inst);
 	u16 k;
@@ -2346,10 +2363,10 @@ static void omci_store_put(u16 class_id, u16 inst, const u8 *body, int blen)
 				omci_store_n++;
 				break;
 			}
-	if (!e) {				/* store full -> bounded drop */
-		pr_warn_ratelimited("rtl9602c-omci: ME store full, dropping class=%u inst=%u\n",
+	if (!e) {				/* store full -> NAK, never a silent drop */
+		pr_warn_ratelimited("rtl9602c-omci: ME store full, NAKing class=%u inst=%u\n",
 				    class_id, inst);
-		return;
+		return false;
 	}
 	if (body && blen > 0) {
 		if (blen > (int)sizeof(e->body))
@@ -2357,6 +2374,7 @@ static void omci_store_put(u16 class_id, u16 inst, const u8 *body, int blen)
 		memcpy(e->body, body, blen);
 		e->blen = (u8)blen;
 	}
+	return true;
 }
 
 static void omci_store_del(u16 class_id, u16 inst)
@@ -2715,30 +2733,40 @@ static void rtl9602c_eth_omci_input(struct rtl9602c_eth *ep, const u8 *msg,
 		 * the ME with its set-by-create attribute body; Delete removes it. Set is NOT
 		 * stored: built-in/default MEs stay served by omci_me_fill + the static rows
 		 * (so they're not duplicated), and an OLT-created ME is already in the store. */
-		if (mt == OMCI_MT_CREATE)
-			omci_store_put(class_id, minst, msg + 8,
-				       (len > 8) ? (int)(len - 8) : 0);
-		else if (mt == OMCI_MT_DELETE)
+		u8 rc = OMCI_RC_OK;
+
+		if (mt == OMCI_MT_CREATE) {
+			if (!omci_store_put(class_id, minst, msg + 8,
+					    (len > 8) ? (int)(len - 8) : 0))
+				rc = OMCI_RC_ATTR_FAILED;
+		} else if (mt == OMCI_MT_DELETE)
 			omci_store_del(class_id, minst);
 
 		/* Mirror stock X111W omci_SyncMibData (omci_app @0x411c98): ONU-Data ME2 attr-1
 		 * (MIB-Data-Sync) is a 1-byte counter incremented by +1 per SUCCESSFULLY-applied
 		 * config message (Create/Set/Delete) — NOT per-attribute (popcount), confirmed by
 		 * MIPS RE of the stock firmware. Byte-wrap 255->1 (0 reserved for just-reset state).
-		 * We apply every config message (never NAK), so bump unconditionally. The OLT's DS
-		 * gate (rsync==lsync) passes because both count the same OLT-driven events from 0.
+		 * The OLT's DS gate (rsync==lsync) passes because both count the same OLT-driven
+		 * events from 0. ★ SO IT MOVES ONLY WHEN THE MESSAGE WAS ACTUALLY APPLIED: a
+		 * Create the store had no room for is NAKed above and MDS FREEZES here, which is
+		 * what lets the OLT's ME2 audit notice and re-provision from MIB-Reset. Bumping
+		 * for a message we dropped would keep the two counters in lockstep across a MIB
+		 * that had diverged, and the audit could then never discover it.
 		 * EXCEPTION: an OLT Set of ME2 attr-1 is an explicit resync write (stock attr-1 is
 		 * OltAcc=R/W) -> take its byte first, then this Set's own +1 still applies. */
-		if (mt == OMCI_MT_SET && class_id == OMCI_ME_ONU_DATA &&
-		    len >= 11 && (((msg[8] << 8) | msg[9]) & 0x8000))
-			ep->omci_mds = msg[10];
-		if (++ep->omci_mds == 0)		/* wrap 255 -> 1 (skip 0) */
-			ep->omci_mds = 1;
-		/* ★ Progress: the OLT is applying config, so the audit is satisfied and
-		 * the walk must not step underneath a provisioning burst. */
-		ep->omci_audit_reads = 0;
-		ep->omci_mds_tries = 0;
-		resp[8] = OMCI_RC_OK;
+		if (rc == OMCI_RC_OK) {
+			if (mt == OMCI_MT_SET && class_id == OMCI_ME_ONU_DATA &&
+			    len >= 11 && (((msg[8] << 8) | msg[9]) & 0x8000))
+				ep->omci_mds = msg[10];
+			if (++ep->omci_mds == 0)	/* wrap 255 -> 1 (skip 0) */
+				ep->omci_mds = 1;
+			/* ★ Progress: the OLT is applying config, so the audit is
+			 * satisfied and the walk must not step underneath a
+			 * provisioning burst. */
+			ep->omci_audit_reads = 0;
+			ep->omci_mds_tries = 0;
+		}
+		resp[8] = rc;
 		break;
 	}
 	case OMCI_MT_GET_ALL_ALARMS:
@@ -2871,7 +2899,15 @@ void rtl9602c_eth_omci_report_oper_up(void)
 }
 EXPORT_SYMBOL(rtl9602c_eth_omci_report_oper_up);
 
-static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget)
+/*
+ * `napi_ctx` says whether the caller is INSIDE napi->poll. It decides how the
+ * frame is handed up, and it is not cosmetic: napi_gro_receive() may only be
+ * called from NAPI poll context (it uses the NAPI instance's own GRO state),
+ * while the legacy fallback below reaches here from a plain timer callback.
+ * Passing the wrong one is a bug on the path nobody exercises -- which is
+ * exactly the path kept as the safety net until INTC input 26 is proven.
+ */
+static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 {
 	struct net_device *ndev = ep->ndev;
 	int rx_done = 0;
@@ -2994,7 +3030,21 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget)
 			skb->protocol = eth_type_trans(skb, rdev);
 			rdev->stats.rx_packets++;
 			rdev->stats.rx_bytes += len;
-			netif_rx(skb);
+			/*
+			 * NAPI poll context: use the receive path, not netif_rx
+			 * -- the same call the 9607C sibling in this tree makes,
+			 * for the same reason. netif_rx() re-queues every frame
+			 * onto the per-CPU backlog and raises a SECOND softirq
+			 * per packet, and forgoes GRO entirely; from poll
+			 * context there is nothing to gain by it. The legacy
+			 * timer fallback still uses netif_rx, because it is NOT
+			 * in poll context and napi_gro_receive would be invalid
+			 * there.
+			 */
+			if (napi_ctx)
+				napi_gro_receive(&ep->napi, skb);
+			else
+				netif_rx(skb);
 		}
 		/* hand the slot back to HW with a fresh buffer */
 		if (rtl9602c_eth_refill(ep, i)) {
@@ -3109,7 +3159,7 @@ static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
 	int work;
 
 	ep->dbg_poll++;
-	work = rtl9602c_eth_rx(ep, budget);
+	work = rtl9602c_eth_rx(ep, budget, true);	/* inside napi->poll */
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);
 	rtl9602c_eth_omci_reclaim(ep);
@@ -3162,7 +3212,7 @@ static void rtl9602c_eth_poll(struct timer_list *t)
 	unsigned long flags;
 
 	ep->dbg_poll++;
-	rtl9602c_eth_rx(ep, RX_RING_SIZE);
+	rtl9602c_eth_rx(ep, RX_RING_SIZE, false);	/* timer callback, NOT napi->poll */
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);	/* under tx_lock (races the OMCI inject's locked reclaim on shared ring 0) */
 	rtl9602c_eth_omci_reclaim(ep);

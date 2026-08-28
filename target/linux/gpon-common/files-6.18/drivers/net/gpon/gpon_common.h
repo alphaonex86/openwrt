@@ -47,6 +47,9 @@
  *
  *   WHICH FILE IS WHICH TODAY (the whole set the refactor touched):
  *     core    drivers/net/gpon/gpon_common.h        this file — the contract
+ *             drivers/net/gpon/gpon_unsup.h         the UNSUP reporting macro
+ *                                                   — a header for SHELLS, see
+ *                                                   the note in its own file
  *             drivers/net/gpon/gpon_ploam.[hc]      G.984.3 PLOAM FSM
  *             drivers/net/gpon/gpon_omci_core.[hc]  G.988 message layer
  *             drivers/net/gpon/gpon_omci_me.[hc]    G.988 ME model
@@ -389,6 +392,69 @@ struct gpon_chip_cfg {
  * downstream-GEM CAM teardown at all (its stale-CAM story is a re-arm flag),
  * so ->data_teardown is NULL there (carve-eln-gem §5.4).
  */
+/*
+ * ---------------------------------------------------------------------------
+ * ANYTHING WE DID NOT UNDERSTAND -- the two classes, and the one signature
+ * ---------------------------------------------------------------------------
+ * Operator, 2026-08-20: *"si el codigo recive algo desconocido o fuera de rango
+ * tiene que informar (sin flood) por dmesg y el python tiene que detectarlo y
+ * informar por log y console, es tanto una logica sana de diagnostico que una
+ * forma de hacer el support de nuevos OLT si el message de error hacer un dump
+ * sin saturar el dmesg (info minimal)"*.
+ *
+ * THE TWO CLASSES ARE NOT DEGREES OF THE SAME THING, and collapsing them would
+ * make every foreign OLT look like a broken device:
+ *
+ *   UNKNOWN  we do not model this value. NOT a fault -- it is the new-support
+ *            work list, and it is exactly what another vendor's OLT produces.
+ *   RANGE    the value is outside the DECLARED domain: a grant naming a T-CONT
+ *            we never configured, an index that would address a table past its
+ *            end. That IS a defect or corruption, and it is a finding.
+ *
+ * The worked example is the alloc-CAM wall (X111W, 2026-08-20): the driver was
+ * handed upstream grants for T-CONTs it had never configured and said NOTHING
+ * -- it used them. The symptom surfaced weeks later at the OLT as LOAi, three
+ * layers from the cause.
+ *
+ * The SHELL side (the emitting macro, the rate limit, the line format) lives in
+ * gpon_unsup.h beside this file. It is deliberately NOT here: this header is
+ * CORE and may never gain a pr_* (see the tier rule at the top of this file).
+ */
+enum gpon_unsup_class {
+	GPON_UNSUP_UNKNOWN = 0,
+	GPON_UNSUP_RANGE   = 1,
+};
+
+/*
+ * The op signature, named ONCE.
+ *
+ * ★ IT IS A TYPEDEF ON PURPOSE. `trace` is declared in BOTH op tables -- this
+ *   one and struct gpon_ploam_ops in gpon_ploam.h -- and the FOLLOW-UP note
+ *   there says the two are to be unified in a later step. Until they are, a
+ *   member spelled out twice is a member that can drift in one of the two
+ *   places, silently, and this project has already paid for a witness spelled
+ *   twice. Both tables therefore declare `gpon_unsup_fn unsupported;` and
+ *   there is exactly one signature to correct.
+ */
+typedef void (*gpon_unsup_fn)(void *sh, const char *kind, int cls, u32 val,
+			      const char *want, const u8 *data,
+			      unsigned int len);
+
+/*
+ * The NULL-safe caller every core uses. Mirrors the ev() idiom in
+ * gpon_ploam.c: the guard lives in ONE place so no call site can forget it,
+ * and "the shell does not implement this" stays a legal, silent, no-decision
+ * state.
+ */
+static inline void gpon_unsup_call(gpon_unsup_fn fn, void *sh, const char *kind,
+				   enum gpon_unsup_class cls, u32 val,
+				   const char *want, const u8 *data,
+				   unsigned int len)
+{
+	if (fn)
+		fn(sh, kind, (int)cls, val, want, data, len);
+}
+
 struct gpon_shell_ops {
 	/* --- PLOAM activation ---------------------------------------------
 	 * One consumer today (realtek-luna). realtek-elnath has NO software
@@ -523,6 +589,35 @@ struct gpon_shell_ops {
 	 *   (carve-luna-ploam B4, carve-eln-shell B2).
 	 */
 	void (*trace)(void *sh, unsigned int ev, u32 a, u32 b);
+
+	/* Report ONE datum the core received and could not place. Same
+	 * diagnostic contract as ->trace above, and for the same reasons: a
+	 * NULL ->unsupported must change no decision the core makes and no byte
+	 * it emits, so a shell that does not implement it loses information and
+	 * nothing else. Existing shells use designated initialisers, so they get
+	 * NULL here without being touched.
+	 *
+	 * ★ WHY IT EXISTS BESIDE ->trace RATHER THAN INSIDE IT. ->trace carries
+	 *   two u32s and no buffer, so it can say "an unhandled type went by"
+	 *   and can NOT say WHAT went by. A 13-octet PLOAM cannot ride two
+	 *   u32s. That gap is the whole point: a report without the datum tells
+	 *   you something happened, a report WITH it is the specification for
+	 *   implementing the thing that happened -- which is how a foreign
+	 *   vendor's OLT gets supported.
+	 *
+	 * @kind  a stable slug naming WHAT was not understood, and it is the
+	 *        rate-limit key in the shell as well as the aggregation key in
+	 *        the reader. That is what stops a new kind being buried under a
+	 *        noisy old one.
+	 * @cls   enum gpon_unsup_class, widened to int so this table needs no
+	 *        ordering dependency on that enum.
+	 * @val   the offending value.
+	 * @want  the DECLARED domain, as a SPACE-FREE token (the reader parses
+	 *        `want=` up to the first space).
+	 * @data  the minimal dump, and @len its length; the shell clips it.
+	 *        NULL/0 is legal -- a report with no dump is still a report.
+	 */
+	gpon_unsup_fn unsupported;
 };
 
 /*

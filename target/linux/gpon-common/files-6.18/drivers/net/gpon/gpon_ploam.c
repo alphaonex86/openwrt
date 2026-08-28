@@ -154,6 +154,25 @@ static void ev(const struct gpon_ploam *o, enum gpon_ploam_ev e, u32 a, u32 b)
 		o->ops->trace(o->sh, e, a, b);
 }
 
+/*
+ * The core's outlet for "we received something we do not model, or out of
+ * range".  Same shape as ev() above and the same contract -- NULL is legal and
+ * changes no decision and no emitted byte -- but it carries the DATUM, which
+ * ev() cannot: two u32s can report that an unhandled type went by, and cannot
+ * report WHAT went by.  The reader on the far end is
+ * dev/ONU-test-case/unsup_scan.py; the shell renders the line (gpon_unsup.h).
+ *
+ * @want is parsed up to the first SPACE by that reader, so every want token
+ * passed here is space-free.
+ */
+static void unsup(const struct gpon_ploam *o, const char *kind,
+		  enum gpon_unsup_class cls, u32 val, const char *want,
+		  const u8 *d, unsigned int len)
+{
+	gpon_unsup_call(o->ops->unsupported, o->sh, kind, cls, val, want,
+			d, len);
+}
+
 /* The single point every upstream PLOAM leaves through. `queue` selects the
  * US_PLOAM_IND queue and is load-bearing: urgent (0x1) pre-empts the auto-SN
  * burst (0x6), which is what gets an Acknowledge out before the OLT raises
@@ -808,8 +827,22 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		 * silent drop into LOAi. PEE / Power_Level / PST /
 		 * Ranging_Adjustment do NOT require an ACK in G.984.3; if a
 		 * reported type turns out to need one, add an explicit case. */
-		if (onu_id == o->onu_id || onu_id == 0xff)
+		if (onu_id == o->onu_id || onu_id == 0xff) {
 			ev(o, GPON_PLOAM_EV_UNHANDLED, type, onu_id);
+			/* ...and say WHAT it was.  GPON_PLOAM_EV_UNHANDLED
+			 * carries the type and the ONU-ID and no message
+			 * bytes, so on its own it can only report that
+			 * something went by.  A downstream PLOAM a foreign
+			 * OLT sends and we do not model is the exact input
+			 * this facility exists to turn into implementable
+			 * information, so the whole 13-octet message rides
+			 * along.  class=unknown, never range: not modelling a
+			 * type is a gap in US, and publishing another
+			 * vendor's OLT as a broken device would be wrong. */
+			unsup(o, "ds_ploam_type", GPON_UNSUP_UNKNOWN, type,
+			      "G.984.3-DS-type-this-ONU-models",
+			      m, GPON_PLOAM_DS_LEN);
+		}
 		break;
 	}
 

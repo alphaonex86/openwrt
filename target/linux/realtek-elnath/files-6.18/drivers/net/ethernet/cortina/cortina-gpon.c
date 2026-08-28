@@ -2239,7 +2239,18 @@ static void cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
  * OMCC; point them all at the OLT-assigned omci_port.id (vendor
  * aal_gpon_omcc_gem_enable -> aal_gpon_us_gem_port_set).
  */
-static void cg_omcc_gem_bind(struct cortina_gpon *cg, u32 gem_id)
+/* Bind every OMCC upstream GEM slot to `gem_id`.  -> 0, or -ETIMEDOUT if the
+ * indirect table access never released GO.
+ *
+ * IT RETURNS A RESULT BECAUSE THE CALLER MUST NOT LATCH ON A FAILED BIND
+ * (2026-08-20).  This used to be void and to `return;` mid-loop on a table
+ * timeout, leaving the OMCC slot run HALF-WRITTEN - and `cg_omcc_try_up()`
+ * then set `omcc_up = true` anyway.  With the latch set, no later event
+ * retries the bind, so the ONU sits at O5 with an OMCC that cannot carry
+ * OMCI and the only way out is an OLT Deactivate.  A recovery that a
+ * transient makes permanent is the same defect shape as a count-capped
+ * retry: the caller has to be able to see that it did not work. */
+static int cg_omcc_gem_bind(struct cortina_gpon *cg, u32 gem_id)
 {
 	u32 idx, d, n;
 
@@ -2248,18 +2259,27 @@ static void cg_omcc_gem_bind(struct cortina_gpon *cg, u32 gem_id)
 	 * shared layer (gpon_gem_us_port_id) so the two families state it once */
 	for (n = 0; n < cg_us_omcc_slots.count; n++) {
 		idx = gpon_gem_us_index(&cg_us_omcc_slots, n);
-		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx))
-			return;
+		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx)) {
+			dev_warn_ratelimited(cg->dev,
+				"OMCC: us-gem slot %u read access timed out - bind NOT complete\n",
+				n);
+			return -ETIMEDOUT;
+		}
 		d = readl(cg->mac + CG_REG_US_PORT_DATA);
 		d = (d & ~0xfffu) | gpon_gem_us_port_id(gem_id);
 		writel(d, cg->mac + CG_REG_US_PORT_DATA);
-		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, CG_TBL_WR | idx))
-			return;
+		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, CG_TBL_WR | idx)) {
+			dev_warn_ratelimited(cg->dev,
+				"OMCC: us-gem slot %u write access timed out - bind NOT complete\n",
+				n);
+			return -ETIMEDOUT;
+		}
 	}
 
 	cg->omcc_gem = gpon_gem_us_port_id(gem_id);
 	dev_info(cg->dev, "OMCC: us-gem 0..%d bound to GEM port-id %u\n",
 		 CG_OMCC_US_GEM_IDX_NUM - 1, cg->omcc_gem);
+	return 0;
 }
 
 /* DS GEM CAM: entry[GEM port-id] -> {intern gem index, vld} (vendor
@@ -2579,7 +2599,14 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 			 omci_port);
 		return;
 	}
-	cg_omcc_gem_bind(cg, CG_OMCI_PORT_ID(omci_port));
+	/* LATCH ONLY ON SUCCESS.  A failed bind leaves `omcc_up` clear, so the
+	 * next PLOAM/state event runs this again - the retry is the event
+	 * stream itself, and it costs nothing while the bind works. */
+	if (cg_omcc_gem_bind(cg, CG_OMCI_PORT_ID(omci_port))) {
+		dev_warn_ratelimited(cg->dev,
+			"OMCC: GEM bind failed at O5 - NOT latching omcc_up, will retry on the next event\n");
+		return;
+	}
 	cg->omcc_up = true;
 	dev_info(cg->dev, "OMCC link UP (alloc %u, gem %u) - ready for OMCI\n",
 		 cg->omcc_alloc, cg->omcc_gem);

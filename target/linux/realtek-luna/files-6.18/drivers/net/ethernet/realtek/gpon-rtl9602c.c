@@ -63,6 +63,24 @@
 #include "rtl9602c_gpon_nic.h"
 #include "rtl960x_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
 
+/*
+ * ANYTHING THIS DRIVER RECEIVES AND CANNOT PLACE leaves through ONE spelling,
+ * authored once in the shared GPON tree and read by
+ * dev/ONU-test-case/unsup_scan.py:
+ *
+ *   rtl9602c-gpon: UNSUP kind=<slug> class=<unknown|range> val=<v> want=<t> n=<c> d=<hex>
+ *
+ * GPON_UNSUP_SUBSYS is defined BEFORE the include so the new lines carry this
+ * file's existing prefix and sit beside its other log lines in dmesg.
+ *
+ * It resolves because this directory's Makefile now carries
+ * `ccflags-y += -I$(srctree)/drivers/net/gpon` -- reason 3 of the four recorded
+ * at the "WHY THE REWIRE DID NOT LAND WITH THE CARVE" note below is therefore
+ * no longer true, and that note has been updated to say so.
+ */
+#define GPON_UNSUP_SUBSYS	"rtl9602c-gpon"
+#include "gpon_unsup.h"		/* shared: the UNSUP report + its rate limit */
+
 #define GPON_PHYS_BASE	0x1b700000u
 #define GPON_REG_SIZE	0x00010000u	/* covers GTC DS block at +0x1000 */
 
@@ -743,7 +761,28 @@ MODULE_PARM_DESC(cdr_stuck_recover, "recover a wedged DS CDR (GTC_DS_STS==0xca0e
 static bool gpon_esd_recover = true;
 module_param(gpon_esd_recover, bool, 0644);
 MODULE_PARM_DESC(gpon_esd_recover, "periodic RX-CDR re-lock when the DS PLEND/LOM parse fails while byte-locked (stock gpon_esdRecover; fixes the ~1/4 grant-deaf churn; default on)");
-#define GPON_CDR_STUCK_MAX	8	/* bounded re-acquire attempts per range cycle */
+#define GPON_CDR_STUCK_MAX	8	/* FAST re-acquire attempts before backing off */
+/* ★ RATE-BOUNDED, NEVER COUNT-CAPPED -- the operator's standing rule, and the
+ * shape cortina-gpon.c already uses for its own stuck-O1 recovery ("the cadence
+ * below bounds the retry RATE; nothing bounds the count").  After the fast
+ * budget is spent the toggle keeps being attempted, once per
+ * GPON_CDR_STUCK_SLOW_TICKS, for as long as the wedge is there.
+ *
+ * IT USED TO STOP DEAD.  The attempt counter was a function-static inside
+ * gpon_fsm_poll(), so nothing could refill it: gpon_fsm_set_state() does not
+ * touch it and neither do any of the four teardowns, and its ONLY reset is a
+ * status read that is not the wedge sentinel -- i.e. the wedge clearing by
+ * itself, the one event that would have made the recovery unnecessary.  Eight
+ * attempts at two ticks each, and after 160 ms of a persistent wedge the
+ * recovery was disarmed for the module's lifetime.  The comments claimed the cap
+ * was "attempts/range" and "per range cycle" and that it "yields to the
+ * LOS/re-range path"; none of the three was true, and the yield target is gated
+ * `if (los_rerange_ticks && gpon_fsm_state >= 2)` -- a state a wedged DS framer
+ * cannot reach, because reaching O2 requires RECEIVING a downstream PLOAM.
+ * Pinned by dev/rtl9607c-test/gpon_lifetime_test.c case [d] (suite step 23),
+ * SEEN to fail on the pre-fix source: 8 attempts, then 33 minutes of silence. */
+#define GPON_CDR_STUCK_SLOW_TICKS	6000	/* ~60 s at the 10 ms poll */
+static unsigned int gpon_cdr_stuck_tries;	/* consecutive attempts THIS episode */
 static unsigned int gpon_cdr_stuck_count;	/* diag: total wedges detected */
 static unsigned int gpon_cdr_stuck_fixed;	/* diag: wedges cleared by the toggle */
 static u32 gpon_gtc_ds_sts_last;		/* diag: last raw GTC DS status seen */
@@ -4455,16 +4494,44 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 	/* Report what each entry HELD before it is parked. This is the confirming
 	 * measurement for the BWmap decode above: an entry that already matches a
 	 * granted Alloc-ID is a grant this ONU was answering on the wrong T-CONT.
-	 * One line, once per activation, so it cannot flood the console. */
+	 *
+	 * ★ class=range, NOT unknown, and the difference is the whole point of
+	 *   the two classes. The DECLARED domain is "exactly one T-CONT -- the
+	 *   one we keep -- may hold a live alloc": every other entry is supposed
+	 *   to be parked at the reserved 0xFFF the OLT never grants. An entry
+	 *   outside that domain that would MATCH a grant is not a gap in what we
+	 *   model, it is the ambiguity that made the content-addressable search
+	 *   resolve the OLT's grant to a T-CONT nothing was draining. That IS a
+	 *   finding, and the reader must fail on it rather than file it as
+	 *   support work.
+	 *
+	 * The dump is the entry itself: d[0] = the CAM index that was wrong,
+	 * d[1] = the ONE index allowed to hold a live alloc, d[2..3] = the
+	 * 12-bit Alloc-ID the wrong entry held, big-endian.  So the line alone
+	 * says WHICH entry, WHICH entry it should have been, and WHICH
+	 * allocation -- with nothing to correlate against a /proc read taken at
+	 * some other moment.  (`keep` rides in the dump rather than in `want`
+	 * so that `want` stays a plain literal: the reader parses want= up to
+	 * the first space, and a formatted token is one more thing that can
+	 * grow a character the parser treats as a field.) */
 	for (t = 0; t < 32; t++) {
 		u32 rb;
 
 		if (t == keep)
 			continue;
 		rb = gpon_alloc_cam_read(t);
-		if (rb & BIT(16))		/* hit: this entry would match a grant */
-			pr_info("rtl9602c-gpon: alloc-CAM[%u] held alloc=0x%x (hit) -> parking at 0xfff\n",
-				t, rb & 0xfff);
+		if (rb & BIT(16)) {		/* hit: this entry would match a grant */
+			u8 dmp[4];
+
+			dmp[0] = t;
+			dmp[1] = keep;
+			dmp[2] = (u8)((rb >> 8) & 0x0f);
+			dmp[3] = (u8)(rb & 0xff);
+			gpon_unsup_report("alloc_cam_stale", GPON_UNSUP_RANGE,
+					  rb & 0xfff,
+					  "0xfff-on-every-tcont-but-the-kept-one",
+					  dmp, sizeof(dmp));
+		}
 	}
 
 	for (t = 0; t < 32; t++) {
@@ -4797,19 +4864,104 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 
 			seq_printf(s, "us_alloc: tc16=alloc0x%x hit%u\n", a16 & 0xfff, !!(a16 & BIT(16)));
 		}
-		/* bwmap: THE decisive alloc-match witness — the Alloc-IDs the OLT is ACTUALLY
-		 * granting this ONU, read from the GTC BWMAP capture engine (GPON_BWMAP_CTRL
-		 * 0x200c CAP_EN bit15 arms it; captured allocation words at GPON_BWMAP_DATA
-		 * 0x2400+; status 0x2010). Each captured allocation carries a granted 12-bit
-		 * Alloc-ID. Cross vs us_alloc tc16 (=0x100): if NO captured Alloc-ID equals the
-		 * CAM's alloc, every operational grant is a CAM MISS -> bwm_acpt=0 (silent
-		 * drop, no fail/inv). Raw words shown; read /proc twice for a fresh capture. */
+		/* bwmap: what the GTC BWMAP capture engine actually holds — which
+		 * T-CONT the OLT's grants RESOLVE TO, and whether we ever configured it.
+		 *
+		 * ★★ THE PREVIOUS COMMENT HERE WAS WRONG, AND IT WAS WRONG IN THE
+		 *    DIRECTION THAT MATTERED (corrected 2026-08-20, RE'd from the
+		 *    vendor SDK's own reader, tier 3, cross-checked against a sibling
+		 *    chip's DAL, tier 4, and against G.984.3's allocation structure).
+		 *    It said "each captured allocation carries a granted 12-bit
+		 *    Alloc-ID" and told the reader to cross it against the CAM's
+		 *    alloc.  There IS NO Alloc-ID in the capture.  What word 0 carries
+		 *    is a 5-bit T-CONT INDEX — the value AFTER the alloc-CAM has
+		 *    already resolved the grant.  So the comparison it asked for could
+		 *    never be made, and a grant that MISSED the CAM cannot appear here
+		 *    as "an Alloc-ID that does not match" at all.  A misleading name is
+		 *    a defect and is renamed the day it is proven wrong.
+		 *
+		 *    The second error was arithmetic: an allocation is TWO words with
+		 *    an 8-byte STRIDE, so the old d[0..5] print showed THREE
+		 *    allocations while its own label claimed six.
+		 *
+		 * WORD 0 (0x2400 + 8*i): [23] VALID  [22] LST  [21] EoB  [20] SoB
+		 *                        [19] PLOAMu [18] FEC  [17:16] DBRu
+		 *                        [14:12] MF  [4:0] T-CONT index
+		 * WORD 1 (0x2400 + 8*i + 4): [15:0] StartTime, [31:16] StopTime.
+		 * VALID / T-CONT / StartTime / StopTime are each confirmed by two
+		 * independent sources; the SoB/EoB/LST/MF bits rest on one and are not
+		 * relied on here.  Status 0x2010 carries exactly one defined bit,
+		 * [8] CAP_OVERFL — there is NO done/ready/fresh bit anywhere in this
+		 * engine, which is why the old "read /proc twice for a fresh capture"
+		 * advice rested on nothing.
+		 *
+		 * ⚠⚠ THE ARM BELOW IS STILL INCOMPLETE, AND THIS COMMENT SAYS SO
+		 *    RATHER THAN LETTING A READER ASSUME OTHERWISE.  The vendor's own
+		 *    sequence is: write 0 -> write CAP_CLR(bit14)|CAP_FRAME_NUM ->
+		 *    write CAP_EN(bit15)|CAP_FRAME_NUM -> WAIT 5-10 ms (40-80 DS
+		 *    frames) -> read CAP_OVERFL -> read the data.  Ours ORs CAP_EN into
+		 *    whatever was there: no CAP_CLR pulse, no frame count, no settle,
+		 *    and no fresh arming edge if CAP_EN was already set.  It is left
+		 *    exactly as it was on purpose — completing it means new register
+		 *    writes and a sleep in this path, and there is no board on the
+		 *    bench to prove them on.  ⇒ EVERY report below is gated on the
+		 *    per-entry VALID bit, which is the only freshness signal this
+		 *    silicon offers, and an all-zero (never-armed) buffer therefore
+		 *    reports NOTHING rather than reporting T-CONT 0 thirty-two times.
+		 *
+		 * ★ WHAT THE REPORT MEANS.  `tcont_en` is the set of T-CONTs the US
+		 *   scheduler was actually configured for.  A VALID captured
+		 *   allocation naming a T-CONT outside that set is a grant this ONU is
+		 *   answering on a queue nothing drains — which is the alloc-CAM wall
+		 *   seen from the other end, and it is class=range, a finding.  The
+		 *   CAM-side witness in gpon_alloc_cam_clear_others() sees the same
+		 *   fault EARLIER, while it can still be prevented; this one confirms
+		 *   it from the grant side. */
 		{
+			u32 en = pi_rd(0x23e4);
+			int i, nvalid = 0;
+
 			gpon_wr(0x0200c, gpon_rd(0x0200c) | (1u << 15));	/* CAP_EN arm */
-			seq_printf(s, "bwmap: ctrl(0x200c)=0x%08x sts(0x2010)=0x%08x d[0..5]=%08x %08x %08x %08x %08x %08x\n",
+			seq_printf(s, "bwmap: ctrl(0x200c)=0x%08x sts(0x2010)=0x%08x[OVERFL=%lu] tcont_en=0x%08x alloc[0..2]=%08x/%08x %08x/%08x %08x/%08x\n",
 				   gpon_rd(0x0200c), gpon_rd(0x02010),
-				   gpon_rd(0x02400), gpon_rd(0x02404), gpon_rd(0x02408),
-				   gpon_rd(0x0240c), gpon_rd(0x02410), gpon_rd(0x02414));
+				   (gpon_rd(0x02010) >> 8) & 1UL, en,
+				   gpon_rd(0x02400), gpon_rd(0x02404),
+				   gpon_rd(0x02408), gpon_rd(0x0240c),
+				   gpon_rd(0x02410), gpon_rd(0x02414));
+
+			/* 32 allocations is what the vendor's own readers walk, of
+			 * the 128 the address space holds; entries past 32 are
+			 * never exercised by any vendor code, so we do not invent a
+			 * meaning for them. */
+			for (i = 0; i < 32; i++) {
+				u32 w0 = gpon_rd(0x02400 + i * 8);
+				u32 w1 = gpon_rd(0x02404 + i * 8);
+				u8 tc, dmp[9];
+
+				if (!(w0 & BIT(23)))		/* VALID */
+					continue;
+				nvalid++;
+				tc = (u8)(w0 & 0x1f);
+				if (en & BIT(tc))		/* configured: fine */
+					continue;
+
+				/* The dump is the whole allocation plus the
+				 * bitmap it was judged against, so the line is
+				 * self-contained: entry index, both captured
+				 * words big-endian, and tcont_en. */
+				dmp[0] = (u8)i;
+				dmp[1] = (u8)(w0 >> 24); dmp[2] = (u8)(w0 >> 16);
+				dmp[3] = (u8)(w0 >> 8);  dmp[4] = (u8)w0;
+				dmp[5] = (u8)(en >> 24); dmp[6] = (u8)(en >> 16);
+				dmp[7] = (u8)(en >> 8);  dmp[8] = (u8)en;
+				gpon_unsup_report("bwmap_tcont", GPON_UNSUP_RANGE,
+						  tc, "a-tcont-set-in-tcont_en",
+						  dmp, sizeof(dmp));
+				seq_printf(s, "bwmap_grant: entry%d -> T-CONT %u NOT in tcont_en=0x%08x (w0=%08x w1=%08x)\n",
+					   i, tc, en, w0, w1);
+			}
+			seq_printf(s, "bwmap_scan: %d valid allocation(s) of 32 examined\n",
+				   nvalid);
 		}
 		/* US GTC emission breakdown: PLOAM (idx2 cpu / idx3 auto) vs GEM (idx4 byte /
 		 * idx1 dbru) + per-T-CONT-16 idle-GEM (TCONT_IDLE_BYTE_STAT[16] = 0x6c00+16*64
@@ -5094,8 +5246,12 @@ static int gpon_proc_show(struct seq_file *s, void *v)
  *      gpon_proto.c drifted.
  *   2. gpon_ploam.o is `# gpon-pending` in the shared Makefile, not obj-y, so
  *      the gpon_ploam_* symbols do not exist at link time.
- *   3. This directory's Makefile carries no -I for drivers/net/gpon, so
- *      #include "gpon_ploam.h" does not resolve from here.
+ *   3. ★ NO LONGER TRUE (2026-08-20). This directory's Makefile now carries
+ *      `ccflags-y += -I$(srctree)/drivers/net/gpon`, the same line
+ *      realtek-elnath has had since the carve, so a shared-tree header DOES
+ *      resolve from here -- this file already includes gpon_unsup.h through
+ *      it. What that removes is ONLY this obstacle; items 1, 2 and 4 above are
+ *      unaffected and each still blocks the PLOAM rewire on its own.
  *   4. gpon_ploam.c's sn_hex_nibble() does NOT reproduce this driver's
  *      hex_to_bin() path, though its comment claims byte-identity: the kernel
  *      returns -1 for a non-hex digit (0xff once stored in the u8), the core
@@ -6152,6 +6308,7 @@ static void gpon_apply_boh(bool ranged)
 	u8 oh[GPON_BOH_LEN];
 	u8 guard = gpon_boh_guard, t3 = ranged ? gpon_boh_t3ranged : gpon_boh_t3pre;
 	u8 rep, i, boh_len, size;
+	unsigned int want;
 
 	/* EXACT port of the stock burst-overhead build (the upstream-overhead
 	 * calculation + the ranged burst-head set). The old
@@ -6167,9 +6324,29 @@ static void gpon_apply_boh(bool ranged)
 		guard = 32;
 	rep = guard / 8;			/* boh_repeat = whole guard bytes (fill index) */
 
-	boh_len = t3 ? (rep + t3 + 3) : GPON_BOH_LEN;	/* total burst-overhead length */
-	if (boh_len > GPON_BOH_MAX_LEN)
-		boh_len = GPON_BOH_MAX_LEN;
+	/* ★ WIDEN BEFORE CLAMPING. `rep + t3 + 3` is computed in int (rep <= 4,
+	 * t3 <= 255, so up to 262) and USED to be assigned straight into the u8
+	 * `boh_len` -- which TRUNCATES, so the clamp below could never see a value
+	 * that had already wrapped. Measured on x86 with the driver's own types:
+	 * t3=253 wants 260, wrapped to 4, the `> 252` test did not fire, and the
+	 * burst went out 4 bytes long instead of 252. This function's own comment
+	 * further down records what a too-short BOH does: the delimiter is cut off,
+	 * the OLT burst receiver cannot frame us, and that is LOAi / "Laser out" ->
+	 * Deactivate. The whole t3 range 249..255 produced 0..6.
+	 * `t3` comes STRAIGHT OFF THE WIRE (Extended_Burst_Length d[1]) with no
+	 * bound, so this is an OLT-supplied value driving a register field. */
+	want = t3 ? (unsigned int)rep + t3 + 3 : GPON_BOH_LEN;
+	if (want > GPON_BOH_MAX_LEN) {
+		/* The value came off the wire and the hardware field cannot hold
+		 * it, so it is a RANGE finding, not support work: report it with
+		 * the guard and t3 that produced it, then clamp. */
+		u8 dmp[2] = { guard, t3 };
+
+		gpon_unsup_report("boh_len", GPON_UNSUP_RANGE, want,
+				  "at-most-252", dmp, sizeof(dmp));
+		want = GPON_BOH_MAX_LEN;
+	}
+	boh_len = (u8)want;		/* total burst-overhead length */
 	size = (boh_len > GPON_BOH_LEN) ? GPON_BOH_LEN : boh_len;	/* stored bytes (<=12) */
 	if (size < 4)				/* need room for >=1 fill + 3 delimiter */
 		size = 4;
@@ -6760,9 +6937,32 @@ static void gpon_fsm_handle(const u8 *m)
 		 * drop -> LOAi. PEE(0x0f)/PowerLevel(0x10)/PST(0x11)/Rang_Adjust(0x17) do NOT
 		 * require an ACK in G.984.3; only log. If a logged type turns out to need an
 		 * ACK, add an explicit case above. */
-		if (onu_id == gpon_fsm_onu_id || onu_id == 0xff)
-			pr_info_ratelimited("rtl9602c-gpon: UNHANDLED DS PLOAM type=0x%02x onu=0x%02x d=%*phN\n",
-					    type, onu_id, 8, d);
+		if (onu_id == gpon_fsm_onu_id || onu_id == 0xff) {
+			/* ★ THE NEW-OLT CASE, VERBATIM. A downstream PLOAM type
+			 * another vendor's OLT sends and we do not model is not
+			 * a fault -- it is the work list, and the dump is what
+			 * makes it implementable rather than merely noticed.
+			 * class=unknown for exactly that reason; a foreign OLT
+			 * must never be published as a broken device.
+			 *
+			 * WHAT CHANGED vs the pr_info_ratelimited this
+			 * replaces, and why the old line was not enough:
+			 *   - the kernel's rate limiter DROPS lines inside its
+			 *     window and tells nobody how many, so a flood hid
+			 *     its own size; `n=` here is cumulative and the
+			 *     backoff prints 1,2,4,8,... so suppression can
+			 *     never HIDE;
+			 *   - its token bucket is shared, so a noisy site could
+			 *     starve a NEW one. The counter here is per site;
+			 *   - the text was this file's own invention, so
+			 *     nothing on the host could read it. It is now the
+			 *     one spelling unsup_scan.py parses.
+			 * The dump grows 8 -> 13 octets: the whole message,
+			 * because half a PLOAM implements nothing. */
+			gpon_unsup_report("ds_ploam_type", GPON_UNSUP_UNKNOWN,
+					  type, "G.984.3-DS-type-this-ONU-models",
+					  m, 13);
+		}
 		break;
 	}
 }
@@ -7103,10 +7303,14 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * lock that a soft/WDT reboot cannot clear); re-acquire it by toggling
 	 * SP_SDS_EN_RX (SDS_REG0[1]) 1->0->1, exactly as stock does. Done as a two-tick
 	 * toggle (disable now, re-enable next tick ~10ms later) so no 10ms busy-wait
-	 * runs in this softirq. Self-limiting: only fires while wedged, and a bounded
-	 * consecutive-attempt cap yields to the LOS/re-range path on a dead link. */
+	 * runs in this softirq. Self-limiting: only fires while wedged. RATE-bounded,
+	 * never count-capped -- GPON_CDR_STUCK_MAX fast attempts, then one every
+	 * GPON_CDR_STUCK_SLOW_TICKS, for as long as the sentinel is latched. It must
+	 * NOT hand off to the LOS/re-range path: that path is gated on
+	 * gpon_fsm_state >= 2, and a wedged DS framer delivers no downstream PLOAM,
+	 * so the FSM never leaves O1 to reach it. */
 	if (cdr_stuck_recover) {
-		static int cdr_pending, cdr_tries;
+		static int cdr_pending;
 		u32 sts = gpon_rd(GPON_GTC_DS_INTR_STS);
 
 		gpon_gtc_ds_sts_last = sts;
@@ -7116,16 +7320,17 @@ static void gpon_fsm_poll(struct timer_list *t)
 			if (gpon_rd(GPON_GTC_DS_INTR_STS) != GTC_DS_CDR_STUCK)
 				gpon_cdr_stuck_fixed++;
 		} else if (sts == GTC_DS_CDR_STUCK) {
-			if (cdr_tries < GPON_CDR_STUCK_MAX) {
+			if (gpon_cdr_stuck_tries < GPON_CDR_STUCK_MAX ||
+			    (gpon_fsm_ticks % GPON_CDR_STUCK_SLOW_TICKS) == 0) {
 				sw_field(SDS_REG0, 1, 1, 0);	/* SP_SDS_EN_RX -> 0 */
 				cdr_pending = 1;
-				cdr_tries++;
+				gpon_cdr_stuck_tries++;
 				gpon_cdr_stuck_count++;
 				pr_warn_ratelimited("rtl9602c-gpon: DS CDR wedged (GTC_DS_STS=0x%08x); SP_SDS_EN_RX re-acquire #%u\n",
 						    sts, gpon_cdr_stuck_count);
 			}
 		} else {
-			cdr_tries = 0;	/* healthy -> reset the consecutive-attempt cap */
+			gpon_cdr_stuck_tries = 0;	/* healthy -> fresh fast budget */
 		}
 	}
 

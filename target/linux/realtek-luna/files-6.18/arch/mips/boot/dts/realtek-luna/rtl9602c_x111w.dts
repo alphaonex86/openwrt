@@ -98,7 +98,15 @@
 			 * MTD_ROOTFS_ROOT_DEV then set ROOT_DEV (no root= needed from
 			 * U-Boot) and carve the rootfs_data overlay child -- without this
 			 * the kernel has no root device and VFS panics at mount. Bank 0 is
-			 * the flash target (inactive; active bank 1 keeps the live stock). */
+			 * the flash target. ★ AND IT IS THE ACTIVE ONE SINCE 2026-08-21:
+			 * our image was written here and COMMITTED (sw_active=0,
+			 * sw_commit=0, read back from the saved U-Boot environment,
+			 * then confirmed by /dev/root on /rom = squashfs). The older
+			 * wording said "inactive; active bank 1 keeps the live stock"
+			 * and was a fact about the unit, not about the design -- it
+			 * went stale the day the bank was committed, and a stale
+			 * comment in a DTS is read as current by whoever ports the
+			 * next board. */
 			linux,rootfs;
 		};
 		partition@840000 {

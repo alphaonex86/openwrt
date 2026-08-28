@@ -34,10 +34,43 @@
  *
  *     TIER    prefix                       holds                    may touch HW
  *     ------  ---------------------------  -----------------------  ------------
- *     core    gpon_                        protocol only: the       NO — never
- *                                          PLOAM FSM, G.988 OMCI
- *                                          + ME model, GEM/T-CONT
- *                                          mapping.  Decides.
+ *     core    gpon_                        LOGIC that is not one     NO — never
+ *                                          family's: the PLOAM FSM,
+ *                                          G.988 OMCI + ME model,
+ *                                          GEM/T-CONT mapping, wire
+ *                                          codecs, and (since
+ *                                          2026-08-28) driver logic
+ *                                          that touches no register
+ *                                          even when it uses Linux.
+ *                                          Decides; never addresses.
+ *
+ *   ★★★ THE CORE WIDENED ON 2026-08-28, BY THE OPERATOR, AND WHY IT HAD TO.
+ *   The tier above used to say "protocol only", and the measurement that forced
+ *   the change is worth keeping: what pins code into a family is NOT the
+ *   hardware.  `cn_flow_replace` is 347 lines with ZERO register accesses and
+ *   could not move, because it allocates, takes netdev references and drives an
+ *   rhashtable -- and the old rule barred those.  Read across both families,
+ *   that is the shape of most of the code: netdev, napi, skb, TC offload,
+ *   timers.  Barring Linux from the core did not keep hardware out; it kept
+ *   SHARED DRIVER LOGIC in two copies, one per family.
+ *
+ *   ⇒ the line is now exactly one thing: **does it name a register or reach a
+ *   bus?**  If not, it is a candidate for the core however much Linux it uses.
+ *
+ *   ⚠⚠ AND THE STRICT SUBSET IS NOT NEGOTIABLE, because it is what this project
+ *   PROVES things with.  These files stay free of Linux APIs as well as of
+ *   MMIO, so they keep building for x86 and keep being fuzzed under
+ *   libFuzzer/ASan/UBSan at thousands of cases per second -- the gate that
+ *   DISCOVERS, against a board boot that only CONFIRMS:
+ *
+ *       gpon_ploam.[hc]   gpon_omci_core.[hc]   gpon_omci_me.[hc]
+ *       gpon_gem_us.[hc]  gpon_sn.[hc]          gpon_regseq.[hc]
+ *
+ *   A file in that list may not gain an allocator, a lock, a device pointer, a
+ *   timer or a sleep.  New core code that needs Linux is a NEW file beside
+ *   them, never an edit to one of them.  `gpon_layer_hostbuild_test.sh` is what
+ *   makes that a fact rather than an intention: it builds the list on the host,
+ *   and it goes red the day one of them stops being buildable there.
  *     family  rtl960x_  and  cortina-      one silicon FAMILY's     yes
  *                                          hardware: PON-MAC and
  *                                          SerDes bring-up, the

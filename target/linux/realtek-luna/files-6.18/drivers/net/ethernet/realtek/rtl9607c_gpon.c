@@ -3,7 +3,7 @@
  * RTL9607C GPON driver — chip-specific hardware bring-up for the Luna
  * interAptiv SoC.  Provides the register-access ops (rtl960x_ops) that the
  * shared family library (rtl960x_ponmac.c) and the shared protocol core
- * (gpon_proto.c / gpon-rtl9602c.c) use.
+ * (gpon_proto.c / gpon-rtl960x.c) use.
  *
  * Key difference from the 9602C: the SWCORE has a decode hole at offsets
  * 0xB0-0xD8 (the I2C indirect registers).  Those are accessed through a

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Shared interface between the RTL9602C GPON MAC driver
- * (gpon-rtl9602c.c) and the NIC/switch driver
+ * (gpon-rtl960x.c) and the NIC/switch driver
  * (rtl9602c_eth.c). Independent implementation from the SoC's register interface
  * and the G.984/G.988 protocols. Once the OLT assigns the OMCC GEM port and the
  * GPON driver installs the OMCC GEM datapath, it arms the NIC OMCI trap so that
@@ -36,7 +36,7 @@ u32 rtl9602c_eth_omci_tx_dirty(void);
  * without the OLT sending DS OMCI. Defined in rtl9602c_eth.c. */
 void rtl9602c_eth_omci_selftest(void);
 
-/* Full PON US/DS-NIC + PBO bring-up (defined in gpon-rtl9602c.c). Non-__init: also
+/* Full PON US/DS-NIC + PBO bring-up (defined in gpon-rtl960x.c). Non-__init: also
  * re-run from rtl9602c_eth_open() after the GMAC IP-block reset so the US-NIC RX
  * engine re-latches against the freshly-reset GMAC (stock order: GMAC reset -> NIC). */
 void gpon_pbo_init(void);
@@ -45,12 +45,12 @@ void gpon_pbo_init(void);
  * (2's-complement s16, 0.002 dB referred to 1 mW): #10 RX signal level, #14 TX
  * level. Reads a cache refreshed on the periodic FSM tick from the RTL8290B's
  * calibrated SFF-8472 DDM page — no I2C in the (softirq) GET path. Defined in
- * gpon-rtl9602c.c. */
+ * gpon-rtl960x.c. */
 void gpon_anig_optical_omci(s16 *rx_level, s16 *tx_level);
 
 /* Faithful port of the stock SDK rtk_all_module_init() GPON datapath bring-up,
  * run on the quiescent switch in the eth reset path (after the GMAC reset + swcore
- * resync, before the GMAC is programmed/armed). Defined in gpon-rtl9602c.c. */
+ * resync, before the GMAC is programmed/armed). Defined in gpon-rtl960x.c. */
 void rtl9602c_datapath_tables_init(void);
 
 /* WAN data-GEM datapath. GPON_DATA_FLOW = the internal SID/flow the gpon0 WAN netdev
@@ -76,7 +76,7 @@ void rtl9602c_datapath_tables_init(void);
 
 /* Install the WAN data GEM datapath (bridged, the OLT's gem-id on flow 1, riding the
  * OMCC T-CONT). Idempotent/one-shot; called from the eth OMCI GEM-Port-CTP (ME268) create
- * handler once the OMCC is up. Defined in gpon-rtl9602c.c. Returns 0 on success,
+ * handler once the OMCC is up. Defined in gpon-rtl960x.c. Returns 0 on success,
  * -EAGAIN if the OMCC isn't installed yet. */
 int gpon_install_data_gem(void);
 /* eth OMCI RX -> gpon: the OLT issued the GEM-CTP (ME268) Create. @port_id is G.988

@@ -61,7 +61,7 @@
  * the pipe; it never reads what flows through it.
  *
  * Luna's implementation of gpon_shell_ops lives where those ops actually are,
- * which is gpon-rtl9602c.c, plus rtl9602c_eth.c for the OMCI transmit. That
+ * which is gpon-rtl960x.c, plus rtl9602c_eth.c for the OMCI transmit. That
  * is the file the Luna op-table instance belongs in - NOT this one. The
  * implementing functions, each verified present at the line given
  * (2026-08-05):
@@ -86,7 +86,7 @@
  *
  * TIER RELATIONSHIP, stated once so it is not re-derived:
  *     gpon_*        protocol core - decides, no MMIO, runs on x86 too
- *     gpon-rtl9602c.c / cortina-gpon.c   the two SHELLS - they implement
+ *     gpon-rtl960x.c / cortina-gpon.c   the two SHELLS - they implement
  *                                        gpon_shell_ops and do the I/O
  *     rtl960x_ponmac.c (this file) / the Cortina NE bring-up
  *                                        a tier BELOW both shells: silicon
@@ -95,7 +95,7 @@
  * and nothing is promoted out of it. The two silicons share no register.
  *
  * ! DO NOT ADD a struct gpon_shell_ops instance to this file. It could only
- *   be a table of pointers into gpon-rtl9602c.c's statics, which needs either
+ *   be a table of pointers into gpon-rtl960x.c's statics, which needs either
  *   12 symbols un-static'd or a runtime registration - a redesign, not code
  *   motion - and it would have no caller here. A shared-looking file with no
  *   consumer is exactly what gpon_proto.c became (dead since 2026-06-18,
@@ -109,13 +109,13 @@
  * fixed - this pass is code motion, and both are pre-existing:
  *   N1. rtl960x_ponmac_serdes_cdr_reset() (the exported dispatcher at the
  *       bottom of this file) has ZERO callers tree-wide. The live CDR reset
- *       is gpon-rtl9602c.c:3153's own inline pulse under its serdes_cdr_reset
+ *       is gpon-rtl960x.c:3153's own inline pulse under its serdes_cdr_reset
  *       module param. Kept as-is: it is the family API for the boards not on
  *       the bench, the same status as the untested 9601B/9603CVD tables.
  *   N2. That CDR reset is NOT the analog_relock op, despite the similar name.
  *       Different registers, different purpose: CDR reset pulses
  *       SDS_ANA_COM_REG12 bit15, while analog_relock is
- *       gpon-rtl9602c.c:6053 gpon_txpll_relock(), which toggles
+ *       gpon-rtl960x.c:6053 gpon_txpll_relock(), which toggles
  *       SDS_ANA_COM_REG27 bit10 (CMU enable 1->0->1) and re-syncs the SerDes
  *       word-FIFO pointer via WSDS_DIG_1D bit14. Wiring analog_relock to the
  *       CDR reset would silently replace the cold-start TX-CMU relock this
@@ -1299,7 +1299,7 @@ static int rtl9607c_serdes_cdr_reset(const struct rtl960x_ops *o)
 /* ------------------------------------------------------------------ *
  *  RTL9602C GPON PON-MAC / SerDes bring-up - clean-room op-table form.
  *  HW-TESTED on the realtek-luna board: this is a faithful translation of
- *  the in-tree gpon-rtl9602c.c SerDes-init / PBO-ponmac steps
+ *  the in-tree gpon-rtl960x.c SerDes-init / PBO-ponmac steps
  *  into this file's op-table primitives, so the family-lib path behaves
  *  identically to that in-tree sibling driver.
  *

@@ -454,7 +454,7 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
 					 * reliable onlining (VLAN-off cold boots failed config-apply 4x; VLAN-on
 					 * onlines + stays stable). BUT with filtering ON this switch does NOT pass
 					 * LAN port<->CPU traffic (ping 192.168.1.1 fails), so LAN management access
-					 * needs filtering OFF. HYBRID (gpon-rtl9602c.c gpon_fsm_poll): keep 0x19 for
+					 * needs filtering OFF. HYBRID (gpon-rtl960x.c gpon_fsm_poll): keep 0x19 for
 					 * config, then auto-clear bit0 (filtering off) once the ONU is stably at O5
 					 * (config done) to open LAN; re-assert on any re-range. Proven viable: online
 					 * with 0x19 then poke 0x13008=0 -> stays online 6h + LAN reachable. */

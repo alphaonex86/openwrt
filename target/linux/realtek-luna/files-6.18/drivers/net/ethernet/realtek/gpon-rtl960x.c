@@ -105,7 +105,7 @@
 #define GPON_UNSUP_SUBSYS	"rtl9602c-gpon"
 #include "gpon_unsup.h"		/* shared: the UNSUP report + its rate limit */
 
-#include "rtl9602c_gpon_regs.h"	/* the per-SoC offsets; the logic below is chip-agnostic */
+#include "rtl960x_gpon_regs.h"	/* the per-SoC offsets; the logic below is chip-agnostic */
 #define   GPON_BOH_LEN		12		/* stored bytes (TOTAL_OVERHEAD_BITS(96)/8); HW extends via REPEAT */
 #define   GPON_BOH_MAX_LEN	252		/* hardware BOH_LENGTH field cap */
 
@@ -396,7 +396,7 @@ MODULE_PARM_DESC(data_gem_en, "install the WAN data GEM datapath during config (
 /* trace=0 (default) silences the routine per-PLOAM/per-ACK dumps so the compact
  * O5 timeline survives the lossy serial console; key-PLOAM EVT + O5 lines always print. */
 static bool trace;	/* default 0: per-PLOAM/ACK tracing is SLOW (printk over serial) and perturbs the
-			 * activation timing (breaks ranging when on). Set gpon_rtl9602c.trace=1 only for short diagnostics. */
+			 * activation timing (breaks ranging when on). Set gpon_rtl960x.trace=1 only for short diagnostics. */
 module_param(trace, bool, 0644);
 MODULE_PARM_DESC(trace, "verbose per-PLOAM/per-ACK serial spam (default 0)");
 
@@ -415,7 +415,7 @@ MODULE_PARM_DESC(ploam_tx_dbg, "log US-PLOAM CPU-TX ENQ self-clear per send (urg
 /* o5_rearm_burst_gate: re-apply the US burst-gate cluster (0x5188/0x526c/0x6024/0x6260)
  * and re-arm the HW auto-No_message keepalive template on every O5 entry (not just __init),
  * so a re-ranged O5 after a GMAC/SDS reset does not run on US-side reset defaults. Default on;
- * A/B with gpon_rtl9602c.o5_rearm_burst_gate=0. */
+ * A/B with gpon_rtl960x.o5_rearm_burst_gate=0. */
 static bool o5_rearm_burst_gate = true;
 module_param(o5_rearm_burst_gate, bool, 0644);
 MODULE_PARM_DESC(o5_rearm_burst_gate, "re-apply US burst-gate cluster + No_message keepalive on each O5 entry (default on)");
@@ -429,7 +429,7 @@ MODULE_PARM_DESC(o5_ploam_keepalive_ticks, "emit No_message US-PLOAM every N 10m
 
 /* o5_provision_watchdog_ticks: a "Laser out" boot reaches O5 LOCALLY but the OLT
  * cannot frame our US burst (the TX-serializer lock PHASE is non-deterministic per
- * boot, gpon-rtl9602c.c:~1843), so the OLT stays Offline / Config=fail, never
+ * boot, gpon-rtl960x.c:~1843), so the OLT stays Offline / Config=fail, never
  * provisions us, and sends NO Deactivate the ONU acts on -> the ONU sits at O5
  * forever with the bad phase and never self-recovers (gpon0 RX stays 0, sds_sync
  * stays 0 = no re-range = "never leases in 5 min", HW-observed). If at O5 this many
@@ -524,7 +524,7 @@ MODULE_PARM_DESC(serdes_tx_xtra, "1=set legacy SerDes-TX D2A/clk-edge bits (stoc
  * TX serializer lock is non-deterministic, which matches the observed cycle-to-cycle US-burst
  * variation (some O5 windows the OLT decodes hundreds of US-OMCI, others it loses the burst at once
  * = LOSi/LOAi "Laser out"). NOTE: serdes_cdr_reset is now writable (0644) so it can be
- * left default-on but A/B'd live. Default on (the fix); gpon_rtl9602c.serdes_cdr_reset=0 reverts. */
+ * left default-on but A/B'd live. Default on (the fix); gpon_rtl960x.serdes_cdr_reset=0 reverts. */
 static bool serdes_cdr_reset = true;
 module_param(serdes_cdr_reset, bool, 0644);
 MODULE_PARM_DESC(serdes_cdr_reset, "pulse SDS_ANA_COM_REG12 (0x225b0) bit15 10ms (stock serdesCdr_reset RX_SD_POR_SEL) (stock ponmac step; default on)");
@@ -554,7 +554,7 @@ MODULE_PARM_DESC(usnic_initrdy_repulse, "on PONIC_INITRDY timeout, re-pulse CDR 
  * the same check each FSM poll tick (BOSA-serialized softirq) as a two-tick toggle
  * (off this tick, on next) to avoid a 10ms busy-wait in softirq. RATE-bounded:
  * GPON_CDR_STUCK_MAX fast attempts, then one per GPON_CDR_STUCK_SLOW_TICKS for as
- * long as the wedge persists -- it never stops. Default on; gpon_rtl9602c.cdr_stuck_recover=0 disables. */
+ * long as the wedge persists -- it never stops. Default on; gpon_rtl960x.cdr_stuck_recover=0 disables. */
 static bool cdr_stuck_recover = true;
 module_param(cdr_stuck_recover, bool, 0644);
 MODULE_PARM_DESC(cdr_stuck_recover, "recover a wedged DS CDR (GTC_DS_STS==0xca0eca0f) by toggling SP_SDS_EN_RX, like stock (default on)");
@@ -620,12 +620,12 @@ MODULE_PARM_DESC(serdes_stock_seq, "1=stock rev-A SerDes bring-up order (gpon_se
  * (RTL960X_CHIP_9602C path) instead of the inline gpon_serdes_init(). Validates the
  * family-lib op-table framework on real 9602C silicon: family_lib=1 must reach O5 +
  * lease + keep LAN exactly like family_lib=0 (the lib's 9602C tables are a faithful
- * translation of gpon_serdes_init). Default off; A/B with gpon_rtl9602c.family_lib=1. */
+ * translation of gpon_serdes_init). Default off; A/B with gpon_rtl960x.family_lib=1. */
 static bool family_lib = true;	/* default ON: the clean-room rtl960x_ponmac family lib is the
 				 * 9602C SerDes boot bring-up. HW-validated (O5 10/10 over two 5-boot
 				 * runs, LAN ok, WAN leases at the analog rate) = equivalent to the
 				 * inline path (its 9602C op-tables are a faithful, exact-match
-				 * translation of gpon_serdes_init). gpon_rtl9602c.family_lib=0 = legacy inline. */
+				 * translation of gpon_serdes_init). gpon_rtl960x.family_lib=0 = legacy inline. */
 module_param(family_lib, bool, 0644);
 MODULE_PARM_DESC(family_lib, "1=bring up SerDes via rtl960x_ponmac family lib (9602C path, default); 0=inline gpon_serdes_init");
 /* serdes_postmode_perturb: the family-lib path performs TWO US-TX serializer edges
@@ -633,7 +633,7 @@ MODULE_PARM_DESC(family_lib, "1=bring up SerDes via rtl960x_ponmac family lib (9
  * re-sync + a post-mode serdesCdr_reset pulse). These were NEVER cleanly A/B'd
  * (the serdes_cdr_reset param does not gate the family-lib path). DEFAULT 0
  * (=stock-matching: skip them) — prime suspect for cold-start serializer-phase
- * jitter (WAN ~50%). gpon_rtl9602c.serdes_postmode_perturb=1 restores legacy behavior. */
+ * jitter (WAN ~50%). gpon_rtl960x.serdes_postmode_perturb=1 restores legacy behavior. */
 static bool serdes_postmode_perturb;	/* default false: skip post-mode perturbations (stock rev-A) */
 module_param(serdes_postmode_perturb, bool, 0644);
 MODULE_PARM_DESC(serdes_postmode_perturb, "1=do post-GPON-mode DIG_1D resync + serdesCdr_reset (legacy); 0=skip (stock rev-A, default)");
@@ -643,7 +643,7 @@ MODULE_PARM_DESC(serdes_postmode_perturb, "1=do post-GPON-mode DIG_1D resync + s
  * RMW, bit7 stayed latched through the whole bring-up = an extra SDS-config reset
  * domain stock never touches -> prime suspect for the per-power-on US-TX serializer/
  * PLL phase re-roll (cold-start WAN ~50%, OLT "Laser out"). DEFAULT 0 = bit0-only
- * (stock = the fix); gpon_rtl9602c.serdes_sds_cfgrst=1 restores the legacy bit7+bit0 pulse. */
+ * (stock = the fix); gpon_rtl960x.serdes_sds_cfgrst=1 restores the legacy bit7+bit0 pulse. */
 static bool serdes_sds_cfgrst;	/* default false = stock bit0-only SDS reset */
 module_param(serdes_sds_cfgrst, bool, 0644);
 MODULE_PARM_DESC(serdes_sds_cfgrst, "1=legacy: also pulse CMD_SDS_CFG_RST_PS bit7 in the SDS reset; 0=stock bit0-only (default, the cold-start fix)");
@@ -652,7 +652,7 @@ MODULE_PARM_DESC(serdes_sds_cfgrst, "1=legacy: also pulse CMD_SDS_CFG_RST_PS bit
  * SerDes registers that differed between stock (WAN-up, 100%) and our failing board
  * (cold-start ~50% US-TX "Laser out"). The golden table writes them correctly but the
  * SDS reset wipes REG01 bit14 (shared CMU) / REG11 RX_FILT; this re-applies them AFTER
- * the reset, like stock. DEFAULT 1 = the fix; gpon_rtl9602c.serdes_stock_analog=0 = legacy. */
+ * the reset, like stock. DEFAULT 1 = the fix; gpon_rtl960x.serdes_stock_analog=0 = legacy. */
 static bool serdes_stock_analog = true;
 module_param(serdes_stock_analog, bool, 0644);
 MODULE_PARM_DESC(serdes_stock_analog, "1=match live-stock SDS REG01=0x73a4 + REG11 RX_FILT=0 post-reset (default, the cold-start fix); 0=legacy");
@@ -662,7 +662,7 @@ MODULE_PARM_DESC(serdes_stock_analog, "1=match live-stock SDS REG01=0x73a4 + REG
  * (legacy) leaves the CMU/CDR locking against default operating-point values that the
  * partial REG01/REG11 re-apply never fully corrects -> metastable per-power-on lock =
  * the cold-start ~50% "Laser out". Post-reset = stock = deterministic lock every cold
- * boot + soft restart. DEFAULT 1 = the fix; gpon_rtl9602c.serdes_analog_postreset=0 = legacy. */
+ * boot + soft restart. DEFAULT 1 = the fix; gpon_rtl960x.serdes_analog_postreset=0 = legacy. */
 static bool serdes_analog_postreset = true;
 module_param(serdes_analog_postreset, bool, 0644);
 MODULE_PARM_DESC(serdes_analog_postreset, "1=program full analog CMU/CDR table AFTER the SDS reset (stock rev-A, default, the cold-start determinism fix); 0=legacy pre-reset");
@@ -768,7 +768,7 @@ MODULE_PARM_DESC(bosa_settle_ms, "ms to settle the BOSA analog before the SerDes
  * (swcore 0x130)=0x00ec0005 (arm on-die over-temp ALARM comparator). Assessment:
  * DRAM-LDO + thermal alarm, NOT the SerDes/laser path — kept as stock platform
  * hygiene (the init we were missing), NOT expected to move the WAN cold-start rate.
- * Default on; A/B revert with gpon_rtl9602c.sc_ldo_init=0. */
+ * Default on; A/B revert with gpon_rtl960x.sc_ldo_init=0. */
 static bool sc_ldo_init = true;
 module_param(sc_ldo_init, bool, 0644);
 MODULE_PARM_DESC(sc_ldo_init, "run stock rtk_ldo_init (SC-indirect 0xfdca analog LDO + THERMAL_CTRL_0); default on");
@@ -790,7 +790,7 @@ static const struct rtl960x_ops rtl9602c_r960_ops = {
 /* DIAGNOSTIC: skip BOSA TX power-on + APC ignition (keep RX golden / bosa_rx_enable)
  * to isolate whether laser emission is what destabilises the downstream framer
  * lock. Set true ONLY for the laser-vs-DS-RX bisection; normal operation = false. */
-static bool laser_off;		/* default false; set via gpon_rtl9602c.laser_off=1 for the isolation test */
+static bool laser_off;		/* default false; set via gpon_rtl960x.laser_off=1 for the isolation test */
 module_param(laser_off, bool, 0444);
 MODULE_PARM_DESC(laser_off, "skip laser TX-enable+APC (DS-RX-vs-laser isolation: laser-on deafens DS RX)");
 /*
@@ -802,7 +802,7 @@ MODULE_PARM_DESC(laser_off, "skip laser TX-enable+APC (DS-RX-vs-laser isolation:
  * BOSA downstream RX (gtc_ds_sts=0x0b LOS+LOF, optic_los=1, ds_rx frozen) — the
  * whole multi-session "OLT never ranges us" wall. With apc_off the ONU reaches
  * O5: DS RX locks (gtc_ds_sts=0x04, ds_rx climbs), the OLT sends Assign_ONU-ID +
- * Ranging_Time, FSM O1..O5. Set gpon_rtl9602c.apc_off=0 only to revisit the (harmful)
+ * Ranging_Time, FSM O1..O5. Set gpon_rtl960x.apc_off=0 only to revisit the (harmful)
  * ignition path. See bisection: laser_off (skip both) vs apc_off (skip only APC).
  */
 static bool apc_off = true;	/* default TRUE: apc_off=false (full APC seat) was RE-TESTED (task bdcqpqqn1) and
@@ -925,7 +925,7 @@ static u16 gpon_data_alloc;		/* the OLT's data Alloc-ID, on T-CONT 8 */
  * Alloc-ID) keeps the OLT happy. ⚠ ONLY for OLTs that grant a SEPARATE data Alloc-ID — THIS lab
  * OLT (HSGQ-G008) uses a SINGLE Alloc-ID 0x100 for both OMCC + data (T-CONT 16), so routing data
  * to T-CONT 8 leaves it grantless. DEFAULT off (data rides T-CONT 16, correct for single-alloc);
- * gpon_rtl9602c.data_tcont=1 enables the per-data-alloc T-CONT 8 bind for multi-alloc OLTs. */
+ * gpon_rtl960x.data_tcont=1 enables the per-data-alloc T-CONT 8 bind for multi-alloc OLTs. */
 static bool data_tcont;		/* default off: single-alloc OLT (this lab) -> data rides T-CONT 16 */
 module_param(data_tcont, bool, 0644);
 MODULE_PARM_DESC(data_tcont, "bind the OLT data Alloc-ID to its own T-CONT 8 (default OFF -- single-alloc OLT like this lab rides data on T-CONT 16; =1 ONLY for multi-alloc OLTs: on a single-alloc OLT =1 routes data to a grant-less T-CONT 8 and PROVOKES the op=0xFF reclaim -> deact churn)");
@@ -3409,7 +3409,7 @@ MODULE_PARM_DESC(serdes_recommit, "1=also re-commit SerDes inside the O5 mode_se
  * guard cited a live-stock 0x66000 read, but that read was the power-up default
  * BEFORE the rev-A clear, and the "clearing didn't help" test ran while the
  * GEM_US_PORT_MAP stride bug still masked it. Stride is now fixed → re-test with the
- * correct rev-A value. A/B via bootarg gpon_rtl9602c.pir_drop=1. */
+ * correct rev-A value. A/B via bootarg gpon_rtl960x.pir_drop=1. */
 static unsigned int pir_drop;
 module_param(pir_drop, uint, 0644);
 MODULE_PARM_DESC(pir_drop, "PON_GEN_PIR_DROP bit18@0x2194: 0=rev-A erratum clear (default, drains T-CONT16), 1=set");
@@ -3424,14 +3424,14 @@ MODULE_PARM_DESC(pir_drop, "PON_GEN_PIR_DROP bit18@0x2194: 0=rev-A erratum clear
  * every prior pir_drop A/B because those toggled ONLY bit18, never METER_OP / WFQ_BURSTSIZE.
  * A zero WFQ_BURSTSIZE plausibly denies the queue any transmit burst -> pipe never arms.
  * The rev-A "must clear PIR_DROP" note is DISPROVEN by this live read (stock rev-A has it
- * SET). Default on = match stock; A/B with gpon_rtl9602c.sch_ctrl_stock=0. */
+ * SET). Default on = match stock; A/B with gpon_rtl960x.sch_ctrl_stock=0. */
 static bool sch_ctrl_stock = true;
 module_param(sch_ctrl_stock, bool, 0644);
 MODULE_PARM_DESC(sch_ctrl_stock, "1=write PON_SCH_CTRL 0x2194=0x66000 verbatim from live stock (PIR_DROP+METER_OP+WFQ_BURSTSIZE); 0=legacy bit18-only (default on)");
 /* DPRU_RPT_PRD (0x2568): DBA_BLKSIZE=48 (byte->block divisor the HW uses to encode the
  * DBRu queued-occupancy report the OLT reads to size grants). Stock writes 0x3002 once at
  * init; ours had regressed this write out -> the OLT reads 0 queued despite qid64 holding
- * pages -> grants once then stops -> gemus64=0. Default on; A/B via gpon_rtl9602c.dbru_blksize=0. */
+ * pages -> grants once then stops -> gemus64=0. Default on; A/B via gpon_rtl960x.dbru_blksize=0. */
 static bool dbru_blksize = true;
 module_param(dbru_blksize, bool, 0644);
 MODULE_PARM_DESC(dbru_blksize, "1=write DPRU_RPT_PRD 0x2568=0x3002 (DBA_BLKSIZE=48, DBRu report divisor; default on)");
@@ -3446,7 +3446,7 @@ MODULE_PARM_DESC(dbru_blksize, "1=write DPRU_RPT_PRD 0x2568=0x3002 (DBA_BLKSIZE=
  * near-full PBO backpressure watermark that nothing in the scheduler/DBA reads (the DBRu
  * reports the raw used_page count 0x2564), so it stays 0 for a small OMCI backlog even
  * when this works. Judge success by gemus64 climbing + sidpage64 draining + the OLT
- * resuming grants, NEVER by over_sts64. Default on; A/B via gpon_rtl9602c.sidvalid_last=0. */
+ * resuming grants, NEVER by over_sts64. Default on; A/B via gpon_rtl960x.sidvalid_last=0. */
 static bool sidvalid_last = true;
 module_param(sidvalid_last, bool, 0644);
 MODULE_PARM_DESC(sidvalid_last, "1=re-issue SIDVALID[64] after the T-CONT-16 arm (stock queue_add tail does this; we had omitted it) (default on)");
@@ -3458,7 +3458,7 @@ MODULE_PARM_DESC(sidvalid_last, "1=re-issue SIDVALID[64] after the T-CONT-16 arm
  * while qid 64 (T-CONT 16) actually holds the pages -> the OLT reads 0 -> grants once ->
  * stops -> gemus64=0, no drain, no bank-underflow, then DEACT (the exact observed wall).
  * Default OFF (match stock: alloc 0x100 -> T-CONT 16 only). A/B via
- * gpon_rtl9602c.omcc_alt_bind=1. */
+ * gpon_rtl960x.omcc_alt_bind=1. */
 static bool omcc_alt_bind;
 module_param(omcc_alt_bind, bool, 0644);
 MODULE_PARM_DESC(omcc_alt_bind, "1=also bind the OMCC alloc to T-CONT 1 (non-stock double-bind that makes the DBRu report the empty T-CONT; default off = stock one-T-CONT-per-alloc)");
@@ -3468,7 +3468,7 @@ MODULE_PARM_DESC(omcc_alt_bind, "1=also bind the OMCC alloc to T-CONT 1 (non-sto
  * O5) can clear it -> on an operational grant the HW never opens the US window -> the
  * GEM-US framer never fires (idle16=0, gemus64=0, bank_underfl=0, dead air -> OLT
  * "Laser out"). Re-writing it at O5 entry closes that. Default on; A/B via
- * gpon_rtl9602c.o5_sstart=0. */
+ * gpon_rtl960x.o5_sstart=0. */
 static bool o5_sstart = true;
 module_param(o5_sstart, bool, 0644);
 MODULE_PARM_DESC(o5_sstart, "1=re-assert AUTO_PROC_SSTART (0x5200 bit0) at O5 so the HW starts the US burst on each grant (default on)");
@@ -3476,7 +3476,7 @@ MODULE_PARM_DESC(o5_sstart, "1=re-assert AUTO_PROC_SSTART (0x5200 bit0) at O5 so
  * (WSDS_DIG_00 0x22030 bit10) right after the O3 TX-PLL relock — the one edge the
  * O5-light re-arm omits. The relock (a SerDes reset) re-parks the feed; this un-parks
  * it. RISK: pulsing the WSDS GPON reset-B may drop the DS framer lock at O3. Default
- * OFF (try o5_sstart first); A/B via gpon_rtl9602c.o3_feed_reset=1. */
+ * OFF (try o5_sstart first); A/B via gpon_rtl960x.o3_feed_reset=1. */
 static bool o3_feed_reset;
 module_param(o3_feed_reset, bool, 0644);
 MODULE_PARM_DESC(o3_feed_reset, "1=pulse WSDS GPON datapath reset-B + light feed re-arm after the O3 TX-PLL relock to un-park the GEM-US framer (default off; risks DS lock)");
@@ -3494,7 +3494,7 @@ MODULE_PARM_DESC(o3_feed_reset, "1=pulse WSDS GPON datapath reset-B + light feed
  * DEACT. The one-shot O5-entry feed re-arm (gpon_us_feed_rearm_light @ O5 entry) is sufficient for the
  * cold-start feed-park it was meant to fix (DHCP still succeeds). Kept as an opt-in diagnostic param;
  * do NOT default it on again without a self-terminate that keys on a RELIABLE progress signal (a per-
- * tick GMII edge is toxic to sustained US either way). A/B via gpon_rtl9602c.feed_rekick=1. */
+ * tick GMII edge is toxic to sustained US either way). A/B via gpon_rtl960x.feed_rekick=1. */
 static bool feed_rekick;
 module_param(feed_rekick, bool, 0644);
 MODULE_PARM_DESC(feed_rekick, "1=per-tick US-feed FIFO re-arm at O5 (DEFAULT OFF: the per-tick GMII edge truncates in-flight US bursts + kills sustained WAN data; opt-in diagnostic only)");
@@ -4066,7 +4066,7 @@ void gpon_pbo_init(void)
 							 * despite qid64 holding pages -> grants once then STOPS ->
 							 * gemus64=0. The working firmware programs it once at init
 							 * (its only writer); ours had regressed this write out. A/B via
-							 * gpon_rtl9602c.dbru_blksize=0. */
+							 * gpon_rtl960x.dbru_blksize=0. */
 		/* 0x20f4 = PON_IPSTS_US, a READ-ONLY init-ready status reg (bit0=PONIC_INITRDY);
 		 * stock never writes it. The old pi_wr(0x20f4,1) was a no-op write to a reserved
 		 * bit -> removed. It is POLLED before the GMII latch edge below (usnic_initrdy_poll). */
@@ -5357,7 +5357,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
  *      DIFFERENT serial-number byte ('7','G' -> 0xff here, 0x7f there;
  *      4660 of 65025 character pairs diverge). Adopting the core's parse would
  *      change the identity this ONU puts on the wire for a malformed
- *      gpon_rtl9602c.onu_sn=, so it is a behaviour change, not code motion.
+ *      gpon_rtl960x.onu_sn=, so it is a behaviour change, not code motion.
  *
  * Sequencing note: the refactor plan orders this move LAST (step M9) and gives
  * it a prerequisite that is NOT code motion — the FSM below is global-based
@@ -5378,7 +5378,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
  * Assign_ONU-ID (0x03) and Ranging_Time (0x04) to reach O5.
  *
  * Per-board serial number stays OUT of the image: default below is overridable
- * via the `gpon_rtl9602c.onu_sn=` module/cmdline param (and is wired to gpon_provision's
+ * via the `gpon_rtl960x.onu_sn=` module/cmdline param (and is wired to gpon_provision's
  * factory value for the fleet). Format (G.984.3 ONU-SN): 4 ASCII ID chars + 8 hex digits.
  */
 
@@ -7842,7 +7842,7 @@ static int __init rtl9602c_gpon_init(void)
 			 * ARE the 9602C recipe. Their golden table writes ~0x226xx,
 			 * which on the 9603CVD is inside the switch's EXTG_ACTYPE
 			 * match table (0x22000-0x220c4) and unmapped above it -- so
-			 * booting this board with gpon_rtl9602c.family_lib=0 would corrupt a
+			 * booting this board with gpon_rtl960x.family_lib=0 would corrupt a
 			 * live LAN path. Refuse instead of doing it. */
 			sret = -ENOTSUPP;
 			via = "REFUSED (family_lib=0 has no 9603CVD SerDes recipe)";

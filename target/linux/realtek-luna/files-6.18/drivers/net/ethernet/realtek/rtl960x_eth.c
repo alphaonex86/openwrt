@@ -143,7 +143,7 @@ MODULE_PARM_DESC(diag_count, "number of periodic link/rxpkts diagnostic dumps");
  *
  * ⚠ CORRECTED 2026-08-26 -- IT WAS NOT THE BOOTLOADER, IT WAS OUR OWN GPON
  * DRIVER, and blaming U-Boot sent this investigation to the wrong tree.
- * gpon-rtl9602c.c used the RTL9602C literal SOC_IO_GPIO_EN = 0x48 for the
+ * gpon-rtl960x.c used the RTL9602C literal SOC_IO_GPIO_EN = 0x48 for the
  * optical-SD GPIO pad recipe. On the RTL9603CVD 0x48 is CFG_PCSXF and 0x4c is
  * CFG_PHY_CTRL, so its second word landed HERE:
  *
@@ -1980,7 +1980,7 @@ static struct platform_driver luna_eth_driver = {
 module_platform_driver(luna_eth_driver);
 
 /*
- * GPON OMCI glue stubs — the shared GPON FSM (gpon-rtl9602c.c) references these
+ * GPON OMCI glue stubs — the shared GPON FSM (gpon-rtl960x.c) references these
  * symbols declared in rtl9602c_gpon_nic.h. On the 9602C the real implementations
  * live in rtl9602c_eth.c; on the 9607C the OMCI datapath is M4 and these are
  * minimal no-ops so the kernel links. They are enough for M3 (reach O5 + DS).

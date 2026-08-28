@@ -64,6 +64,7 @@
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
 #include <linux/timer.h>
+#include "rtl960x_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 
 /* ---- bring-up knobs (live-tunable; the datapath framing is HW-uncertain on
  * first contact, so expose the few values most likely to need a tweak) ------ */
@@ -237,23 +238,12 @@ module_param(cpu_no_loopback, bool, 0644);
 MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (stops self-loopback RX)");
 
 /* ---- GMAC0 register block (offsets from the DT reg base 0x18012000) -------- */
-#define R_IDR0		0x00	/* station MAC [0:3], MSB first			*/
-#define R_IDR4		0x04	/* station MAC [4:5] in [31:16]			*/
 #define R_MAR0		0x08	/* multicast hash [31:0]				*/
 #define R_MAR4		0x0C	/* multicast hash [63:32]			*/
 #define R_CMD		0x3B	/* 8-bit command: bit0 RST			*/
 #define   CMD_RXCHK	0x02	/* RX checksum offload				*/
 #define   CMD_RXJUMBO	0x08	/* accept jumbo					*/
-#define R_IMR		0x3C	/* 16-bit RX/TX interrupt mask			*/
-#define R_ISR		0x3E	/* 16-bit RX/TX interrupt status (W1C)		*/
-#define R_TCR		0x40	/* TX control					*/
-#define R_RCR		0x44	/* RX control (bit0 = accept-all-physical)	*/
-#define R_CPUTAGCR	0x48	/* CPU-tag insert config			*/
-#define R_CONFIG	0x4C
-#define R_CPUTAG1CR	0x50
 #define R_MSR		0x58	/* media/flow status; top byte = force flow ctl	*/
-#define R_IMR0		0xD0	/* 32-bit per-ring TX-completion mask		*/
-#define R_ISR1		0xD8	/* 32-bit per-ring TX-completion status (W1C)	*/
 #define R_TxFDP0	0x1300	/* TX ring0 fetch-descriptor pointer		*/
 #define R_TxCDO0	0x1304	/* TX ring0 current-descriptor offset (u16)	*/
 #define R_RRING_ROUTE	0x1370	/* RX class -> ring routing			*/
@@ -262,15 +252,35 @@ MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (
 				/* 32-BIT register. The (u16) this comment used to carry
 				 * named the FIELD, and an iowrite16 was written to match
 				 * it -- see the store below.			*/
-#define R_RxDesNum	0x1430	/* RX ring0 size + flow-control thresholds	*/
-#define R_IO_CMD	0x1434	/* DMA enable + per-ring TX kick (bit0 = ring0)	*/
-#define R_IO_CMD1	0x1438
 
 /* engine enable values (inherited-config + DMA-enable edge) */
+/* MSR(0x58) top byte.  Live working stock runs 0xf0 (FORCE_TRXFCE|RXFCE|TXFCE:
+ * flow control FORCED on the internal GMAC<->switch links).
+ *
+ * ★★ HW-PROVEN ON THE SIBLING CHIP (RTL9602C, 2026-06-12): with our MINIMAL
+ * init, 0xf0 STALLS the LAN datapath (ping 0/60) while 0x10 keeps it healthy
+ * (40/40).  Stock tolerates 0xf0 because its FULL init configures flow control
+ * properly; ours does not, so 0xf0's forced pause-frame handling wedges the
+ * MAC.  It is an init-COMPLETENESS problem, not a value we can simply match.
+ *
+ * ⚠ THIS DRIVER HARDCODED 0xf0 UNTIL 2026-08-28 -- the exact value the other
+ * Luna driver had already measured as harmful.  That is the failure mode the
+ * whole deduplication exists to stop: a repair that lands in one board's copy
+ * of a shared driver and never reaches the others.  The two drivers had no
+ * symbol in common, so nothing could have flagged it.
+ *
+ * ⚠ AND IT IS A HYPOTHESIS ON *THIS* CHIP, NOT A RESULT.  The RTL9602C
+ * measurement is tier-1 for the RTL9602C.  Whether forced flow control is what
+ * holds this board's RX down is UNPROVEN until the board says so; the parameter
+ * exists so the A/B can be run live (`msr_top=0xf0` restores the old value)
+ * rather than argued about.
+ */
+static unsigned int msr_top = 0x10;
+module_param(msr_top, uint, 0644);
+MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf0 = stock's value, MEASURED to stall the LAN on the RTL9602C)");
+
 #define IO_CMD_ENABLE	0xc059f130
 #define IO_CMD1_ENABLE	0x32000001
-#define IMR_RX_BITS	0xf835	/* RX-OK + RX-error + ring descriptor-unavailable */
-#define IMR0_TX_BITS	0x3f	/* per-ring TX completion				*/
 
 /* CPU-tag engine config. CTEN_RX (bit31) makes the MAC strip the 8-byte switch
  * tag in hardware on RX and expose the parsed ingress port in the descriptor;
@@ -281,21 +291,8 @@ MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (
 #define ABLTY_CPU_FORCE	0xBFFF		/* CPU-port forced-ability mode (keep)	*/
 
 /* descriptor flags (word0 / opts1, both rings) */
-#define D_OWN		BIT(31)	/* 1 = owned by the DMA engine			*/
-#define D_EOR		BIT(30)	/* end of ring (wrap)				*/
-#define D_FS		BIT(29)	/* first segment				*/
-#define D_LS		BIT(28)	/* last segment					*/
-#define D_TXCRC		BIT(23)	/* TX: append FCS				*/
-#define RXD_CRCERR	BIT(27)
 #define RXD_DMAERR	BIT(24)
-#define RXD_LEN_MASK	0x1fff
-#define TXD_LEN_MASK	0x1ffff
 
-#define RX_RING_SIZE	64
-#define TX_RING_SIZE	64
-#define RX_BUF_SIZE	2048
-#define TH_ON_VAL	0x10	/* RX flow-control assert / de-assert thresholds	*/
-#define TH_OFF_VAL	0x30
 
 /* ---- switch core (SWCORE), phys 0x1b000000 ---------------------------------
  * ★ THE BASE IS THE SAME ON BOTH CHIPS AND THAT IS ESTABLISHED, NOT ASSUMED.
@@ -308,7 +305,6 @@ MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (
  * RTL9607C's highest named register sits at 0x42E7C, so the 0x42000 this file
  * used to map was 0xE7C SHORT — a register at the top of the block would have
  * been written into a hole with nothing to read. */
-#define SWCORE_PHYS		0x1b000000UL
 #define SWCORE_SIZE		0x43000
 
 /* -- offsets that are the SAME on every Luna part covered here -------------- */
@@ -500,10 +496,7 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 
 /* VLAN: filtering must not gate CPU<->LAN egress (the boot loader may leave it on
  * with the CPU port outside the member set). */
-#define SW_VLAN_CTRL		0x13008
 #define   VLAN_FILTERING	BIT(0)
-#define SW_VLAN_ACCEPT		0x13000	/* per-port accept-frame-type (0 = accept all) */
-#define SW_VLAN_PB_VID		0x1300C	/* per-port default VID (PVID), stride 4	*/
 
 /* Per-port lookup-miss (unknown-DA) action, 2 bits/port; 0 = FORWARD. Needed for
  * the post-ARP unicast / IPv6-ND path (the first broadcast already floods). */
@@ -536,7 +529,6 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 #define RTL_CPU_TAG_ETYPE	0x8899
 
 /* SoC peripheral control (fixed uncached KSEG1, no ioremap) */
-#define SOC_IP_SEL	((void __iomem *)0xb8000600ul)	/* per-engine clock/reset*/
 #define   IPSEL_GMAC0	BIT(1)
 #define SOC_SW_ENABLE	((void __iomem *)0xb800063cul)	/* switch-core enable	*/
 #define   SW_EN_BIT	BIT(5)
@@ -1480,8 +1472,10 @@ static void eth_hw_program(struct luna_eth *ep)
 			ep_wr(ep, R_RRING_ROUTE + k * 4, 0);
 	}
 
-	/* force the internal MAC<->switch link flow-control (top byte of MSR). */
-	ep_wr(ep, R_MSR, (ep_rd(ep, R_MSR) & 0x00ffffff) | 0xf0000000);
+	/* MSR(0x58) top byte -- see the msr_top param note.  0xf0 is stock's
+	 * value and it WEDGES our datapath. */
+	ep_wr(ep, R_MSR,
+	      (ep_rd(ep, R_MSR) & 0x00ffffff) | ((msr_top & 0xffu) << 24));
 	eth_set_hwaddr(ep, ep->ndev->dev_addr);
 	ep_wr(ep, R_MAR0, 0xffffffff);
 	ep_wr(ep, R_MAR4, 0xffffffff);

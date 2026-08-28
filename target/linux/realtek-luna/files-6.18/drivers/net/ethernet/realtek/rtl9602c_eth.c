@@ -38,6 +38,7 @@
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include "rtl960x_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
 #include <linux/crc32.h>	/* crc32_le for the optional SW OMCI MIC path */
 #include "rtl9602c_gpon_nic.h"
@@ -281,13 +282,6 @@ module_param(recover_rst, uint, 0644);
 MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-block power-cycle");
 
 /* GMAC register offsets (from the NIC base). */
-#define R_IDR0		0x00	/* MAC[0:3] (native word) */
-#define R_IDR4		0x04	/* MAC[4:5] in [31:16] */
-#define R_TCR		0x40	/* TX control */
-#define R_RCR		0x44	/* RX control */
-#define R_CPUTAGCR	0x48
-#define R_CONFIG	0x4C
-#define R_CPUTAG1CR	0x50
 #define R_TxFDP1	0x1300	/* TX ring0 fetch-descriptor pointer (phys) */
 #define R_TxCDO1	0x1304	/* TX ring0 current-descriptor offset (u16) */
 /* Per-ring TX descriptor pointers. The GMAC has six TX descriptor rings; each
@@ -308,9 +302,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 #define R_RxMRingCfg(k)	(0x1380 + (k) * 16)	/* RX multiring k config block (stock stride 16) */
 #define R_RxFDP		0x13F0	/* RX ring0 fetch-descriptor pointer (phys) */
 #define R_RxCDO		0x13F4	/* RX ring0 current-descriptor offset */
-#define R_RxDesNum	0x1430	/* RX ring0 size / flow-control thresholds */
-#define R_IO_CMD	0x1434	/* DMA enable + TX kick (rings 0-3 = bits 0-3) */
-#define R_IO_CMD1	0x1438
 /* Live-stock 9602C operating values (read off a running stock ONU at O5). The
  * U-Boot value 0x400f3330 is its polled-TFTP config; the stock OS reprograms
  * IO_CMD/IO_CMD1 after the IP-block reset. Bits[3:0] of IO_CMD stay 0 here (the
@@ -328,7 +319,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * on sparse TX. KSEG1 is always mapped on MIPS, so address it directly like
  * pcie-rtl9602c.c does.
  */
-#define SOC_IP_SEL	((void __iomem *)0xb8000600ul)
 #define IPSEL_EN_GMAC0	BIT(1)
 
 /*
@@ -338,25 +328,11 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * IMR=0xf835), so the 16-bit IMR/ISR are accessed via ioread16/iowrite16 at
  * 0x3c/0x3e. Values below are the live-stock operating masks.
  */
-#define R_IMR		0x3c	/* 16-bit RX/TX IRQ mask (stock operating = 0xf835) */
-#define R_ISR		0x3e	/* 16-bit RX/TX IRQ status, write-1-to-clear */
-#define R_IMR0		0xd0	/* 32-bit per-ring TX-completion mask (stock = 0x3f) */
-#define R_ISR1		0xd8	/* 32-bit per-ring TX-completion status, W1C */
-#define IMR_RX_BITS	0xf835	/* RX_OK + RX-err + RDU/RDU2..6 (stock IMR) */
-#define IMR0_TX_BITS	0x3f	/* 6 per-ring TX-completion IRQs (stock IMR0) */
 #define R_RRING_ROUTING1 0x1370	/* RX-ring routing by priority: PRI_n_ROUTE = ring# at nibble n (operational default 0x65432100). 0 => all priorities to ring 0. */
 
 /* Descriptor opts1 bits (shared TX/RX where noted). */
-#define D_OWN		BIT(31)	/* 1 = HW owns */
-#define D_EOR		BIT(30)	/* end of ring (wrap) */
-#define D_FS		BIT(29)	/* first segment */
-#define D_LS		BIT(28)	/* last segment */
 #define D_IPCS		BIT(27)	/* TX: insert IPv4 csum */
-#define D_TXCRC		BIT(23)	/* TX: append FCS */
-#define RXD_CRCERR	BIT(27)	/* RX: CRC error */
 #define RXD_RCDF	BIT(24)	/* RX: DMA error */
-#define RXD_LEN_MASK	0x1fff	/* RX length (low bits of opts1) */
-#define TXD_LEN_MASK	0x1ffff	/* TX length */
 
 /*
  * TX descriptor CPU-tag fields (the GMAC tx_info layout, selected by the GMAC
@@ -382,12 +358,9 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * OR-ing the window corrupts them). Set 0 to disable — kept as a named knob. */
 #define DMA_BUS_WINDOW	0x00000000u
 
-#define RX_RING_SIZE	64
-#define TX_RING_SIZE	64
 #define OTX_RING_SIZE	8	/* dedicated US-OMCI TX ring (low-rate control) */
 #define OMCI_RESV	2	/* LAN xmit stops this many slots early so the sparse shared-ring OMCI inject always has room (never dropped) */
 #define DUMMY_RING_SIZE	4	/* idle filler armed on the unused HW TX rings (gap rings) */
-#define RX_BUF_SIZE	2048
 #define RX_CPU_PREFIX	2	/* switch CPU-port prepends a 2-byte offset word on RX */
 /*
  * TX_CPUTAG selects the CPU->switch egress method:
@@ -400,8 +373,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  *       differs from mainline rtl8_4.
  */
 #define TX_CPUTAG	0
-#define TH_ON_VAL	0x10
-#define TH_OFF_VAL	0x30
 #define POLL_INTERVAL	msecs_to_jiffies(2)	/* legacy pure-poll fallback (ep->irq<=0) */
 #define REKICK_INTERVAL	msecs_to_jiffies(100)	/* slow TX-unpark backstop when IRQ-driven */
 
@@ -412,7 +383,6 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * SoC switch core (SWCORE), phys 0x1B000000. The switch has 4 ports (0-3); the
  * CPU port (where GMAC0 attaches) is port 3. Flood masks have one bit per port.
  */
-#define SWCORE_PHYS	0x1B000000UL
 #define SWCORE_SIZE	0x40000	/* must cover MIB @0x32000 + PISO @0x27000 (was 0x24000 = too small, those fell outside the ioremap!) */
 #define SW_CPU_PORT		3
 /* per-port forced-ability value + force-mode (RTL9602C register map: base 0x180
@@ -445,10 +415,7 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * default VLAN; for flat bring-up we DISABLE them so a parsed cpu-tag's directed
  * egress is not dropped by VLAN membership checks (we have no VLAN table set up). */
 #define SW_VLAN_INGRESS		0x13004
-#define SW_VLAN_CTRL		0x13008
 #define SW_VLAN_FILTERING	BIT(0)
-#define SW_VLAN_ACCEPT		0x13000	/* per-port accept-frame-type (0 = accept all) */
-#define SW_VLAN_PB_VID		0x1300C	/* per-port PVID, stride 4; VID = bits[11:0] */
 /* Operational value: VLAN_CTRL=0x19 (filtering + VID0/VID4095 type bits). */
 #define SW_VLAN_CTRL_VAL	0x19	/* VLAN filtering ON at init — required during ranging/config-apply for
 					 * reliable onlining (VLAN-off cold boots failed config-apply 4x; VLAN-on

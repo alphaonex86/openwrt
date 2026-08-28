@@ -155,4 +155,23 @@ int omci_onu_input(struct omci_onu *o, const u8 *req, unsigned int len, u8 *resp
  * report.  Fills @out (48 bytes, trailer + MIC done); returns OMCI_LEN. */
 int omci_onu_emit_veip_up_avc(struct omci_onu *o, u8 *out);
 
+
+/* ---- wire packing ---------------------------------------------------------
+ * Store a 16-bit field big-endian, by explicit byte math.
+ *
+ * ★ IT LIVES IN THE HEADER BECAUSE A SECOND COPY ALREADY EXISTED.  The Luna
+ * ethernet driver carried a byte-identical `omci_put_be16` of its own, purely
+ * because this one was `static inline` inside gpon_omci_core.c and no other
+ * translation unit could reach it.  A helper that cannot be used is a helper
+ * that gets written again.
+ *
+ * ★ EXPLICIT BYTE MATH, NEVER A CAST OVER WIRE BYTES: one image runs big-endian
+ * MIPS and little-endian ARM64, and this is the project's standing rule for
+ * anything that touches a frame. */
+static inline void omci_put_be16(u8 *p, u16 v)
+{
+	p[0] = (u8)(v >> 8);
+	p[1] = (u8)v;
+}
+
 #endif /* GPON_OMCI_CORE_H */

@@ -18,20 +18,22 @@
 #include <linux/delay.h>
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
+
+#include "rtl960x_gpon_regs.h"	/* the family SMI master + SWCORE proxy */
 #include "rtl960x_ponmac.h"
 
 #define SWCORE_PHYS		0x1b000000u
 #define SWCORE_SIZE		0x00041000u
 
-/* SMI indirect access registers (accessible via direct I/O, 0x23000 range) */
+/* ★ THE SMI REGISTERS COME FROM THE FAMILY HEADER, NOT FROM A SECOND COPY.
+ * SMI_CTRL_0/2/3, SMI_CMD_EN, SMI_BC_PHYID and SWCORE_PROXY_PHY were spelled
+ * again here with the same values while rtl960x_gpon_regs.h already carried
+ * them.  Two spellings of one register is how a corrected offset reaches half
+ * the family and not the other half -- the exact shape that cost this project
+ * the CFG_PHY_CTRL weeks and, on 2026-08-28, a board shipping the family's
+ * bring-up default MAC.  Only what the family header does NOT have stays. */
 #define SW_IO_MODE_EN		0x23014u
 #define   SW_MDX_M_EN		BIT(10)
-#define SMI_CTRL_0		0x230B8u
-#define   SMI_CMD_EN		BIT(0)
-#define SMI_CTRL_2		0x230C0u	/* port mask for SMI access */
-#define SMI_CTRL_3		0x230C4u
-#define SMI_BC_PHYID		0x230C8u
-#define SWCORE_PROXY_PHY	10
 
 static void __iomem *swcore_base;
 
@@ -41,65 +43,24 @@ static void __iomem *swcore_base;
  * PHY 10 (the SWCORE register proxy).  Use SMI_INDRT_ACCESS_CTRL which
  * IS directly memory-mapped (unlike the I2C indirect registers at 0xB0).
  */
-static u16 smi_phy_read(u8 phy, u8 reg)
-{
-	u32 ctrl, data;
-	int i;
+/* ★ THE PROXY BODIES ARE THE FAMILY'S, in rtl960x_gpon_regs.h.  The two SMI
+ * wrappers that used to sit beside these went with them: once sw_proxy_*
+ * delegates to the family (which uses the family's own SMI), nothing here
+ * called them any more and -Werror=unused-function said so.  This file and
+ * gpon-rtl960x.c each carried a copy: sw_proxy_rd/wr byte for byte identical,
+ * the two SMI halves differing only in comments.  The wrappers keep the old
+ * names so the call sites are untouched; all they add is this file's own
+ * `swcore_base`. */
 
-	iowrite32(phy << 5, swcore_base + SMI_BC_PHYID);
-	iowrite32(BIT(phy), swcore_base + SMI_CTRL_2);	/* target port mask */
-	/* MAIN_PAGE=0x1FFF (broadcast), REG=phyreg, CMD=1 (trigger read) */
-	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | SMI_CMD_EN,
-		  swcore_base + SMI_CTRL_0);
-	for (i = 0; i < 1000; i++) {
-		ctrl = ioread32(swcore_base + SMI_CTRL_0);
-		if (!(ctrl & SMI_CMD_EN))
-			break;
-		udelay(10);
-	}
-	data = ioread32(swcore_base + SMI_CTRL_3);
-	return (u16)(data >> 16);
+
+static inline u32 sw_proxy_rd(u32 swc_off)
+{
+	return rtl960x_sw_proxy_rd(swcore_base, swc_off);
 }
 
-static void smi_phy_write(u8 phy, u8 reg, u16 val)
+static inline void sw_proxy_wr(u32 swc_off, u32 val)
 {
-	u32 ctrl;
-	int i;
-
-	iowrite32(phy << 5, swcore_base + SMI_BC_PHYID);
-	iowrite32(BIT(phy), swcore_base + SMI_CTRL_2);
-	iowrite32(val, swcore_base + SMI_CTRL_3);	/* data in bits[15:0] */
-	/* MAIN_PAGE=0x1FFF, REG=phyreg, RWOP=1 (write), CMD=1 */
-	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | BIT(4) | SMI_CMD_EN,
-		  swcore_base + SMI_CTRL_0);
-	for (i = 0; i < 1000; i++) {
-		ctrl = ioread32(swcore_base + SMI_CTRL_0);
-		if (!(ctrl & SMI_CMD_EN))
-			break;
-		udelay(10);
-	}
-}
-
-/* ---- SWCORE register access via PHY-10 proxy --------------------------- */
-static u32 sw_proxy_rd(u32 swc_off)
-{
-	u16 lo, hi;
-
-	smi_phy_write(SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 6, 0x800b);	/* read trigger */
-	lo = smi_phy_read(SWCORE_PROXY_PHY, 4);
-	hi = smi_phy_read(SWCORE_PROXY_PHY, 5);
-	return ((u32)hi << 16) | lo;
-}
-
-static void sw_proxy_wr(u32 swc_off, u32 val)
-{
-	smi_phy_write(SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 2, (u16)(val & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 3, (u16)((val >> 16) & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 6, 0x804b);	/* write trigger */
+	rtl960x_sw_proxy_wr(swcore_base, swc_off, val);
 }
 
 /* ---- rtl960x_ops: direct I/O with MDIO-proxy fallback ------------------ */

@@ -67,6 +67,7 @@
 #include <linux/workqueue.h>
 #include <linux/of.h>
 #include "rtl9602c_gpon_nic.h"
+#include "rtl960x_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
 #include "rtl960x_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
 
 /*
@@ -943,62 +944,24 @@ static inline void gpon_wr(u32 off, u32 v) { iowrite32(v, gpon_base + off); }
  */
 #define   SW_MDX_M_EN		BIT(10)
 
-static u16 smi_phy_read(u8 phy, u8 reg)
-{
-	u32 ctrl, data;
-	int i;
+/* ★ THE PROXY BODIES ARE THE FAMILY'S, in rtl960x_gpon_regs.h.  The two SMI
+ * wrappers that used to sit beside these went with them: once sw_proxy_*
+ * delegates to the family (which uses the family's own SMI), nothing here
+ * called them any more and -Werror=unused-function said so.  These four were
+ * written twice -- here and in rtl9607c_gpon.c -- and the copies were identical
+ * (sw_proxy_rd/wr byte for byte, the SMI halves differing only in comments).
+ * The wrappers keep their old names so every call site and this diff stay
+ * small; the only thing they add is this file's own `swcore_base`. */
 
-	iowrite32(phy << 5, swcore_base + SMI_BC_PHYID);
-	iowrite32(BIT(phy), swcore_base + SMI_CTRL_2);
-	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | SMI_CMD_EN,
-		  swcore_base + SMI_CTRL_0);
-	for (i = 0; i < 1000; i++) {
-		ctrl = ioread32(swcore_base + SMI_CTRL_0);
-		if (!(ctrl & SMI_CMD_EN))
-			break;
-		udelay(10);
-	}
-	data = ioread32(swcore_base + SMI_CTRL_3);
-	return (u16)(data >> 16);
+
+static inline u32 sw_proxy_rd(u32 swc_off)
+{
+	return rtl960x_sw_proxy_rd(swcore_base, swc_off);
 }
 
-static void smi_phy_write(u8 phy, u8 reg, u16 val)
+static inline void sw_proxy_wr(u32 swc_off, u32 val)
 {
-	u32 ctrl;
-	int i;
-
-	iowrite32(phy << 5, swcore_base + SMI_BC_PHYID);
-	iowrite32(BIT(phy), swcore_base + SMI_CTRL_2);
-	iowrite32(val, swcore_base + SMI_CTRL_3);
-	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | BIT(4) | SMI_CMD_EN,
-		  swcore_base + SMI_CTRL_0);
-	for (i = 0; i < 1000; i++) {
-		ctrl = ioread32(swcore_base + SMI_CTRL_0);
-		if (!(ctrl & SMI_CMD_EN))
-			break;
-		udelay(10);
-	}
-}
-
-static u32 sw_proxy_rd(u32 swc_off)
-{
-	u16 lo, hi;
-
-	smi_phy_write(SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 6, 0x800b);	/* read trigger */
-	lo = smi_phy_read(SWCORE_PROXY_PHY, 4);
-	hi = smi_phy_read(SWCORE_PROXY_PHY, 5);
-	return ((u32)hi << 16) | lo;
-}
-
-static void sw_proxy_wr(u32 swc_off, u32 val)
-{
-	smi_phy_write(SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 2, (u16)(val & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 3, (u16)((val >> 16) & 0xffff));
-	smi_phy_write(SWCORE_PROXY_PHY, 6, 0x804b);	/* write trigger */
+	rtl960x_sw_proxy_wr(swcore_base, swc_off, val);
 }
 
 /*
@@ -3586,7 +3549,10 @@ static void tbl_write(u32 type, u32 addr)
 
 void rtl9602c_datapath_tables_init(void)
 {
-	void __iomem *ipsel = (void __iomem *)0xb800063cul;	/* SoC PONPBO clk */
+	/* ⚠ THIS POINTER WAS CALLED `ipsel`, WHICH IS ANOTHER REGISTER'S NAME.
+	 * SOC_IP_SEL is 0xb8000600; this is 0xb800063c, and the two gate
+	 * different things. Renamed the day it was proven wrong. */
+	void __iomem *sw_en = SOC_SW_ENABLE;
 	int port, idx;
 
 	/*
@@ -3616,7 +3582,8 @@ void rtl9602c_datapath_tables_init(void)
 		return;
 
 	/* 1) switch_init -------------------------------------------------- */
-	writel(readl(ipsel) | (1u << 5), ipsel);	/* PONPBO IP enable      */
+	writel(readl(sw_en) | SW_EN_BIT, sw_en);	/* see the naming note in
+							 * rtl960x_eth_regs.h    */
 	pi_field(0x2190, 7, 0, 0x6e);			/* PON_TB_CTRL tick      */
 	pi_field(0x2190, 15, 8, 0x95);
 	sw_field(0x25000, 7, 0, 43);			/* METER_TB_CTRL tick    */
@@ -6468,8 +6435,11 @@ static void gpon_set_eqd(u32 value)
 {
 	u32 min_delay1 = (gpon_rd(GPON_GTC_US_MIN_DELAY) >> 7) & 0x1ff;
 	u32 eqd1  = value + min_delay1 * 128;
-	u32 multi = eqd1 / GPON_EQD_FRAME_LEN;
-	u32 intra = eqd1 - multi * GPON_EQD_FRAME_LEN;
+	/* The CORE's constant, not a second spelling of it: this arithmetic and
+	 * gpon_ploam.c's set_eqd() must divide by the same number or the A/B
+	 * switch between them would range the ONU differently. */
+	u32 multi = eqd1 / GPON_PLOAM_EQD_FRAME_LEN;
+	u32 intra = eqd1 - multi * GPON_PLOAM_EQD_FRAME_LEN;
 
 	gpon_wr(GPON_GTC_US_EQD,
 		((multi & GPON_EQD_MF_MASK) << GPON_EQD_MF_SHIFT) |

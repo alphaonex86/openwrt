@@ -86,6 +86,15 @@
 #define TH_ON_VAL		0x10
 #define TH_OFF_VAL		0x30
 
+/* Switch-core registers the two chipdefs place at the SAME address, so they are
+ * family constants rather than table fields.  Cross-read 2026-08-28 from each
+ * chip's own reg_list.c; the silicon's own names are kept, because a name that
+ * follows the silicon is one a reader can look up. */
+#define SW_CHIP_INFO		0x10004	/* CHIP_INFO: low 16 bits = the GPHY variant */
+#define SW_METER_TB_CTRL	0x25000	/* METER_TB_CTRL: meter tick/token config */
+#define SW_VLAN_EGRESS_TAG	0x2A000	/* VLAN_EGRESS_TAG */
+#define SW_STAT_PORT_TX_MIB	0x32000	/* STAT_PORT_TX_MIB, +0x80 per port */
+
 /* Switch core: the VLAN block did NOT move between these two revisions. */
 #define SW_VLAN_ACCEPT		0x13000	/* per-port accept-frame-type (0 = accept all) */
 #define SW_VLAN_CTRL		0x13008

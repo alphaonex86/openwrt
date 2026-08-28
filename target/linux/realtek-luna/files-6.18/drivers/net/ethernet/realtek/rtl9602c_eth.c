@@ -2771,14 +2771,14 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	for (to = 0; to < 200000 && !(readl(sysstat) & 0x2); to++)
 		udelay(1);
 	/* GPHY analog patch (0x6485 variant only), switch regs 0x10004/0x0/0x4 */
-	iowrite32(0xa0000000, ep->sw + 0x10004);
-	if ((ioread32(ep->sw + 0x10004) & 0xffff) == 0x6485) {
+	iowrite32(0xa0000000, ep->sw + SW_CHIP_INFO);
+	if ((ioread32(ep->sw + SW_CHIP_INFO) & 0xffff) == 0x6485) {
 		iowrite32(0x0000fffb, ep->sw + 0x0);
 		iowrite32(0x0061b844, ep->sw + 0x4);
 		iowrite32(0x0021b906, ep->sw + 0x4);
 		iowrite32(0x0021b906, ep->sw + 0x4);
 	}
-	iowrite32(0x0, ep->sw + 0x10004);
+	iowrite32(0x0, ep->sw + SW_CHIP_INFO);
 	iowrite32(1, ep->sw + 0x110);		/* WRAP_GPHY_MISC PATCH_PHY_DONE */
 	msleep(500);
 	iowrite32(0x00003000, ep->sw + 0x0);	/* GPHY power down */
@@ -2792,7 +2792,7 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	iowrite32(0x003fffff, ep->sw + 0x27004);
 	iowrite32(0x00000196, ep->sw + 0x18c);		/* CPU port ability */
 	iowrite32(0x00000fff, ep->sw + 0x1c0);		/* CPU port force mode */
-	iowrite32(0x00012bbd, ep->sw + 0x25000);	/* meter tick-token */
+	iowrite32(0x00012bbd, ep->sw + SW_METER_TB_CTRL);	/* meter tick-token */
 	iowrite32(0,          ep->sw + 0x13008);	/* VLAN function disable */
 	iowrite32(1, ep->sw + 0x2a000);			/* VLAN keep-format p0-3 */
 	iowrite32(1, ep->sw + 0x2a004);
@@ -3517,7 +3517,7 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 		/* LAN ports p0(FE)/p1(GE): if the injected US OMCI floods here, the cpu-tag
 		 * steering failed and the frame went to the L2 switch instead of the US-NIC. */
 		seq_printf(m, "MIB p0(LAN) tx=%08x | p1(LAN) tx=%08x\n",
-			   ioread32(ep->sw + 0x32000), ioread32(ep->sw + 0x32080));
+			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB), ioread32(ep->sw + 0x32080));
 		seq_printf(m, "MIB p2(PON) tx=%08x %08x %08x | rx=%08x %08x %08x\n",
 			   ioread32(ep->sw + 0x32100), ioread32(ep->sw + 0x32104),
 			   ioread32(ep->sw + 0x32108), ioread32(ep->sw + 0x32500),

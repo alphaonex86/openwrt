@@ -132,57 +132,62 @@
 #include <linux/bits.h>
 
 /* ---- op-table format (original) --------------------------------------- */
-enum r960_opc {
-	R960_WR,	/* wr(addr, val)                         */
-	R960_FLD,	/* rfwr(addr, msb, lsb, val) RMW         */
-	R960_DLY,	/* mdelay(val) ms                        */
-	R960_POLL,	/* wait addr bit[lsb]==1, up to val*200us */
-};
+/*
+ * ★ THE OPCODES, THE STEP AND THE INTERPRETER ARE THE CORE'S NOW
+ * (drivers/net/gpon/gpon_regseq.h).  What stays here is what is a SILICON fact:
+ * the tables below -- which registers, what values, in what order, with what
+ * delays -- and the accessor that reaches them.
+ *
+ * The old names are kept as aliases so that not one of the ~580 table lines had
+ * to be retyped: the enum order and the struct layout were already identical,
+ * which is what made the extraction a move rather than a rewrite.
+ */
+#include "gpon_regseq.h"
 
-struct r960_op {
-	u8  opc;
-	u8  msb;
-	u8  lsb;
-	u32 addr;
-	u32 val;
-};
+#define r960_op		gpon_regseq_op
+#define R960_WR		GPON_REGSEQ_WR
+#define R960_FLD	GPON_REGSEQ_FLD
+#define R960_DLY	GPON_REGSEQ_DLY
+#define R960_POLL	GPON_REGSEQ_POLL
 
-#define WR(a, v)		{ R960_WR,  0, 0, (a), (v) }
-#define FLD(a, m, l, v)		{ R960_FLD, (m), (l), (a), (v) }
-#define DLY(ms)			{ R960_DLY, 0, 0, 0, (ms) }
-#define POLL(a, bit, iters)	{ R960_POLL, (bit), (bit), (a), (iters) }
+/* The STEP is the core's too (gpon_regseq_op): same five fields, same order --
+ * which is why `#define r960_op gpon_regseq_op` above is an alias and not a
+ * second declaration.  Leaving this struct behind made it exactly that, and the
+ * compiler said so: "redefinition of 'struct gpon_regseq_op'". */
+
+#define WR(a, v)		GPON_WR((a), (v))
+#define FLD(a, m, l, v)		GPON_FLD((a), (m), (l), (v))
+#define DLY(ms)			GPON_DLY((ms))
+#define POLL(a, bit, iters)	GPON_POLL((a), (bit), (iters))
 
 /* the whole interpreter - one function for the entire family */
+/*
+ * ★ THE SHELL HALF, and the whole of what stayed behind: this family's SLEEP.
+ * The core cannot call mdelay()/udelay() -- a tier that sleeps cannot be run on
+ * a host -- so the two delays are handed over as ops, and the interpreter that
+ * consumes them is now shared by every target in the tree.
+ */
+static void r960_delay_ms(unsigned int ms)
+{
+	mdelay(ms);
+}
+
+static void r960_delay_us(unsigned int us)
+{
+	udelay(us);
+}
+
 static int r960_run(const struct rtl960x_ops *o,
 		    const struct r960_op *seq, unsigned int n)
 {
-	unsigned int i, k;
+	const struct gpon_regseq_io io = {
+		.rd		= o->rd,
+		.wr		= o->wr,
+		.delay_ms	= r960_delay_ms,
+		.delay_us	= r960_delay_us,
+	};
 
-	for (i = 0; i < n; i++) {
-		const struct r960_op *p = &seq[i];
-
-		switch (p->opc) {
-		case R960_WR:
-			o->wr(p->addr, p->val);
-			break;
-		case R960_FLD:
-			rtl960x_rfwr(o, p->addr, p->msb, p->lsb, p->val);
-			break;
-		case R960_DLY:
-			mdelay(p->val);
-			break;
-		case R960_POLL:
-			for (k = 0; k < p->val; k++) {
-				if (o->rd(p->addr) & (1u << p->lsb))
-					break;
-				udelay(200);
-			}
-			if (k == p->val)
-				return -ETIMEDOUT;
-			break;
-		}
-	}
-	return 0;
+	return gpon_regseq_run(&io, seq, n);
 }
 
 /* =======================================================================

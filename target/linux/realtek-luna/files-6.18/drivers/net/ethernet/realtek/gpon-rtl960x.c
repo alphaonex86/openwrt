@@ -6515,6 +6515,48 @@ static void gpon_txpll_relock(void)
 	pr_info("rtl9602c-gpon: TX-PLL relock (CMU re-toggle + FIFO re-sync) at O3 entry\n");
 }
 
+/*
+ * ★ LIFTED OUT OF gpon_fsm_set_state() 2026-08-28, BEHAVIOUR UNCHANGED: the
+ * same code, called from the same place.  The core's PLOAM FSM reaches these
+ * two moments through ops -- o5_rearm_burst() and on_below_o5() -- and a body
+ * buried inside a state setter cannot be handed to it.  Extracting them is the
+ * first half of the shape change, and it is deliberately separate from wiring
+ * the FSM so a regression here would be attributable to the extraction alone.
+ */
+static void gpon_o5_rearm_burst(void)
+{
+	u8 nomsg[12];
+
+	/* Re-apply the O5 packed-burst gate cluster + re-arm the HW auto-No_message
+	 * keepalive on EVERY O5 entry, not just at __init.  A re-range performs a
+	 * GMAC/SDS reset that can clear these US-side regs, so a re-ranged O5 must
+	 * not run on reset defaults ("isolated tolerates, packed exposes").
+	 * US-side only, harmless to DS/ranging. */
+	if (!o5_rearm_burst_gate)
+		return;
+	gpon_wr_us_protected(0x5188, 0x00504bfa);	/* US_OPTIC_SD_TH */
+	gpon_field(0x526c, 0, 0, 1);			/* US_PWR_SAV_MODE */
+	gpon_wr(0x6024, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG */
+	gpon_wr(0x6260, 0x00000028u);			/* GEM_US_EOB_MERGE */
+	memset(nomsg, 0xaa, sizeof(nomsg));
+	nomsg[0] = 0xff;	/* ONU-ID (HW overrides via ONUID_OVRD) */
+	nomsg[1] = 0x04;	/* GPON_PLOAM_US_NOMESSAGE */
+	gpon_send_cpu_ploam(PLM_US_QUEUE_NOMSG, nomsg);
+}
+
+static void gpon_below_o5(void)
+{
+	gpon_rerange_start_j = jiffies ? jiffies : 1;	/* start the outage timer */
+	gpon_o5_entry_tick = 0;
+	if (gpon_vlan_lan_open && !lan_keep_open) {
+		sw_field(0x13008, 0, 0, 1);	/* re-assert VLAN_FILTER for re-config */
+		gpon_vlan_lan_open = false;
+		pr_info("rtl9602c-gpon: re-range -> VLAN_FILTER re-armed (config phase)\n");
+	}
+	/* lan_keep_open (default): leave VLAN_FILTER cleared so LAN management
+	 * survives the WAN-down/re-range; the OLT re-config on resume tolerates it. */
+}
+
 static void gpon_fsm_set_state(u8 st)
 {
 	u8 prev = gpon_fsm_state;
@@ -6557,28 +6599,9 @@ static void gpon_fsm_set_state(u8 st)
 		 * so a re-ranged O5 must not run on reset defaults ("isolated
 		 * tolerates, packed exposes"). Same values as init (4791-4794, 4730-
 		 * 4737); US-side only, harmless to DS/ranging. */
-		if (o5_rearm_burst_gate) {
-			u8 nomsg[12];
-
-			gpon_wr_us_protected(0x5188, 0x00504bfa);	/* US_OPTIC_SD_TH */
-			gpon_field(0x526c, 0, 0, 1);			/* US_PWR_SAV_MODE */
-			gpon_wr(0x6024, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG */
-			gpon_wr(0x6260, 0x00000028u);			/* GEM_US_EOB_MERGE */
-			memset(nomsg, 0xaa, sizeof(nomsg));
-			nomsg[0] = 0xff;	/* ONU-ID (HW overrides via ONUID_OVRD) */
-			nomsg[1] = 0x04;	/* GPON_PLOAM_US_NOMESSAGE */
-			gpon_send_cpu_ploam(PLM_US_QUEUE_NOMSG, nomsg);
-		}
+		gpon_o5_rearm_burst();
 	} else if (st < 5 && prev >= 5) {
-		gpon_rerange_start_j = jiffies ? jiffies : 1;	/* start the outage timer (O5 dropped) */
-		gpon_o5_entry_tick = 0;
-		if (gpon_vlan_lan_open && !lan_keep_open) {
-			sw_field(0x13008, 0, 0, 1);	/* re-assert VLAN_FILTER for re-config */
-			gpon_vlan_lan_open = false;
-			pr_info("rtl9602c-gpon: re-range -> VLAN_FILTER re-armed (config phase)\n");
-		}
-		/* lan_keep_open (default): leave VLAN_FILTER cleared so LAN management
-		 * survives the WAN-down/re-range; the OLT re-config on resume tolerates it. */
+		gpon_below_o5();
 	}
 	/* The HW ONU_STATE field uses the same 1-based encoding as our state numbers:
 	 * UNKNOWN=0, O1=1, O2=2, O3=3, O4=4, O5=5. So O3 (Serial-Number, where the
@@ -6722,6 +6745,18 @@ static void luna_op_set_hw_onu_id(void *sh, u8 onu_id)
 	gpon_field(GPON_GTC_DS_ONU_STATUS, 15, 8, onu_id);
 }
 
+static void luna_op_on_below_o5(void *sh)
+{
+	(void)sh;
+	gpon_below_o5();
+}
+
+static void luna_op_o5_rearm_burst(void *sh)
+{
+	(void)sh;
+	gpon_o5_rearm_burst();
+}
+
 static void luna_op_analog_relock(void *sh)
 {
 	(void)sh;
@@ -6777,6 +6812,8 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.us_ploam_flush	= luna_op_us_ploam_flush,
 	.set_hw_state	= luna_op_set_hw_state,
 	.set_hw_onu_id	= luna_op_set_hw_onu_id,
+	.on_below_o5	= luna_op_on_below_o5,
+	.o5_rearm_burst	= luna_op_o5_rearm_burst,
 	.analog_relock	= luna_op_analog_relock,
 	.o3_feed_reset	= luna_op_o3_feed_reset,
 	.aes_stage_key	= luna_op_aes_stage_key,

@@ -202,6 +202,21 @@ obj-y += gpon_omci_me.o
 # in silicon, so there is no second copy this de-duplicates.  It is here for the
 # roadmap -- the future ARM OLT, other brands, and the offline adversarial
 # fuzzing that needs the FSM decoupled from any register.
-# gpon-pending: gpon_ploam.o -- no collision, but no consumer either until
-#   gpon-rtl9602c.c is migrated; X111W is off the rig, so that move is
-#   offline-provable only and must not ride in this step.
+# ★★★ BUILT AS OF 2026-08-27, DELIBERATELY WITHOUT A CONSUMER YET (operator:
+# *"al menos quitarlo de especifico si es generico, para forzar ir usando en
+# generico y no hacer codigo duplicado"*).
+#
+# It used to say "no consumer either until gpon-rtl9602c.c is migrated", and
+# that is exactly how a common file rots: unbuilt, it compiles for nobody, and
+# meanwhile the shell's private FSM keeps being extended because it is the one
+# that works. Building it makes the family copy the one that CANNOT silently
+# break -- every target compiles it on every build -- so the shell's copy is
+# now provably the redundant one rather than the living one.
+#
+# ⚠ THE MIGRATION ITSELF IS NOT IN THIS STEP, and the reason is measured: the
+# X400AXF -- the only board that boots and therefore the only place a change
+# gets verified -- does activation IN SILICON and never calls a software PLOAM
+# FSM. So swapping the Luna onto this file could be proven by the offline suite
+# and by NOTHING on hardware, on a board that currently wedges at ~30 s. Build
+# it, freeze the duplicate, migrate when the X111W boots.
+obj-y += gpon_ploam.o

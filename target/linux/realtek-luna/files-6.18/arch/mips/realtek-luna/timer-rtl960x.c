@@ -122,7 +122,7 @@ static int __init luna_timer_of_init(struct device_node *node)
 	rate = clk_get_rate(clk);
 	t->divisor = rate / TC_TICK_RATE;
 	if (t->divisor < 2 || t->divisor > 0xffff) {
-		pr_err("rtl9602c-timer: bad divisor %u for src %lu Hz\n",
+		pr_err("rtl960x-timer: bad divisor %u for src %lu Hz\n",
 		       t->divisor, rate);
 		ret = -EINVAL;
 		goto err_unmap;
@@ -153,7 +153,7 @@ static int __init luna_timer_of_init(struct device_node *node)
 		goto err_unmap;
 
 	clockevents_config_and_register(&t->evt, TC_TICK_RATE, 2, 0x0fffffff);
-	pr_info("rtl9602c-timer: tick %u Hz (src %lu Hz, div %u), irq %d\n",
+	pr_info("rtl960x-timer: tick %u Hz (src %lu Hz, div %u), irq %d\n",
 		TC_TICK_RATE, rate, t->divisor, irq);
 	return 0;
 
@@ -164,4 +164,20 @@ err_free:
 	return ret;
 }
 
+/*
+ * ⚠ THE FILE WAS RENAMED; THE COMPATIBLE WAS NOT, AND MUST NOT BE.
+ *
+ * This driver was called `timer-rtl9602c.c` while being family code -- its own
+ * struct is already `luna_timer` and it carries no chip conditional at all --
+ * so the FILE now says what it is.  The DT string is a different kind of thing:
+ * it is a CONTRACT with every device tree in this target, and the RTL9603CVD
+ * reaches this driver through it as a FALLBACK
+ * (`"realtek,rtl9603cvd-timer", "realtek,rtl9602c-timer"`).  Renaming it would
+ * unbind that board's timer with both files still individually correct.
+ *
+ * ★ OPEN, and recorded rather than touched: the RTL9607C's own .dtsi asks for
+ * `"realtek,otto-timer"`, which NOTHING here declares.  Either that chip is
+ * meant to use a different timer driver, or its node never binds.  It is not
+ * this rename's business and it is not guessed at.
+ */
 TIMER_OF_DECLARE(rtl9602c_timer, "realtek,rtl9602c-timer", luna_timer_of_init);

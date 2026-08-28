@@ -123,3 +123,10 @@ obj-$(CONFIG_FUJITSU_ES) += fjes/
 obj-$(CONFIG_USB4_NET) += thunderbolt/
 obj-$(CONFIG_NETDEVSIM) += netdevsim/
 obj-$(CONFIG_NET_FAILOVER) += net_failover.o
+
+# --- Flow-offload common layer (target/linux/gpon-common) ----------------
+# The HW-decoupled half of L3/L4 offload. A SIBLING of gpon/, because flow
+# offload is not GPON and naming it so would be the kind of lie this tree
+# renames on sight. Unconditional like gpon/: if this file is in the build,
+# the shared tree is in the build.
+obj-y += flowcore/

@@ -151,4 +151,25 @@ static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
 	.unkn_uc_flood	= 0x1C030,
 };
 
+/* The RTL9607C's eight LUT offsets were CROSS-READ from its own chipdef on
+ * 2026-08-28 and are identical to the RTL9603CVD's, every one of them -- so
+ * rtl960x_eth.c serving both chips from one constant set was correct, and this
+ * table records that rather than leaving it as an assumption.
+ *
+ * ⚠ swcore_size is NOT from the chipdef: it is an ioremap LENGTH, a decision
+ * about how much of the block this driver touches, not a silicon fact.  It
+ * carries the value that driver has been using.
+ */
+static const struct rtl960x_sw_map rtl9607c_sw_map = {
+	.swcore_size	= 0x43000,
+	.lut_unkn_sa	= 0x1C004,
+	.lut_unkn_uc_da	= 0x1C00C,
+	.unkn_l2_mc	= 0x1C018,
+	.unkn_ip4_mc	= 0x1C01C,
+	.unkn_ip6_mc	= 0x1C020,
+	.bc_flood	= 0x1C028,
+	.unkn_mc_flood	= 0x1C02C,
+	.unkn_uc_flood	= 0x1C030,
+};
+
 #endif /* _RTL960X_ETH_REGS_H */

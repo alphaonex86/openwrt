@@ -1927,7 +1927,15 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
 #define OMCI_MT_MIB_UPLOAD	0x0d
 #define OMCI_MT_MIB_UPLOAD_NX	0x0e
 #define OMCI_MT_MIB_RESET	0x0f
-#define OMCI_MT_GET_NEXT	0x10
+/* ★★★ 0x1a, NOT 0x10 -- CORRECTED 2026-08-28, and it is a WIRE defect.
+ * G.988 assigns 0x10 (16) to the ONU-autonomous ALARM and 0x1a (26) to Get
+ * Next. With 0x10 this driver answered every alarm as if it were a Get Next
+ * request and NEVER handled a real one. It is invisible by inspection and was
+ * found only by putting the two copies of these constants side by side --
+ * gpon_omci_me.h has the right value and had recorded the disagreement as
+ * "follow-up F1", unactionable while a second copy existed.
+ * Guarded now: ONU-test-case/const_divergence_guard.py. */
+#define OMCI_MT_GET_NEXT	0x1a
 /* Config-apply / management action MTs the OLT issues after MIB-upload+HGU classification.
  * We ACK them OK (no real action needed to pass config-load) so the OLT completes provisioning. */
 #define OMCI_MT_TEST		0x12	/* 18 — ANI-G optical test */

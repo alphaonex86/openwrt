@@ -220,3 +220,17 @@ obj-y += gpon_omci_me.o
 # and by NOTHING on hardware, on a board that currently wedges at ~30 s. Build
 # it, freeze the duplicate, migrate when the X111W boots.
 obj-y += gpon_ploam.o
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gpon_regseq.o -- a bring-up expressed as DATA, and the interpreter that runs it.
+#
+# ★ WHY IT IS HERE AND NOT IN A FAMILY.  The register addresses and values of a
+# bring-up are silicon facts and stay with the silicon; "write, set these bits,
+# wait, poll until it clears or give up" is not one, and it had been written per
+# family only because the interpreter and the tables shared a file.
+#
+# ★ IT IS WHAT MADE THE MOVE POSSIBLE: the family version called mdelay() and
+# udelay() directly, which this tier forbids.  With the two delays as ops the
+# same interpreter runs on silicon and against a FIXTURE clock on a host, which
+# is this project's stated preference over one ~200 s board boot.
+obj-y += gpon_regseq.o

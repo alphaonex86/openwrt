@@ -69,12 +69,6 @@
 #include "gpon_omci_core.h"
 #include "gpon_omci_me.h"	/* struct omci_onu + the ME model / dynamic store */
 
-static inline void omci_put_be16(u8 *p, u16 v)
-{
-	p[0] = (u8)(v >> 8);
-	p[1] = (u8)v;
-}
-
 /*
  * MIC (bytes 44..47) = the I.363.5 / AAL5 CRC-32 over bytes 0..43 (G.984.4
  * baseline trailer): NON-reflected polynomial 0x04C11DB7 MSB-first, init

@@ -23,7 +23,21 @@
 #   is not a valid unicast address, means we do not know this unit's MAC --
 #   and inventing one is exactly the failure being repaired. Absent is absent.
 
-mac=$(sed -n 's/.*rtl960x_eth\.mac=\([0-9A-Fa-f:]\{17\}\).*/\1/p' /proc/cmdline)
+# ⚠ THE MODULE NAME IS NOT THE SAME ON EVERY BOARD OF THIS TARGET, and this
+#   line carried ONE board's spelling for three days.  `rtl960x_eth` is the
+#   RTL9607C/RTL9603CVD driver; the RTL9602C's is `rtl9602c_eth`, gated by a
+#   different CONFIG symbol in a different subtarget.  MEASURED 2026-08-28: the
+#   X111W booted with `rtl9602c_eth.mac=98:c7:a4:32:82:ae` on its command line,
+#   the driver announced it at probe -- and this script matched nothing, exited
+#   0, and left br-lan unpinned, which is precisely the failure the comment
+#   above describes.  A board fact frozen into a file that ships to every board
+#   is the same defect twice.
+#
+# ★ SO THE MODULE IS MATCHED, NOT SPELLED: any `<module>.mac=` on the command
+#   line.  The VALUE still comes from the kernel command line and no address is
+#   spelled here, so this stays correct for every board on this target -- which
+#   is the property the original comment claims and this now actually has.
+mac=$(sed -n 's/.*[ \t][A-Za-z0-9_]\{1,\}\.mac=\([0-9A-Fa-f:]\{17\}\).*/\1/p' /proc/cmdline)
 [ -n "$mac" ] || exit 0
 
 # reject a multicast/zero address: the first octet's low bit is the I/G bit

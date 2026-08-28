@@ -35,6 +35,10 @@
 #define _RTL960X_GPON_REGS_H
 
 
+
+#include <linux/bits.h>	/* BIT */
+#include <linux/delay.h>	/* udelay in the SMI poll */
+#include <linux/io.h>	/* ioread32 / iowrite32 */
 #define GPON_PHYS_BASE	0x1b700000u
 #define GPON_REG_SIZE	0x00010000u	/* covers GTC DS block at +0x1000 */
 
@@ -77,7 +81,13 @@
 #define   GPON_EQD_INFRAME_MASK	0x3ffffu	/* [17:0]  in-frame delay    */
 #define   GPON_EQD_MF_SHIFT	24		/* [26:24] multiframe count  */
 #define   GPON_EQD_MF_MASK	0x7u
-#define   GPON_EQD_FRAME_LEN	(19440 * 8)	/* one upstream frame, in bits */
+/* ⚠ GPON_EQD_FRAME_LEN LIVED HERE AND IS GONE: it is not a register, it is the
+ * G.984 UPSTREAM FRAME LENGTH IN BITS, and the core already declares it as
+ * GPON_PLOAM_EQD_FRAME_LEN with the same value.  Two names for one spec fact,
+ * in two headers, is how the equalization-delay arithmetic in this driver and
+ * the one in the core come to disagree -- and the day they disagree the ONU
+ * ranges to the wrong offset, which does not look like a constant problem at
+ * all.  The driver takes the core's name; this header keeps only registers. */
 #define GPON_GTC_US_WRITE_PROTECT 0x5018	/* gate for US config writes   */
 #define   GPON_US_WP_UNLOCK	0xcc19u		/* magic: enable protected US writes */
 #define   GPON_US_WP_LOCK	0x0000u
@@ -423,5 +433,87 @@
  * yet, and deleting them now would mean re-deriving the LOS path a second
  * time. Unused TODAY is not the same as unused.
  */
+
+
+/* ---- the SMI/MDIO master, and the SWCORE proxy built on it -----------------
+ *
+ * ★★ FAMILY, TAKING THE MAPPED BASE -- the (hwio) conversion.  These four were
+ * written TWICE, in gpon-rtl960x.c and rtl9607c_gpon.c, and the two copies were
+ * identical: `sw_proxy_rd`/`sw_proxy_wr` byte for byte, and the two SMI halves
+ * differing ONLY in comments (verified by diff, 2026-08-28).  The single thing
+ * that kept them apart was the file-scope `swcore_base` each one closed over,
+ * so passing the base in is the whole of the fix.
+ *
+ * ⚠ AND THE CONSTANTS WERE DOUBLED TOO: this header already declared SMI_CTRL_0
+ * and its neighbours while rtl9607c_gpon.c carried its own `#define`s of the
+ * same addresses.  Two spellings of one register is how a corrected offset
+ * reaches half the family -- the defect this tree paid for twice today.
+ *
+ * ★ THE POLL IS BOUNDED AND ITS EXIT IS NOT CHECKED, exactly as both copies had
+ * it.  That is preserved deliberately: changing behaviour while moving code
+ * makes a later bisect blame the move.  It is recorded as OWED, not fixed here
+ * -- an SMI transaction that never clears CMD_EN currently returns whatever the
+ * data register held, and on this project a silent read is how a dead PHY bus
+ * survived five candidate fixes. */
+static inline u16 rtl960x_smi_read(void __iomem *sw, u8 phy, u8 reg)
+{
+	u32 ctrl, data;
+	int i;
+
+	iowrite32(phy << 5, sw + SMI_BC_PHYID);
+	iowrite32(BIT(phy), sw + SMI_CTRL_2);		/* target port mask */
+	/* MAIN_PAGE=0x1FFF (broadcast), REG=phyreg, CMD=1 (trigger read) */
+	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | SMI_CMD_EN,
+		  sw + SMI_CTRL_0);
+	for (i = 0; i < 1000; i++) {
+		ctrl = ioread32(sw + SMI_CTRL_0);
+		if (!(ctrl & SMI_CMD_EN))
+			break;
+		udelay(10);
+	}
+	data = ioread32(sw + SMI_CTRL_3);
+	return (u16)(data >> 16);
+}
+
+static inline void rtl960x_smi_write(void __iomem *sw, u8 phy, u8 reg, u16 val)
+{
+	u32 ctrl;
+	int i;
+
+	iowrite32(phy << 5, sw + SMI_BC_PHYID);
+	iowrite32(BIT(phy), sw + SMI_CTRL_2);
+	iowrite32(val, sw + SMI_CTRL_3);
+	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | BIT(4) | SMI_CMD_EN,
+		  sw + SMI_CTRL_0);
+	for (i = 0; i < 1000; i++) {
+		ctrl = ioread32(sw + SMI_CTRL_0);
+		if (!(ctrl & SMI_CMD_EN))
+			break;
+		udelay(10);
+	}
+}
+
+/* 32-bit SWCORE access through the PHY-%d proxy: address low/high, then the
+ * trigger word, then read the two data halves back. */
+static inline u32 rtl960x_sw_proxy_rd(void __iomem *sw, u32 swc_off)
+{
+	u16 lo, hi;
+
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x800b);	/* read trigger */
+	lo = rtl960x_smi_read(sw, SWCORE_PROXY_PHY, 4);
+	hi = rtl960x_smi_read(sw, SWCORE_PROXY_PHY, 5);
+	return ((u32)hi << 16) | lo;
+}
+
+static inline void rtl960x_sw_proxy_wr(void __iomem *sw, u32 swc_off, u32 val)
+{
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 2, (u16)(val & 0xffff));
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 3, (u16)((val >> 16) & 0xffff));
+	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x804b);	/* write trigger */
+}
 
 #endif /* _RTL960X_GPON_REGS_H */

@@ -35,6 +35,7 @@
  */
 
 #include <linux/kernel.h>
+#include "cortina_l3fe_logic.h"	/* hoisted logic */
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/build_bug.h>
@@ -924,22 +925,6 @@ static const struct { u16 idx; u32 w[L3FE_CLS_FIB_WORDS]; }
 	{ L3FE_CLS_FIB_IDX(L3FE_CLS_KEY_ROW_WAN_CTL),
 	  { 0, 0, 0, 0, 0x1C000000, 0x01C00004, 0x00000200 } },
 };
-
-/* WAN MAC = LAN/base MAC + 1 (per-board rule, stock-verified). */
-static void l3fe_wan_mac_derive(const u8 *lan_mac, u8 *wan_mac)
-{
-	u64 v = ((u64)lan_mac[0] << 40) | ((u64)lan_mac[1] << 32) |
-		((u64)lan_mac[2] << 24) | ((u64)lan_mac[3] << 16) |
-		((u64)lan_mac[4] << 8) | lan_mac[5];
-
-	v++;
-	wan_mac[0] = v >> 40;
-	wan_mac[1] = v >> 32;
-	wan_mac[2] = v >> 24;
-	wan_mac[3] = v >> 16;
-	wan_mac[4] = v >> 8;
-	wan_mac[5] = v;
-}
 
 int cortina_l3fe_intf_add(void __iomem *ne, const u8 *lan_mac)
 {

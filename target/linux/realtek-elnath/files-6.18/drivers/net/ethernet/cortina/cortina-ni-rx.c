@@ -37,6 +37,7 @@
  */
 
 #include <linux/bitfield.h>
+#include "cortina_ni_rx_logic.h"	/* hoisted logic */
 #include <linux/crc32.h>	/* ★ TEMP DIAG rx_frag_tap - revert with it */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -778,15 +779,6 @@ EXPORT_SYMBOL_GPL(cortina_ni_pon_wan_ndev_set);
 #define HDRI_L4_OFFSET		897	/*  8b PE: L4 offset in the frame */
 #define HDRI_L3_OFFSET		913	/*  8b PE: L3 offset in the frame */
 #define HDRI_PKT_LEN		929	/* 14b PE: orig_packet_len */
-
-/* extract an LSB-first bitfield (width <= 32) from the 32 LE HDR_I words */
-static u32 rx_hdri_get(const u32 *w, unsigned int bit, unsigned int width)
-{
-	u64 v = ((u64)w[(bit >> 5) + 1] << 32) | w[bit >> 5];
-
-	v >>= bit & 31;
-	return v & (width < 32 ? (1u << width) - 1 : 0xffffffffu);
-}
 
 /* SW-decoded frame layering (explicit byte math, endianness-agnostic) */
 struct rx_stack_sw {

@@ -124,6 +124,7 @@
  */
 
 #include "rtl960x_ponmac.h"
+#include "rtl960x_ponmac_logic.h"	/* hoisted logic */
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -1614,16 +1615,6 @@ static const struct r960_op c2_sds_txresync[] = {
  * the CMU/serializer phase latches. The active GPON bank (0x22708) + the FIB PDOWN-clear are
  * kept. Cold-start determinism fix candidate (makes the bring-up timing stock-minimal). */
 int rtl960x_c2_minimal_analog;
-
-/* True for the SerDes offsets our golden table writes but the stock rev-A bring-up never does. */
-static bool c2_off_overconfig(u32 off)
-{
-	u32 a = off & 0xffffu;
-	return (a >= 0x2608 && a <= 0x265c) ||	/* duplicate GPON per-rate bank 1 */
-	       (a >= 0x2688 && a <= 0x26dc) ||	/* duplicate GPON per-rate bank 2 */
-	       (a >= 0x2788 && a <= 0x27dc) ||	/* duplicate GPON per-rate bank 3 */
-	       (a >= 0x2c00 && a <= 0x2df8);	/* the 4 FIB-bank bodies            */
-}
 
 /* Program the full analog CMU/CDR golden table + clear fiber power-down on every
  * FIB bank. Factored so it can run either BEFORE the SDS reset (legacy) or AFTER it

@@ -24,6 +24,7 @@
  */
 
 #include <linux/bitfield.h>
+#include "cortina_ni_tx_logic.h"	/* hoisted logic */
 #include <linux/dma-mapping.h>
 #include <linux/etherdevice.h>
 #include <linux/if_arp.h>
@@ -113,13 +114,6 @@ MODULE_PARM_DESC(lan_tx_mode,
 #define CA_NI_LAN_FDB_MAC	GENMASK_ULL(47, 0)
 #define CA_NI_LAN_FDB_PORT	GENMASK_ULL(50, 48)
 #define CA_NI_LAN_FDB_VALID	BIT_ULL(51)
-
-/* explicit byte math: this driver must stay endianness-agnostic */
-static u64 ca_ni_mac_key(const u8 *mac)
-{
-	return ((u64)mac[0] << 40) | ((u64)mac[1] << 32) | ((u64)mac[2] << 24) |
-	       ((u64)mac[3] << 16) | ((u64)mac[4] << 8) | mac[5];
-}
 
 static unsigned int ca_ni_mac_bucket(const u8 *mac)
 {

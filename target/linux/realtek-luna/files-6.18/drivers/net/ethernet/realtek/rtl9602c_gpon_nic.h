@@ -93,4 +93,14 @@ void gpon_omci_note_gem_create(u16 port_id);
  * few seconds after O5 (config-apply done). */
 void rtl9602c_eth_omci_report_oper_up(void);
 
+
+/*
+ * The ONU serial number, owned by the PLOAM layer that provisions it.
+ * ★ WHY AN ACCESSOR AND NOT A SECOND COPY: the OMCI responder needs the same
+ *   eight bytes to answer ME 256 (ONU-G), and this tree has already paid for
+ *   two copies of one serial number -- the two decoders disagreed, one of them
+ *   turning a bad hex digit into 0xff without a word. One owner, one reader.
+ */
+void gpon_onu_sn(u8 out[8]);
+
 #endif /* _RTL9602C_GPON_NIC_H */

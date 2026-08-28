@@ -5052,6 +5052,22 @@ static void gpon_parse_sn(const char *s)
 	gpon_parse_sn_into(gpon_sn_bytes, s);
 }
 
+/*
+ * The ONU-SN, for the OMCI shell. It lives here because PLOAM owns the
+ * identity; the OMCI responder needs the same eight bytes to answer ME 256
+ * (ONU-G) and must not keep a second copy of them -- that is how two decoders
+ * of one serial number came to disagree in the first place.
+ */
+void gpon_onu_sn(u8 out[8])
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		out[i] = gpon_sn_bytes[i];
+}
+EXPORT_SYMBOL(gpon_onu_sn);
+
+
 /* True when `s` decodes to a DIFFERENT ONU-SN than the one in force.  The
  * caller uses this to decide whether a write is an identity change (re-range)
  * or a rewrite of the same serial (do nothing). */

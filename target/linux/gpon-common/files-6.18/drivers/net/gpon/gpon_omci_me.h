@@ -116,7 +116,15 @@
  * MIB-Upload reflect the actual configured MIB — without it the OLT's
  * post-config audit gets UNKNOWN_ME, re-runs the whole MIB-Reset/Upload/
  * Create sequence every ~50 s and finally Deactivates. */
+/* ★★ A CAPACITY IS A PER-BOARD VALUE, THE LOGIC IS COMMON (2026-08-27).
+ * Overridable so a board can rebase onto this store WITHOUT losing room: the
+ * Luna shell kept its own 128-entry table and swapping it for a fixed 64 here
+ * would have silently dropped provisioned MEs -- a regression wearing the
+ * clothes of a cleanup. One lean kernel per model, so each target compiles the
+ * core with its own number and neither pays for the other's. */
+#ifndef OMCI_STORE_MAX
 #define OMCI_STORE_MAX		64
+#endif
 struct omci_me_inst {
 	u16	class_id;
 	u16	inst;
@@ -132,7 +140,15 @@ struct omci_mib_row {
 	u16	inst;
 	u16	mask;
 };
+/* ★★ A CAPACITY IS A PER-BOARD VALUE, THE LOGIC IS COMMON (2026-08-27).
+ * Overridable so a board can rebase onto this store WITHOUT losing room: the
+ * Luna shell kept its own 200-entry table and swapping it for a fixed 72 here
+ * would have silently dropped provisioned MEs -- a regression wearing the
+ * clothes of a cleanup. One lean kernel per model, so each target compiles the
+ * core with its own number and neither pays for the other's. */
+#ifndef OMCI_MIB_ROWS_MAX
 #define OMCI_MIB_ROWS_MAX	72
+#endif
 
 struct omci_onu {
 	u8	sn[8];			/* PLOAM serial number (vendor+VSSN) */

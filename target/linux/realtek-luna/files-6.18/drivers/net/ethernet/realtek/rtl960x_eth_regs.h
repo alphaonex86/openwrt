@@ -98,6 +98,18 @@
 /* ─────────────────────────── the per-chip table ─────────────────────────── */
 /**
  * struct rtl960x_sw_map - the switch-core facts that differ between Luna chips
+ * @src_permit:       L2_SRC_PORT_PERMIT -- egress FILTER ENABLE, permissive
+ *                    value is 0 (writing all-ones reflects every frame back
+ *                    out its own ingress port; that was a real broadcast loop).
+ *                    ⚠ ON THE RTL9602C THIS ADDRESS WAS WRONG ONCE, and the
+ *                    note travels with the value: it was 0x1C114, which is
+ *                    QOS_PB_PRI on that chip, so the CPU port's ingress permit
+ *                    was never set and the fabric dropped every CPU-injected
+ *                    frame after DMA -- TX counter climbing, nothing egressing.
+ * @piso_base:        per-port egress-forward (isolation) matrix
+ * @cpu_port:         the switch port this GMAC is
+ * @pon_port:         the fibre port (no copper PHY behind it)
+ * @port_mask:        flood/member mask covering every port on this chip
  * @swcore_size:      ioremap length; must cover the highest block the driver
  *                    touches (MIB, PISO).  Too small and those reads land
  *                    outside the mapping instead of failing loudly.
@@ -116,6 +128,16 @@
  * day a third revision moves only half the block.
  */
 struct rtl960x_sw_map {
+	/* ★ PORT NUMBERS ARE PER-CHIP AND WERE HALF-TABULATED.  rtl960x_eth.c
+	 * already carried pon_port/cpu_port per chip while rtl9602c_eth.c
+	 * hardcoded RTL9602C_PON_PORT=2 and SW_CPU_PORT=3 -- the same shape as
+	 * the MSR value one sibling made tunable and the other did not.  The
+	 * numbers differ genuinely: PON is port 2, 4 and 5 on the three chips. */
+	u32 src_permit;
+	u32 piso_base;
+	u8  cpu_port;
+	u8  pon_port;
+	u32 port_mask;
 	u32 swcore_size;
 	u32 lut_unkn_sa;
 	u32 lut_unkn_uc_da;
@@ -128,6 +150,11 @@ struct rtl960x_sw_map {
 };
 
 static const struct rtl960x_sw_map rtl9602c_sw_map = {
+	.src_permit	= 0x1C088,
+	.piso_base	= 0x27000,
+	.cpu_port	= 3,
+	.pon_port	= 2,
+	.port_mask	= 0xf,
 	.swcore_size	= 0x40000,	/* must cover MIB @0x32000 + PISO @0x27000 */
 	.lut_unkn_sa	= 0x1C004,	/* unmoved: the SAME offset on both chips */
 	.lut_unkn_uc_da	= 0x1C008,
@@ -140,6 +167,11 @@ static const struct rtl960x_sw_map rtl9602c_sw_map = {
 };
 
 static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
+	.src_permit	= 0x1C0B0,
+	.piso_base	= 0x27000,
+	.cpu_port	= 5,
+	.pon_port	= 4,
+	.port_mask	= GENMASK(5, 0),
 	.swcore_size	= 0x43000,
 	.lut_unkn_sa	= 0x1C004,
 	.lut_unkn_uc_da	= 0x1C00C,
@@ -161,6 +193,19 @@ static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
  * carries the value that driver has been using.
  */
 static const struct rtl960x_sw_map rtl9607c_sw_map = {
+	/* ⚠ 0x1C114, NOT the RTL9603CVD's 0x1C0B0.  This was written as 0x1C0B0 by
+	 * copying the sibling's value; the driver's own table and this chip's
+	 * chipdef both say 0x1C114, and two guards caught it before it shipped.
+	 * The number matters more than it looks: 0x1C114 is what the RTL9602C's
+	 * own comment records as WRONG for THAT chip -- it is QOS_PB_PRI there, and
+	 * using it left the CPU port's ingress permit unset so the fabric dropped
+	 * every CPU-injected frame.  One address, correct on one die and
+	 * catastrophic on another: that is what this table is for. */
+	.src_permit	= 0x1C114,
+	.piso_base	= 0x27000,
+	.cpu_port	= 9,
+	.pon_port	= 5,
+	.port_mask	= GENMASK(9, 0),
 	.swcore_size	= 0x43000,
 	.lut_unkn_sa	= 0x1C004,
 	.lut_unkn_uc_da	= 0x1C00C,

@@ -333,28 +333,28 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
 struct luna_eth_chip {
 	const char *name;
 
-	/* ★ The switch-core map for THIS chip.  Kept as a pointer into
+	/* ★ The switch-core map for THIS chip -- and the ONLY home of this
+	 * chip's port numbers.  They were briefly duplicated here AND in
+	 * rtl960x_sw_map (2026-08-28, by the same change that tabulated them for
+	 * the sibling driver); the two agreed, which is luck and not structure.
+	 * Two copies of one silicon fact is how they come to disagree in silence.  Kept as a pointer into
 	 * rtl960x_eth_regs.h rather than copied in, so the sibling driver and
 	 * this one read the SAME numbers and a correction lands once. */
 	const struct rtl960x_sw_map *sw_map;
 
 	/* --- switch port map ------------------------------------------------ */
-	u8	cpu_port;	/* the port this GMAC is				*/
-	u8	pon_port;	/* the fibre port (no copper PHY behind it)	*/
 	/* ★ Force the PON port's MAC link like the CPU port's -- 1 only on a
 	 * chip where STOCK was MEASURED doing it. See the write site. */
 	u8	force_pon_ablty;
 	u8	last_port;	/* highest port to iterate, INCLUSIVE		*/
 	u8	n_copper;	/* copper PHY ports, always 0..n_copper-1	*/
 	u8	gphy_ports;	/* bitmap: ports whose PHY is a GPHY, not FE	*/
-	u32	port_mask;	/* flood/member mask covering 0..last_port	*/
 
 	/* --- switch registers that MOVED ------------------------------------ */
 	u32	force_ablty;	/* + 4*port: forced ability values		*/
 	u32	p_ablty;	/* + 4*port: LIVE ability, read-only		*/
 	u32	ablty_force;	/* + 4*port: which ability fields are forced	*/
 	u32	msti_ctrl;	/* + 4*port: per-port spanning-tree state	*/
-	u32	src_permit;	/* source-port egress FILTER ENABLE (want 0)	*/
 	u32	cpu_tag_insert;
 	u32	cpu_tag_aware;
 	u32	swcore_rst;	/* swcore soft reset (bit10), excludes cfg	*/
@@ -365,7 +365,6 @@ struct luna_eth_chip {
 	u32	cfg_pcsxf;	/* RST_RXFIFO[13:10] | MIIRX_IPG[9:5] | PCSXF[4:1] */
 
 	/* --- port-isolation packing, which differs in SHAPE not just offset -- */
-	u32	piso_base;
 	u8	piso_per_word;	/* how many ports share one 32-bit word		*/
 	u8	piso_bits;	/* width of one port's mask			*/
 	u32	piso_all;	/* the all-open value for ONE port		*/
@@ -391,8 +390,6 @@ struct luna_eth_chip {
 static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.sw_map		= &rtl9607c_sw_map,
 	.name		= "RTL9607C",
-	.cpu_port	= 9,
-	.pon_port	= 5,
 	/* ⚠ 0 DELIBERATELY, and it is a scope statement rather than a
 	 * finding: nobody has diffed SWCORE 0x1cc/0x238 stock-vs-ours on the
 	 * RTL9607C engineering board, and this chip reaches its PON/PBO
@@ -404,19 +401,16 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.last_port	= 11,	/* 0..4,8 copper; 5 PON; 6,7 SerDes; 9 CPU; 11 PBO */
 	.n_copper	= 5,	/* ports 0..4 */
 	.gphy_ports	= 0x1f,	/* all five copper ports are GPHYs here	*/
-	.port_mask	= GENMASK(9, 0),
 	.force_ablty	= 0x001CC,
 	.p_ablty	= 0x00200,
 	.ablty_force	= 0x00238,
 	.msti_ctrl	= 0x1704C,
-	.src_permit	= 0x1C114,
 	.cpu_tag_insert	= 0x230F4,
 	.cpu_tag_aware	= 0x230F8,
 	.swcore_rst	= 0x00108,
 	.gphy_misc	= 0x00114,
 	.fephy_poll	= 0,	/* every PHY here is a GPHY: no FE auto-poller	*/
 	.cfg_phy_ini	= 0x0004C,
-	.piso_base	= 0x27000,
 	.piso_per_word	= 1,
 	.piso_bits	= 29,
 	.piso_all	= 0x1FFFFFFF,
@@ -459,8 +453,6 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.sw_map		= &rtl9603cvd_sw_map,
 	.name		= "RTL9603CVD",
-	.cpu_port	= 5,
-	.pon_port	= 4,
 	/* ★★ MEASURED 2026-08-27, stock vs ours, SWCORE 0x180..0x1fc
 	 * (swcore_diff.py --board=RTL9603CVD/LANLY/G24W --diff):
 	 *     FORCE_P_ABLTY[4]     stock 0x00000016   ours 0x00000000
@@ -473,12 +465,10 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.last_port	= 5,	/* 0..2 FE; 3 GE; 4 PON; 5 CPU (6 = PBO loopback)*/
 	.n_copper	= 4,	/* ports 0..3					*/
 	.gphy_ports	= 0x08,	/* ONLY port 3 is a GPHY; 0..2 are FE PHYs	*/
-	.port_mask	= GENMASK(5, 0),
 	.force_ablty	= 0x00198,
 	.p_ablty	= 0x001B8,
 	.ablty_force	= 0x001DC,
 	.msti_ctrl	= 0x1713C,
-	.src_permit	= 0x1C0B0,
 	.cpu_tag_insert	= 0x2303C,
 	.cpu_tag_aware	= 0x23040,
 	.swcore_rst	= 0x000E0,
@@ -487,7 +477,6 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.cfg_phy_ini	= 0x00050,
 	.cfg_phy_ctrl	= 0x0004C,
 	.cfg_pcsxf	= 0x00048,
-	.piso_base	= 0x27000,
 	.piso_per_word	= 2,
 	.piso_bits	= 12,
 	.piso_all	= 0xFFF,
@@ -1221,7 +1210,7 @@ static void eth_switch_init(struct luna_eth *ep)
 		eth_rtl8221b_reset_release(ep);
 
 	/* 4. open the L2 forwarding plane. */
-	for (p = 0; p <= ep->c->cpu_port; p++) {
+	for (p = 0; p <= ep->c->sw_map->cpu_port; p++) {
 		u32 reg = ep->c->sw_map->lut_unkn_sa + (p / 16) * 4;
 
 		/* unknown-source-MAC action 0 = learn + forward */
@@ -1240,10 +1229,10 @@ static void eth_switch_init(struct luna_eth *ep)
 	 * board sees the identical write it saw before.
 	 */
 	{
-		u32 flood = ep->c->port_mask;
+		u32 flood = ep->c->sw_map->port_mask;
 
 		if (ep->c->force_pon_ablty)
-			flood &= ~BIT(ep->c->pon_port);
+			flood &= ~BIT(ep->c->sw_map->pon_port);
 		sw_or(ep, ep->c->sw_map->bc_flood, flood);
 		sw_or(ep, ep->c->sw_map->unkn_mc_flood, flood);
 		sw_or(ep, ep->c->sw_map->unkn_uc_flood, flood);
@@ -1254,7 +1243,7 @@ static void eth_switch_init(struct luna_eth *ep)
 	 * working firmware leaves it 0 (no filtering = forward). Writing all-ones here
 	 * silently dropped every LAN->CPU frame (port RX climbed, CPU RX stayed flat).
 	 * Correct forwarding-permissive value is 0. */
-	sw_wr(ep, ep->c->src_permit, 0x00000000);
+	sw_wr(ep, ep->c->sw_map->src_permit, 0x00000000);
 
 	/* 4a2. per-port unknown-DA lookup-miss action = FORWARD(0). We only set the
 	 *      unknown-SOURCE action above; the unknown-DESTINATION action must also
@@ -1297,9 +1286,9 @@ static void eth_switch_init(struct luna_eth *ep)
 	 * read-modify-write is therefore mandatory -- a plain store would wipe
 	 * the neighbouring port's mask on the chip that shares a word. */
 	if (cpu_no_loopback) {
-		unsigned int cp = ep->c->cpu_port;
+		unsigned int cp = ep->c->sw_map->cpu_port;
 		unsigned int per = ep->c->piso_per_word;
-		u32 reg = ep->c->piso_base + (cp / per) * 4;
+		u32 reg = ep->c->sw_map->piso_base + (cp / per) * 4;
 		unsigned int shift = (cp % per) * ep->c->piso_bits;
 		u32 fld = ep->c->piso_all & ~BIT(cp);
 
@@ -1314,7 +1303,7 @@ static void eth_switch_init(struct luna_eth *ep)
 	 *    link bit, so we don't disturb the working internal link (clobbering it
 	 *    can stop the switch egressing CPU-injected frames). */
 	for (p = 0; p <= ep->c->last_port; p++) {
-		if (p == ep->c->cpu_port) {
+		if (p == ep->c->sw_map->cpu_port) {
 			sw_or(ep, SW_FORCE_ABLTY(ep, p), BIT(4));
 			sw_wr(ep, SW_ABLTY_FORCE(ep, p), ABLTY_CPU_FORCE);
 		} else {
@@ -1383,7 +1372,7 @@ static void eth_switch_init(struct luna_eth *ep)
 	 * MAC behind it, which is why it is repaired now rather than after.
 	 */
 	if (ep->c->force_pon_ablty) {
-		unsigned int pp = ep->c->pon_port;
+		unsigned int pp = ep->c->sw_map->pon_port;
 		u32 was = sw_rd(ep, SW_FORCE_ABLTY(ep, pp));
 
 		sw_wr(ep, SW_FORCE_ABLTY(ep, pp), ABLTY_1G_FULL_LINK);
@@ -1404,9 +1393,9 @@ static void eth_switch_init(struct luna_eth *ep)
 
 	dev_info(ep->dev,
 		 "switch: %s open-L2 up (cpu-port %u of 0..%u, src-permit=%08x, cpu-ablty=%04x)\n",
-		 ep->c->name, ep->c->cpu_port, ep->c->last_port,
-		 sw_rd(ep, ep->c->src_permit),
-		 sw_rd(ep, SW_P_ABLTY(ep, ep->c->cpu_port)));
+		 ep->c->name, ep->c->sw_map->cpu_port, ep->c->last_port,
+		 sw_rd(ep, ep->c->sw_map->src_permit),
+		 sw_rd(ep, SW_P_ABLTY(ep, ep->c->sw_map->cpu_port)));
 	/* Baseline real-link snapshot; the periodic diag (armed at open) then shows
 	 * which port's genuine link comes up + rxpkts climb under host traffic. */
 	eth_diag_dump(ep);

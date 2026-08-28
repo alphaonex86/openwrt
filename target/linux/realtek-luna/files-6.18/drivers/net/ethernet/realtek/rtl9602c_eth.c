@@ -383,22 +383,15 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * SoC switch core (SWCORE), phys 0x1B000000. The switch has 4 ports (0-3); the
  * CPU port (where GMAC0 attaches) is port 3. Flood masks have one bit per port.
  */
-#define SW_CPU_PORT		3
 /* per-port forced-ability value + force-mode (RTL9602C register map: base 0x180
  * / 0x1B4, stride 4). FORCE_P_ABLTY holds speed/duplex/link; ABLTY_FORCE_MODE
  * = 0xFFF forces all of them. */
 #define SW_FORCE_P_ABLTY(p)	(0x180 + ((p) << 2))
 #define SW_ABLTY_FORCE_MODE(p)	(0x1B4 + ((p) << 2))
-#define SW_SRC_PORT_PERMIT	0x1C088	/* RTL9602C L2_SRC_PORT_PERMIT, 1 bit/port; 0 drops ingress.
-					 * WAS 0x1C114 (= QOS_PB_PRI on this chip — WRONG): the CPU
-					 * port's ingress permit was never set, so the fabric dropped
-					 * every CPU-injected frame after DMA (TX counter++ / no egress). */
 #define SW_SYS_LRN_LIMITNO	0x17018	/* system MAC-learn limit [10:0]; 0 = no learning */
 #define SW_DLF_ACT_TRAP2CPU	2
-#define SW_PISO_PORT		0x27000	/* per-port egress-forward (isolation) mask, 11b/port bit-packed; set bit = may forward to that port. all-1s = no isolation */
 /* Forced ability value: 1000M (speed[1:0]=2) + full duplex (b2) + link-up (b4) */
 #define SW_ABLTY_1G_FD_UP	(0x2 | BIT(2) | BIT(4))
-#define SW_PORTS_ALL		0xf	/* ports 0-3 (incl CPU port 3) */
 /* MAC_CPU_TAG_CTRL: TAG_AWARE[9] makes the switch parse the CPU-tag on CPU-port
  * ingress and STRIP it before physical egress; TRAP_TAGET_INSERT_EN[8] inserts
  * a CPU-tag on frames trapped to the CPU. */
@@ -434,7 +427,6 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * to the CPU port tagged with rx-reason OMCI from the PON port; CPUTAG1CR[14:8]
  * selects which DS stream-id the GMAC traps to the CPU. */
 #define RTL9602C_OMCI_REASON	246	/* RX cpu-tag reason code = OMCI */
-#define RTL9602C_PON_PORT	2	/* PON/fiber switch port */
 #define CPUTAG1_OMCI_SID(s)	(((s) & 0x7f) << 8)	/* R_CPUTAG1CR[14:8] */
 #define CPUTAG1_B1		0x2	/* bit1: live 9602C stock reads CPUTAG1CR=0x4002; not present in the 9607C register map */
 /* Stock NIC init writes CPUTAG1CR = (SID<<8) | 0x70 (bits 4/5/6 = the
@@ -778,18 +770,18 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * Cross-port forwarding (host port1 <-> CPU port3) is unaffected (different
 	 * ports). PISO 0x27000 is an 11-bit positive egress matrix (reset 0x3FFFFF =
 	 * forward to all); leave it at reset — do NOT write 0xffffffff (reserved bits). */
-	iowrite32(0, ep->sw + SW_SRC_PORT_PERMIT);
+	iowrite32(0, ep->sw + ep->swm->src_permit);
 	/* Flood masks: ports 0,1 (LAN) + 3 (CPU), but NOT port 2 (PON). Behavioral note:
 	 * stock excludes the PON port from BC/MC/unknown-UC flood so a cpu-tagged US OMCI
 	 * that the parser did not direct-TX has NO flood escape to switch-p2 — it is forced
 	 * down the PSEL direct-TX path to the US-NIC (our measured symptom was OMCI
 	 * L2-flooding to p2 instead). LAN/CPU flood (host BC/ARP/DHCP reach the CPU) is
 	 * preserved; DS ingress from p2 and directed US GEM data are unaffected. */
-	iowrite32((ioread32(ep->sw + ep->swm->bc_flood) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
+	iowrite32((ioread32(ep->sw + ep->swm->bc_flood) | ep->swm->port_mask) & ~BIT(ep->swm->pon_port),
 		  ep->sw + ep->swm->bc_flood);
-	iowrite32((ioread32(ep->sw + ep->swm->unkn_mc_flood) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
+	iowrite32((ioread32(ep->sw + ep->swm->unkn_mc_flood) | ep->swm->port_mask) & ~BIT(ep->swm->pon_port),
 		  ep->sw + ep->swm->unkn_mc_flood);
-	iowrite32((ioread32(ep->sw + ep->swm->unkn_uc_flood) | SW_PORTS_ALL) & ~BIT(RTL9602C_PON_PORT),
+	iowrite32((ioread32(ep->sw + ep->swm->unkn_uc_flood) | ep->swm->port_mask) & ~BIT(ep->swm->pon_port),
 		  ep->sw + ep->swm->unkn_uc_flood);
 	/* Unknown-unicast that misses the L2 lookup (e.g. the host's NDP/ARP
 	 * reply to the not-yet-learned CPU MAC) must reach the CPU. Flooding via
@@ -844,8 +836,8 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * immediately starts RX. The LAN jack ports stay auto-negotiated (real PHYs);
 	 * only the internal MAC<->MAC CPU port must be force-linked.
 	 */
-	iowrite32(SW_ABLTY_1G_FD_UP, ep->sw + SW_FORCE_P_ABLTY(SW_CPU_PORT));
-	iowrite32(0xfff, ep->sw + SW_ABLTY_FORCE_MODE(SW_CPU_PORT));
+	iowrite32(SW_ABLTY_1G_FD_UP, ep->sw + SW_FORCE_P_ABLTY(ep->swm->cpu_port));
+	iowrite32(0xfff, ep->sw + SW_ABLTY_FORCE_MODE(ep->swm->cpu_port));
 
 	/* Accept short (runt) frames on the PON port (2) and CPU port (3). A DS OMCI
 	 * frame is the 48-byte G.988 baseline + headers = ~60 bytes, BELOW the 64-byte
@@ -867,7 +859,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * port and the GMAC RX ring stays empty (filled=0) despite the PON-IP DS
 	 * datapath being fully up. Forcing 1000M/FD/LINK opens the PON->CPU path.
 	 */
-	iowrite32(SW_ABLTY_1G_FD_UP, ep->sw + SW_FORCE_P_ABLTY(RTL9602C_PON_PORT));
+	iowrite32(SW_ABLTY_1G_FD_UP, ep->sw + SW_FORCE_P_ABLTY(ep->swm->pon_port));
 	/*
 	 * Force P2 link UP (0xfff). This is REQUIRED for the DS path (PON->CPU forward).
 	 * Tested the stock-style auto-link (0xfef, clearing FORCE_LINK_ABLTY) on HW:
@@ -875,7 +867,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * fixed (us_rxsid still 0). So the P2 force-link is load-bearing for DS and is
 	 * NOT the US-egress blocker -- do not remove it.
 	 */
-	iowrite32(0xfff, ep->sw + SW_ABLTY_FORCE_MODE(RTL9602C_PON_PORT));
+	iowrite32(0xfff, ep->sw + SW_ABLTY_FORCE_MODE(ep->swm->pon_port));
 }
 
 static void rtl9602c_eth_get_hwaddr(struct rtl9602c_eth *ep, u8 *mac)
@@ -1490,7 +1482,7 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
  * Carries GPON WAN user data on the data GEM (the OLT's gem-port-id, gpon_data_gem_port,
  * on internal flow GPON_DATA_FLOW).
  * DS frames de-encapsulated from the data GEM arrive from switch PON port 2 and are demux'd
- * to this netdev in rtl9602c_eth_rx (src_port == RTL9602C_PON_PORT). US frames use the SAME
+ * to this netdev in rtl9602c_eth_rx (src_port == ep->swm->pon_port). US frames use the SAME
  * HW cpu-tag direct-TX descriptor the OMCI path uses, but tx_dst_stream_id = GPON_DATA_FLOW
  * (the US-NIC then stamps the OLT's gem-id via GEM_US_PORT_MAP and routes to the OMCC's
  * T-CONT 16/qid 64 grants). Carrier is held up so netifd runs DHCP; pre-install US frames are
@@ -2130,7 +2122,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 		 * only partial fix re-caught — by fuzz/fuzz_rx.c (ASan). */
 		if (ep->omci_trap_on && len >= RX_CPU_PREFIX + 8 && len <= RX_BUF_SIZE &&
 		    ((((ep->rx_ring[i].opts2 >> 21) & 0xff) == RTL9602C_OMCI_REASON &&
-		      ((ep->rx_ring[i].opts3 >> 16) & 0xf) == RTL9602C_PON_PORT) ||
+		      ((ep->rx_ring[i].opts3 >> 16) & 0xf) == ep->swm->pon_port) ||
 		     /* DS OMCI actually arrives SWITCH-routed (no reason==246): the de-
 		      * encapsulated baseline OMCI rides the GMAC CPU-port behind the 2-byte
 		      * prefix as raw G.988 -> [TID(2)][MT(1)][DevID(1)=0x0a baseline/0x0b
@@ -2191,7 +2183,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 				 * bridge works. (An earlier is_multicast->gpon0 rule mis-sent LAN ARP to
 				 * the WAN and broke 192.168.1.1 reachability.) */
 				if (ep->wan_ndev &&
-				    (sp == RTL9602C_PON_PORT || wan_drain ||
+				    (sp == ep->swm->pon_port || wan_drain ||
 				     ether_addr_equal(dst, ep->wan_ndev->dev_addr)))
 					rdev = ep->wan_ndev;
 				else
@@ -3508,7 +3500,7 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 		   ep_rd(ep, 0x13c4) & 0xffff, ep_rd(ep, 0x13d4) & 0xffff);
 	if (ep->sw) {
 		seq_printf(m, "SW permit(1c088)=%08x flood bc/mc/uc=%08x/%08x/%08x\n",
-			   ioread32(ep->sw + SW_SRC_PORT_PERMIT),
+			   ioread32(ep->sw + ep->swm->src_permit),
 			   ioread32(ep->sw + ep->swm->bc_flood),
 			   ioread32(ep->sw + ep->swm->unkn_mc_flood),
 			   ioread32(ep->sw + ep->swm->unkn_uc_flood));

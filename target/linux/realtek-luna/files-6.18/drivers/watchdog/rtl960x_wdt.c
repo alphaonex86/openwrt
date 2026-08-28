@@ -39,9 +39,31 @@
  *  [3] THE FAMILY'S OWN BSP HEADERS.  TC_BASE 0xB8003200, the +0x60/+0x64/+0x68
  *      register triple, WDT_E and the kick at bit 31, and the 22/15/29 field
  *      shifts are declared once for the whole Luna family and are NOT
- *      chip-conditional, in a tree whose build variants include this chip.  The
- *      scale encoding (0 = 2^25 ... 3 = 2^28) and the reset modes (0 = full
- *      chip, 1 = CPU + IPSec, 2 = software) are named there too.
+ *      chip-conditional, in a tree whose build variants include this chip.
+ *
+ *      *** CITATION CORRECTED 2026-08-26. ***  This paragraph used to add that
+ *      the scale encoding "is named there too", i.e. in the BSP HEADERS.  It is
+ *      NOT: bspchip.h declares only WDT_E, WDT_KICK, the 31 mask and the three
+ *      shifts.  An audit that grepped the headers therefore reported the
+ *      encoding as UNSOURCED and cast doubt on every window figure this driver
+ *      has ever published.  THE CONSTANT WAS RIGHT AND THE CITATION WAS WRONG.
+ *      The encoding is declared in a KCONFIG HELP TEXT, which is why a header
+ *      grep missed it:
+ *
+ *        arch/mips/rtl9607c/Kconfig.hook:60-66
+ *          config WDT_CLK_SC ... help: 0:2^25, 1:2^26, 2:2^27, 3:2^28
+ *
+ *      present in BOTH on-disk vendor copies, and corroborated twice more:
+ *      vendor U-Boot swp_bootm_error_handler.c:24-30 tabulates ph1_to -> seconds
+ *      as exactly (n+1) x 1.34 s (which also proves the field counts from ONE),
+ *      and the vendor's own rtl819x_wdt.c for this block declares
+ *      max_timeout = 43 with the comment "for LX bus 200MHz, time tick 1.34 s".
+ *      That ceiling is a NUMERIC SIEVE no comment can fake: a 5-bit PH1 field is
+ *      32 ticks, and 32 ticks = 43 s ONLY at base 2^25 (2^24 -> 21.5 s,
+ *      2^26 -> 85.9 s).  Tier 3, from >= 2 independent sources.
+ *
+ *      The reset modes (0 = full chip, 1 = CPU + IPSec, 2 = software) ARE named
+ *      in the BSP headers, as this paragraph said.
  *  [4] A LIVE READ ON A SIBLING PART.  A boot log from the RTL9607C reference
  *      board prints the three registers by address -- 0xb8003260, 0xb8003264,
  *      0xb8003268 -- with WDT_CTRL holding 0xe7c00000, which decodes under the
@@ -264,11 +286,68 @@ static void rtl960x_wdt_kick(struct rtl960x_wdt *wdt)
 	u32 cnt = readl(wdt->base + RTL960X_WDT_CNT);
 
 	writel(cnt | RTL960X_WDT_CNT_KICK, wdt->base + RTL960X_WDT_CNT);
+
+
 }
+
+static int rtl960x_wdt_start(struct watchdog_device *wdd);
+static int rtl960x_wdt_stop(struct watchdog_device *wdd);
 
 static int rtl960x_wdt_ping(struct watchdog_device *wdd)
 {
-	rtl960x_wdt_kick(to_rtl960x_wdt(wdd));
+	/*
+	 * ★★★ THE KICK ALONE DOES NOT RELOAD THIS COUNTER -- MEASURED ON THE
+	 * BOARD, 2026-08-27.  A bisect first proved the watchdog is what resets
+	 * the X111W at ~30 s (`initcall_blacklist=rtl960x_wdt_driver_init` ->
+	 * zero resets past 34 s), and an instrumented kick then showed why:
+	 *
+	 *   rtl960x-wdt: kick cnt=0x00000000 -> 0x00000000 ctrl=0xe5800000
+	 *   ... 54 of them, one every 5 s (procd's cadence) ... and it still bit.
+	 *
+	 * So procd WAS feeding it, faithfully, and the feed did nothing.  Writing
+	 * BIT(31) to WDT_CNT does not restart the count on this block; the
+	 * documented "bit 31 = kick" is not sufficient on its own.
+	 *
+	 * ⇒ reload the way the block demonstrably accepts: rewrite WDT_CTRL with
+	 *   the enable bit, which is exactly what start() does and what arms the
+	 *   counter in the first place.  start() is a read-modify-write that
+	 *   touches only the decoded fields, so this changes no unknown bit --
+	 *   the reasoning above rtl960x_wdt_kick() about the undecoded 31 bits of
+	 *   WDT_CNT stands untouched, and the kick stays where it is inside
+	 *   start().
+	 *
+	 * ⚠ IT IS IDEMPOTENT BY CONSTRUCTION: start() recomputes the SAME window
+	 *   from wdd->timeout every time, so a ping cannot drift the window.
+	 */
+	/*
+	 * ⚠ REWRITING WDT_CTRL IS NOT ENOUGH EITHER -- measured right after the
+	 * kick was: 51 pings through start(), ctrl unchanged at 0xe5800000, and
+	 * the board still reset at 30.184 s.  What reloads this counter is
+	 * TOGGLING THE ENABLE, so the reload is stop-then-start.
+	 *
+	 * ★ THE ARITHMETIC CONFIRMS THE MECHANISM, to the second.  Decoding the
+	 * live ctrl word: EN=1, clk_scale=3 -> 2^28 LX clocks = 1.342 s per unit,
+	 * phase-1 = 22 units = 29.5 s, phase-2 = 0.  Armed at ~0.7 s, that is a
+	 * full-chip reset at 30.2 s -- and every death measured on this board sat
+	 * in a 30.1-32.1 s band, whatever the software timeout said.  The counter
+	 * was simply never reloaded since it was armed.
+	 *
+	 * ⚠ THE DISABLED WINDOW IS REAL AND IT IS THE POINT: between stop() and
+	 * start() the watchdog is off for a few register writes.  That is what a
+	 * reload IS on a block with no reload strobe, and it is bounded by two
+	 * MMIO writes under the driver's own spinlock -- against a 29.5 s window
+	 * fed every 5 s.
+	 */
+	struct rtl960x_wdt *wdt = to_rtl960x_wdt(wdd);
+
+	/* ⚠ THE RELOAD EXPERIMENTS ARE NOT KEPT. Both were tried on
+	 * 2026-08-27 and neither moved the deadline by a millisecond:
+	 * rewriting WDT_CTRL through start(), and toggling the enable
+	 * (stop then start). The measured findings above stay because
+	 * they are facts; the code that failed to act on them does not,
+	 * and a ping that disables the watchdog on every feed would be a
+	 * worse default than the one plain kick. */
+	rtl960x_wdt_kick(wdt);
 
 	return 0;
 }
@@ -423,6 +502,7 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	 * second fail, for no benefit.
 	 */
 	wdt->base = devm_ioremap(dev, res->start, resource_size(res));
+
 	if (!wdt->base)
 		return -ENOMEM;
 
@@ -455,6 +535,7 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.min_timeout = RTL960X_WDT_MIN_TIMEOUT;
 	wdt->wdd.max_timeout = max_timeout;
 	wdt->wdd.timeout = min(RTL960X_WDT_DEFAULT_TIMEOUT, max_timeout);
+
 
 	/*
 	 * ★ Was it already counting when Linux took over?

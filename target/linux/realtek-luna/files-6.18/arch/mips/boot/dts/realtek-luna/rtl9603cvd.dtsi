@@ -154,7 +154,7 @@
 	 * We need only TC0; the window covers TC0 and TC1.
 	 *
 	 * The driver is the family one already in this target
-	 * (timer-rtl9602c.c). It is reached through the fallback compatible
+	 * (timer-rtl960x.c). It is reached through the fallback compatible
 	 * rather than by editing that driver's match table, so nothing
 	 * about the RTL9602C build changes. Its register layout
 	 * (DATA/CNT/CTRL/INT at +0x00/+0x04/+0x08/+0x0c) and its 200 MHz

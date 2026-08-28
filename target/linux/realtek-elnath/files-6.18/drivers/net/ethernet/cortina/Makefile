@@ -20,6 +20,10 @@
 # kernel that builds cortina_gpon.ko always has the core available to link
 # against; there is deliberately no way to configure one without the other.
 ccflags-y += -I$(srctree)/drivers/net/gpon
+# The hoisted-logic headers (drivers/net/flowcore/*_logic.h): pure functions
+# moved out of this directory's shells into the shared tree; the shells still
+# call them, so their prototypes must resolve from here.
+ccflags-y += -I$(srctree)/drivers/net/flowcore
 
 obj-$(CONFIG_GEMINI_ETHERNET) += gemini.o
 obj-$(CONFIG_CORTINA_NI) += cortina_ni.o

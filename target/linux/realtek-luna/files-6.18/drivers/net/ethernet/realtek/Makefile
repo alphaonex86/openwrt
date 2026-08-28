@@ -50,6 +50,10 @@
 # adds an include path and no code: an object that includes nothing from the
 # shared tree is byte-identical with and without it.
 ccflags-y += -I$(srctree)/drivers/net/gpon
+# The hoisted-logic headers (drivers/net/flowcore/*_logic.h): pure functions
+# moved out of this directory's shells into the shared tree; the shells still
+# call them, so their prototypes must resolve from here.
+ccflags-y += -I$(srctree)/drivers/net/flowcore
 
 # ★ THIS BOARD'S OMCI CAPACITIES. The core defaults (64 MEs / 72 MIB rows) are
 # the Elnath's; the Luna shell has always carried 128/200 and rebasing it onto

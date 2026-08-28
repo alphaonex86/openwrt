@@ -16,6 +16,7 @@
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
 #include <linux/delay.h>
+#include "rtl9602c_l34_logic.h"	/* hoisted logic */
 #include <linux/errno.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -40,22 +41,6 @@ static inline void l34_wr(struct rtl9602c_l34 *l, u32 off, u32 val)
  * Pack/unpack a field that may straddle 32-bit word boundaries within the
  * entry's word array. @lsp is the bit position from bit 0 of word[0].
  */
-static void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val)
-{
-	unsigned int word = lsp / 32, bit = lsp % 32, take;
-
-	val &= (width >= 32) ? ~0u : ((1u << width) - 1);
-	while (width) {
-		take = min(width, 32 - bit);
-		w[word] &= ~((((take >= 32) ? ~0u : ((1u << take) - 1))) << bit);
-		w[word] |= (val & ((take >= 32) ? ~0u : ((1u << take) - 1))) << bit;
-		val >>= take;
-		width -= take;
-		word++;
-		bit = 0;
-	}
-}
-
 /* Inverse of l34_field_set: extract a (possibly word-straddling) field. */
 static u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width)
 {
@@ -151,39 +136,6 @@ int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw)
 	mutex_init(&l->lock);
 	l->ready = true;	/* table-access ready; the engine is enabled lazily */
 	return 0;
-}
-
-/*
- * NAPT bucket hashes (clean-room: the arithmetic is re-expressed from observed
- * behaviour). Each folds its key to a 10-bit bucket (0..1023); the 4096-entry
- * NAPT/NAPTR tables are 4-way, so an entry index is (bucket << 2) + way, with
- * way 0..3. The is_tcp argument is a 1-bit flag (1=TCP, 0=UDP) — NOT the IP
- * protocol number; only its bit 0 feeds the hash.
- */
-static u16 l34_hash_out(bool is_tcp, u32 sip, u16 sport, u32 dip, u16 dport)
-{
-	/* low 16 bits of both addresses + both ports, summed then folded 18->10 */
-	u32 lo   = (sip & 0xffff) + (dip & 0xffff) + sport + dport;
-	u32 fold = (lo & 0x3ff) + ((lo >> 10) & 0xff);
-
-	/* the address upper halves and the TCP/UDP selector, mixed in by XOR */
-	u32 mix  = ((sip >> 16) & 0x3ff) ^ ((dip >> 16) & 0x3ff);
-
-	mix ^= ((sip >> 26) & 0x3f) + ((u32)(is_tcp & 1) << 9);
-	mix ^= ((dip >> 26) & 0x3f) << 4;
-
-	return (fold ^ mix) & 0x3ff;
-}
-
-/* Inbound NAPTR bucket: keyed only on the post-NAT (WAN-side) dest IP + port. */
-static u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport)
-{
-	u32 lo   = dport + (dip & 0xffff);
-	u32 fold = (lo & 0x3ff) + ((lo >> 10) & 0x7f);
-	u32 mix  = ((dip >> 16) & 0x3ff)
-		 ^ (((dip >> 26) & 0x3f) + ((u32)(is_tcp & 1) << 9));
-
-	return (fold ^ mix) & 0x3ff;
 }
 
 /* Scan the 4 ways of a hash bucket for the first slot whose VALID field is 0;

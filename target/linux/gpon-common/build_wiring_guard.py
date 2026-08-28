@@ -282,11 +282,85 @@ class Guard:
         self.check(kc is not None and re.search(r'^config GPON_CORE\s*$', kc or "", re.M),
                    "W9.declared", "GPON_CORE is not declared in " + GPON_DIR + "/Kconfig")
 
+    # -- W10 --------------------------------------------------------------
+    def w10_shared_header_include_path(self):
+        """A target that INCLUDES a shared header must carry the -I that finds it.
+
+        The shared tree is a SEPARATE files- overlay merged into the kernel
+        source where upstream's own directories land, so a shared header is
+        NOT reachable by a relative include from a vendor driver directory.
+        Each such directory's Makefile must add
+
+            ccflags-y += -I$(srctree)/drivers/net/gpon
+
+        and the failure without it is loud but LATE -- a "No such file or
+        directory" deep in a target build, naming the header and not the
+        reason.  It is guarded HERE because the fix is one line in a file
+        nothing else checks, and because it was already recorded once as a
+        blocker in the Luna driver's own source (gpon-rtl9602c.c, the
+        "carries no -I for drivers/net/gpon" note) rather than fixed.
+
+        ★ IT IS DRIVEN BY WHAT THE SOURCES ACTUALLY INCLUDE, not by a list of
+        directories kept here.  A hand-kept list is a list somebody forgets to
+        extend the day a third target starts using the shared layer -- and the
+        guard would then pass by not looking.
+        """
+        gpon_dir = self.p(GPON_DIR)
+        if not os.path.isdir(gpon_dir):
+            self.check(False, "W10.sharedhdrs", GPON_DIR + " is not a directory")
+            return
+        shared = {f for f in os.listdir(gpon_dir) if f.endswith(".h")}
+        self.check(bool(shared), "W10.sharedhdrs",
+                   "the shared tree declares no header at all")
+        inc = re.compile(r'^\s*ccflags-y\s*\+=.*-I\$\(srctree\)/drivers/net/gpon\s*$',
+                         re.M)
+        want = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
+
+        for t in TARGETS:
+            base = self.p("target/linux/%s/files-%s" % (t, VER))
+            if not os.path.isdir(base):
+                continue
+            need = {}          # directory -> the shared headers it includes
+            for dirpath, _d, filenames in os.walk(base, followlinks=False):
+                if os.path.abspath(dirpath).startswith(os.path.abspath(gpon_dir)):
+                    continue
+                for fn in filenames:
+                    if not fn.endswith((".c", ".h")):
+                        continue
+                    p = os.path.join(dirpath, fn)
+                    try:
+                        with open(p, "r", encoding="utf-8", errors="replace") as f:
+                            body = f.read()
+                    except OSError:
+                        continue
+                    hit = {h for h in want.findall(body)
+                           if h in shared and
+                           not os.path.exists(os.path.join(dirpath, h))}
+                    if hit:
+                        need.setdefault(dirpath, set()).update(hit)
+            for dirpath, headers in sorted(need.items()):
+                mk = os.path.join(dirpath, "Makefile")
+                try:
+                    with open(mk, "r", encoding="utf-8", errors="replace") as f:
+                        body = f.read()
+                except OSError:
+                    body = ""
+                self.check(inc.search(body) is not None,
+                           "W10.include/" + t,
+                           "%s includes shared header(s) %s but %s carries no "
+                           "`ccflags-y += -I$(srctree)/drivers/net/gpon` -- the "
+                           "build fails late, naming the header and not the "
+                           "reason"
+                           % (os.path.relpath(dirpath, self.root),
+                              ", ".join(sorted(headers)),
+                              os.path.relpath(mk, self.root)))
+
     def run(self):
         for fn in (self.w1_files_dir_line, self.w2_trees_disjoint, self.w3_o2,
                    self.w4_objects_accounted, self.w5_no_patch_collides,
                    self.w6_no_scanned_makefile, self.w7_no_symlinks,
-                   self.w8_parent_wiring, self.w9_someone_selects):
+                   self.w8_parent_wiring, self.w9_someone_selects,
+                   self.w10_shared_header_include_path):
             fn()
         return self.fails
 
@@ -330,6 +404,13 @@ MUTATIONS = [
     ("W9.select", "target/linux/realtek-elnath/files-%s/drivers/net/ethernet/"
                   "cortina/Kconfig" % VER,
      lambda s: re.sub(r'^\tselect GPON_CORE.*$', '', s, flags=re.M)),
+    # W10: drop the include path from a directory that DOES include a shared
+    # header.  Without the guard this is silent here and fails deep inside a
+    # target build, naming the header and not the reason.
+    ("W10.include", "target/linux/realtek-luna/files-%s/drivers/net/ethernet/"
+                    "realtek/Makefile" % VER,
+     lambda s: re.sub(r'^ccflags-y \+= -I\$\(srctree\)/drivers/net/gpon$', '',
+                      s, flags=re.M)),
 ]
 
 

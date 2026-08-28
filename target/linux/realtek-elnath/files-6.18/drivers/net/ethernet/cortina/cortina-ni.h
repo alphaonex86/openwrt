@@ -319,6 +319,17 @@ struct cortina_ni_rx {
 	struct delayed_work	recovery_work;
 	u16			gphy_cal[CA_NI_GPHY_COUNT][CA_NI_RX_GPHY_CAL_REGS]; /* per-bank probe snapshot */
 	bool			intf_done;	/* per-port GPHY->MAC interface established (once) */
+	/* ★ RATE-BOUNDED, NEVER COUNT-CAPPED (2026-08-20).  The decoupled LAN
+	 * bring-up used to run only for the first thirty `rearms`.  That
+	 * counter is bumped by
+	 * every REAL link-up too, so ~30 cable bounces exhausted it exactly as
+	 * 30 seconds did - and after that no GPHY bank is ever patched,
+	 * intf_done is never set, and no RJ45 ingresses for the rest of the
+	 * boot.  These two count ATTEMPTS ONLY, and they gate a growing CADENCE
+	 * rather than a stop: the recovery slows down, it never gives up.  They
+	 * are also the witness a failing boot is read by (/proc). */
+	u64			bringup_ticks;	/* recovery ticks with the bring-up owed */
+	u64			bringup_calls;	/* times the bring-up actually ran */
 	/* spy counters (project rule: dump/probe capability is first-class) */
 	u64			rearms;		/* link-up RX re-arms */
 	u64			recoveries;	/* GPHY reinits fired */

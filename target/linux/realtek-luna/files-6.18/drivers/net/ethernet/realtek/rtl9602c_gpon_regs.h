@@ -140,9 +140,7 @@
 #define SDS_CFG			0x001d0		/* [4:0] CFG_SDS_MODE          */
 #define   SDS_MODE_OFF		0x1fu
 #define   SDS_MODE_GPON		0x08u
-#define SDS_FIB_STATUS		0x001e4		/* [17] SDS_SDET [2] FIB100_SDET */
 #define   SDS_FIB_SDS_SDET	BIT(17)		/* SDS-level optical sig-detect */
-#define FIB_REG16		0x22c40		/* [10] FP_CFG_FRC_SD [2] SEL_RX_SD */
 
 #define I2C_CONFIG0		0x23004		/* bus0; stride 0x20 per bus   */
 #define   I2C_CFG_DEV_ID_MSB	20		/* [20:14] 7-bit slave addr    */
@@ -189,7 +187,6 @@
 #define WSDS_DIG_01		0x22034		/* [31:0] CFG_DMY0 (force-SDS)  */
 #define WSDS_DIG_02		0x22038		/* [10]  EN_PDOWN_BEN          */
 #define WSDS_DIG_03		0x2203c		/* [6:4] CFG_TXDIS_SEL_DLY     */
-#define WSDS_DIG_18		0x22090		/* [12]  BEN_OE                */
 #define WSDS_DIG_1D		0x220a4		/* interface reset-B releases  */
 #define   WSDS_SFT_RSTB_INF	BIT(14)		/* interface soft reset-B (FIFO r/w ptr re-sync) */
 #define   WSDS_SFT_RSTB_INF_RX	BIT(15)		/* RX interface soft reset-B   */
@@ -208,10 +205,8 @@
 #define SDS_ANA_MISC_REG00	0x22500		/* [5] FRC_RX_EN_VAL [4] _ON   */
 #define SDS_ANA_MISC_REG01	0x22504		/* [7:5] SPDSEL_VAL [4] _ON    */
 #define SDS_ANA_MISC_REG02	0x22508		/* [13] SD_VAL [12] SD_FORCE   */
-#define FIB_EXT_REG21		0x22e54		/* [13]  FEP_V2ANALOG (lock)   */
 #define   SDS_ANALOG_READY	BIT(13)
 #define SDS_LOCK_POLL_MAX	1000		/* x200us = up to 200 ms       */
-#define SDS_REG0		0x22800		/* [1] SP_SDS_EN_RX (RX enable)*/
 #define   SP_SDS_EN_RX		BIT(1)
 /* Stock link-state polling behavior: when GPON_GTC_DS_INTR_STS reads this
  * exact sentinel the DS CDR is wedged; stock recovers by toggling SP_SDS_EN_RX
@@ -228,9 +223,6 @@
  * OPTIC_LOS_SIG reads "loss" even with real light. Releasing GPIO 13 (function
  * disabled) routes the pad to the optical-SD input.
  */
-#define SOC_IO_MODE_EN		0x23018		/* [19] OEM_EN (optical pads)  */
-#define   IO_OEM_EN		BIT(19)
-#define SOC_IO_GPIO_EN		0x00048		/* GPIO func-enable, 1 bit/pin */
 #define SOC_IO_GPIO_EN_W0	0x40202006u	/* enable GPIO 1,2,13,21,30    */
 #define SOC_IO_GPIO_EN_W1	0x00000819u	/* enable GPIO 32,35,36,43     */
 
@@ -404,5 +396,43 @@
 
 #define GPON_GTC_DS_ALLOC_IND	0x10c0		/* T-CONT alloc CAM: OP_IDX[4:0]=tcont */
 #define GPON_GTC_DS_ALLOC_WR	0x10c4		/* [11:0] allocateId */
+
+
+/*
+ * ★ RESCUED FROM THE board/g24w MERGE, 2026-08-28. These five existed only
+ * on that branch: the extraction of the 180 offsets happened on board/x111w
+ * and the G24W work added these afterwards, so a merge that simply took the
+ * extracted header would have DROPPED them -- and they are the optical-LOS
+ * forcing path, which is exactly what a GPON board needs to detect a pulled
+ * fibre. Checked one by one against the header before resolving, rather than
+ * discovered later by a link error.
+ */
+#define   GPON_CDR_LOS_EN	BIT(2)		/* enable CDR-LOS monitor     */
+#define   FIB_FP_CFG_FRC_SD	BIT(10)		/* FIB_REG16[10] force sig-detect */
+#define   WSDS_OPTIC_LOS_SEL_EPON	BIT(15)
+#define   WSDS_FRC_OPTIC_LOS		BIT(14)
+#define   WSDS_FRCV_OPTIC_LOS		BIT(13)
+
+
+/*
+ * ★★★ 8 OFFSETS WERE REMOVED FROM THIS HEADER ON 2026-08-28, and the reason is
+ * the architecture, not a conflict resolution. They live in gpon-rtl9602c.c as
+ * a RUNTIME lookup -- `SOC_IO_GPIO_EN` is `(swc->io_gpio_en)`, not 0x00048 --
+ * because the G24W work had already turned the SWCORE map into a per-chip
+ * TABLE while the extraction that created this header turned the same
+ * registers into per-chip LITERALS. Two branches, opposite directions, same
+ * registers; the merge had to pick one.
+ *
+ * The table wins, and it is the operator's own target: a compile-time header
+ * gives ONE chip per object, so shared logic is still compiled twice and can
+ * still diverge between the two builds. A table is chosen by pointer, so one
+ * compiled function serves every part and a new chip is an initialiser a human
+ * can diff against the last one -- which is what "a port is a list of
+ * registers" actually means.
+ *
+ * ⚠ THE DISAGREEMENT WAS SILENT AND THE BUILD FOUND IT: same names, different
+ * values (0x00048 against swc->io_gpio_en), and -Werror=macro-redefined is the
+ * only reason anybody looked.
+ */
 
 #endif /* _RTL9602C_GPON_REGS_H */

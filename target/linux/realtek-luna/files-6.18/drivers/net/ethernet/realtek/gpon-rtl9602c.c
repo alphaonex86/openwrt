@@ -86,7 +86,6 @@
 #include "gpon_unsup.h"		/* shared: the UNSUP report + its rate limit */
 
 #define GPON_PHYS_BASE	0x1b700000u
-#define GPON_REG_SIZE	0x00010000u	/* covers GTC DS block at +0x1000 */
 
 /*
  * ANYTHING THIS DRIVER RECEIVES AND CANNOT PLACE leaves through ONE spelling,
@@ -106,53 +105,7 @@
 #define GPON_UNSUP_SUBSYS	"rtl9602c-gpon"
 #include "gpon_unsup.h"		/* shared: the UNSUP report + its rate limit */
 
-<<<<<<< HEAD
 #include "rtl9602c_gpon_regs.h"	/* the per-SoC offsets; the logic below is chip-agnostic */
-=======
-#define GPON_INT_DLT		0x0000
-#define GPON_RESET		0x000c
-#define   GPON_SOFT_RST		BIT(0)		/* 1 = assert soft reset      */
-#define   GPON_RST_DONE		BIT(8)		/* 1 = reset cycle complete   */
-#define GPON_VERSION		0x0010
-#define   GPON_VER_ID_MASK	0xffu
-#define GPON_TEST		0x0014
-#define GPON_AES_BYPASS		0x0020
-#define GPON_INTR_MASK		0x0040
-#define GPON_INTR_STS		0x0044
-#define GPON_GTC_DS_INTR_DLT	0x1000
-#define GPON_GTC_DS_INTR_MASK	0x1004
-#define GPON_GTC_DS_INTR_STS	0x1008
-#define GPON_GTC_DS_LOS_CFG_STS	0x1040		/* downstream LOS status/cfg  */
-#define   GPON_CDR_LOS_SIG	BIT(10)		/* 1 = CDR not recovering clk */
-#define   GPON_OPTIC_LOS_SIG	BIT(8)		/* 1 = no optical signal      */
-#define   GPON_CDR_LOS_EN	BIT(2)		/* enable CDR-LOS monitor     */
-#define   GPON_OPTIC_LOS_POLAR	BIT(1)		/* invert optical-LOS input   */
-#define   GPON_OPTIC_LOS_EN	BIT(0)		/* enable optical-LOS monitor */
-#define GPON_GTC_DS_ONU_STATUS	0x1010
-#define   GPON_ONU_STATE_MASK	0xfu		/* [3:0]  FSM state O1..O7    */
-#define   GPON_ONU_ID_SHIFT	8		/* [15:8] ONU-ID             */
-#define   GPON_ONU_ID_MASK	0xffu
-#define GPON_GTC_US_ONU_ID	0x5010
-#define GPON_GTC_US_MIN_DELAY	0x5040
-#define GPON_GTC_US_EQD		0x5044
-#define   GPON_EQD_INFRAME_MASK	0x3ffffu	/* [17:0]  in-frame delay    */
-#define   GPON_EQD_MF_SHIFT	24		/* [26:24] multiframe count  */
-#define   GPON_EQD_MF_MASK	0x7u
-#define   GPON_EQD_FRAME_LEN	(19440 * 8)	/* one upstream frame, in bits */
-#define GPON_GTC_US_WRITE_PROTECT 0x5018	/* gate for US config writes   */
-#define   GPON_US_WP_UNLOCK	0xcc19u		/* magic: enable protected US writes */
-#define   GPON_US_WP_LOCK	0x0000u
-#define GPON_GTC_US_CFG		0x5014		/* [11]LESS_RANDOM [10]IND_NRM_PLM
-						 * [9]PLM_DIS [4]ENA_AUTO_DG
-						 * [3]US_BEN_POLAR [0]SCRM_DIS */
-#define   GPON_US_CFG_VAL	0x0c18u		/* online operating value: BEN_POLAR=1,
-						 * scrambler on, PLOAM on (LESS_RANDOM|
-						 * IND_NRM_PLM|ENA_AUTO_DG|US_BEN_POLAR) */
-#define GPON_GTC_US_LASER	0x504c		/* [13:8] LON_TIME, [5:0] LOFF_TIME */
-#define   GPON_US_LASER_VAL	0x2028u		/* LON=32, LOFF=40 burst-window edges */
-#define GPON_GTC_US_BOH_CFG	0x5054		/* [11:8] BOH_REPEAT, [7:0] BOH_LENGTH */
-#define GPON_GTC_US_BOH_DATA	0x5080		/* 12-entry burst-overhead byte array, stride 4 */
->>>>>>> board/g24w
 #define   GPON_BOH_LEN		12		/* stored bytes (TOTAL_OVERHEAD_BITS(96)/8); HW extends via REPEAT */
 #define   GPON_BOH_MAX_LEN	252		/* hardware BOH_LENGTH field cap */
 
@@ -166,62 +119,6 @@
  * true GPON-block offsets read from the SoC register map.
  */
 #define GPON_GTC_US_ONU_ID_SHIFT 8		/* [15:8] OLT-assigned ONU-ID  */
-<<<<<<< HEAD
-#define   FIB_FP_CFG_FRC_SD	BIT(10)
-=======
-#define GPON_GTC_DS_PLOAM_CFG	0x101c		/* [9]BC_ACC [8]ONUID_FLT [7:0]NOMSG_ID */
-#define GPON_GTC_DS_PLOAM_IND	0x1080		/* DS receive-buffer indicator */
-#define   GPON_DS_PLM_BUF_EMPTY	BIT(5)		/* 1 = no DS PLOAM pending     */
-#define   GPON_DS_PLM_BUF_FULL	BIT(4)
-#define   GPON_DS_PLM_DEQ	BIT(0)		/* W: advance to next message  */
-#define GPON_GTC_DS_PLOAM_MSG	0x10a0		/* 8-word received-message buf */
-#define GPON_GTC_US_PLOAM_IND	0x50c0		/* US transmit-queue indicator */
-#define   GPON_US_PLM_TYPE_SHIFT 8		/* [10:8] queue/type select    */
-#define   GPON_US_PLM_NRM_EMPTY	BIT(7)		/* normal queue empty          */
-#define   GPON_US_PLM_NRM_FULL	BIT(6)
-#define   GPON_US_PLM_URG_EMPTY	BIT(5)		/* urgent queue empty          */
-#define   GPON_US_PLM_URG_FULL	BIT(4)
-#define   GPON_US_PLM_ENQ	BIT(0)		/* W: queue the composed msg   */
-#define GPON_GTC_US_PLOAM_DATA	0x50e0		/* 8-word transmit-message buf */
-#define GPON_GTC_US_PLOAM_CFG	0x5100		/* US PLOAM buffer control     */
-#define   GPON_US_PLM_FLUSH_BUF	BIT(4)
-#define   GPON_US_PLM_CRC_GEN_EN BIT(1)		/* HW computes US PLOAM CRC    */
-#define   GPON_US_PLM_ONUID_OVRD BIT(0)		/* override ONU-ID field       */
-
-#define GPON_TEST_SCRATCH	0x12345678u
-#define GPON_RST_POLL_MAX	1000		/* bounded RST_DONE poll      */
-
-/*
- * PON SerDes (SDS) analog block. It lives in the SWCORE window (phys
- * 0x1B000000), NOT the GPON datapath sub-block — these are plain MMIO offsets
- * off the switch-core base. The SDS CMU/PLL recovers the line clock that feeds
- * the GPON MAC core; until it is configured and its analog-ready flag asserts,
- * the MAC core has no clock, the soft-reset never completes (RST_DONE stays 0)
- * and the GTC register banks read a floating pattern. The GPON-MAC reset is
- * issued as part of this sequence (the SDS_RST also resets the MAC).
- */
-#define SWCORE_PHYS_BASE	0x1b000000u
-#define SWCORE_REG_SIZE		0x00041000u	/* covers up to FIB_EXT_REG21  */
-
-/*
- * Register offsets here are the TRUE switch-core offsets (verified against the
- * SoC register map). The SerDes digital/analog banks live at SWCORE + 0x22xxx
- * (phys 0x1b022xxx), NOT 0x40xxx — a direct access to 0x40xxx hits an unmapped
- * hole that returns the bus abort-fill 0xbad0bad0. SDS_CFG and SOFTWARE_RST are
- * in the low control page.
- */
-#define SW_SOFTWARE_RST		0x00104
-#define   SW_SDS_RST_PS		BIT(0)		/* [0]  CMD_SDS_RST_PS pulse   */
-#define   SW_SDS_CFG_RST_PS	BIT(7)		/* [7]  CMD_SDS_CFG_RST_PS     */
-#define   SW_PONMAC_RST		BIT(6)		/* [6]  GPON-MAC core reset    */
-#define SDS_CFG			0x001d0		/* [4:0] CFG_SDS_MODE          */
-#define   SDS_MODE_OFF		0x1fu
-#define   SDS_MODE_GPON		0x08u
-/* [17] SDS_SDET [2] FIB100_SDET -- the OFFSET moves per chip, the FIELD does
- * not (9602C 0x1e4, 9603CVD 0x214, 9607C 0x28c: see struct gpon_swc_map). */
-#define   SDS_FIB_SDS_SDET	BIT(17)		/* SDS-level optical sig-detect */
-#define   FIB_FP_CFG_FRC_SD	BIT(10)		/* FIB_REG16[10] force sig-detect */
->>>>>>> board/g24w
 
 /*
  * SoC hardware I2C master (SWCORE register file). The external RTL8290B BOSA
@@ -233,139 +130,6 @@
  * BUSY, then read I2C_IND_RD. Confirmed on the hardware: I2C_CONFIG.DEV_ID
  * reads back 0x50; bus-0 is enabled in IO_MODE_EN bit13.
  */
-<<<<<<< HEAD
-=======
-#define I2C_CONFIG0		0x23004		/* bus0; stride 0x20 per bus   */
-#define   I2C_CFG_DEV_ID_MSB	20		/* [20:14] 7-bit slave addr    */
-#define   I2C_CFG_DEV_ID_LSB	14
-#define   I2C_CFG_AW_MSB	13		/* [13:12] reg-addr width 0=8b */
-#define   I2C_CFG_AW_LSB	12
-#define   I2C_CFG_DW_MSB	11		/* [11:10] data width 0=8b     */
-#define   I2C_CFG_DW_LSB	10
-#define   I2C_CFG_CLKDIV_MSB	9		/* [9:0] clock divider         */
-#define   I2C_CFG_CLKDIV_LSB	0
-#define   I2C_CLKDIV_100K	0x270u		/* (62500/100)-1 -> ~100 kHz   */
-#define I2C_IND_WD		0x000b0		/* [31:0] write data           */
-#define I2C_IND_ADR		0x000b8		/* [31:0] target reg offset    */
-#define I2C_IND_CMD		0x000c0		/* [0]CMD_EN [1]RW_EN [2]BUSY [3]NACK */
-#define   I2C_CMD_EN		BIT(0)
-#define   I2C_CMD_RW_WR		BIT(1)		/* 1=write 0=read              */
-#define   I2C_CMD_BUSY		BIT(2)
-#define   I2C_CMD_NACK		BIT(3)
-#define I2C_IND_RD		0x000c8		/* [31:0] read data            */
-#define I2C_BUSY_POLL_MAX	1000		/* x10us = up to 10 ms         */
-/*
- * RTL8290B register space is paged by I2C slave address: the full 12-bit
- * register number's high byte selects a 256-register page (page0->0x50,
- * page1->0x51, page2->0x54, page3+ ->0x55) and the low byte is the offset
- * within that page. Confirmed: chip-ID reg 0x390 reads correctly at slave 0x55
- * offset 0x90. RX path registers (NUM/page mapping from the transceiver's
- * register map):
- */
-#define BOSA_REG_NUM		0x390		/* chip NUM (0x8290), 2 bytes  */
-#define BOSA_REG_VID		0x394		/* manufacturer ID (0x0001)    */
-#define BOSA_REG_W4		0x204		/* [4] EN_L booster (1=on)     */
-#define BOSA_REG_W41		0x229		/* [4] RXI_PWDN_L (0=RX on)    */
-#define BOSA_REG_CONTROL2	0x254		/* [6] LOS_PIN_TRI (0=drive SD)*/
-#define BOSA_REG_STATUS2	0x383		/* [2] RX_LOS_STATUS (0=signal)*/
-#define WSDS_DIG_00		0x22030		/* SDS clock + soft-reset-B bank */
-#define   WSDS_STOP_CLK		BIT(0)		/* 1 = GPON MAC core clock off */
-#define   WSDS_FRC_125M_EN	BIT(4)		/* force 125M ref clock enable */
-#define   WSDS_FRCV_125M_EN	BIT(5)		/* forced value for 125M       */
-#define   WSDS_SFT_RSTB		BIT(8)		/* digital soft reset-B        */
-#define   WSDS_SFT_RSTB_EPON	BIT(9)		/* EPON datapath reset-B       */
-#define   WSDS_SFT_RSTB_GPON	BIT(10)		/* GPON datapath reset-B       */
-#define   WSDS_SFT_RSB_ANA	BIT(11)		/* analog reset-B              */
-#define   WSDS_DIG00_RUN	0xf30u		/* operational run state       */
-#define WSDS_DIG_01		0x22034		/* [31:0] CFG_DMY0 (force-SDS)  */
-#define WSDS_DIG_02		0x22038		/* [10]  EN_PDOWN_BEN          */
-#define WSDS_DIG_03		0x2203c		/* [6:4] CFG_TXDIS_SEL_DLY     */
-/* [15] CFG_OPTIC_LOS_SEL_EPON [14] CFG_FRC_OPTIC_LOS [13] CFG_FRCV_OPTIC_LOS
- * [12] BEN_OE -- the OFFSET moves per chip (9602C 0x22090, 9603CVD/9607C
- * 0x40090), so it is selected through gpon_swc_map like the rest. Until
- * 2026-08-26 /proc read 0x22090 on every chip, which on the 9603CVD is inside
- * the switch's EXTG_ACTYPE table: the `dig18=` field was a manufactured value,
- * and it is the one register that can say whether the optic-LOS input is
- * FORCED rather than sampled. */
-#define   WSDS_OPTIC_LOS_SEL_EPON	BIT(15)
-#define   WSDS_FRC_OPTIC_LOS		BIT(14)
-#define   WSDS_FRCV_OPTIC_LOS		BIT(13)
-#define WSDS_DIG_1D		0x220a4		/* interface reset-B releases  */
-#define   WSDS_SFT_RSTB_INF	BIT(14)		/* interface soft reset-B (FIFO r/w ptr re-sync) */
-#define   WSDS_SFT_RSTB_INF_RX	BIT(15)		/* RX interface soft reset-B   */
-#define   WSDS_SFT_RSTB_INF_TX	BIT(16)		/* TX interface soft reset-B   */
-#define SDS_ANA_COM_REG27	0x225ec		/* TX CMU enable lives here    */
-#define   SDS_CMU_EN		BIT(10)		/* TX CMU enable (toggle 1->0->1 to re-lock the PLL) */
-#define SDS_ANA_COM_REG03	0x2258c		/* [15:14] CMU_ISTANK_SEL_RX   */
-#define SDS_ANA_COM_REG08	0x225a0		/* TX-CDR (reg1418); [15] = the
-						 * serdesCdr_reset toggle bit    */
-#define SDS_ANA_COM_REG11	0x225ac		/* [7:0]  RX_FILT_CONFIG       */
-#define SDS_ANA_COM_REG12	0x225b0		/* [14]   RX_SEL_CDR_AFEN      */
-#define SDS_ANA_COM_REG22	0x225d8		/* [5:3] TX_AMP [2:0] TX_EMP   */
-#define SDS_ANA_COM_REG26	0x225e8		/* [6:5] CMU_ISTANK_SEL_GPHY   */
-#define SDS_ANA_GPON_REG42	0x22728		/* [2]   PCM_CMU_EN            */
-#define SDS_ANA_GPON_REG46	0x22738		/* [9:7]KI [6:4]KP1 [3:1]KP2   */
-#define SDS_ANA_MISC_REG00	0x22500		/* [5] FRC_RX_EN_VAL [4] _ON   */
-#define SDS_ANA_MISC_REG01	0x22504		/* [7:5] SPDSEL_VAL [4] _ON    */
-/* ⚠ RENAMED 2026-08-26: [13]/[12] are FRC_BER_NOTIFY_VAL / FRC_BER_NOTIFY_ON on
- * BOTH the RTL9602C and the RTL9603CVD, per each die's own register map -- not
- * signal-detect. Nothing in this driver forces SDS_SDET, on any chip, which is
- * what makes a measured sdet=0 a real optical statement rather than our own. */
-#define SDS_ANA_MISC_REG02	0x22508		/* [13] FRC_BER_NOTIFY_VAL [12] _ON */
-#define   SDS_ANALOG_READY	BIT(13)		/* FIB_EXT_REG21[13] FEP_V2ANALOG */
-#define SDS_LOCK_POLL_MAX	1000		/* x200us = up to 200 ms       */
-#define   SP_SDS_EN_RX		BIT(1)		/* SDS_REG0[1] RX enable       */
-/* Stock link-state polling behavior: when GPON_GTC_DS_INTR_STS reads this
- * exact sentinel the DS CDR is wedged; stock recovers by toggling SP_SDS_EN_RX
- * 1->0->1 (SDS_REG0[1]), waiting 10ms, then re-reading. */
-#define GTC_DS_CDR_STUCK	0xca0eca0fu
-
-/*
- * SoC IO pad routing for the optical front-end (switch-core register file, so
- * these are plain SWCORE offsets like the SDS block above). IO_MODE_EN's OEM_EN
- * bit enables the optical "e-mode" pads (TX_DISABLE, optical TX_SD / RX signal-
- * detect); IO_GPIO_EN is a 1-bit-per-pin GPIO-function-enable array (32 pins per
- * 32-bit word). The optical RX signal-detect shares pad GPIO 13: while that pin
- * is in GPIO mode the BOSA's signal-detect never reaches the GPON LOS input, so
- * OPTIC_LOS_SIG reads "loss" even with real light. Releasing GPIO 13 (function
- * disabled) routes the pad to the optical-SD input.
- */
-#define SOC_IO_GPIO_EN_W0	0x40202006u	/* enable GPIO 1,2,13,21,30    */
-#define SOC_IO_GPIO_EN_W1	0x00000819u	/* enable GPIO 32,35,36,43     */
-
-/*
- * Front-panel LED controller (SWCORE window). Each panel LED has an index whose
- * 2-bit "force value" the CPU can drive directly — 0=off, 1=on, 2=blink — once
- * the index is placed in CPU force-mode and enabled for parallel (vs serial-
- * shift) output. A working unit lights the green PON LED solid once ranged to
- * the OLT and lights the red LOS LED only while downstream light is absent.
- * Board X111W wires PON-status to index 12 and LOS to index 13. Offsets are
- * into swcore_base (phys 0x1b000000).
- */
-#define LED_MODE_SEL		0x1e000		/* [0] 0 = parallel output      */
-#define LED_DATA_CFG(idx)	(0x1e004 + (idx) * 4)	/* [12] CPU force-mode  */
-#define   LED_CPU_FORCE_BIT	12
-#define LED_FORCE_VALUE		0x1e04c		/* [idx*2+1:idx*2] force value  */
-#define LED_BLINK_RATE		0x1e050		/* [14:12] force blink period   */
-#define LED_PARA_EN		0x1e05c		/* [n+1] LEDn parallel-enable    */
-#define   LED_SERI_DATA_EN_BIT	19
-#define   LED_SERI_CLK_EN_BIT	18
-#define LED_IO_EN		0x23014		/* [n] LEDn pad-output enable    */
-#define   LED_SERI_OUT_EN_BIT	17
-#define LED_FORCE_OFF		0u
-#define LED_FORCE_ON		1u
-#define LED_FORCE_BLINK		2u
-#define LED_BLINK_512MS		4u		/* [14:12] period code           */
-#define PON_LED_IDX		12u
-#define LOS_LED_IDX		13u
-/* Ethernet port-link LEDs: hardware-auto (the switch lights them straight from
- * port link + activity, no CPU). 0xf78 = link at every speed (bits 8..11) +
- * activity at every speed (bits 3..6). The switch port map is port0=FE(100M),
- * port1=GE(1G), so each LED is typed to its own port. */
-#define LED_LINKACT		0xf78u
-#define LED_TYPE_UTP0		0x01u		/* switch port 0 = FE 100M */
-#define LED_TYPE_UTP1		0x02u		/* switch port 1 = GE 1G   */
->>>>>>> board/g24w
 /* Controller index -> physical panel LED, confirmed by cable test: the
  * GE-labelled LED is index 1 (driven from the GE port, UTP1) and the FE-labelled
  * LED is index 15 (driven from the FE port, UTP0). */
@@ -788,14 +552,9 @@ MODULE_PARM_DESC(usnic_initrdy_repulse, "on PONIC_INITRDY timeout, re-pulse CDR 
  * detects the wedge at link-check time — GPON_GTC_DS_INTR_STS == 0xca0eca0f — and
  * recovers by toggling SP_SDS_EN_RX (SDS_REG0[1]) 1->0->1 with a 10ms settle. We run
  * the same check each FSM poll tick (BOSA-serialized softirq) as a two-tick toggle
-<<<<<<< HEAD
  * (off this tick, on next) to avoid a 10ms busy-wait in softirq. RATE-bounded:
  * GPON_CDR_STUCK_MAX fast attempts, then one per GPON_CDR_STUCK_SLOW_TICKS for as
  * long as the wedge persists -- it never stops. Default on; gpon_rtl9602c.cdr_stuck_recover=0 disables. */
-=======
- * (off this tick, on next) to avoid a 10ms busy-wait in softirq. Bounded by
- * GPON_CDR_STUCK_MAX attempts/range. Default on; gpon_rtl9602c.cdr_stuck_recover=0 disables. */
->>>>>>> board/g24w
 static bool cdr_stuck_recover = true;
 module_param(cdr_stuck_recover, bool, 0644);
 MODULE_PARM_DESC(cdr_stuck_recover, "recover a wedged DS CDR (GTC_DS_STS==0xca0eca0f) by toggling SP_SDS_EN_RX, like stock (default on)");
@@ -4528,7 +4287,6 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		{0x701000, 0x70101c},
 	};
 	static const u32 gm[][2] = {		/* absolute phys (separate ioremap) */
-<<<<<<< HEAD
 		{0x18012000, 0x180120fc}, {0x18013400, 0x180134fc},
 		/* ★ THE PCIe HOST CONTROLLER, so its link state can be COMPARED with
 		 * stock instead of interpreted. `pcie-rtl9602c.c` prints
@@ -4553,33 +4311,6 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		{0x18b00700, 0x18b0073c},	/* HOSTCFG: 0x728 = LTSSM state	*/
 		{0x18b01000, 0x18b0101c},	/* HOSTEXT: 0x008 = LTSSM enable	*/
 		{0x18000040, 0x1800005c},	/* SOC_PINMUX at 0x4c		*/
-=======
-		/* ★ 0x180133F0 not 0x18013400: the RX ring pointers sit just BELOW
-		 * the old floor -- R_RxFDP0 at 0x13F0 and R_RxCDO0 at 0x13F4, the
-		 * word carrying RxCDO[31:16] | RxRingSize[15:8]. Measured
-		 * 2026-08-23: with eth0 rx stuck at 0, NO dump ever taken on this
-		 * board contained 0x180133F4, so the one register that would say
-		 * whether the ring size was programmed had never been read. The
-		 * board's kernel has CONFIG_DEVMEM off (devmem gives ENXIO on a
-		 * hand-made /dev/mem), so this dump is the ONLY way to read it. */
-		/* ★ THE PER-PORT SWITCH MIB (SWCORE + 0x32620 + port*0x80: RX
-		 * unicast/multicast/broadcast, six ports) and the three ABILITY
-		 * arrays (FORCE_P_ABLTY 0x198 | P_ABLTY 0x1B8 | ABLTY_FORCE_MODE
-		 * 0x1DC, + port*4). MEASURED 2026-08-23: with eth0 rx stuck at 0,
-		 * the ONE question nothing could answer was whether frames still
-		 * ENTER the switch at all -- the driver's periodic diag stops after
-		 * `diag_count` dumps (writing the param does NOT re-arm it), and
-		 * CONFIG_DEVMEM is off, so there was no live route to these
-		 * counters. The ability block is here because P_ABLTY bit 4 is our
-		 * own FORCED bit read back while forcing is on, so the force-mode
-		 * word has to be readable beside it or the link bit means nothing. */
-		/* ★ 0x1b000180..0x1b0001fc was here as a SECOND route to the ability
-		 * arrays; sw[] covers 0x00100..0x002fc since 2026-08-27, so keeping
-		 * it would print every one of those words TWICE and make a text diff
-		 * of two dumps unreadable. The swcore route is the same silicon. */
-		{0x1b032600, 0x1b0328fc},
-		{0x18012000, 0x180120fc}, {0x180133f0, 0x180134fc},
->>>>>>> board/g24w
 	};
 	u32 off, a, val;
 	int r;
@@ -7665,7 +7396,6 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * lock that a soft/WDT reboot cannot clear); re-acquire it by toggling
 	 * SP_SDS_EN_RX (SDS_REG0[1]) 1->0->1, exactly as stock does. Done as a two-tick
 	 * toggle (disable now, re-enable next tick ~10ms later) so no 10ms busy-wait
-<<<<<<< HEAD
 	 * runs in this softirq. Self-limiting: only fires while wedged. RATE-bounded,
 	 * never count-capped -- GPON_CDR_STUCK_MAX fast attempts, then one every
 	 * GPON_CDR_STUCK_SLOW_TICKS, for as long as the sentinel is latched. It must
@@ -7674,12 +7404,6 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * so the FSM never leaves O1 to reach it. */
 	if (cdr_stuck_recover) {
 		static int cdr_pending;
-=======
-	 * runs in this softirq. Self-limiting: only fires while wedged, and a bounded
-	 * consecutive-attempt cap yields to the LOS/re-range path on a dead link. */
-	if (cdr_stuck_recover && SDS_REG0) {
-		static int cdr_pending, cdr_tries;
->>>>>>> board/g24w
 		u32 sts = gpon_rd(GPON_GTC_DS_INTR_STS);
 
 		gpon_gtc_ds_sts_last = sts;

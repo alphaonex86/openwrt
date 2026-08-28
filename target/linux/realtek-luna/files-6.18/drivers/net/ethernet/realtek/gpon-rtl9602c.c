@@ -6267,6 +6267,29 @@ static void gpon_cdr_reset_worker(struct work_struct *w)
 		cdr);
 }
 
+/*
+ * ★★★ THIS FSM IS THE DUPLICATE. DO NOT EXTEND IT (2026-08-27).
+ *
+ * drivers/net/gpon/gpon_ploam.c is the common G.984.3 activation FSM: same
+ * O1..O7 states, the same message set, and it is HW-decoupled and fuzzed on
+ * x86 with time as an explicit input. As of today it is BUILT by every target,
+ * so it can no longer rot unnoticed -- which is what let this second copy go on
+ * being the living one.
+ *
+ * ⚠ WHY IT IS STILL HERE, stated so nobody reads the delay as approval: the
+ * X400AXF is the only board that boots, and it does activation IN SILICON --
+ * it never calls a software PLOAM FSM. So swapping this shell onto the common
+ * file can be proven by the offline suite and by nothing at all on hardware,
+ * on a board that currently wedges at ~30 s. The bar this project sets for a
+ * change is an end-to-end witness, and there is none available for this one
+ * yet.
+ *
+ * ⇒ A FIX THAT BELONGS TO THE PROTOCOL GOES IN THE COMMON FILE AND IS MIRRORED
+ *   HERE, never the other way round. Anything else widens the gap that has to
+ *   be closed later, and this tree has already paid for that twice today: an
+ *   OMCI responder that had drifted into a weaker copy, and two decoders of one
+ *   serial number that disagreed about what a serial number is.
+ */
 static void gpon_fsm_handle(const u8 *m)
 {
 	u8 onu_id = m[0], type = m[1];

@@ -98,13 +98,27 @@ CONFIG_RTL9602C_GPON=y
 # The on-chip NIC + switch live under the Realtek vendor menu, so the kernel
 # only descends into drivers/net/ethernet/realtek/ when this umbrella is set.
 CONFIG_NET_VENDOR_REALTEK=y
-CONFIG_RTL9607C_ETH=y
+CONFIG_RTL960X_ETH=y
 #
-# The host-bridge driver built under CONFIG_PCI is the RTL9602C PCIe controller:
-# its late_initcall unconditionally registers the controller and runs SoC clock /
-# SerDes bring-up against 9602C register offsets, which differ on this SoC and
-# wedge the late-initcall phase. PCIe/WiFi for this SoC is M2+; keep PCI off for M1.
-# CONFIG_PCI is not set
+# ★★★ PCI IS ON SINCE 2026-08-27, AND THE REASON IT WAS OFF IS GONE.
+#
+# It read: "the host-bridge driver built under CONFIG_PCI is the RTL9602C PCIe
+# controller: its late_initcall unconditionally registers the controller and runs
+# SoC clock / SerDes bring-up against 9602C register offsets, which differ on
+# this SoC and wedge the late-initcall phase." That was true and it is no longer:
+# `arch/mips/realtek-luna/pcie-rtl960x.c` now serves BOTH chips from one per-chip
+# table and resolves which one from the DEVICE-TREE ROOT COMPATIBLE, so on a
+# board that declares neither it registers nothing and says so. The RTL9607C
+# engineering board, which shares this kernel, takes that path.
+#
+# ⚠ WITHOUT THIS LINE THERE IS NO WiFi ON THE G24W AND NO WAY TO SEE WHY. The
+# radio is a PCIe endpoint (10ec:818c); with CONFIG_PCI off there is no PCI
+# subsystem, `CONFIG_RTL8192FE` is not even EMITTED into the generated .config
+# (measured: 0 occurrences of RTL8192 in 2381 lines), `lspci` is empty and
+# `/sys/class/ieee80211/` is empty. The board document said for weeks that the
+# driver was "compiled in" and the only gap was a device-tree node; it was
+# reading the SHARED config-6.18, which this file overrides.
+CONFIG_PCI=y
 
 #
 # Match the proven-good 9607C kernel's known-good config: disable the OpenWrt

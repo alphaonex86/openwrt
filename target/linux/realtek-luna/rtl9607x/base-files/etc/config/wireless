@@ -1,0 +1,44 @@
+# ★★★ SUBTARGET (rtl9607x) OVERRIDE OF THE SHARED wireless CONFIG -- ONE
+# DIFFERENCE ONLY: radio0 ships DISABLED, as a TEMPORARY hold.
+#
+# MEASURED 2026-08-27 on the LANLY G24W, twice (transcript
+# results/artifacts/uboot_tftp/RTL9603CVD/LANLY/G24W/2026-08-27.log): the FIRST
+# wlan0 open -- possible at all only since wifi-scripts landed -- ends the boot.
+#   boot 1: rtl92fe_hw_init -> pcie_capability_* -> panic (__initconst chip
+#           table under a lifetime pointer; FIXED in pcie-rtl960x.c);
+#   boot 2, with that fixed: hostapd opens wlan0 at ~21 s and the single CPU
+#           livelocks in softirq ("watchdog: BUG: soft lockup - CPU#0 stuck for
+#           26s! [hostapd:1354]"), panic at 48 s, SoC watchdog full-chip reset,
+#           U-Boot autoboots the committed STOCK image.
+# The signature is a stuck level PCIe INTx re-entered forever on one core. The
+# vendor's own 9603cvd_pci.c does NO bridge-side interrupt ack, so this is not
+# a one-register host-bridge fix; it needs its own sitting (which line storms,
+# /proc/interrupts with the open triggered by hand on a live console).
+#
+# WHY HERE and not a uci-default: netifd's first wireless bring-up races
+# uci_apply_defaults (measured: hostapd's open at ~21 s vs defaults finishing
+# ~21 s), so only the SHIPPED file loses no race. This subtarget builds the
+# G24W and the RTL9607C engboard; the engboard has no phy0 (no chip entry in
+# pcie-rtl960x.c binds its PCIe), so the hold is G24W-scoped in practice.
+#
+# REMOVE THIS FILE the day the storm is fixed -- the shared target file then
+# ships again, byte-identical minus this hold. wifi_ap_onair keeps FAILING
+# while this hold stands, and that is CORRECT: the AP truly is not on air.
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option phy 'phy0'
+	option channel '1'
+	option band '2g'
+	option htmode 'HT20'
+	option country 'BO'
+	option disabled '1'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option multicast_to_unicast '1'
+	# ssid + key are overwritten per-board at boot by /etc/uci-defaults/99-onu-wifi.
+	option ssid 'ONU-X111W-AP'
+	option encryption 'psk2'
+	option key '12345678'

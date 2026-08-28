@@ -122,6 +122,53 @@ static long jffs2_read_file(const uint8_t *d, uint32_t n, const char *name)
 	return flen;
 }
 
+/*
+ * Fallback container: the raw Realtek MIB (LANLY G24W and siblings).
+ *
+ * Not every product wraps its factory config in JFFS2. The G24W's "config"
+ * partition is the Realtek MIB container: records whose payloads are ZLIB
+ * STREAMS holding the same plain <Value Name="K" Value="V"/> XML vocabulary
+ * (proven on this board's own mtd3 dump, 2026-08-27 -- ELAN_MAC_ADDR carries
+ * the unit MAC as 12 bare hex digits; see dev/ONU-test-case/mib_read.py, the
+ * Python oracle this scan mirrors). The scan needs no container structure at
+ * all: try every plausible zlib header, let the decompressor judge, and let a
+ * LATER stream override an earlier one -- exactly the oracle's measured rule
+ * (on the real partition only the blind scan finds ELAN_MAC_ADDR; the
+ * structured record walk recovers a third of the keys).
+ *
+ * Runs only when the JFFS2 route yielded nothing, so JFFS2 boards (X111W) keep
+ * byte-identical behaviour.
+ */
+static const char *xml_value(const uint8_t *buf, long len, const char *key);
+
+static const char *mib_value(const uint8_t *d, long n, const char *key)
+{
+	static char out[256];
+	const char *hit = NULL;
+	long i;
+
+	for (i = 0; i + 4 <= n; i++) {
+		uLongf dl;
+		const char *v;
+
+		if (d[i] != 0x78)                     /* zlib CMF: deflate, 32K win */
+			continue;
+		if (((unsigned)(d[i] << 8) | d[i + 1]) % 31)
+			continue;                     /* FCHECK invalid: not a header */
+		dl = FILE_MAX;
+		if (uncompress(filebuf, &dl, d + i, (uLong)(n - i)) != Z_OK)
+			continue;
+		if (dl <= 64)                         /* oracle's own noise floor */
+			continue;
+		v = xml_value(filebuf, (long)dl, key);
+		if (v) {
+			snprintf(out, sizeof out, "%s", v);
+			hit = out;                    /* last stream wins, as the oracle */
+		}
+	}
+	return hit;
+}
+
 /* Extract Value of <... Name="key" ... Value="val" ...> from a buffer. */
 static const char *xml_value(const uint8_t *buf, long len, const char *key)
 {
@@ -187,7 +234,7 @@ static int mtd_path_by_name(const char *name, char *out, size_t n);
 static int do_optical_cal(const char *part)
 {
 	uint8_t blob[4096];
-	char devpath[64];
+	char devpath[256];
 	int fd;
 	ssize_t got = 0, r;
 	long flen;
@@ -263,7 +310,7 @@ int main(int argc, char **argv)
 {
 	const char *part = "config", *verb;
 	const struct map *m;
-	char path[64];
+	char path[256];
 	int a = 1, fd;
 	ssize_t got = 0, r;
 	long flen;
@@ -303,13 +350,14 @@ int main(int argc, char **argv)
 	close(fd);
 
 	flen = jffs2_read_file(partbuf, (uint32_t)got, m->file);
-	if (flen < 0) {
-		fprintf(stderr, "rtk_factory: %s not found in %s\n", m->file, path);
-		return 1;
-	}
-	val = xml_value(filebuf, flen, m->key);
+	val = flen < 0 ? NULL : xml_value(filebuf, flen, m->key);
+	if (!val)                       /* not JFFS2 (or key absent): raw MIB container */
+		val = mib_value(partbuf, (long)got, m->key);
 	if (!val) {
-		fprintf(stderr, "rtk_factory: %s not set in %s\n", m->key, m->file);
+		fprintf(stderr, "rtk_factory: %s not found in %s (jffs2 route: %s; "
+			"MIB-container route: no zlib stream carries it)\n",
+			m->key, path,
+			flen < 0 ? "file absent" : "file present, key absent");
 		return 1;
 	}
 

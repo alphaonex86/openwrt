@@ -14,6 +14,7 @@
 #include "dm.h"
 #include "fw.h"
 #include "led.h"
+#include <linux/of.h>
 #include "hw.h"
 #include "../pwrseqcmd.h"
 #include "pwrseq.h"
@@ -2309,6 +2310,11 @@ static void _rtl92fe_hal_customized_behavior(struct ieee80211_hw *hw)
  * driver works across units instead of carrying one board's cal.
  * ------------------------------------------------------------------------- */
 struct rtl92fe_board_cal {
+	/* ★★★ WHICH BOARD THIS CAL BELONGS TO -- the DT ROOT compatible.
+	 * Added 2026-08-27 after this table was MEASURED being applied to the
+	 * wrong board: see the note at rtl92fe_board_cals[]. */
+	const char *compat;
+	const char *board;
 	u8 mac[ETH_ALEN];
 	/* per-channel (ch1..ch14) CCK base power, path A / path B */
 	u8 cck_a[CHANNEL_MAX_NUMBER_2G];
@@ -2323,6 +2329,8 @@ struct rtl92fe_board_cal {
 };
 
 static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
+	.compat = "realtek,rtl9602c", .board = "X111W",
+	/* = this unit's ELAN_MAC_ADDR in its own flash MIB. */
 	.mac = { 0x98, 0xc7, 0xa4, 0x32, 0x82, 0xae },
 	.cck_a = { 0x27, 0x27, 0x27, 0x28, 0x28, 0x28, 0x28,
 		   0x28, 0x28, 0x29, 0x29, 0x29, 0x29, 0x29 },
@@ -2337,6 +2345,89 @@ static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
 	.pa_type = 0,
 	.reg_domain = 1,
 };
+
+/*
+ * LANLY G24W (RTL9603CVD). READ FROM THIS UNIT'S OWN FLASH MIB, key for key --
+ * `mib_read.py --file <mtd3-config.bin>` on the board's own config partition:
+ *
+ *   ELAN_MAC_ADDR               5c1923b3ce90
+ *   HW_WLAN0_TX_POWER_CCK_A     2c x14
+ *   HW_WLAN0_TX_POWER_CCK_B     2f x14
+ *   HW_WLAN0_TX_POWER_HT40_1S_A 2c x9, 2d x5
+ *   HW_WLAN0_TX_POWER_HT40_1S_B 2e x9, 2f x5
+ *   HW_WLAN0_11N_THER           34
+ *   HW_WLAN0_11N_XCAP           21
+ *   HW_WLAN0_11N_PA_TYPE        0
+ *   HW_WLAN0_REG_DOMAIN         14
+ *
+ * ★ THE ENCODING IS PROVEN, NOT ASSUMED. The same reader run on the X111W's own
+ * config partition returns THER 36 / XCAP 47 / PA_TYPE 0 / REG_DOMAIN 1 and the
+ * four power arrays byte for byte -- i.e. exactly the constants baked into
+ * rtl92fe_x111w_cal above, which were obtained independently. So the MIB's
+ * scalar digits are HEX, and this table reads the G24W's the same way.
+ *
+ * ★ AND THE MAC IS THE *ELAN* MAC, which the same cross-check established: the
+ * X111W's baked .mac IS its ELAN_MAC_ADDR. `WLAN_MAC_ADDR` in the MIB reads
+ * 00:e0:4c:07:68:02 on BOTH boards -- a vendor placeholder, not a per-unit
+ * address, and using it would put every unit of this family on one MAC.
+ *
+ * ⚠ reg_domain is the one field the cross-check cannot discriminate (the X111W's
+ * is 1, which reads the same in either base). It is read with the SAME hex rule
+ * as the four scalars the sibling proved, and it is masked to 3 bits here and
+ * only selects a tx-power limit table -- the LEGAL domain comes from OpenWrt's
+ * own country setting and wireless-regdb, never from this byte.
+ */
+static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
+	.compat = "realtek,rtl9603cvd", .board = "G24W",
+	.mac = { 0x5c, 0x19, 0x23, 0xb3, 0xce, 0x90 },
+	.cck_a = { 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c,
+		   0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c },
+	.cck_b = { 0x2f, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f,
+		   0x2f, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f },
+	.ht40_1s_a = { 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c,
+		       0x2c, 0x2c, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d },
+	.ht40_1s_b = { 0x2e, 0x2e, 0x2e, 0x2e, 0x2e, 0x2e, 0x2e,
+		       0x2e, 0x2e, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f },
+	.thermalmeter = 0x34,
+	.crystalcap = 0x21,
+	.pa_type = 0,
+	.reg_domain = 0x14,
+};
+
+/*
+ * ★★★ A BOARD'S CAL IS APPLIED TO THAT BOARD, AND TO NO OTHER (2026-08-27).
+ *
+ * MEASURED, on the first boot that ever brought this radio up on the G24W:
+ *
+ *   rtl8192fe: applied board WiFi cal (X111W): MAC=98:c7:a4:32:82:ae ...
+ *
+ * -- the X111W's factory calibration, INCLUDING ITS MAC, on a different product
+ * with a different crystal and different tx-power tables. Two boards on this rig
+ * would have claimed one MAC the moment both had WiFi up, which is the identical
+ * failure the Ethernet driver already had with the silicon default
+ * 00:e0:4c:86:70:01 and repaired with a loud random LAA. The table's own TODO
+ * said so ("carrying one board's cal"); nothing enforced it.
+ *
+ * ⇒ the cal is SELECTED by the device tree's ROOT compatible, and a board with
+ * no entry gets NOTHING -- not a neighbour's. Applying a foreign MAC and a
+ * foreign crystal trim is worse than an uncalibrated radio, because an
+ * uncalibrated radio announces itself.
+ */
+static const struct rtl92fe_board_cal *const rtl92fe_board_cals[] = {
+	&rtl92fe_x111w_cal,
+	&rtl92fe_g24w_cal,
+};
+
+static const struct rtl92fe_board_cal *_rtl92fe_board_cal_for_this_board(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(rtl92fe_board_cals); i++)
+		if (rtl92fe_board_cals[i]->compat &&
+		    of_machine_is_compatible(rtl92fe_board_cals[i]->compat))
+			return rtl92fe_board_cals[i];
+	return NULL;
+}
 
 /* Populate rtlefuse from the board cal table when the efuse is blank, then
  * clear autoload_failflag so the regular RF / tx-power init runs with these
@@ -2428,7 +2519,8 @@ static void _rtl92fe_apply_board_cal(struct ieee80211_hw *hw,
 	 */
 	efu->autoload_failflag = false;
 
-	pr_info("rtl8192fe: applied board WiFi cal (X111W): MAC=%pM xtal=0x%02x thermal=0x%02x cck[A1]=0x%02x ht40[A1]=0x%02x reg=%u\n",
+	pr_info("rtl8192fe: applied board WiFi cal (%s): MAC=%pM xtal=0x%02x thermal=0x%02x cck[A1]=0x%02x ht40[A1]=0x%02x reg=%u\n",
+		cal->board ? cal->board : "?",
 		efu->dev_addr, efu->crystalcap, efu->eeprom_thermalmeter,
 		efu->txpwrlevel_cck[RF90_PATH_A][0],
 		efu->txpwrlevel_ht40_1s[RF90_PATH_A][0],
@@ -2475,8 +2567,20 @@ void rtl92fe_read_eeprom_info(struct ieee80211_hw *hw)
 	 * autoload_failflag so the radio calibrates instead of falling back to
 	 * a random MAC + generic tx-power + untrimmed crystal.
 	 */
-	if (rtlefuse->autoload_failflag)
-		_rtl92fe_apply_board_cal(hw, &rtl92fe_x111w_cal);
+	if (rtlefuse->autoload_failflag) {
+		const struct rtl92fe_board_cal *cal =
+			_rtl92fe_board_cal_for_this_board();
+
+		if (cal) {
+			_rtl92fe_apply_board_cal(hw, cal);
+		} else {
+			/* ★ LOUD, and it leaves autoload_failflag SET so the core
+			 * takes its own random-MAC / generic-power path. An
+			 * uncalibrated radio that says so is recoverable; a radio
+			 * silently wearing another board's identity is not. */
+			pr_warn("rtl8192fe: blank efuse and NO factory cal declared for this board -- the radio stays UNCALIBRATED (generic tx-power, untrimmed crystal, core-assigned MAC). Read HW_WLAN0_* from this unit's own flash MIB and add an entry keyed on its DT root compatible; applying another board's cal would give two units one MAC.\n");
+		}
+	}
 
 	_rtl92fe_hal_customized_behavior(hw);
 

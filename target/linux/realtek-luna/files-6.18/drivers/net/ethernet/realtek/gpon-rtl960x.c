@@ -49,6 +49,7 @@
  */
 
 #include <linux/delay.h>
+#include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
 #include "gpon_rtl9602c_logic.h"	/* hoisted logic */
 #include <linux/init.h>
 #include <linux/io.h>
@@ -5382,25 +5383,26 @@ static int gpon_proc_show(struct seq_file *s, void *v)
  * factory value for the fleet). Format (G.984.3 ONU-SN): 4 ASCII ID chars + 8 hex digits.
  */
 
-/* Parse "XPON12345678" -> {'X','P','O','N',0x12,0x34,0x56,0x78}. */
-/* Decode "AAAAhhhhhhhh" into the 8-byte G.984.3 ONU-SN.  Split out of
- * gpon_parse_sn() so gpon_sn_differs() compares through the SAME decoder --
- * a second copy would drift and make an identity change look like a no-op. */
+/* Decode "AAAAhhhhhhhh" into the 8-byte G.984.3 ONU-SN.
+ *
+ * REBASED onto the common codec (drivers/net/gpon/gpon_sn.c) 2026-08-28.  This
+ * was a second decoder of one wire format, and it did not agree with the core's:
+ * hex_to_bin() returns -1 on a bad digit, and storing that in a u8 made the byte
+ * 0xff, so "XPON1234567Z" silently decoded to a serial nobody asked for.  It
+ * also accepted a short string by leaving the rest of the bytes as found.
+ *
+ * The core REFUSES malformed input and leaves `out` untouched, which is what
+ * both call sites already wanted: gpon_parse_sn() passes the serial in force,
+ * and gpon_sn_differs() seeds `want` from it -- so a refusal now reads as "not
+ * a different serial" instead of manufacturing one and triggering a re-range.
+ *
+ * The wrapper keeps its name so the call sites and this diff stay small.
+ */
 static void gpon_parse_sn_into(u8 *out, const char *s)
 {
-	int i;
-
-	for (i = 0; i < 4 && s[i]; i++)
-		out[i] = s[i];
-	for (i = 0; i < 4; i++) {
-		u8 hi = 0, lo = 0;
-
-		if (s[4 + 2 * i])
-			hi = hex_to_bin(s[4 + 2 * i]);
-		if (s[4 + 2 * i + 1])
-			lo = hex_to_bin(s[4 + 2 * i + 1]);
-		out[4 + i] = (hi << 4) | lo;
-	}
+	if (gpon_sn_parse(s, out))
+		pr_warn("gpon: ONU-SN \"%s\" is not 4 ID chars + 8 hex digits -- keeping the serial in force\n",
+			s ? s : "(null)");
 }
 
 static void gpon_parse_sn(const char *s)

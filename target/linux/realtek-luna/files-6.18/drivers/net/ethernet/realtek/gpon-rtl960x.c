@@ -6757,6 +6757,30 @@ static void luna_op_o5_rearm_burst(void *sh)
 	gpon_o5_rearm_burst();
 }
 
+static void luna_op_install_data_gem(void *sh, u16 gem)
+{
+	int rc;
+
+	(void)sh;
+	/* ★ PLUMB THE VALUE, DO NOT DISCARD IT.  The core passes the OLT's wire
+	 * gem-port-id.  It goes through the function that already OWNS that
+	 * value's semantics -- the 12-bit G.984.3 mask, the refusal to adopt the
+	 * MULTICAST gem as the WAN data gem, and the re-arm when the OLT MOVES the
+	 * port -- rather than assigning gpon_data_gem_port here and re-stating
+	 * three rules that would then drift.
+	 *
+	 * ⚠ THE OP RETURNS void AND THE INSTALL RETURNS int, so the status has
+	 * nowhere to go.  -EAGAIN is NORMAL and frequent (the OMCC GEM must be up
+	 * first, and the FSM retries), so it is not reported; anything else is a
+	 * real failure and says so rather than vanishing.
+	 */
+	gpon_omci_note_gem_create(gem);
+	rc = gpon_install_data_gem();
+	if (rc && rc != -EAGAIN)
+		pr_warn_ratelimited("rtl9602c-gpon: data-GEM %u install failed (%d)\n",
+				    gem, rc);
+}
+
 static void luna_op_analog_relock(void *sh)
 {
 	(void)sh;
@@ -6791,10 +6815,6 @@ static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
  * ⚠ THE OPS LEFT NULL, each for a stated reason -- never because they were
  * forgotten, and never filled with something that merely compiles:
  *
- *   install_data_gem  this driver's gpon_install_data_gem() takes NO port id;
- *                     it uses one recorded elsewhere.  Wiring the op would
- *                     DISCARD the gem the core passes -- plumb the value or do
- *                     not plumb it at all.
  *   on_below_o5,      the driver does these inside the FSM body rather than in
  *   o5_rearm_burst,   a callable helper.  Extracting them is part of the shape
  *   cdr_reseat        change, not of this signature check.
@@ -6814,6 +6834,7 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.set_hw_onu_id	= luna_op_set_hw_onu_id,
 	.on_below_o5	= luna_op_on_below_o5,
 	.o5_rearm_burst	= luna_op_o5_rearm_burst,
+	.install_data_gem = luna_op_install_data_gem,
 	.analog_relock	= luna_op_analog_relock,
 	.o3_feed_reset	= luna_op_o3_feed_reset,
 	.aes_stage_key	= luna_op_aes_stage_key,

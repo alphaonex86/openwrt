@@ -31,8 +31,8 @@
  * was changed, no define was renamed, and the file order is preserved so the
  * one define whose value references another still resolves.
  */
-#ifndef _RTL9602C_GPON_REGS_H
-#define _RTL9602C_GPON_REGS_H
+#ifndef _RTL960X_GPON_REGS_H
+#define _RTL960X_GPON_REGS_H
 
 
 #define GPON_PHYS_BASE	0x1b700000u
@@ -107,7 +107,6 @@
 #define   GPON_US_PLM_ENQ	BIT(0)		/* W: queue the composed msg   */
 #define GPON_GTC_US_PLOAM_DATA	0x50e0		/* 8-word transmit-message buf */
 #define GPON_GTC_US_PLOAM_CFG	0x5100		/* US PLOAM buffer control     */
-#define   GPON_US_PLM_FLUSH_BUF	BIT(4)
 #define   GPON_US_PLM_CRC_GEN_EN BIT(1)		/* HW computes US PLOAM CRC    */
 #define   GPON_US_PLM_ONUID_OVRD BIT(0)		/* override ONU-ID field       */
 
@@ -134,22 +133,15 @@
  * in the low control page.
  */
 #define SW_SOFTWARE_RST		0x00104
-#define   SW_SDS_RST_PS		BIT(0)		/* [0]  CMD_SDS_RST_PS pulse   */
-#define   SW_SDS_CFG_RST_PS	BIT(7)		/* [7]  CMD_SDS_CFG_RST_PS     */
-#define   SW_PONMAC_RST		BIT(6)		/* [6]  GPON-MAC core reset    */
 #define SDS_CFG			0x001d0		/* [4:0] CFG_SDS_MODE          */
 #define   SDS_MODE_OFF		0x1fu
 #define   SDS_MODE_GPON		0x08u
 #define   SDS_FIB_SDS_SDET	BIT(17)		/* SDS-level optical sig-detect */
 
 #define I2C_CONFIG0		0x23004		/* bus0; stride 0x20 per bus   */
-#define   I2C_CFG_DEV_ID_MSB	20		/* [20:14] 7-bit slave addr    */
 #define   I2C_CFG_DEV_ID_LSB	14
-#define   I2C_CFG_AW_MSB	13		/* [13:12] reg-addr width 0=8b */
 #define   I2C_CFG_AW_LSB	12
-#define   I2C_CFG_DW_MSB	11		/* [11:10] data width 0=8b     */
 #define   I2C_CFG_DW_LSB	10
-#define   I2C_CFG_CLKDIV_MSB	9		/* [9:0] clock divider         */
 #define   I2C_CFG_CLKDIV_LSB	0
 #define   I2C_CLKDIV_100K	0x270u		/* (62500/100)-1 -> ~100 kHz   */
 #define I2C_IND_WD		0x000b0		/* [31:0] write data           */
@@ -176,21 +168,13 @@
 #define BOSA_REG_CONTROL2	0x254		/* [6] LOS_PIN_TRI (0=drive SD)*/
 #define BOSA_REG_STATUS2	0x383		/* [2] RX_LOS_STATUS (0=signal)*/
 #define WSDS_DIG_00		0x22030		/* SDS clock + soft-reset-B bank */
-#define   WSDS_STOP_CLK		BIT(0)		/* 1 = GPON MAC core clock off */
-#define   WSDS_FRC_125M_EN	BIT(4)		/* force 125M ref clock enable */
-#define   WSDS_FRCV_125M_EN	BIT(5)		/* forced value for 125M       */
 #define   WSDS_SFT_RSTB		BIT(8)		/* digital soft reset-B        */
-#define   WSDS_SFT_RSTB_EPON	BIT(9)		/* EPON datapath reset-B       */
-#define   WSDS_SFT_RSTB_GPON	BIT(10)		/* GPON datapath reset-B       */
-#define   WSDS_SFT_RSB_ANA	BIT(11)		/* analog reset-B              */
 #define   WSDS_DIG00_RUN	0xf30u		/* operational run state       */
 #define WSDS_DIG_01		0x22034		/* [31:0] CFG_DMY0 (force-SDS)  */
 #define WSDS_DIG_02		0x22038		/* [10]  EN_PDOWN_BEN          */
 #define WSDS_DIG_03		0x2203c		/* [6:4] CFG_TXDIS_SEL_DLY     */
 #define WSDS_DIG_1D		0x220a4		/* interface reset-B releases  */
 #define   WSDS_SFT_RSTB_INF	BIT(14)		/* interface soft reset-B (FIFO r/w ptr re-sync) */
-#define   WSDS_SFT_RSTB_INF_RX	BIT(15)		/* RX interface soft reset-B   */
-#define   WSDS_SFT_RSTB_INF_TX	BIT(16)		/* TX interface soft reset-B   */
 #define SDS_ANA_COM_REG27	0x225ec		/* TX CMU enable lives here    */
 #define   SDS_CMU_EN		BIT(10)		/* TX CMU enable (toggle 1->0->1 to re-lock the PLL) */
 #define SDS_ANA_COM_REG03	0x2258c		/* [15:14] CMU_ISTANK_SEL_RX   */
@@ -261,10 +245,8 @@
 
 #define GPIO_PHYS_BASE		0x18003300u
 #define GPIO_REG_SIZE		0x40u
-#define GPIO_CTRL_ABCD		0x00
 #define GPIO_DIR_ABCD		0x08
 #define GPIO_DATA_ABCD		0x0c
-#define GPIO_CTRL_EFGH		0x1c
 #define GPIO_DIR_EFGH		0x24
 #define GPIO_DATA_EFGH		0x28
 #define GPIO_GOLD_DIR_ABCD	0x40002006u	/* 1,2,13,30 out; 21 in        */
@@ -288,13 +270,8 @@
 #define PI_MEDIA_STS_DS		0x0c058
 #define PI_IO_CMD_1_US		0x05438		/* [5:4] RPAGE [1:0] TPAGE size  */
 #define PI_IO_CMD_1_DS		0x0d438
-#define   PI_GMII_RX_EN		BIT(5)
-#define   PI_GMII_TX_EN		BIT(4)
 #define PI_PONIP_CTL_US		0x020d8		/* US PON-IP control             */
 #define PI_PONIP_CTL_DS		0x0a0ac		/* DS PON-IP control             */
-#define   PI_CFG_PBUF_EN	BIT(0)		/* [0] packet-buffer enable      */
-#define   PI_CFG_STOP_RXC_EN	BIT(1)		/* [1] stop RXC enable           */
-#define   PI_CFG_EPON_MODE	BIT(2)		/* [2] 0=GPON 1=EPON             */
 #define PI_PON_US_FIFO_CTL	0x020f0		/* [5:4] SPACE [3:0] START       */
 #define PI_PON_DSC_CFG_US	0x0215c		/* [28:16] RAM_NO [12:0] SRAM_NO */
 #define PI_PON_DSC_CFG_DS	0x0a0cc		/* [14:13] PAGE_SIZE             */
@@ -416,7 +393,7 @@
 
 /*
  * ★★★ 8 OFFSETS WERE REMOVED FROM THIS HEADER ON 2026-08-28, and the reason is
- * the architecture, not a conflict resolution. They live in gpon-rtl9602c.c as
+ * the architecture, not a conflict resolution. They live in gpon-rtl960x.c as
  * a RUNTIME lookup -- `SOC_IO_GPIO_EN` is `(swc->io_gpio_en)`, not 0x00048 --
  * because the G24W work had already turned the SWCORE map into a per-chip
  * TABLE while the extraction that created this header turned the same
@@ -435,4 +412,16 @@
  * only reason anybody looked.
  */
 
-#endif /* _RTL9602C_GPON_REGS_H */
+
+/*
+ * ★ 23 UNUSED DEFINES WERE DELETED ON 2026-08-28 (operator: "borrar los no
+ * usados"). Nothing in this directory referenced them.
+ *
+ * ⚠ FIVE WERE KEPT DESPITE BEING UNUSED: FIB_FP_CFG_FRC_SD, GPON_CDR_LOS_EN
+ * and the three WSDS optical-LOS forcing bits. They were rescued from the
+ * board/g24w merge hours earlier -- the code that uses them has not landed
+ * yet, and deleting them now would mean re-deriving the LOS path a second
+ * time. Unused TODAY is not the same as unused.
+ */
+
+#endif /* _RTL960X_GPON_REGS_H */

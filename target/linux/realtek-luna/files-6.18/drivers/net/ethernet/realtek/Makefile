@@ -32,7 +32,7 @@
 # SHARED GPON tree, target/linux/gpon-common/files-6.18/drivers/net/gpon/, which
 # reaches the build through FILES_DIR (see this target's Makefile).  Without the
 # -I below, `#include "gpon_unsup.h"` (and "gpon_ploam.h", and the rest) simply
-# does not resolve from here -- which is exactly what gpon-rtl9602c.c:5097
+# does not resolve from here -- which is exactly what gpon-rtl960x.c:5097
 # recorded as reason 3 for why the PLOAM rewire could not land.
 #
 # WHY AN -I AND NOT A RELATIVE INCLUDE, and why this spelling: the shared tree is
@@ -63,13 +63,13 @@ ccflags-y += -I$(srctree)/drivers/net/flowcore
 ccflags-y += -DOMCI_STORE_MAX=128 -DOMCI_MIB_ROWS_MAX=200
 
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_eth.o
-obj-$(CONFIG_RTL9602C_GPON) += gpon-rtl9602c.o rtl960x_ponmac.o
+obj-$(CONFIG_RTL9602C_GPON) += gpon-rtl960x.o rtl960x_ponmac.o
 obj-$(CONFIG_RTL9607C_GPON) += rtl9607c_gpon.o rtl960x_ponmac.o
 obj-$(CONFIG_RTL960X_ETH) += rtl960x_eth.o
 # The datapath hot path keeps -O2 even under the size-optimized (-Os) kernel:
 # the NIC RX/TX + GEM/PON-MAC forwarding must not lose per-packet performance.
 CFLAGS_rtl9602c_eth.o += -O2
-CFLAGS_gpon-rtl9602c.o += -O2
+CFLAGS_gpon-rtl960x.o += -O2
 CFLAGS_rtl960x_eth.o += -O2
 CFLAGS_rtl9607c_gpon.o += -O2
 CFLAGS_rtl960x_ponmac.o += -O2

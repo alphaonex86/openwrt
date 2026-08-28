@@ -6872,6 +6872,36 @@ static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
  *                     "NEVER load-bearing, NULL is always legal" and the core
  *                     null-checks it before every call.
  */
+/*
+ * ★ THE CORE'S FSM OBJECT, INSTANTIATED BUT NOT YET DRIVING.
+ *
+ * Nothing dispatches through it: gpon_fsm_handle()/gpon_fsm_poll() below still
+ * run this driver's own FSM.  What this step buys is that the COMPILER checks
+ * the coupling -- the ops table, the config the core expects, and the object's
+ * lifetime -- before any behaviour moves.  The shape change (this driver's FSM
+ * is global-based over ~11 file-scope variables; the core is object-based) is
+ * the remaining work, and it lands behind a switch so it can be A/B'd on the
+ * board rather than argued about, the same way msr_top and hw_pppoe were.
+ *
+ * ★ THE CONFIG IS THIS DRIVER'S OWN KNOBS, one for one.  gpon_ploam_cfg's own
+ * comments read "Luna 16" and "Luna 8": the core was carved out of this
+ * driver's lineage, so its configuration surface IS the module parameters that
+ * already exist here.  Nothing is invented to fill it.
+ */
+static struct gpon_ploam luna_ploam __maybe_unused;
+
+static const struct gpon_ploam_cfg luna_ploam_cfg __maybe_unused = {
+	.hold			= false,	/* set from gpon_hold at init */
+	.cdr_reseat_on_reactivate = true,	/* from cdr_reseat_on_reactivate */
+	.o5_rearm_burst_gate	= true,		/* from o5_rearm_burst_gate */
+	.o3_feed_reset		= false,	/* from o3_feed_reset */
+	.data_gem_en		= true,		/* from data_gem_en */
+	.omcc_alt_bind		= false,	/* from omcc_alt_bind */
+	.omcc_tcont		= GPON_OMCC_TCONT,	/* 16 on Luna */
+	.omcc_tcont_alt		= GPON_OMCC_TCONT_ALT,	/* 1, only when alt_bind */
+	.data_tcont		= GPON_DATA_TCONT,	/* 8 on Luna */
+};
+
 static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.ploam_tx	= luna_op_ploam_tx,
 	.boh_write	= luna_op_boh_write,
@@ -6894,6 +6924,18 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.install_tcont	= luna_op_install_tcont,
 };
 
+/*
+ * ★ THE A/B SWITCH FOR THE FSM REWIRE.  Default OFF: this driver's own FSM
+ * still runs, byte for byte as before.  Set `core_fsm=1` and the SAME downstream
+ * PLOAM goes to the common core instead, through the ops table above.
+ *
+ * The project's own pattern (msr_top, hw_pppoe): a change this size lands as a
+ * live A/B, not as a claim.  Both FSMs are compiled in and one line chooses.
+ */
+static bool core_fsm;
+module_param(core_fsm, bool, 0644);
+MODULE_PARM_DESC(core_fsm, "dispatch downstream PLOAM through the COMMON core FSM instead of this driver's own (default 0 = this driver's; the A/B for the rewire)");
+
 static void gpon_fsm_handle(const u8 *m)
 {
 	u8 onu_id = m[0], type = m[1];
@@ -6906,6 +6948,21 @@ static void gpon_fsm_handle(const u8 *m)
 	if (trace && type != PLM_DS_UPSTREAM_OVERHEAD && type != PLM_DS_EXT_BURST_LENGTH)
 		pr_info_ratelimited("rtl9602c-gpon: DS PLOAM onu_id=0x%02x type=0x%02x d=%*phN\n",
 				    onu_id, type, 8, d);
+
+	if (core_fsm) {
+		/* ★ TICKS x 10, NOT THE WALL CLOCK, and the more accurate clock is
+		 * the wrong one here.  This FSM does not measure time: it counts
+		 * polls, at a 10 ms mod_timer that is a TARGET and not a guarantee,
+		 * so under load the tick count falls behind wall time -- and every
+		 * timeout in the code being replaced already lives on that slipping
+		 * clock.  Hand the core jiffies_to_msecs() and its timeouts fire on
+		 * a different schedule from the FSM it replaces: the A/B would then
+		 * compare two FSMs AND two clocks, and blame the FSM.
+		 * See ONU-test-case/OWED-ploam-swap-time-unit.md. */
+		gpon_ploam_ds(&luna_ploam, m, GPON_PLOAM_DS_LEN,
+			      gpon_fsm_ticks * 10u);
+		return;
+	}
 
 	switch (type) {
 	case PLM_DS_UPSTREAM_OVERHEAD:
@@ -8415,9 +8472,11 @@ skip_bosa_init:
 	 * SN burst (gpon_apply_boh in the FSM); this is just a sane state for the
 	 * window between GTC bring-up and those PLOAMs arriving.
 	 */
-	/* ★ REWIRE BLOCKER 1b (see the FSM head comment): the second __init caller
-	 * of a core computation the common layer keeps `static` (apply_boh). Same
-	 * resolution as 1a — export it from gpon_ploam.h, never re-implement it. */
+	/* ★ WAS REWIRE BLOCKER 1b, RESOLVED 2026-08-28: the second __init caller
+	 * of a computation the core used to keep `static`. The core now exposes
+	 * gpon_ploam_apply_boh() for exactly this, so nothing here is waiting on
+	 * somebody else's file. Do NOT re-implement the arithmetic locally --
+	 * that fork is what killed gpon_proto.c. */
 	gpon_apply_boh(false);
 
 	/*
@@ -8440,6 +8499,24 @@ skip_bosa_init:
 	/* Start the PLOAM activation FSM: parse the per-board serial number and
 	 * begin draining downstream PLOAM to drive O1 -> O5. */
 	gpon_parse_sn(onu_sn);
+
+	/* ★ BRING THE CORE'S FSM OBJECT UP ALONGSIDE OURS -- it does not drive yet.
+	 * Placed AFTER the serial number is in force, because gpon_ploam_init()
+	 * takes it: an object seeded with a blank SN would range as a different
+	 * ONU the moment it were switched on, which is exactly the kind of
+	 * difference an A/B must not carry silently. */
+	{
+		struct gpon_ploam_cfg cfg = luna_ploam_cfg;
+
+		cfg.hold = gpon_hold;
+		cfg.cdr_reseat_on_reactivate = cdr_reseat_on_reactivate;
+		cfg.o5_rearm_burst_gate = o5_rearm_burst_gate;
+		cfg.o3_feed_reset = o3_feed_reset;
+		cfg.data_gem_en = data_gem_en;
+		cfg.omcc_alt_bind = omcc_alt_bind;
+		gpon_ploam_init(&luna_ploam, &luna_ploam_ops, &cfg, NULL,
+				gpon_sn_bytes);
+	}
 	pr_info("rtl9602c-gpon: PLOAM FSM start, SN '%s' = %*phN\n",
 		onu_sn, 8, gpon_sn_bytes);
 	INIT_WORK(&gpon_cdr_reset_work, gpon_cdr_reset_worker);

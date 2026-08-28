@@ -207,15 +207,35 @@
 	 * family driver already in this target binds on the generic
 	 * compatible, so no driver change is needed.
 	 *
-	 * ★ DISABLED ON PURPOSE, and it matches stock. The same dump reads
-	 * "WDT_E=0, (1-enable, 0-disable)": the vendor firmware does NOT arm
-	 * this watchdog at boot. Arming it here would make our first boot
-	 * strictly less forgiving than the firmware we are replacing -- a
-	 * bring-up kernel that stops before userspace would reset instead of
-	 * sitting at the console where it can be read.
+	 * ★★★ CORRECTED 2026-08-26 -- THIS COMMENT USED TO SAY "DISABLED ON
+	 * PURPOSE, AND IT MATCHES STOCK", CITING "WDT_E=0" FROM THE STOCK DUMP.
+	 * THAT WAS FALSE, AND THE DISPROOF IS FOUR LINES FURTHER DOWN THE SAME
+	 * BOOT LOG:
 	 *
-	 * ENABLE at M6 (soak/robustness), together with the LED and reboot
-	 * work, not before.
+	 *   [0.345419] WDT_E=0, (1-enable, 0-disable)        <- show_usage() reads it
+	 *   [0.382093] BSP_WDTCTRLR(0xb8003268): 0xe7c00000  <- 37 ms later, BIT 31 SET
+	 *
+	 * WDT_E *is* bit 31, and 0xe7c00000 has it set. The "WDT_E=0" line is a
+	 * PRINT-ORDER ARTEFACT: the vendor's watchdog_timeout_init() calls
+	 * set_rtk_wdt_ph1_threshold(), whose show_usage() reads the register
+	 * BEFORE the very next statement RTK_WDG_EN() runs. Nine seconds later
+	 * rc34 arms it a SECOND time. So this board's stock arms the hardware
+	 * watchdog TWICE per boot, at 0.38 s and at rc34 -- somebody read the
+	 * first line of the block and stopped.
+	 *
+	 * ⇒ THE OPERATOR'S HYPOTHESIS THAT A VENDOR-DISABLED WATCHDOG MIGHT MEAN
+	 * FAULTY SILICON IS DEAD AT ITS PREMISE ON THIS CHIP: stock enables it.
+	 * Nothing here is evidence of a hardware fault.
+	 *
+	 * ★ THE NODE STAYS DISABLED ANYWAY, for a REASON THAT SURVIVES the
+	 * correction: on this silicon the driver has never run, so its reload is
+	 * unproven here -- and on the SIBLING RTL9602C the same driver is
+	 * shipped ENABLED and resets that board every boot, with the evidence
+	 * pointing at a kick that does not reload. Enabling an unproven reload
+	 * on a second board would multiply the fault, not test it.
+	 *
+	 * ENABLE once the reload is isolated on the 9602C and re-proven here --
+	 * not at a milestone, at a MEASUREMENT.
 	 */
 	watchdog@18003260 {
 		compatible = "realtek,rtl9603cvd-wdt", "realtek,rtl960x-wdt";
@@ -223,6 +243,49 @@
 		clocks = <&lx_clk>;
 		timeout-sec = <30>;
 		status = "disabled";
+	};
+
+	/*
+	 * GMAC0 -- the CPU port's Gigabit MAC, brought up as eth0.  The CPU
+	 * reaches the LAN only through the on-chip switch:
+	 *
+	 *	CPU <-> GMAC0 (eth0) <-> switch CPU-port(5) <-> LAN port <-> wire
+	 *
+	 * ★ THE BASE IS *NOT* INHERITED FROM THE RTL9607C -- it was verified
+	 * for this chip.  The vendor builds ONE NIC driver for both parts,
+	 * takes the base from its device tree (`ioremap(reg[0], reg[1])`,
+	 * never a compiled-in constant), and the DTB actually built for the
+	 * 9603CVD product carries the same 0x18012000/0x2000 window.  The
+	 * KSEG1 alias 0xB8012000 in the vendor header is dead code.
+	 * [tier 3, the chip's own 4.4.140 SDK: nicDriver/re8686_rtl9607c.c
+	 *  takes the base from DT; the 9603CVD-configured tree's own DTB and
+	 *  arch/mips/boot/dts/realtek/rtl9607c_soc.dtsi agree on the window]
+	 *
+	 * ⚠ A DECOY, recorded so nobody re-chases it: the BSP header also
+	 * declares a "LS GMAC" at 0x1b007000 size 0x400.  It is `status =
+	 * "disabled"` in the vendor DTS and 0x400 cannot even span this MAC's
+	 * 0x1440 of registers.  It is not this block.
+	 *
+	 * ★ THE INTERRUPT IS PROVEN AT TIER 1 ON THIS BOARD, by arithmetic
+	 * that closes:  our aggregator input 26 (GMAC0 int0; 27 is int1) maps
+	 * through the vendor kernel's own printed `gisr_translate_d2c` table
+	 * (26 => 36) and its domain base of 23 to Linux virq 59 -- and this
+	 * board's own console prints `re8670_close 5927 irq=59 name=eth0`.
+	 * Three independent numbers agree, which is why this is <26> and NOT
+	 * the RTL9607C's GIC `<0 36 4>`.
+	 *
+	 * The switch core itself is programmed by this driver through a fixed
+	 * window at phys 0x1b000000, not through a node: the register file is
+	 * one block shared with the GPIO/pinmux the vendor maps at 0x1b000038
+	 * on THIS board, which is what corroborates the base here rather than
+	 * on the sibling.
+	 */
+	nic: ethernet@18012000 {
+		compatible = "realtek,rtl9603cvd-nic";
+		reg = <0x18012000 0x2000>;
+		interrupt-parent = <&intc>;
+		interrupts = <26>;		/* GMAC0 int0 */
+		status = "okay";
 	};
 
 	/*
@@ -241,12 +304,14 @@
 	 *       and not one GPIO number or polarity is known, and the
 	 *       vendor blinks them from a software kthread. A wrong gpio
 	 *       number drives an unknown pin on a live board.
-	 *   ethernet / switch  - the aggregator input for the switch core
-	 *       is 8 and for GMAC0 is 26/27 (see irq-rtl9603cvd.c). The
-	 *       vendor's datapath is built INTO its kernel, not a module,
+	 *   switch interrupt   - aggregator input 8. NOT wired, on purpose:
+	 *       the NIC driver reads the switch's own per-port link state
+	 *       instead, so a link-change interrupt buys nothing at M2 and a
+	 *       wrong one costs a boot. GMAC0 (input 26) IS present above.
+	 *       The vendor's datapath is built INTO its kernel, not a module,
 	 *       so there is no .ko to read; RE targets the vmlinux in k0.
-	 *       The four printed sockets appear as QinQ eth0.<N>.0 devices,
-	 *       which is not the shape the RTL9602C NIC driver produces.
+	 *       The four printed sockets appear as QinQ eth0.<N>.0 devices on
+	 *       stock -- that is base-files topology, not device tree.
 	 *   PCIe / WiFi        - MEASURED: the radio is PCIe-attached,
 	 *       PCI id 10ec:818c, claimed on stock by the vendor rtl8192cd
 	 *       driver, chip_version 0x100c. Aggregator input 16. Note the

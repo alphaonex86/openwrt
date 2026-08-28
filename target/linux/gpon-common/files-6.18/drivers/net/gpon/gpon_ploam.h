@@ -581,6 +581,12 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms);
 /* G.984.3 O-state name, for logs and /proc. Canonical spelling (O1 is
  * *Initial*, O2 is Standby) — the oracle's enum has these shifted, which is
  * recorded as a defect of the oracle, not of either driver. */
+/* The two computations a SHELL needs at __init, outside any PLOAM dispatch --
+ * see the note beside their definitions.  Both are the core's own arithmetic;
+ * a shell that re-implements either forks the code it is supposed to share. */
+void gpon_ploam_apply_boh(struct gpon_ploam *o, bool ranged);
+void gpon_ploam_set_eqd(struct gpon_ploam *o, u32 value);
+
 const char *gpon_ploam_state_name(enum gpon_ostate st);
 
 #endif /* GPON_PLOAM_H */

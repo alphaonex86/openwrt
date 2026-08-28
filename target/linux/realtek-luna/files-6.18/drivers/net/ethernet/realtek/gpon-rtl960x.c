@@ -6890,6 +6890,9 @@ static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
  */
 static struct gpon_ploam luna_ploam __maybe_unused;
 
+/* File scope, NOT a local: gpon_ploam_init() keeps the pointer. */
+static struct gpon_ploam_cfg luna_ploam_cfg_live __maybe_unused;
+
 static const struct gpon_ploam_cfg luna_ploam_cfg __maybe_unused = {
 	.hold			= false,	/* set from gpon_hold at init */
 	.cdr_reseat_on_reactivate = true,	/* from cdr_reseat_on_reactivate */
@@ -8505,18 +8508,22 @@ skip_bosa_init:
 	 * takes it: an object seeded with a blank SN would range as a different
 	 * ONU the moment it were switched on, which is exactly the kind of
 	 * difference an A/B must not carry silently. */
-	{
-		struct gpon_ploam_cfg cfg = luna_ploam_cfg;
-
-		cfg.hold = gpon_hold;
-		cfg.cdr_reseat_on_reactivate = cdr_reseat_on_reactivate;
-		cfg.o5_rearm_burst_gate = o5_rearm_burst_gate;
-		cfg.o3_feed_reset = o3_feed_reset;
-		cfg.data_gem_en = data_gem_en;
-		cfg.omcc_alt_bind = omcc_alt_bind;
-		gpon_ploam_init(&luna_ploam, &luna_ploam_ops, &cfg, NULL,
-				gpon_sn_bytes);
-	}
+	/* ★ THE CONFIG MUST OUTLIVE THIS FUNCTION.  gpon_ploam_init() STORES the
+	 * pointer (`o->cfg = cfg`); it does not copy the struct.  The first
+	 * version of this block built the config on the STACK and handed over its
+	 * address, so luna_ploam.cfg dangled the moment the block closed.  It
+	 * would not have bitten while core_fsm=0 -- nothing dereferences it --
+	 * and would have read dead stack the first time the switch was flipped,
+	 * which is the worst possible place for it to surface. */
+	luna_ploam_cfg_live = luna_ploam_cfg;
+	luna_ploam_cfg_live.hold = gpon_hold;
+	luna_ploam_cfg_live.cdr_reseat_on_reactivate = cdr_reseat_on_reactivate;
+	luna_ploam_cfg_live.o5_rearm_burst_gate = o5_rearm_burst_gate;
+	luna_ploam_cfg_live.o3_feed_reset = o3_feed_reset;
+	luna_ploam_cfg_live.data_gem_en = data_gem_en;
+	luna_ploam_cfg_live.omcc_alt_bind = omcc_alt_bind;
+	gpon_ploam_init(&luna_ploam, &luna_ploam_ops, &luna_ploam_cfg_live, NULL,
+			gpon_sn_bytes);
 	pr_info("rtl9602c-gpon: PLOAM FSM start, SN '%s' = %*phN\n",
 		onu_sn, 8, gpon_sn_bytes);
 	INIT_WORK(&gpon_cdr_reset_work, gpon_cdr_reset_worker);

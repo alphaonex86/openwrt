@@ -5332,40 +5332,41 @@ static int gpon_proc_show(struct seq_file *s, void *v)
  * original and offline reference respectively. Keep them in step — a fix here
  * that is not mirrored there makes the offline gate lie about this driver.
  *
- * ★ WHY THE REWIRE DID NOT LAND WITH THE CARVE. Four items, each MEASURED
- * 2026-08-05, not assumed. All four are somebody else's file, which is why the
- * driver was left untouched rather than half-converted:
+ * ★ WHY THE REWIRE DID NOT LAND WITH THE CARVE -- AND WHAT IS LEFT OF THAT.
+ * Four obstacles were MEASURED 2026-08-05.  ALL FOUR ARE NOW GONE (2026-08-28);
+ * the list is kept because each says what a future obstacle of the same kind
+ * looks like, and because "we already checked" is worth nothing without dates.
  *
- *   1. The core has no entry point for the two computations this driver needs
- *      at __init, OUTSIDE any PLOAM dispatch: gpon_set_eqd(0) below and
- *      gpon_apply_boh(false) below. In the core both are `static` (apply_boh,
- *      set_eqd) and reachable only from gpon_ploam_ds(). Calling them from a
- *      shell therefore does not compile, and re-implementing them here would
- *      fork the very code being shared — which is exactly how the now-deleted
- *      gpon_proto.c drifted.
- *   2. gpon_ploam.o is `# gpon-pending` in the shared Makefile, not obj-y, so
- *      the gpon_ploam_* symbols do not exist at link time.
- *   3. ★ NO LONGER TRUE (2026-08-20). This directory's Makefile now carries
- *      `ccflags-y += -I$(srctree)/drivers/net/gpon`, the same line
- *      realtek-elnath has had since the carve, so a shared-tree header DOES
- *      resolve from here -- this file already includes gpon_unsup.h through
- *      it. What that removes is ONLY this obstacle; items 1, 2 and 4 above are
- *      unaffected and each still blocks the PLOAM rewire on its own.
- *   4. gpon_ploam.c's sn_hex_nibble() does NOT reproduce this driver's
- *      hex_to_bin() path, though its comment claims byte-identity: the kernel
- *      returns -1 for a non-hex digit (0xff once stored in the u8), the core
- *      returns 0xf. A valid high nibble with an invalid low one then yields a
- *      DIFFERENT serial-number byte ('7','G' -> 0xff here, 0x7f there;
- *      4660 of 65025 character pairs diverge). Adopting the core's parse would
- *      change the identity this ONU puts on the wire for a malformed
- *      gpon_rtl960x.onu_sn=, so it is a behaviour change, not code motion.
+ *   1. ★ RESOLVED 2026-08-28. The core kept the two computations this driver
+ *      needs at __init -- set_eqd() and apply_boh() -- `static`, reachable only
+ *      from gpon_ploam_ds(), so a shell could not call them. The core now
+ *      exposes gpon_ploam_set_eqd() and gpon_ploam_apply_boh(): the SAME
+ *      functions behind thin wrappers, deliberately not copies, because
+ *      re-implementing the arithmetic here is exactly how gpon_proto.c drifted.
+ *   2. ★ RESOLVED. gpon_ploam.o was `# gpon-pending` in the shared Makefile;
+ *      it is `obj-y` now, so the gpon_ploam_* symbols exist at link time.
+ *   3. ★ RESOLVED 2026-08-20. This directory's Makefile carries
+ *      `ccflags-y += -I$(srctree)/drivers/net/gpon`, so a shared-tree header
+ *      resolves from here.
+ *   4. ★ RESOLVED 2026-08-28, and the diagnosis had the wrong file. The claim
+ *      was that adopting "the core's parse" would change this ONU's identity
+ *      for a malformed onu_sn=. What it actually described was
+ *      gpon_ploam_parse_sn(), a SECOND decoder inside the core that disagreed
+ *      with gpon_sn.c's -- 0xf for a bad nibble where the strict parser
+ *      refuses. It had zero callers and is now a wrapper over the strict one,
+ *      so the core has ONE decoder and this driver is already rebased onto it.
+ *      The behaviour change was made deliberately, with a pr_warn, and it fixes
+ *      a spurious re-range: a malformed string used to manufacture a different
+ *      serial and read as an identity change.
  *
- * Sequencing note: the refactor plan orders this move LAST (step M9) and gives
- * it a prerequisite that is NOT code motion — the FSM below is global-based
- * over ~11 file-scope variables while the core is object-based (struct
- * gpon_ploam), and converting it is a shape change that must land, and be
- * gated, on its own. X111W is off the rig, so none of it is board-verifiable
- * today; a green offline gate gates a boot, it never proves the hardware works.
+ * ⇒ WHAT REMAINS IS NOT AN OBSTACLE, IT IS THE WORK: the FSM below is
+ * global-based over ~11 file-scope variables while the core is object-based
+ * (struct gpon_ploam). That is a shape change, it must land and be gated on its
+ * own, and it is now the ONLY thing between this driver and the common FSM.
+ *
+ * ⚠ AND IT IS NOT BOARD-VERIFIABLE ON DEMAND: a green offline gate GATES a
+ * boot, it never proves the hardware works, so the shape change lands behind
+ * the offline differential first and is confirmed on the board after.
  */
 
 /*
@@ -8124,12 +8125,13 @@ skip_bosa_init:
 	 * mask/status registers, NOT the burst overhead — removed.)
 	 */
 	gpon_wr_us_protected(GPON_GTC_US_MIN_DELAY, 0x9132);
-	/* ★ REWIRE BLOCKER 1a (see the FSM head comment): this is an __init caller
-	 * of the equalization-delay computation, with no PLOAM in flight. The
-	 * common core keeps that computation `static` inside gpon_ploam.c, reachable
-	 * only from gpon_ploam_ds(), so converting this driver to the core needs the
-	 * core to expose it first. Do not satisfy this by copying the arithmetic
-	 * back in here — that fork is what killed gpon_proto.c. */
+	/* ★ WAS REWIRE BLOCKER 1a, RESOLVED 2026-08-28: this is an __init
+	 * caller of the equalization-delay computation, with no PLOAM in flight.
+	 * The core now exposes gpon_ploam_set_eqd() for exactly this, so the
+	 * conversion no longer needs anything from somebody else's file. Do NOT
+	 * satisfy it by copying the arithmetic back in here -- that fork is what
+	 * killed gpon_proto.c.
+	 */
 	gpon_set_eqd(0);			/* pre-ranging EqD = 290*128 = 0x9100 */
 
 	/*

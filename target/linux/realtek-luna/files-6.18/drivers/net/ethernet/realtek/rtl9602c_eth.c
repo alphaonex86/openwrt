@@ -447,6 +447,9 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 /* The switch L34 (NAPT) offload module is compiled in via this driver's TU to
  * avoid a separate Kbuild object; it carries its own header include guard. */
 #include "rtl9602c_l34.c"
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+#include "gpon_flow_offload.h"	/* the core TC-offload lifecycle */
+#endif
 
 /* HW NAT (switch L34 offload) gate. Module-param gated (not Kconfig) so it can
  * be toggled without an OpenWrt kernel-config round-trip. Default off: engine
@@ -548,6 +551,9 @@ struct rtl9602c_eth {
 	struct napi_struct napi;
 	int		irq;	/* GMAC0 INTC input (platform_get_irq); <=0 = pure-poll fallback */
 	struct rtl9602c_l34 l34;	/* switch L3/L4 (NAPT) hardware-offload engine */
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+	struct gpon_flow_offload *fo;	/* the COMMON TC lifecycle, drivers/net/gpon/ */
+#endif
 	/* Host uplink port, learned from the RX descriptor src_port_num. All RX
 	 * arrives on the board's single connected LAN port, so this resolves to the
 	 * physical switch port the host is on — we then steer CPU->LAN TX there
@@ -3308,7 +3314,17 @@ static void rtl9602c_eth_set_rx_mode(struct net_device *ndev)
 				 !!(ndev->flags & (IFF_PROMISC | IFF_ALLMULTI)));
 }
 
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+/* This family's five-op table for the COMMON TC lifecycle.  Included here, not
+ * at the top, because it needs `struct rtl9602c_eth` complete and the WAN ops
+ * table defined -- and the LAN ops table below needs ITS ndo_setup_tc. */
+#include "rtl9602c_l34_tc.c"
+#endif
+
 static const struct net_device_ops rtl9602c_eth_netdev_ops = {
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+	.ndo_setup_tc		= rtl9602c_l34_setup_tc,
+#endif
 	.ndo_open		= rtl9602c_eth_open,
 	.ndo_stop		= rtl9602c_eth_stop,
 	.ndo_start_xmit		= rtl9602c_eth_xmit,
@@ -3627,6 +3643,17 @@ mac_done:
 		} else {
 			dev_info(dev, "L34 hw-nat engine initialised\n");
 			rtl9602c_l34_proc_init(&ep->l34);	/* bring-up harness */
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+			/* The COMMON lifecycle owns the cookie map and the
+			 * entry; this driver supplies five ops.  ★ Its install
+			 * REFUSES today -- the NETIF/NEXTHOP tables are not
+			 * provisioned, so a flow would blackhole while reading
+			 * back healthy.  Registering anyway is what proves the
+			 * core's contract is reachable from this family. */
+			ep->fo = gpon_flow_offload_new(&rtl9602c_l34_flow_ops, ep);
+			if (!ep->fo)
+				dev_warn(dev, "L34: the common TC lifecycle could not be created; software forwarding\n");
+#endif
 		}
 	}
 

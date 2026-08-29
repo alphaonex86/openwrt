@@ -58,12 +58,12 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
-#include <linux/rhashtable.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include <net/netfilter/nf_flow_table.h>
 
 #include "gpon_flow.h"	/* the core's TC->5-tuple decode */
+#include "gpon_flow_offload.h"	/* the core TC-offload lifecycle */
 #include "cortina-ni.h"
 #include "cortina-l3fe.h"
 
@@ -474,7 +474,7 @@ static_assert(sizeof(struct cn_l3e_act) == CN_L3E_FIB_BYTES);
 /* in the build/wiring phase; NULL = offload rejected everywhere)      */
 /* ------------------------------------------------------------------ */
 
-struct cn_flow_entry;
+struct cn_flow_priv;
 
 struct cn_l3e {
 	struct device	*dev;
@@ -520,7 +520,7 @@ struct cn_l3e {
 	 * the vendor's >7 MB per-entry kmalloc model) */
 	u32		*shadow_crc32;	/* per entry, 0 = free */
 	u16		*shadow_crc16;	/* for cache-invalidate on delete */
-	struct cn_flow_entry **entry_by_idx;	/* sweep reverse map */
+	struct cn_flow_priv **entry_by_idx;	/* sweep reverse map */
 	u8		*bucket_occ;	/* entries per AGE row: sweep skip mask */
 	/* SWO HW-CRC selftest verdict (phase-1 gate instrument) */
 	int		selftest_ret;
@@ -897,7 +897,7 @@ static int cn_l3e_flow_add_rawcrc(struct cn_l3e *l3e, u32 crc32, u16 crc16,
 	 *
 	 * Step the age back DOWN to IDLE(1) as the last act of the install (the two
 	 * manual /proc install paths already did exactly this; the automatic
-	 * cn_flow_replace path did not, which is the defect this closes).  IDLE is
+	 * cn_flow_install path did not, which is the defect this closes).  IDLE is
 	 * live - the sweep itself writes it back to live slots - and the HW ager only
 	 * counts UP on a lookup hit, so from here a slot above IDLE is unambiguous
 	 * proof the engine matched a frame in silicon.
@@ -965,7 +965,7 @@ static int cn_l3e_flow_del(struct cn_l3e *l3e, u32 idx, u16 crc16)
 /* mainline flow_block glue (mtk_ppe_offload-shaped)                   */
 /* ------------------------------------------------------------------ */
 
-/* one flow's share of the DMA-AFT tables.  Lives in cn_flow_entry, but is
+/* one flow's share of the DMA-AFT tables.  Lives in cn_flow_priv, but is
  * filled BEFORE the entry exists (the decision to offload is taken first),
  * so it is its own small type rather than fields on the entry. */
 struct cn_aft_ref {
@@ -973,9 +973,14 @@ struct cn_aft_ref {
 	bool	valid;		/* holds a reference that must be released */
 };
 
-struct cn_flow_entry {
-	struct rhash_head	node;
-	unsigned long		cookie;
+/*
+ * ★ THIS IS NO LONGER AN ENTRY, IT IS THE CORE'S `priv`.  The rhash node and
+ * the cookie went to gpon_flow_offload.c with the lifecycle; what is left is
+ * exactly the state THIS ENGINE needs and no other family would recognise -- a
+ * CRC, an age bucket, a DMA-AFT reference.  The core allocates it with the
+ * entry, hands it back on every op, and never reads it.
+ */
+struct cn_flow_priv {
 	u32			hash_idx;
 	u16			crc16;
 	unsigned long		last_hit;	/* fed by the stats sweep */
@@ -995,8 +1000,11 @@ struct cn_flow_entry {
 						 * flow uses, if any */
 };
 
-static struct rhashtable cn_flow_table;
 static bool cn_flow_table_ready;
+
+/* The core's TC-offload engine handle: it owns the cookie map, the entry
+ * lifetime and the action decode; this driver supplies cn_flow_ops. */
+static struct gpon_flow_offload *cn_fo;
 /* Flow installs stay OFF until the P3 key-packing is SWO-validated: an
  * entry installed with the placeholder CRC could never match (harmless)
  * but would waste table slots and report a false "offloaded" state. */
@@ -1327,7 +1335,7 @@ static atomic_t cn_l3e_hw_hits = ATOMIC_INIT(0);
 /*
  * ★ PER-DIRECTION HW-HIT witnesses, split out of cn_l3e_hw_hits so ONE /proc
  * read says WHICH leg the hardware is forwarding.  Same evidence (the age-SRAM
- * re-arm), attributed through entry_by_idx -> cn_flow_entry.ds.  A re-arm on a
+ * re-arm), attributed through entry_by_idx -> cn_flow_priv.ds.  A re-arm on a
  * slot that has no auto entry (a manual /proc-installed flow) is counted
  * separately rather than mis-attributed - a mis-attributed witness is the #1
  * recurring waste on this project.
@@ -1382,7 +1390,7 @@ static atomic_t cn_pppoe_early_gone = ATOMIC_INIT(0);
  * session-id change, which is expected and must not be counted as a flap or the
  * witness cries wolf on every redial.
  */
-static void cn_pppoe_entry_gone(const struct cn_flow_entry *e, bool count_flap)
+static void cn_pppoe_entry_gone(const struct cn_flow_priv *e, bool count_flap)
 {
 	if (!e->pppoe)
 		return;
@@ -2267,11 +2275,12 @@ int cortina_ni_wan_pppoe_session_set(u16 session)
 	 * on a clear, an absent) header on the wire.  Flush them so
 	 * nf_flow_table reinstalls the still-live conntracks against the new
 	 * sid; never leave a live flow carrying a stale sid.  Cheap + rare;
-	 * the entry_by_idx scan avoids an rhashtable-walk use-after-free.
+	 * the entry_by_idx scan reads the sweep state without walking the
+	 * core's cookie table.
 	 * ★ Caller MUST hold cn_flow_offload_mutex.  All four in-tree callers do:
 	 * the debugfs "pppoe" control write (cortina_ni_l3fe_debug_write takes it),
 	 * cn_l3e_set_us_egress
-	 * via cn_flow_replace, the WAN data-path teardown and the hw_pppoe 1->0 edge
+	 * via cn_flow_install, the WAN data-path teardown and the hw_pppoe 1->0 edge
 	 * (the last two take it around the call - both run in sleepable context). */
 	if (session != READ_ONCE(l3e->data_pppoe_session) &&
 	    atomic_read(&cn_flow_installed))
@@ -2309,7 +2318,7 @@ EXPORT_SYMBOL_GPL(cortina_ni_wan_pppoe_session_set);
  * hw_pppoe writer.  Plain bool set, plus one safety: turning the mode OFF also
  * CLEARS the armed session (GAP-3).  Without it a benchmark run left the sid
  * behind, and a stale sid then refuses every later flow on this WAN (the
- * "shadow armed but the rule carries no push" branch in cn_flow_replace) -
+ * "shadow armed but the rule carries no push" branch in cn_flow_install) -
  * i.e. a PPPoE experiment silently cost the IPoE path its HW offload until the
  * next reboot.  ★ That is the SAME defect cn_pppoe_shadow_stale() now covers in
  * general - a plain PPPoE->IPoE WAN change, with the mode left ON, went the
@@ -2454,7 +2463,7 @@ static int cn_l3e_set_us_egress(struct cn_l3e *l3e, struct cn_l3e_act *act,
 		 * substitute it.  ★ smac_trans stays 0 to match the stock oracle
 		 * (idx43000 smac_trans=0): the L3-IF supplies the SMAC; the extra
 		 * smac_trans=1 was an aal-gen2-era guess.  The next-hop DMAC is set
-		 * by the caller (cn_flow_replace A2) from the ETH-mangle gateway MAC
+		 * by the caller (cn_flow_install A2) from the ETH-mangle gateway MAC
 		 * (mac_da_idx); the /proc manual-install path has no next hop, so a
 		 * manual entry HW-forwards but egresses with an unrewritten DMAC -
 		 * end-to-end far-end delivery needs the auto (nf_flow_table) path. */
@@ -2602,7 +2611,7 @@ static void cn_l3e_set_ds_wan_vlan(struct cn_l3e_act *act, u16 vid)
  *      ingress CLS stamped into HDR_I.t2_ctrl - so a DS frame stamped with a
  *      profile still pointing at a stock mask could never match.
  *      ★ CONCRETE, not hypothetical: the pri-9 CLS rows stamp hash profile 2
- *      (see the word6 decode in cn_flow_replace), step 2b does NOT cover
+ *      (see the word6 decode in cn_flow_install), step 2b does NOT cover
  *      profile 2, and whether those rows key on IP-multicast or on any MAC-DA
  *      CAM hit - in which case a DS unicast to our WAN MAC matches them first -
  *      could not be settled offline.  Covering all 7 closes that and removes the
@@ -2788,12 +2797,6 @@ static void cn_l3e_ds_probe_apply(struct cn_l3e_act *act)
 	}
 }
 
-static const struct rhashtable_params cn_flow_ht_params = {
-	.head_offset	= offsetof(struct cn_flow_entry, node),
-	.key_offset	= offsetof(struct cn_flow_entry, cookie),
-	.key_len	= sizeof(unsigned long),
-	.automatic_shrinking = true,
-};
 
 /*
  * Liveness sweep: every CN_L3E_SWEEP_MS walk ONLY the occupied buckets, one
@@ -2833,7 +2836,7 @@ static void cn_l3e_sweep_work(struct work_struct *work)
 
 		traffic = trf;
 		for_each_set_bit(slot, &traffic, CN_L3E_AGE_SLOTS) {
-			struct cn_flow_entry *e =
+			struct cn_flow_priv *e =
 				l3e->entry_by_idx[bucket * CN_L3E_AGE_SLOTS +
 						  slot];
 
@@ -2859,12 +2862,12 @@ static void cn_l3e_sweep_work(struct work_struct *work)
 	schedule_delayed_work(&cn_l3e_sweep, msecs_to_jiffies(CN_L3E_SWEEP_MS));
 }
 
-/* Names every cn_flow_replace refusal branch so a rejected/silently-erroring
+/* Names every cn_flow_install refusal branch so a rejected/silently-erroring
  * REPLACE localises itself.  At pr_debug (dynamic-debug): first-class dump/spy
  * per project policy, but silent at the default loglevel so the shipped tree
  * is not info-spammy under a many-flow load. */
 #define cn_rep_dbg(fmt, ...) \
-	pr_debug("cn_flow_replace: " fmt, ##__VA_ARGS__)
+	pr_debug("cn_flow_install: " fmt, ##__VA_ARGS__)
 
 /*
  * ★ THE REFUSAL LEDGER (/proc/cortina_l3fe `refused:`).
@@ -3340,7 +3343,7 @@ static int cn_wan_chain_vlan(struct net_device *dev)
  * forceDisDmaAft=0), so there is a second, per-flow selection path we have not
  * characterised.  Which engine performs stock's wire edit is UNSETTLED; the full
  * evidence and the A/B that would settle it are at the cn_aft_install() call
- * site in cn_flow_replace().  Nothing below depends on the retracted half - the
+ * site in cn_flow_install().  Nothing below depends on the retracted half - the
  * hit-action route is measured end to end.
  *
  * THE EVIDENCE, one rig session, one variable at a time, tagged WAN on VID 46,
@@ -3950,149 +3953,93 @@ static bool cn_flow_refuse_vlan_wan(struct net_device *wan_dev, bool ds_leg)
 	return false;
 }
 
-static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
+/*
+ * The ENGINE half of a TC flow install.  The LIFECYCLE half -- the cookie map,
+ * the dedup, the action decode, the entry and its unwind -- is the core's
+ * (drivers/net/gpon/gpon_flow_offload.c), and this is what it calls.
+ *
+ * ★ WHY THE SEAM IS HERE AND NOT WHERE IT FIRST LOOKED.  A "3 questions + 3
+ * engine calls" contract was drafted for this and it was WRONG: reading the
+ * ~850 lines this function used to be showed its generic and silicon halves are
+ * not stacked but INTERLEAVED -- a PPPoE leg gate whose input is a driver-held
+ * session SHADOW, a lazy one-time DS arm that touches hardware, a VLAN readback
+ * BY LITERAL BIT NUMBER out of the FIB table.  So the core keeps only what is a
+ * fact about nf_flow_table, and everything that must read or write silicon
+ * stays in ONE call: this one.  It is deliberately allowed to be large.
+ *
+ * ⚠ `ctx->idev` is BORROWED -- the core holds the reference for the whole of
+ * this call and drops it after.  Do not dev_put it here.
+ */
+static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
+			   const struct gpon_flow_act *a,
+			   const struct gpon_flow_ctx *ctx, void *priv,
+			   u32 *idx_out)
 {
-	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
-	struct flow_action_entry *fa;
+	struct cn_flow_priv *entry = priv;
 	struct cn_l3e_key key = {};
 	struct cn_l3e_act act = {};
-	struct cn_flow_entry *entry;
-	struct net_device *odev = NULL;
-	bool lan_ingress = false, snat_port = false;
-	bool ds_leg = false, vlan_wan = false;
+	struct net_device *odev = ctx->odev;
+	bool ds_leg = ctx->ds_leg, vlan_wan = false;
 	u16 vlan_wan_vid = 0;			/* 0 = untagged WAN = untouched */
-	int profile, i, err;
-	u16 pppoe_sid = 0;
+	int profile, err;
+	u16 pppoe_sid = a->pppoe_sid;
 	struct cn_wan_encap wenc = { .vid = -1, .sid = -1 };
 	u16 vlan_wan_sid = 0;		/* PPPoE sid resolved from the WAN chain */
 	bool vlan_pppoe = false;	/* this leg is PPPoE *and* tagged */
-	u8 gw_dmac[6] = {};		/* next-hop MAC from the ETH mangle (A2) */
-	bool got_dmac_lo = false, got_dmac_hi = false;
+	u8 gw_dmac[6];			/* next-hop MAC; may be REPLACED below */
+	bool got_dmac_lo = a->dmac_valid, got_dmac_hi = a->dmac_valid;
 
 	if (!cn_l3e || !cn_l3e_install_ok)
 		return -EOPNOTSUPP;
-	if (rhashtable_lookup_fast(&cn_flow_table, &f->cookie,
-				   cn_flow_ht_params)) {
-		cn_rep_dbg("cookie %lx already installed (other direction)\n",
-			   f->cookie);
-		return -EEXIST;
-	}
 
 	/*
-	 * ★ THE DECODE IS THE CORE'S (gpon_flow_key_from_tc).  "Read a TC rule,
-	 * refuse what this silicon cannot do, hand back the 5-tuple" is the same
-	 * work in every driver that offloads NAPT; what stays here is the half
-	 * that IS a hardware fact -- how that tuple is packed into THIS engine's
-	 * key registers.  The three refusals are unchanged: not IPv4, not
-	 * TCP/UDP, no L4 ports.
+	 * ★ THE 5-TUPLE AND THE ACTION COME DECIDED (gpon_flow_key_from_tc and
+	 * gpon_flow_act_from_tc).  What is left here is the half that IS a
+	 * hardware fact: how they are packed into THIS engine's registers.  The
+	 * core has already refused what is not IPv4/TCP/UDP, what carries no L4
+	 * ports, what is not the "one NAT rewrite + a redirect" shape, and a
+	 * rule carrying a VLAN push or pop -- so none of those are re-checked.
 	 */
-	{
-		struct gpon_flow_key fk = {};
+	key.ip_protocol = k->ip_protocol;
+	key.ip_sa_0     = k->ip_sa;
+	key.ip_da_0     = k->ip_da;
+	key.l4_sport    = k->l4_sport;
+	key.l4_dport    = k->l4_dport;
+	key.ip_ver      = k->ip_ver;
+	key.ip_vld      = 1;
 
-		err = gpon_flow_key_from_tc(rule, &fk);
-		if (err)
-			return err;
-		key.ip_protocol = fk.ip_protocol;
-		key.ip_sa_0     = fk.ip_sa;
-		key.ip_da_0     = fk.ip_da;
-		key.l4_sport    = fk.l4_sport;
-		key.l4_dport    = fk.l4_dport;
-		key.ip_ver      = fk.ip_ver;
-		key.ip_vld      = 1;
+	act.ip_addr_vld = a->nat_valid;
+	act.ip_type     = a->nat_is_da;	/* 0 = rewrite SA, 1 = DA */
+	act.ip_addr     = a->nat_addr;
+	act.l4_port     = a->nat_port;
+	ether_addr_copy(gw_dmac, a->gw_dmac);
+
+	/*
+	 * ★ The DS leg's WAN side is its INGRESS device, so this is the only
+	 * point where the DS half of the VLAN-WAN refusal can be decided -- and
+	 * it is decided HERE, BEFORE cn_l3e_arm_ds() just below touches any HW:
+	 * a VLAN-WAN board must not even re-point the hash profiles.  Evaluated
+	 * only when the ingress is NOT the LAN, so the LAN-side device is never
+	 * tested (see cn_flow_refuse_vlan_wan).
+	 *
+	 * A tagged WAN is PROGRAMMABLE: the DMA-AFT carries the edit (push US /
+	 * strip DS).  We refuse up front only when that engine is switched off;
+	 * otherwise the decision moves to the install below, which unwinds the
+	 * flow if the edit cannot be programmed.
+	 *
+	 * ★ The DS leg needs only the BOOLEAN, never the number:
+	 * cn_l3e_set_ds_wan_vlan() writes vlan_vld=1 / vlan_cnt=0 / top_vid=0 /
+	 * top_tpid_enc=0 -- an EXPLICIT "emit zero tags" whose every value is
+	 * vid-independent (the vid is used solely as its `if (!vid) return`
+	 * guard).  The DS PPPoE strip is likewise already unconditional, via the
+	 * LAN L3-IF's REMOVE encoding.
+	 */
+	if (ds_leg && ctx->idev) {
+		vlan_wan_vid = cn_aft_wan_vid(ctx->idev);
+		if (vlan_wan_vid &&
+		    !cn_wan_vlan_programmable(ctx->idev, vlan_wan_vid, &wenc))
+			vlan_wan = cn_flow_refuse_vlan_wan(ctx->idev, true);
 	}
-
-	/* Ingress side: the block-cb dev is NOT the flow's ingress (every
-	 * registered cb sees every rule); the rule carries the real ingress
-	 * ifindex in its META key.  LAN ingress = the US (LAN->WAN) transit
-	 * direction; anything else is the DS (WAN->LAN) reply leg, which
-	 * nf_flow_table offers as a second REPLACE with its own cookie once
-	 * NF_FLOW_HW_BIDIRECTIONAL is set (it always is - nft_flow_offload and
-	 * xt_FLOWOFFLOAD both set it unconditionally).
-	 *
-	 * BOTH legs install under the SAME routed profile and the SAME 5-tuple
-	 * mask.  That is sound, not just convenient: the profile id is stamped
-	 * into HDR_I.t2_ctrl for the CRC, but the 5-tuple mask (8) EXCLUDES that
-	 * field (the vendor hash helper zeroes ctrl_set_id in place when the mask
-	 * bit is set - polarity 1 = exclude), and the per-profile tuple
-	 * rotate/XOR config is all zero, so an entry is byte-identical whatever
-	 * profile it was installed under and a lookup stamped with a DIFFERENT
-	 * profile still matches it.  Both facts are asserted at probe -
-	 * cn_l3e_verify_profile_invariants() - because they are silent killers.
-	 *
-	 * What DOES have to line up is the LOOKUP mask: the TUPLE0 maskptr of
-	 * whichever profile the ingress CLS stamped, plus the action's
-	 * chk_msk_ptr, which must equal it or the post-hit double-check fails.
-	 * Hence the DS gate re-points ALL hash profiles at mask 8 (cn_l3e_arm_ds)
-	 * and the DS action carries chk_msk_ptr = 8.
-	 *
-	 * ★ Why "all profiles" and not just the one the DS side stamps.  The CLS
-	 * FIB word6 layout is now RESOLVED (tier-2 from the stock CLS-FIB entry
-	 * dumper: it gates on word6 bit 9 then extracts the profile with a 4-bit
-	 * field at bit 10 - `ubfx #10,#4` - feeding a "t2_ctrl = 0x%x" print;
-	 * cross-checked against the aal-77c cls_fib_mod_0_t field order):
-	 *   word6 bit 9 = t2_ctrl_vld, bits [13:10] = t2_ctrl (4 bits).
-	 * Decoding our golden rows with it: 0x200 -> profile 0 (the vendor's
-	 * "5TUPLE" hash profile), 0x600 -> 1 ("2TUPLE"), 0xA00 -> 2 ("MC", and
-	 * the rows carrying it are the pri-9 IP-multicast rows, which closes the
-	 * identification).  So a routed unicast - either direction - lands on
-	 * profile 0 via FIB 4 (WAN) / 260 (LAN), and the all-wildcard catch-alls
-	 * stamp profile 1.
-	 *
-	 * That leaves ONE profile genuinely in doubt: 2.  It is stamped by the
-	 * pri-9 rows, and whether those key on IP-multicast specifically or on
-	 * "MAC-DA CAM hit" generally could not be settled offline - if generally,
-	 * a DS unicast to our WAN MAC matches that row FIRST (pri 9 beats pri 1)
-	 * and is stamped profile 2.  Re-pointing every profile's maskptr makes
-	 * the answer not matter, which is cheaper and safer than betting on it.
-	 * (The CLS per-profile DEFAULT rows 1024/1025/1028 are deliberately NOT
-	 * decoded with the map above: they are written as a different result-type
-	 * whose FIB packing variant differs, so their word6 means something else.
-	 * They are also a per-profile stride-4 slot - index (max_entry - def_max)
-	 * | (profile << 2) | ((rslt_type & 1) << 1) | ((rslt_type & 2) << 3) -
-	 * not a replicated catch-all.) */
-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {
-		struct flow_match_meta m;
-		struct net_device *idev;
-
-		flow_rule_match_meta(rule, &m);
-		idev = dev_get_by_index(dev_net(dev), m.key->ingress_ifindex);
-		if (idev) {
-			lan_ingress = cn_dev_is_lan_side(idev);
-			/* ★ The DS leg's WAN side is its INGRESS device, so this
-			 * is the only point where the DS half of the VLAN-WAN
-			 * refusal can be decided - and it is decided HERE, while
-			 * the reference is still held and BEFORE cn_l3e_arm_ds()
-			 * just below touches any HW: a VLAN-WAN board must not
-			 * even re-point the hash profiles.  Evaluated only when
-			 * the ingress is NOT the LAN, so the LAN-side device is
-			 * never tested (see cn_flow_refuse_vlan_wan). */
-			if (!lan_ingress) {
-				/* A tagged WAN is now PROGRAMMABLE: the DMA-AFT
-				 * carries the edit (push US / strip DS).  We
-				 * only refuse up front when that engine is
-				 * switched off; otherwise the decision moves to
-				 * the install below, which unwinds the flow if
-				 * the edit cannot be programmed. */
-				vlan_wan_vid = cn_aft_wan_vid(idev);
-				/* ★ The DS leg needs only the BOOLEAN, never
-				 * the number: cn_l3e_set_ds_wan_vlan() writes
-				 * vlan_vld=1 / vlan_cnt=0 / top_vid=0 /
-				 * top_tpid_enc=0 - an EXPLICIT "emit zero tags"
-				 * whose every value is vid-independent (the vid
-				 * is used solely as its `if (!vid) return`
-				 * guard).  The DS PPPoE strip is likewise
-				 * already unconditional, via the LAN L3-IF's
-				 * REMOVE encoding. */
-				if (vlan_wan_vid &&
-				    !cn_wan_vlan_programmable(idev, vlan_wan_vid,
-							      &wenc))
-					vlan_wan = cn_flow_refuse_vlan_wan(idev,
-									   true);
-			}
-			dev_put(idev);
-		}
-	}
-	ds_leg = !lan_ingress;
 	if (vlan_wan)
 		return -EOPNOTSUPP;
 	if (ds_leg) {
@@ -4109,154 +4056,6 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 		}
 	}
 	profile = CN_L3E_PROFILE_ROUTED;
-
-	flow_action_for_each(i, fa, &rule->action) {
-		switch (fa->id) {
-		case FLOW_ACTION_REDIRECT:
-			odev = fa->dev;
-			break;
-		case FLOW_ACTION_MANGLE:
-			switch (fa->mangle.htype) {
-			case FLOW_ACT_MANGLE_HDR_TYPE_IP4:
-				/* The engine rewrites exactly ONE address per
-				 * entry; ip_type picks which end (0 = SA,
-				 * 1 = DA).  nf_flow_table's two legs of a
-				 * masqueraded flow are exactly that mirror
-				 * (flow_offload_ipv4_snat): the ORIGINAL rule
-				 * mangles saddr (offset 12) to our WAN address,
-				 * the REPLY rule mangles daddr (offset 16) back
-				 * to the LAN client's address.  Accept the one
-				 * that belongs to this leg and nothing else.
-				 *
-				 * The discriminator is deliberately the INGRESS
-				 * SIDE, not the SNAT/DNAT flag, so an inbound
-				 * port-forward works too: its WAN-ingress leg is
-				 * a daddr rewrite and its LAN-ingress leg a saddr
-				 * rewrite - the same two shapes, just reached via
-				 * ipv4_dnat().  A doubly-NAT'd flow (SNAT *and*
-				 * DNAT) emits BOTH mangles on one leg, so the
-				 * second trips this check and the flow is refused
-				 * to software - correct, because an entry carries
-				 * exactly one ip_addr/l4_port pair and cannot
-				 * express two rewrites.  Every refusal here
-				 * happens before any HW write. */
-				if (fa->mangle.offset !=
-				    (ds_leg ? offsetof(struct iphdr, daddr)
-					    : offsetof(struct iphdr, saddr))) {
-					cn_rep_dbg("refuse: IP4 mangle off=%u (want %s)\n",
-						   fa->mangle.offset,
-						   ds_leg ? "daddr/DNAT" : "saddr/SNAT");
-					return -EOPNOTSUPP;
-				}
-				act.ip_addr_vld = 1;
-				act.ip_type = ds_leg;	/* 0 = rewrite SA, 1 = DA */
-				act.ip_addr = ntohl(fa->mangle.val);
-				break;
-			case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
-			case FLOW_ACT_MANGLE_HDR_TYPE_UDP:
-				/* nf_flow_table encodes the port rewrite as
-				 * one big-endian 32-bit word at offset 0:
-				 * source port in the upper half, dest port in
-				 * the lower.  The mask says which half is
-				 * writable, and it is the leg discriminator
-				 * (flow_offload_port_snat): ORIGINAL -> mask
-				 * ~htonl(0xffff0000), value p<<16 = the new
-				 * SOURCE port; REPLY -> mask ~htonl(0xffff),
-				 * value p = restore the DEST port to the
-				 * client's original one.  The engine likewise
-				 * carries one l4_port per entry, applied to the
-				 * same end as ip_type. */
-				if (fa->mangle.offset != 0 ||
-				    (fa->mangle.mask == ~htonl(0xffff)) != ds_leg) {
-					cn_rep_dbg("refuse: L4 mangle off=%u mask=%08x (not the %s-port rewrite)\n",
-						   fa->mangle.offset,
-						   ntohl(fa->mangle.mask),
-						   ds_leg ? "dest" : "source");
-					return -EOPNOTSUPP;
-				}
-				act.l4_port = ds_leg ?
-					(ntohl(fa->mangle.val) & 0xffff) :
-					(ntohl(fa->mangle.val) >> 16);
-				snat_port = true;
-				break;
-			case FLOW_ACT_MANGLE_HDR_TYPE_ETH:
-				/* A2: capture this leg's next-hop DMAC.
-				 * nf_flow_table emits it as two ETH mangles:
-				 * offset 0 = dmac[0..3]; offset 4 with the low
-				 * 16 bits changed (mask keeps the high 16) =
-				 * dmac[4..5].  The offset-4-high + offset-8
-				 * words are the SMAC, which we substitute from
-				 * the my-MAC CAM (mac_sa_an_sel) - ignored.
-				 * Direction-agnostic on purpose: the same parse
-				 * yields the WAN gateway MAC on the US leg and
-				 * the LAN client's MAC on the DS leg, because
-				 * flow_offload_eth_dst() resolves the neighbour
-				 * of the OTHER tuple's source address. */
-				if (fa->mangle.offset == 0) {
-					gw_dmac[0] = fa->mangle.val & 0xff;
-					gw_dmac[1] = (fa->mangle.val >> 8) & 0xff;
-					gw_dmac[2] = (fa->mangle.val >> 16) & 0xff;
-					gw_dmac[3] = (fa->mangle.val >> 24) & 0xff;
-					got_dmac_lo = true;
-				} else if (fa->mangle.offset == 4 &&
-					   (fa->mangle.mask & 0xffff) == 0) {
-					gw_dmac[4] = fa->mangle.val & 0xff;
-					gw_dmac[5] = (fa->mangle.val >> 8) & 0xff;
-					got_dmac_hi = true;
-				}
-				break;
-			default:
-				return -EOPNOTSUPP;
-			}
-			break;
-		case FLOW_ACTION_CSUM:
-			break;		/* implicit in the HW rewrite */
-		case FLOW_ACTION_PPPOE_PUSH:
-			/* PPPoE WAN: the kernel emits this on the US rule with
-			 * the LIVE negotiated session id (host-order u16, from
-			 * the reply tuple's encap - nf_flow_table_offload
-			 * nf_flow_rule_route_common; mtk_ppe precedent).  Feed
-			 * it into the US egress encap below - NEVER the /proc
-			 * constant. */
-			pppoe_sid = fa->pppoe.sid;
-			break;
-		case FLOW_ACTION_VLAN_PUSH:
-		case FLOW_ACTION_VLAN_POP:
-			/* The OTHER kernel-side shape of a VLAN-encapsulated WAN
-			 * (see the banner on cn_flow_refuse_vlan_wan): reached
-			 * only when the sub-interface's LOWER device is itself a
-			 * flowtable device, so nft_dev_forward_path() kept the
-			 * encap and nf_flow_rule_route_common() emitted a push
-			 * (egress side) or pop (ingress side) for it.
-			 * BEHAVIOUR IS UNCHANGED - this already fell into
-			 * `default:` and already refused.  What changes is
-			 * ATTRIBUTION: it now lands in the vlan_wan ledger
-			 * instead of being one of nine anonymous unsupp reasons,
-			 * which is the distinction whose absence made this defect
-			 * unreadable from /proc twice. */
-			cn_vlan_wan_account(ds_leg,
-					    fa->id == FLOW_ACTION_VLAN_PUSH ?
-					    fa->vlan.vid : 0,
-					    CN_VLAN_WAN_ACTION);
-			cn_rep_dbg("refuse: %s leg carries FLOW_ACTION_VLAN_%s (vid %u) - this hit-action cannot express a VLAN tag\n",
-				   ds_leg ? "DS" : "US",
-				   fa->id == FLOW_ACTION_VLAN_PUSH ? "PUSH" : "POP",
-				   fa->id == FLOW_ACTION_VLAN_PUSH ?
-				   fa->vlan.vid : 0);
-			return -EOPNOTSUPP;
-		default:
-			cn_rep_dbg("refuse: unsupported flow action id=%d\n",
-				   fa->id);
-			return -EOPNOTSUPP;
-		}
-	}
-	/* keep to the proven shape: a full inline NAT rewrite + a redirect */
-	if (!odev || !act.ip_addr_vld || !snat_port) {
-		cn_rep_dbg("refuse: not the %s NAT shape (odev=%d ip=%d port=%d)\n",
-			   ds_leg ? "DS/DNAT" : "US/SNAT",
-			   !!odev, (int)act.ip_addr_vld, snat_port);
-		return -EOPNOTSUPP;
-	}
 
 	/* ★ US leg ONLY: the WAN is this leg's EGRESS, i.e. the REDIRECT device.
 	 * Still before every HW write (cn_l3e_set_us_egress and the L2-FDB append
@@ -4606,12 +4405,9 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 						   "CPU_0 punt hit-action");
 	}
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
-	if (!entry) {
-		pr_err_ratelimited("cn_flow_replace: entry alloc failed\n");
-		return -ENOMEM;
-	}
-	entry->cookie = f->cookie;
+	/* `entry` is the core's per-flow private area, already allocated and
+	 * zeroed and freed with the entry; the cookie and the table are the
+	 * core's business, not ours. */
 	entry->last_hit = jiffies;
 	entry->installed_at = jiffies;
 	entry->ds = ds_leg;
@@ -4644,7 +4440,7 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 			cn_rep_dbg("%s install refused (%d) - flow stays on the SW fastpath\n",
 				   ds_leg ? "DS" : "US", err);
 		else
-			pr_err_ratelimited("cn_flow_replace: %s install FAILED (%d) %pI4h:%u->%pI4h:%u proto=%u pppoe=%#x\n",
+			pr_err_ratelimited("cn_flow_install: %s install FAILED (%d) %pI4h:%u->%pI4h:%u proto=%u pppoe=%#x\n",
 					   ds_leg ? "DS" : "US",
 					   err, &(u32){ key.ip_sa_0 },
 					   (u16)key.l4_sport,
@@ -4767,16 +4563,6 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 		}
 	}
 
-	err = rhashtable_insert_fast(&cn_flow_table, &entry->node,
-				     cn_flow_ht_params);
-	if (err) {
-		pr_err_ratelimited("cn_flow_replace: rhashtable insert FAILED (%d) - undoing idx=%u\n",
-				   err, entry->hash_idx);
-		cn_l3e_flow_del(cn_l3e, entry->hash_idx, entry->crc16);
-		cn_aft_release(cn_l3e, &entry->aft);
-		goto free;
-	}
-
 	/* register with the liveness sweep (under cn_flow_offload_mutex) */
 	cn_l3e->entry_by_idx[entry->hash_idx] = entry;
 	cn_l3e->bucket_occ[entry->hash_idx / CN_L3E_AGE_SLOTS]++;
@@ -4788,102 +4574,109 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 	/* per-flow install witness; pr_debug so a 1000-flow soak stays quiet.
 	 * "nat=" is the rewritten end named by ip_type: SA on the US leg, DA on
 	 * the DS leg. */
-	pr_debug("cn_flow_replace: %s INSTALLED idx=%u crc16=%04x %pI4h:%u->%pI4h:%u proto=%u pppoe=%#x nat[%s]=%pI4h:%u mcgid=0x%03x\n",
+	pr_debug("cn_flow_install: %s INSTALLED idx=%u crc16=%04x %pI4h:%u->%pI4h:%u proto=%u pppoe=%#x nat[%s]=%pI4h:%u mcgid=0x%03x\n",
 		 ds_leg ? "DS" : "US", entry->hash_idx, entry->crc16,
 		 &(u32){ key.ip_sa_0 }, (u16)key.l4_sport,
 		 &(u32){ key.ip_da_0 }, (u16)key.l4_dport,
 		 (u8)key.ip_protocol, pppoe_sid,
 		 act.ip_type ? "DA" : "SA",
 		 &(u32){ act.ip_addr }, (u16)act.l4_port, (u32)act.mcgid);
+	*idx_out = entry->hash_idx;
 	return 0;
 free:
-	kfree(entry);
+	/* Reached only from the install steps above.  The core owns the entry
+	 * memory and the cookie table, so there is nothing to free here -- the
+	 * hardware undo that used to live at the rhashtable-failure label moved
+	 * into cn_flow_remove(), which the core calls on ITS unwind. */
 	return err;
 }
 
-static int cn_flow_destroy(struct flow_cls_offload *f)
+/*
+ * Tear this flow out of the hardware.  The core has already found it by cookie
+ * and will free the memory; everything here is silicon and this driver's own
+ * bookkeeping.
+ *
+ * ⚠ ALSO THE CORE'S UNWIND PATH: when the cookie insert fails after a
+ * successful install, the core calls this rather than leaking a flow that is in
+ * hardware and unreachable by cookie.  It must therefore be safe on a flow that
+ * was never registered with the sweep -- it is: entry_by_idx is written just
+ * before the core inserts, and clearing an already-NULL slot is a no-op.
+ */
+static int cn_flow_remove(void *sh, u32 idx, void *priv)
 {
-	struct cn_flow_entry *entry;
+	struct cn_flow_priv *entry = priv;
 
-	entry = rhashtable_lookup_fast(&cn_flow_table, &f->cookie,
-				       cn_flow_ht_params);
-	if (!entry)
-		return -ENOENT;
-
-	cn_l3e->entry_by_idx[entry->hash_idx] = NULL;
-	cn_l3e->bucket_occ[entry->hash_idx / CN_L3E_AGE_SLOTS]--;
-	cn_l3e_flow_del(cn_l3e, entry->hash_idx, entry->crc16);
+	cn_l3e->entry_by_idx[idx] = NULL;
+	cn_l3e->bucket_occ[idx / CN_L3E_AGE_SLOTS]--;
+	cn_l3e_flow_del(cn_l3e, idx, entry->crc16);
 	cn_aft_release(cn_l3e, &entry->aft);
-	rhashtable_remove_fast(&cn_flow_table, &entry->node,
-			       cn_flow_ht_params);
 	if (entry->ds)
 		atomic_dec(&cn_ds_installed);
 	cn_pppoe_entry_gone(entry, true);
-	kfree(entry);
 	atomic_dec(&cn_flow_installed);
-	pr_debug("cn_flow_destroy: removed idx (flows=%d ds=%d)\n",
-		 atomic_read(&cn_flow_installed),
+	pr_debug("cn_flow_remove: removed idx=%u (flows=%d ds=%d)\n",
+		 idx, atomic_read(&cn_flow_installed),
 		 atomic_read(&cn_ds_installed));
 	return 0;
 }
 
-/*
- * ★ BUG-B: tear down EVERY installed offloaded flow.  Called (under
- * cn_flow_offload_mutex) when the live PPPoE session id CHANGES: all US flows
- * share the single L3-IF[1] entry, so a stale flow would emit the wrong/absent
- * session header once L3-IF[1] is reprogrammed.  nf_flow_table reinstalls the
- * still-live conntracks against the new sid on their next packet.  Iterates the
- * entry_by_idx reverse map (not the rhashtable) to remove-and-free safely
- * without an rhashtable-walk use-after-free.
- */
 static void cn_l3e_flush_auto_flows(struct cn_l3e *l3e)
 {
-	u32 idx;
-	int n = 0;
-
-	if (!cn_flow_table_ready)
-		return;
-	for (idx = 0; idx < CN_L3E_ENTRIES; idx++) {
-		struct cn_flow_entry *e = l3e->entry_by_idx[idx];
-
-		if (!e)
-			continue;
-		l3e->entry_by_idx[idx] = NULL;
-		l3e->bucket_occ[idx / CN_L3E_AGE_SLOTS]--;
-		cn_l3e_flow_del(l3e, idx, e->crc16);
-		/* the third and last place an entry is freed - without this the
-		 * flow's DMA-AFT reference leaks, and a PPPoE session change on
-		 * a tagged WAN would exhaust the 64-entry fib table */
-		cn_aft_release(l3e, &e->aft);
-		rhashtable_remove_fast(&cn_flow_table, &e->node,
-				       cn_flow_ht_params);
-		if (e->ds)
-			atomic_dec(&cn_ds_installed);
-		cn_pppoe_entry_gone(e, false);
-		kfree(e);
-		atomic_dec(&cn_flow_installed);
-		n++;
-	}
-	if (n)
-		pr_info("cortina-l3fe: flushed %d offloaded flow(s) on PPPoE sid change\n",
-			n);
+	/*
+	 * ★ BUG-B: tear down EVERY installed offloaded flow.  Called (under
+	 * cn_flow_offload_mutex) when the live PPPoE session id CHANGES: all US
+	 * flows share the single L3-IF[1] entry, so a stale flow would emit the
+	 * wrong/absent session header once L3-IF[1] is reprogrammed.
+	 * nf_flow_table reinstalls the still-live conntracks against the new sid
+	 * on their next packet.
+	 *
+	 * ★ THE WALK IS THE CORE'S NOW.  This used to iterate the entry_by_idx
+	 * reverse map specifically to avoid an rhashtable-walk use-after-free --
+	 * a mechanism no other family has.  gpon_flow_offload_flush() does it
+	 * with rhashtable's own iterator and calls cn_flow_remove() per entry,
+	 * so the hardware teardown and the DMA-AFT release are the SAME code the
+	 * single-flow path uses.  There is no second place that frees a flow any
+	 * more, which is what the "third and last place an entry is freed"
+	 * comment here used to be warning about.
+	 */
+	gpon_flow_offload_flush(cn_fo);
 }
 
-static int cn_flow_stats(struct flow_cls_offload *f)
+static int cn_flow_stats_op(void *sh, u32 idx, void *priv,
+			    unsigned long *lastused)
 {
-	struct cn_flow_entry *entry;
-
-	entry = rhashtable_lookup_fast(&cn_flow_table, &f->cookie,
-				       cn_flow_ht_params);
-	if (!entry)
-		return -ENOENT;
+	struct cn_flow_priv *entry = priv;
 
 	/* No per-flow byte/pkt counters in the engine (AQM MIB meters only
 	 * 2048 flows); report LIVENESS, fed by the batch bucket sweep -
 	 * zero MMIO here, so 10k+ concurrent STATS queries stay free. */
-	f->stats.lastused = entry->last_hit;
+	*lastused = entry->last_hit;
 	return 0;
 }
+
+static bool cn_flow_is_lan_side(void *sh, struct net_device *dev)
+{
+	return cn_dev_is_lan_side(dev);
+}
+
+/* A rule carrying a VLAN push or pop is refused by the CORE -- no hit-action
+ * here can express a tag.  This keeps the refusal ATTRIBUTED in /proc rather
+ * than counted as one of N anonymous unsupported reasons, which is the
+ * distinction whose absence made that defect unreadable twice. */
+static void cn_flow_note_vlan_action(void *sh, bool ds_leg, u16 vid)
+{
+	cn_vlan_wan_account(ds_leg, vid, CN_VLAN_WAN_ACTION);
+}
+
+static const struct gpon_flow_ops cn_flow_ops = {
+	.is_lan_side		= cn_flow_is_lan_side,
+	.install		= cn_flow_install,
+	.remove			= cn_flow_remove,
+	.stats			= cn_flow_stats_op,
+	.note_vlan_action	= cn_flow_note_vlan_action,
+	.priv_size		= sizeof(struct cn_flow_priv),
+};
+
 
 static int cn_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 				void *cb_priv)
@@ -4897,16 +4690,16 @@ static int cn_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 	mutex_lock(&cn_flow_offload_mutex);
 	switch (f->command) {
 	case FLOW_CLS_REPLACE:
-		err = cn_flow_replace(f, cb_priv);
+		err = gpon_flow_offload_replace(cn_fo, f, cb_priv);
 		/* every REPLACE outcome passes here: a refusal is counted, never
-		 * silent (see the refusal-ledger comment above cn_flow_replace) */
+		 * silent (see the refusal-ledger comment above cn_flow_install) */
 		cn_flow_refused_account(err);
 		break;
 	case FLOW_CLS_DESTROY:
-		err = cn_flow_destroy(f);
+		err = gpon_flow_offload_destroy(cn_fo, f);
 		break;
 	case FLOW_CLS_STATS:
-		err = cn_flow_stats(f);
+		err = gpon_flow_offload_stats(cn_fo, f);
 		break;
 	default:
 		err = -EOPNOTSUPP;
@@ -5168,7 +4961,7 @@ static int cn_l3e_init(struct cn_l3e *l3e)
 	l3e->shadow_crc32 = kvcalloc(CN_L3E_ENTRIES, sizeof(u32), GFP_KERNEL);
 	l3e->shadow_crc16 = kvcalloc(CN_L3E_ENTRIES, sizeof(u16), GFP_KERNEL);
 	l3e->entry_by_idx = kvcalloc(CN_L3E_ENTRIES,
-				     sizeof(struct cn_flow_entry *),
+				     sizeof(struct cn_flow_priv *),
 				     GFP_KERNEL);
 	l3e->bucket_occ = kvcalloc(CN_L3E_AGE_ROWS, sizeof(u8), GFP_KERNEL);
 	if (!l3e->shadow_crc32 || !l3e->shadow_crc16 || !l3e->entry_by_idx ||
@@ -5264,7 +5057,8 @@ static int cn_flowoffload_init(void)
 {
 	int ret;
 
-	ret = rhashtable_init(&cn_flow_table, &cn_flow_ht_params);
+	cn_fo = gpon_flow_offload_new(&cn_flow_ops, NULL);
+	ret = cn_fo ? 0 : -ENOMEM;
 	cn_flow_table_ready = !ret;
 	if (!ret)
 		schedule_delayed_work(&cn_l3e_sweep,
@@ -5851,7 +5645,7 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 				continue;
 			for (slot = 0; slot < CN_L3E_AGE_SLOTS; slot++) {
 				u32 idx = bucket * CN_L3E_AGE_SLOTS + slot;
-				struct cn_flow_entry *e = l3e->entry_by_idx[idx];
+				struct cn_flow_priv *e = l3e->entry_by_idx[idx];
 				u32 crc32 = l3e->shadow_crc32[idx];
 
 				if (!e || !crc32)
@@ -5913,7 +5707,7 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 			traffic = trf;
 			for (slot = 0; slot < CN_L3E_AGE_SLOTS; slot++) {
 				u32 idx = bucket * CN_L3E_AGE_SLOTS + slot;
-				struct cn_flow_entry *e = l3e->entry_by_idx[idx];
+				struct cn_flow_priv *e = l3e->entry_by_idx[idx];
 				bool hit = traffic & BIT(slot);
 				u32 tbit;
 

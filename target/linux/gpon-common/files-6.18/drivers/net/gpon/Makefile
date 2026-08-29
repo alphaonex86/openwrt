@@ -234,3 +234,14 @@ obj-y += gpon_ploam.o
 # same interpreter runs on silicon and against a FIXTURE clock on a host, which
 # is this project's stated preference over one ~200 s board boot.
 obj-y += gpon_regseq.o
+
+# gpon_flow.o -- "which flow is this", decided once for every family.
+# ⚠ NOT in the strict host-buildable subset: it uses Linux's flow-offload API
+# deliberately, which the widened core admits (the line is the REGISTER, not
+# Linux) and the strict subset does not.
+# ⚠ GATED, and the build is what taught it: the Luna targets have no
+# net/flow_offload.h at all, so an unconditional obj-y here is a fatal error on
+# every board without an accelerator.  The operator's call (2026-08-28): a
+# Kconfig symbol per target, so a board with no engine carries ZERO bytes of
+# this -- which matters under the <=64 MB / small-NAND rule.
+obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow.o

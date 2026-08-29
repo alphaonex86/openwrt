@@ -63,6 +63,7 @@
 #include <net/pkt_cls.h>
 #include <net/netfilter/nf_flow_table.h>
 
+#include "gpon_flow.h"	/* the core's TC->5-tuple decode */
 #include "cortina-ni.h"
 #include "cortina-l3fe.h"
 
@@ -3961,7 +3962,6 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 	bool ds_leg = false, vlan_wan = false;
 	u16 vlan_wan_vid = 0;			/* 0 = untagged WAN = untouched */
 	int profile, i, err;
-	u16 addr_type = 0;
 	u16 pppoe_sid = 0;
 	struct cn_wan_encap wenc = { .vid = -1, .sid = -1 };
 	u16 vlan_wan_sid = 0;		/* PPPoE sid resolved from the WAN chain */
@@ -3978,45 +3978,28 @@ static int cn_flow_replace(struct flow_cls_offload *f, struct net_device *dev)
 		return -EEXIST;
 	}
 
-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
-		struct flow_match_control m;
+	/*
+	 * ★ THE DECODE IS THE CORE'S (gpon_flow_key_from_tc).  "Read a TC rule,
+	 * refuse what this silicon cannot do, hand back the 5-tuple" is the same
+	 * work in every driver that offloads NAPT; what stays here is the half
+	 * that IS a hardware fact -- how that tuple is packed into THIS engine's
+	 * key registers.  The three refusals are unchanged: not IPv4, not
+	 * TCP/UDP, no L4 ports.
+	 */
+	{
+		struct gpon_flow_key fk = {};
 
-		flow_rule_match_control(rule, &m);
-		addr_type = m.key->addr_type;
+		err = gpon_flow_key_from_tc(rule, &fk);
+		if (err)
+			return err;
+		key.ip_protocol = fk.ip_protocol;
+		key.ip_sa_0     = fk.ip_sa;
+		key.ip_da_0     = fk.ip_da;
+		key.l4_sport    = fk.l4_sport;
+		key.l4_dport    = fk.l4_dport;
+		key.ip_ver      = fk.ip_ver;
+		key.ip_vld      = 1;
 	}
-	if (addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS)
-		return -EOPNOTSUPP;	/* phase 1: IPv4 NAPT only */
-
-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
-		struct flow_match_basic m;
-
-		flow_rule_match_basic(rule, &m);
-		if (m.key->ip_proto != IPPROTO_TCP &&
-		    m.key->ip_proto != IPPROTO_UDP)
-			return -EOPNOTSUPP;
-		key.ip_protocol = m.key->ip_proto;
-	} else {
-		return -EOPNOTSUPP;
-	}
-
-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
-		struct flow_match_ipv4_addrs m;
-
-		flow_rule_match_ipv4_addrs(rule, &m);
-		key.ip_sa_0 = be32_to_cpu(m.key->src);
-		key.ip_da_0 = be32_to_cpu(m.key->dst);
-	}
-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
-		struct flow_match_ports m;
-
-		flow_rule_match_ports(rule, &m);
-		key.l4_sport = be16_to_cpu(m.key->src);
-		key.l4_dport = be16_to_cpu(m.key->dst);
-	} else {
-		return -EOPNOTSUPP;
-	}
-	key.ip_ver = 0;			/* IPv4 */
-	key.ip_vld = 1;
 
 	/* Ingress side: the block-cb dev is NOT the flow's ingress (every
 	 * registered cb sees every rule); the rule carries the real ingress

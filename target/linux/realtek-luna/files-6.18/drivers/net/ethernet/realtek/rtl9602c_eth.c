@@ -405,6 +405,34 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * ingress and STRIP it before physical egress; TRAP_TAGET_INSERT_EN[8] inserts
  * a CPU-tag on frames trapped to the CPU. */
 #define SW_MAC_CPU_TAG_CTRL	0x23030
+/*
+ * ★★ THE THREE "AUX" WORDS ARE FLOW-CONTROL THRESHOLDS, NOT CPU-TAG REGISTERS
+ * (tier 3, 2026-08-29: the RTL9602C's OWN chipdef, rtk_rtl9602c_reg_list.c).
+ * They were written here as magic copied off a working stock board, described
+ * only as "Aux regs (live-stock)", and the family's per-chip table names two of
+ * these very addresses cpu_tag_insert / cpu_tag_aware -- for the RTL9607C.
+ *
+ *   0x23030  MAC_CPU_TAG_CTRL     (this driver already had it right)
+ *   0x230F0  FC_P_LO_TH           per-port flow-control LOW threshold
+ *   0x230F4  FC_P_FCOFF_HI_TH     flow-control OFF, HIGH threshold
+ *   0x230F8  FC_P_FCOFF_LO_TH     flow-control OFF, LOW threshold
+ *   0x23040  CFG_UNHIOL           -- and THIS is why the 9607C names must never
+ *                                    be adopted here: that is where the family
+ *                                    table puts cpu_tag_aware for the 9603CVD.
+ *
+ * Same address, different silicon, different register.  Adopting the sibling's
+ * name would have been the CFG_PHY_CTRL defect again -- our own driver
+ * corrupting a register because a matching number was read as a matching
+ * meaning.
+ *
+ * ⚠ THE VALUES ARE UNCHANGED AND STAY VERBATIM.  Naming a register is not
+ * understanding its value: 0x00400034 / 0x00f000ea / 0x00400034 were measured on
+ * a board that works, and nothing here has yet derived them from page counts.
+ * What changes is that the next reader knows WHAT they configure.
+ */
+#define SW_FC_P_LO_TH		0x230F0
+#define SW_FC_P_FCOFF_HI_TH	0x230F4
+#define SW_FC_P_FCOFF_LO_TH	0x230F8
 #define SW_TAG_AWARE		BIT(9)
 #define SW_TRAP_TAG_INSERT_EN	BIT(8)
 /* VLAN filtering: VLAN_CTRL @ 0x13008 bit0 = VLAN_FILTERING; VLAN_INGRESS @
@@ -818,7 +846,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * CPU->LAN forwarding. The bootloader leaves it at default (TX works), so we
 	 * do too. */
 	/* NOTE: the SWITCH cpu-tag engine writes (MAC_CPU_TAG_CTRL=0x300 TAG_AWARE +
-	 * the 0x230F0/F4/F8 aux) MOVED to rtl9602c_eth_open(), armed BEFORE R_IO_CMD
+	 * the three FC_P_* flow-control thresholds) MOVED to rtl9602c_eth_open(), armed BEFORE R_IO_CMD
 	 * enables TX — mainline rtl8365mb arms the cpu-tag engine before the
 	 * TX/forwarding path; arming it here (post-TX-enable) left CPU-port-3 ingress
 	 * unable to parse the cpu-tagged US OMCI. */
@@ -2607,9 +2635,9 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		iowrite32(0, ep->sw + SW_MAC_CPU_TAG_CTRL);
 		wmb();					/* clear must land before the re-arm edge */
 		iowrite32(sw_tagaware, ep->sw + SW_MAC_CPU_TAG_CTRL);
-		iowrite32(0x00400034, ep->sw + 0x230F0);
-		iowrite32(0x00f000ea, ep->sw + 0x230F4);
-		iowrite32(0x00400034, ep->sw + 0x230F8);
+		iowrite32(0x00400034, ep->sw + SW_FC_P_LO_TH);
+		iowrite32(0x00f000ea, ep->sw + SW_FC_P_FCOFF_HI_TH);
+		iowrite32(0x00400034, ep->sw + SW_FC_P_FCOFF_LO_TH);
 	}
 
 	/* Ring pointers, programmed while IO_CMD==0 (stock order; CDO is
@@ -3070,7 +3098,9 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	 * MAC_CPU_TAG_CTRL = 0x300 (TAG_AWARE bit9 + TRAP_TARGET_INSERT_EN bit8): the
 	 * switch PARSES the cpu-tag on CPU-port ingress so a CPU TX frame is steered by
 	 * the tag (stream-id for the OMCC US OMCI) instead of L2-DA-flooded. Aux regs
-	 * (live-stock): 0x230F0=0x00400034, 0x230F4=0x00f000ea, 0x230F8=0x00400034. */
+	 * (live-stock, and NAMED from the chip's own chipdef 2026-08-29):
+	 * FC_P_LO_TH=0x00400034, FC_P_FCOFF_HI_TH=0x00f000ea,
+	 * FC_P_FCOFF_LO_TH=0x00400034. */
 	if (ep->sw) {
 		/* OFF->ON edge re-latches the SWITCH CPU-port cpu-tag PARSER, mirroring the
 		 * GMAC CPUTAGCR re-latch above. Behavioral note: TAG_AWARE
@@ -3081,9 +3111,9 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		iowrite32(0, ep->sw + SW_MAC_CPU_TAG_CTRL);
 		wmb();					/* clear must land before the re-arm edge */
 		iowrite32(sw_tagaware, ep->sw + SW_MAC_CPU_TAG_CTRL);
-		iowrite32(0x00400034, ep->sw + 0x230F0);
-		iowrite32(0x00f000ea, ep->sw + 0x230F4);
-		iowrite32(0x00400034, ep->sw + 0x230F8);
+		iowrite32(0x00400034, ep->sw + SW_FC_P_LO_TH);
+		iowrite32(0x00f000ea, ep->sw + SW_FC_P_FCOFF_HI_TH);
+		iowrite32(0x00400034, ep->sw + SW_FC_P_FCOFF_LO_TH);
 	}
 	/* GMAC config regs that a LIVE stock ONU at O5 SETS but my driver left at 0 /
 	 * masked wrong — found by full block diff. The earlier masking of MSR(0x58) down

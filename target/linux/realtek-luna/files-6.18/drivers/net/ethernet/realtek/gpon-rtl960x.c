@@ -197,6 +197,15 @@ static char *onu_sn = "XPON39013867";	/* TEST-ONLY default = this board's SN, so
 					 * gpon_provision init script at OS startup. */
 static bool gpon_sn_changed;		/* SN (re)provisioned -> FSM must re-range */
 
+/* ⚠ FORWARD DECLARATION.  The core FSM object is defined with the rest of the
+ * shell, far below, but the `onu_sn` module-parameter setter just above needs
+ * to hand it the new serial -- and that setter can fire at insmod, before the
+ * GPON probe has run at all.  gpon_ploam_init() memsets the object and re-seeds
+ * the serial, so an early write is simply overwritten; what must NOT happen is
+ * the core missing an identity change while it is not driving. */
+static struct gpon_ploam luna_ploam;
+static u8 gpon_sn_bytes[8];		/* defined here for the same reason */
+
 static int onu_sn_set(const char *val, const struct kernel_param *kp)
 {
 	int ret = param_set_charp(val, kp);
@@ -228,6 +237,19 @@ static int onu_sn_set(const char *val, const struct kernel_param *kp)
 		if (gpon_sn_differs(onu_sn)) {
 			gpon_parse_sn(onu_sn);
 			gpon_sn_changed = true;
+			/*
+			 * ★ AND THE CORE'S OWN FLAG, UNCONDITIONALLY -- not under
+			 * core_fsm.  The core object must track the identity
+			 * whether or not it is driving, or flipping the switch
+			 * later would hand it a serial it never saw.  That is the
+			 * same rule the init site states for the SN it seeds.
+			 *
+			 * Safe before the GPON probe runs (this is a module
+			 * parameter setter and can fire first): gpon_ploam_init()
+			 * memsets the object and re-seeds the serial from
+			 * gpon_sn_bytes, so an early call is simply overwritten.
+			 */
+			gpon_ploam_set_sn(&luna_ploam, gpon_sn_bytes);
 		}
 	}
 	return ret;
@@ -845,7 +867,7 @@ MODULE_PARM_DESC(apc_offk, "run rtl8290b_apc_init B-variant OFFK ignition (compl
 static bool gpon_hold;	/* default false: range to O5 normally (so the O5 selftest fires) */
 module_param(gpon_hold, bool, 0444);
 MODULE_PARM_DESC(gpon_hold, "hold the GPON FSM at O1 (no ranging) -> stable br-lan/WiFi for LAN+WiFi access (GPON/WAN disabled)");
-static u8 gpon_sn_bytes[8];		/* G.984.3 ONU-SN: 4-byte ID + 4-byte serial */
+/* gpon_sn_bytes is defined near the top: the onu_sn setter needs it. */
 static struct timer_list gpon_fsm_timer;
 static u8 gpon_fsm_state = 1;		/* O1 */
 static u8 gpon_fsm_onu_id = 0xff;
@@ -6002,6 +6024,13 @@ void gpon_omci_note_gem_create(u16 port_id)
 	}
 	gpon_data_gem_port = port_id;
 	gpon_data_gem_solicited = true;
+	/* ★ AND THE CORE'S OWN COPY, UNCONDITIONALLY.  The core CLEARS
+	 * data_gem_solicited itself on re-admit but nothing SET it, so with
+	 * core_fsm=1 gpon_ploam_poll_provision() would never install the WAN data
+	 * GEM -- the board would range to O5 and carry no user traffic, and the
+	 * A/B would read that as the core FSM being broken.  Set outside the
+	 * switch so the core tracks the OLT's ME 268 whether or not it drives. */
+	gpon_ploam_set_data_gem_solicited(&luna_ploam, true, port_id);
 }
 
 int gpon_install_data_gem(void)
@@ -6069,6 +6098,7 @@ int gpon_install_data_gem(void)
 	gpon_wr(GPON_GTC_DS_TRAFFIC_CFG + GPON_MCAST_FLOW * DS_TRAFFIC_CFG_STRIDE, 0x3);
 
 	gpon_data_installed = true;	/* set BEFORE modeset so its collision-fix keeps flow 1 */
+	gpon_ploam_set_data_installed(&luna_ploam, true);	/* the core's copy */
 
 	/* ===== DATA-FLOW SID CLASSIFY COMMIT (the flow-1 US half-boot fix) =====
 	 * ROOT CAUSE of the ~50/50 data-US latch: the US-NIC RX engine commits its
@@ -6884,7 +6914,7 @@ static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
  * driver's lineage, so its configuration surface IS the module parameters that
  * already exist here.  Nothing is invented to fill it.
  */
-static struct gpon_ploam luna_ploam __maybe_unused;
+/* luna_ploam is defined near the top: the onu_sn setter needs it. */
 
 /* File scope, NOT a local: gpon_ploam_init() keeps the pointer. */
 static struct gpon_ploam_cfg luna_ploam_cfg_live __maybe_unused;
@@ -7390,7 +7420,9 @@ static void gpon_fsm_poll(struct timer_list *t)
 	/* SN was (re)provisioned after ranging began (the driver started with the
 	 * placeholder SN, which the OLT auto-ranges as a phantom that never matches
 	 * the provisioned ONU). Drop to O1 and re-offer the new Serial_Number. */
-	if (gpon_sn_changed) {
+	if (core_fsm)
+		gpon_ploam_sn_changed(&luna_ploam, gpon_fsm_ticks * 10u);
+	if (!core_fsm && gpon_sn_changed) {
 		gpon_sn_changed = false;
 		if (gpon_fsm_state > 1) {
 			gpon_fsm_onu_id = 0xff;

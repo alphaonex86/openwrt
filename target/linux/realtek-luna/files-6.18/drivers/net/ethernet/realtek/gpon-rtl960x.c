@@ -6880,6 +6880,13 @@ static const struct gpon_ploam_cfg luna_ploam_cfg __maybe_unused = {
 	.o3_feed_reset		= false,	/* from o3_feed_reset */
 	.data_gem_en		= true,		/* from data_gem_en */
 	.omcc_alt_bind		= false,	/* from omcc_alt_bind */
+	/* ★ DELIBERATELY ZERO, and written down rather than left blank: the core
+	 * reads it as `override ? override : onu_id`, so 0 means "use the LIVE
+	 * ONU-ID" -- which is the rule (the OMCC alloc-CAM is the live ONU-ID,
+	 * never a constant).  This driver has no module parameter for it and
+	 * must not grow one.  Declared here so a config-parity check sees an
+	 * intent instead of an omission. */
+	.omcc_alloc_override	= 0,
 	.omcc_tcont		= GPON_OMCC_TCONT,	/* 16 on Luna */
 	.omcc_tcont_alt		= GPON_OMCC_TCONT_ALT,	/* 1, only when alt_bind */
 	.data_tcont		= GPON_DATA_TCONT,	/* 8 on Luna */
@@ -8502,6 +8509,24 @@ skip_bosa_init:
 	luna_ploam_cfg_live.o3_feed_reset = o3_feed_reset;
 	luna_ploam_cfg_live.data_gem_en = data_gem_en;
 	luna_ploam_cfg_live.omcc_alt_bind = omcc_alt_bind;
+	/*
+	 * ★★ THE THREE TICK TUNABLES, AND LEAVING THEM OUT WAS A SILENT
+	 * ASYMMETRY IN THE A/B (found 2026-08-28).  gpon_ploam_cfg carries
+	 * los_rerange_ticks, o5_provision_watchdog_ticks and
+	 * o5_ploam_keepalive_ticks, and nothing here copied them -- so they were
+	 * 0 in the core object while this driver ran with los_rerange_ticks=30.
+	 *
+	 * That does not bite while core_fsm=0 (the core's polls are not driven
+	 * yet), and it would have bitten the moment the switch was flipped: the
+	 * A/B would have compared a driver WITH fibre-pull recovery against a
+	 * core WITHOUT it and blamed the core.  Same class as the stack-allocated
+	 * config above, and the same rule -- an A/B must not carry a difference
+	 * silently.
+	 */
+	luna_ploam_cfg_live.trace = trace;
+	luna_ploam_cfg_live.los_rerange_ticks = los_rerange_ticks;
+	luna_ploam_cfg_live.o5_provision_watchdog_ticks = o5_provision_watchdog_ticks;
+	luna_ploam_cfg_live.o5_ploam_keepalive_ticks = o5_ploam_keepalive_ticks;
 	gpon_ploam_init(&luna_ploam, &luna_ploam_ops, &luna_ploam_cfg_live, NULL,
 			gpon_sn_bytes);
 	pr_info("rtl9602c-gpon: PLOAM FSM start, SN '%s' = %*phN\n",

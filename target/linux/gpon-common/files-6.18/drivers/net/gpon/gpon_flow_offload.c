@@ -296,18 +296,10 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	entry->ds = ctx.ds_leg;
 
 	/*
-	 * Every decision that needs silicon, in one call.  It may amend `act`
-	 * (a family that resolves the PPPoE session from its own WAN chain does
-	 * it here) and it runs before anything is installed, so a refusal costs
-	 * no unwind.
+	 * Every decision that needs silicon, and the install, in ONE call --
+	 * see the contract for why it is not two.  A refusal here costs no
+	 * unwind: nothing is in the table yet.
 	 */
-	if (fo->ops->prepare) {
-		err = fo->ops->prepare(fo->sh, &key, &act, &ctx,
-				       entry_priv(entry));
-		if (err)
-			goto out_free;
-	}
-
 	err = fo->ops->install(fo->sh, &key, &act, &ctx, entry_priv(entry),
 			       &entry->idx);
 	if (err)
@@ -332,6 +324,40 @@ out_put:
 	if (ctx.idev)
 		dev_put(ctx.idev);
 	return err;
+}
+
+void gpon_flow_offload_flush(struct gpon_flow_offload *fo)
+{
+	struct rhashtable_iter it;
+	struct gpon_flow_entry *e;
+
+	if (!fo || !fo->table_ready)
+		return;
+
+	/*
+	 * ⚠ REMOVING WHILE WALKING.  rhashtable's iterator is explicitly safe
+	 * against removal of the entry it is sitting on, which the previous
+	 * implementation achieved instead by iterating the family's own reverse
+	 * map -- a mechanism no other family has.  The walk is stopped and
+	 * restarted around each removal because rhashtable_remove_fast may
+	 * rehash, and a rehash under a held walk is the use-after-free.
+	 */
+	rhashtable_walk_enter(&fo->table, &it);
+	do {
+		rhashtable_walk_start(&it);
+		e = rhashtable_walk_next(&it);
+		while (e && !IS_ERR(e)) {
+			rhashtable_walk_stop(&it);
+			fo->ops->remove(fo->sh, e->idx, entry_priv(e));
+			rhashtable_remove_fast(&fo->table, &e->node,
+					       gpon_flow_ht_params);
+			kfree(e);
+			rhashtable_walk_start(&it);
+			e = rhashtable_walk_next(&it);
+		}
+		rhashtable_walk_stop(&it);
+	} while (e == ERR_PTR(-EAGAIN));
+	rhashtable_walk_exit(&it);
 }
 
 int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,

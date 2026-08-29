@@ -96,17 +96,23 @@ struct gpon_flow_ops {
 	bool (*is_lan_side)(void *sh, struct net_device *dev);
 
 	/*
-	 * EVERY decision that must read or write silicon.  Returns 0 to go
-	 * ahead, or a negative errno -- -EOPNOTSUPP means "this flow stays on
-	 * the software fastpath", which is a normal outcome and not an error.
-	 * May amend `act` (a family that resolves the PPPoE session from its
-	 * own WAN chain writes it here).  Runs BEFORE any entry exists, so a
-	 * refusal costs no unwind.
+	 * EVERY decision that must read or write silicon, AND the install.
+	 * Returns 0, or a negative errno -- -EOPNOTSUPP means "this flow stays
+	 * on the software fastpath", which is a NORMAL outcome and not an
+	 * error, so the core neither logs nor counts it as one.
+	 *
+	 * ★ IT IS ONE CALL AND NOT TWO, and that was decided by reading the one
+	 * implementation rather than by taste.  A separate `prepare` was
+	 * drafted; the Cortina engine has nothing to put in it, because its
+	 * refusals are INTERLEAVED with its programming -- it arms the DS
+	 * direction, programs an egress, then refuses if the WAN VLAN will not
+	 * fit the action.  Splitting that in two would have meant a boundary
+	 * running through the middle of one decision, and an unused hook on
+	 * every other family forever.
+	 *
+	 * The engine may write `priv` freely: it is this flow's private state,
+	 * it lives as long as the entry, and the core never reads it.
 	 */
-	int (*prepare)(void *sh, const struct gpon_flow_key *key,
-		       struct gpon_flow_act *act,
-		       const struct gpon_flow_ctx *ctx, void *priv);
-
 	int (*install)(void *sh, const struct gpon_flow_key *key,
 		       const struct gpon_flow_act *act,
 		       const struct gpon_flow_ctx *ctx, void *priv,
@@ -137,6 +143,19 @@ struct gpon_flow_offload;
 struct gpon_flow_offload *gpon_flow_offload_new(const struct gpon_flow_ops *ops,
 						void *sh);
 void gpon_flow_offload_free(struct gpon_flow_offload *fo);
+
+/*
+ * Tear down EVERY installed flow.  A family calls this when something it owns
+ * changes underneath the entries -- the Cortina engine does it on a PPPoE
+ * session change, because all upstream flows share one egress L3-IF and a stale
+ * entry would emit the wrong session header the moment that word is rewritten.
+ *
+ * ⚠ THE CORE OWNS THIS, and it has to: the family's own reverse map cannot
+ * remove an entry from the cookie table, and walking the table while removing
+ * from it is the use-after-free the previous implementation wrote a paragraph
+ * about avoiding.
+ */
+void gpon_flow_offload_flush(struct gpon_flow_offload *fo);
 
 /* The three TC verbs, dispatched by cookie. */
 int gpon_flow_offload_replace(struct gpon_flow_offload *fo,

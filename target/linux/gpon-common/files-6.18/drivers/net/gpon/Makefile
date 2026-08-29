@@ -252,3 +252,9 @@ obj-y += gpon_regseq.o
 # Kconfig symbol per target, so a board with no engine carries ZERO bytes of
 # this -- which matters under the <=64 MB / small-NAND rule.
 obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow.o
+
+# gpon_flow_offload.o -- the TC offload LIFECYCLE: the cookie->flow map, the
+# entry and its unwind, destroy, stats, flush.  A family with an accelerator
+# supplies five ops and writes none of this; a family without one compiles
+# neither object.
+obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow_offload.o

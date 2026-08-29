@@ -374,7 +374,6 @@ struct luna_eth_chip {
 	/* --- SerDes uplink: present only on the bigger part ------------------ */
 	u32	serdes_linemode;	/* 0 = no SerDes on this chip		*/
 	u32	force_ablty_x;		/* SerDes/PBO ability trio, 0 if absent	*/
-	u32	p_ablty_x;
 	u32	ablty_force_x;
 	u32	sds_fib_status;		/* + 0x20*idx, 0 if absent		*/
 
@@ -414,7 +413,6 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.piso_all	= 0x1FFFFFFF,
 	.serdes_linemode = 0x00084,
 	.force_ablty_x	= 0x002F4,
-	.p_ablty_x	= 0x002F8,
 	.ablty_force_x	= 0x002FC,
 	.sds_fib_status	= 0x0028C,
 	.sys_status	= 0,
@@ -476,7 +474,6 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.piso_all	= 0xFFF,
 	.serdes_linemode = 0,	/* no SerDes on this part			*/
 	.force_ablty_x	= 0,
-	.p_ablty_x	= 0,
 	.ablty_force_x	= 0,
 	.sds_fib_status	= 0,
 	.sys_status	= 0xB8000044,	/* SoC handshake, outside SWCORE		*/

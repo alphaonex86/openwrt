@@ -386,32 +386,7 @@ static void set_eqd(struct gpon_ploam *o, u32 value)
 	o->ops->set_eqd(o->sh, multi, intra);
 }
 
-/*
- * ★★ THE TWO ENTRY POINTS A SHELL NEEDS OUTSIDE ANY PLOAM DISPATCH.
- *
- * Recorded as "REWIRE BLOCKER 1" in the Luna driver, MEASURED 2026-08-05: that
- * driver must compute a pre-ranging equalization delay and a pre-ranged burst
- * overhead at __init, with no PLOAM message in flight.  Both computations lived
- * here as `static`, reachable only from gpon_ploam_ds(), so a shell could not
- * call them -- and re-implementing them in the shell would fork the very code
- * being shared, which is precisely how the deleted gpon_proto.c drifted.
- *
- * They are the same functions, not copies: these wrappers exist so that the
- * arithmetic has exactly one home.
- */
-void gpon_ploam_apply_boh(struct gpon_ploam *o, bool ranged)
-{
-	if (!o)
-		return;
-	apply_boh(o, ranged);
-}
 
-void gpon_ploam_set_eqd(struct gpon_ploam *o, u32 value)
-{
-	if (!o)
-		return;
-	set_eqd(o, value);
-}
 
 /* ---------------------------------------------------------------------------
  * State transitions, from gpon-rtl9602c.c:6068-6140.
@@ -1118,25 +1093,6 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
  * its hex_to_bin() result: the kernel returns -1 there, so a bad character
  * yields 0xf in that nibble rather than being rejected. Elnath validates its
  * serial number instead; converging is FOLLOW-UP P7 and a behaviour change. */
-/* Decode "AAAAhhhhhhhh" into the 8-byte G.984.3 ONU-SN.
- *
- * ★★ THIS WAS A SECOND DECODER INSIDE THE CORE ITSELF, and it disagreed with
- * the first.  gpon_sn.c has carried gpon_sn_parse() since the carve; this one
- * kept its own sn_hex_nibble(), which returned 0xf for a non-hex digit where
- * the strict parser REFUSES -- so one core function accepted a malformed
- * serial and silently put a different identity on the wire than the other core
- * function would have.  It had ZERO callers, which is the only reason nothing
- * had diverged in practice.
- *
- * Rebased 2026-08-28.  The name is kept as a thin wrapper so the PLOAM API does
- * not change shape; the STRICTNESS does change, deliberately: a refusal now
- * leaves `sn` exactly as the caller had it, which is what every caller of a
- * serial-number setter wants.
- */
-void gpon_ploam_parse_sn(const char *s, u8 sn[8])
-{
-	(void)gpon_sn_parse(s, sn);
-}
 
 void gpon_ploam_set_sn(struct gpon_ploam *o, const u8 sn[8])
 {
@@ -1183,16 +1139,3 @@ void gpon_ploam_init(struct gpon_ploam *o, const struct gpon_ploam_ops *ops,
 	o->aes_switch_time = 0xffffffff;
 }
 
-const char *gpon_ploam_state_name(enum gpon_ostate st)
-{
-	switch (st) {
-	case GPON_O1_INITIAL:	return "O1-Initial";
-	case GPON_O2_STANDBY:	return "O2-Standby";
-	case GPON_O3_SERIAL:	return "O3-Serial-Number";
-	case GPON_O4_RANGING:	return "O4-Ranging";
-	case GPON_O5_OPERATION:	return "O5-Operation";
-	case GPON_O6_POPUP:	return "O6-POPUP";
-	case GPON_O7_EMERGENCY:	return "O7-Emergency-Stop";
-	}
-	return "O?-unknown";
-}

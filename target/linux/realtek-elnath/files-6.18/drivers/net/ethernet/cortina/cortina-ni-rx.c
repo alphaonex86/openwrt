@@ -4962,7 +4962,7 @@ static void cortina_ni_rx_epp_init(struct cortina_ni *ni)
 		/* ★★★ build80: the SECOND per-voq ring buffer (PADDR_HI = PADDR + 0x2000).
 		 * Stock sets it; ours was 0 -> the writeback engine wrote ZERO descriptors. */
 		writel(vphys + CA_NI_RX_RING_HI_OFFSET, ni_base(ni) +
-		       CA_NI_QM_EPP64_PADDR_HI(CA_NI_RX_CPU_PORT, i));
+		       CA_NI_QM_EPP64_PADDR_HI(i));
 
 		/* adopt the HW write pointer (0 after reset) as this voq's start */
 		wptr = cortina_ni_rx_wptr_voq(ni, i);
@@ -5458,9 +5458,29 @@ void cortina_ni_rx_link_up(struct cortina_ni *ni)
 		 * CA_NI_RX_PORT.  The host cable can be on ANY physical port (this rig
 		 * links on port 3, phy4), and a port forwards line->MAC only once its
 		 * GMII interface is established - configuring only port 0 leaves the
-		 * cabled port dark (stock sets STATIC=0xcb000200 on all ports).  Upper
-		 * byte 0xCB is RO datapath-active status; writable fields only,
-		 * idempotent. */
+		 * cabled port dark (stock sets STATIC=0xcb000200 on all ports).
+		 *
+		 * ★★ AND 0xCB IS NOT A STATUS CODE -- IT IS THIS BOARD'S OWN MAC BYTE.
+		 * This comment used to call the upper byte "RO datapath-active status".
+		 * The X400AXF's MAC is 98:c7:a4:6c:af:CB, so the byte stock leaves in
+		 * [31:24] is byte5 of the address, and the same field is written as
+		 * exactly that ~2800 lines above -- CA_NI_L3FE_PT_MAC_BYTE5 at 0xa5c0,
+		 * which IS PORT_STATIC_CFG(0).  One register, two names, and the two
+		 * comments contradicted each other.
+		 *
+		 * ⚠ WHAT IS MEASURED AND WHAT IS NOT.  Measured: the byte equals this
+		 * unit's MAC byte5, and the two paths touch DISJOINT bits (this RMW
+		 * masks [3:0]|[4]|[13:12] = 0x0000301f, the my-MAC one masks [31:24]),
+		 * so nothing is corrupted either way and there is no live bug.  NOT
+		 * measured: whether stock's 0xcb on ports 1..3 is also a MAC byte -- the
+		 * my-MAC field is declared for port 0 only, and this lab has one Cortina
+		 * board, so a second unit with a different MAC is what would settle it.
+		 *
+		 * The reason to correct it anyway: "RO status" invites someone to delete
+		 * the my-MAC write above as pointless, and that write is what makes the
+		 * own-MAC comparator match.  Nothing would report it.
+		 *
+		 * writable fields only, idempotent. */
 		for (p = 0; p < CA_NI_GPHY_COUNT; p++)
 			ni_rmw(ni, CA_NI_PORT_STATIC_CFG(p),
 			       CA_NI_PORT_STATIC_INT_CFG | CA_NI_PORT_STATIC_PHY_MODE |

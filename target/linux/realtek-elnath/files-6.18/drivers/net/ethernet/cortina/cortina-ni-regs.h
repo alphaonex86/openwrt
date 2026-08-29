@@ -1737,7 +1737,19 @@ enum cortina_ni_win {
  * 0x2000.  Stock live capture: without PADDR_HI the writeback engine writes ZERO
  * descriptors (wptr advances but every slot stays poison/0).  Per-voq, same 0x400
  * stride as PADDR: voq q -> 0x7220+q*4 = ring_base+0x2000+q*0x400. */
-#define CA_NI_QM_EPP64_PADDR_HI(p, q)	(0x7220 + 4 * (8 * (p) + (q)))
+/* ★★ PER-VOQ, ONE CPU PORT -- the signature says so now.  It used to take
+ * (p, q) with the same 8*p term as PADDR_START, which made PADDR_HI(0,q)
+ * numerically identical to PADDR_START(1,q) and produced EIGHT open
+ * collisions in ni_reg_alias_test.  The p dimension was fiction: the note
+ * above already states "voq q -> 0x7220+q*4", and the driver only ever
+ * passes CA_NI_RX_CPU_PORT (= 0).  Narrowing it to (q) removes the phantom
+ * aliasing and makes a p=1 caller a COMPILE ERROR instead of a silent
+ * overlap.
+ * ⚠ NOT proven, and left alone: whether PADDR_START's own p dimension is
+ * real.  If it is, 0x7220 is genuinely two registers and the hardware
+ * resolves it one way -- but nothing here uses p>0, so nothing depends on
+ * the answer today. */
+#define CA_NI_QM_EPP64_PADDR_HI(q)	(0x7220 + 4 * (q))
 #define CA_NI_RX_RING_HI_OFFSET		0x2000u
 #define  CA_NI_QM_EPP64_PTR		GENMASK(23, 0)
 

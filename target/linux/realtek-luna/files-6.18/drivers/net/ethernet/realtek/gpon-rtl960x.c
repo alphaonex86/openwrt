@@ -6744,7 +6744,23 @@ static void luna_op_set_hw_state(void *sh, enum gpon_ostate st)
 static void luna_op_set_hw_onu_id(void *sh, u8 onu_id)
 {
 	(void)sh;
+	/*
+	 * ★★ BOTH REGISTERS, and writing only one was a real divergence in the
+	 * A/B (found 2026-08-28).  The ONU-ID lives in TWO places on this GTC --
+	 * GPON_GTC_DS_ONU_STATUS[15:8] and GPON_GTC_US_ONU_ID[15:8], which the
+	 * register map above calls the "upstream copy" -- and every site in this
+	 * driver's own FSM writes the pair together: the assign at Assign_ONU-ID,
+	 * and every clear back to 0xff.
+	 *
+	 * This op wrote only the downstream one.  Harmless while core_fsm=0
+	 * (nothing calls it), and with the switch flipped the core's watchdog and
+	 * SN-reprovision paths would have cleared the DS status while leaving a
+	 * STALE upstream ONU-ID in the hardware -- so the ONU would keep bursting
+	 * under an identity the OLT had taken back.  The A/B would have read that
+	 * as the core FSM being wrong.
+	 */
 	gpon_field(GPON_GTC_DS_ONU_STATUS, 15, 8, onu_id);
+	gpon_field(GPON_GTC_US_ONU_ID, 15, 8, onu_id);
 }
 
 static void luna_op_on_below_o5(void *sh)
@@ -7353,6 +7369,23 @@ static void gpon_fsm_poll(struct timer_list *t)
 	int guard = 0;
 
 	gpon_fsm_ticks++;
+	/*
+	 * ★★ STAGE 2 OF THE A/B: the PERIODIC half, behind the same `core_fsm`
+	 * switch that already selects the downstream dispatch.  With it clear --
+	 * the default -- every block below runs exactly as before and the core's
+	 * polls are never entered, so this stage is inert by construction.
+	 *
+	 * The shape is deliberately `if (core_fsm) <core>;` beside an untouched
+	 * `if (!core_fsm && <original condition>)`, rather than an if/else around
+	 * a restructured body: the original blocks are 428 lines of shell work
+	 * and FSM decisions interleaved, and a diff that moves them is a diff
+	 * nobody can review against the FSM it is meant to reproduce.
+	 *
+	 * ⚠ TICKS x 10, NOT THE WALL CLOCK -- the same reasoning as the DS path.
+	 * See ONU-test-case/OWED-ploam-swap-time-unit.md.
+	 */
+	if (core_fsm)
+		gpon_ploam_tick(&luna_ploam);
 	gpon_led_los_set((gpon_rd(GPON_GTC_DS_LOS_CFG_STS) & GPON_OPTIC_LOS_SIG) != 0);
 	/* SN was (re)provisioned after ranging began (the driver started with the
 	 * placeholder SN, which the OLT auto-ranges as a phantom that never matches
@@ -7409,11 +7442,20 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * idempotently over the OLT's gem, never proactively ahead of it (the 2nd-admit
 	 * churn cause). Driven from the poll (process/timer context) so the US-NIC modeset
 	 * stays off the OMCI-RX softirq; the ME268 arrives in the tolerated config window. */
-	if (gpon_fsm_state == 5 && data_gem_en && gpon_omcc_installed &&
+	/* Both provisioning follow-ups -- the WAN data GEM once the OLT has
+	 * solicited it, and the VEIP oper-up AVC -- are one core poll.  ⚠ The
+	 * AVC's constants live in the core as GPON_PLOAM_AVC_MAX = 3,
+	 * _DELAY_TICKS = 2500 and _PERIOD_TICKS = 150 -- CHECKED against the
+	 * 3 / 2500 / 150 below, and the core carries this driver's own line
+	 * numbers beside them (:6608-:6610), so they are a copy and not a
+	 * coincidence. */
+	if (core_fsm)
+		gpon_ploam_poll_provision(&luna_ploam, gpon_fsm_ticks * 10u);
+	if (!core_fsm && gpon_fsm_state == 5 && data_gem_en && gpon_omcc_installed &&
 	    gpon_data_gem_solicited && !gpon_data_installed)
 		gpon_install_data_gem();
 
-	if (gpon_fsm_state == 5 && gpon_omcc_installed && gpon_avc_sent < 3 &&
+	if (!core_fsm && gpon_fsm_state == 5 && gpon_omcc_installed && gpon_avc_sent < 3 &&
 	    gpon_o5_entry_tick && (gpon_fsm_ticks - gpon_o5_entry_tick) > 2500 &&
 	    ((gpon_fsm_ticks - gpon_o5_entry_tick) % 150) == 0) {
 		rtl9602c_eth_omci_report_oper_up();
@@ -7455,7 +7497,11 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * phase, mirroring the Deactivate->O1 path (incl. the CDR/reset-B re-seat that
 	 * actually changes the serializer lock). wan_rx>0 on any working or
 	 * slow-leasing link, so this fires only on a genuinely dead/stuck link. */
-	if (o5_provision_watchdog_ticks && gpon_fsm_state == 5 &&
+	if (core_fsm)
+		gpon_ploam_poll_watchdog(&luna_ploam,
+					 rtl9602c_eth_wan_rx_count() == 0,
+					 gpon_fsm_ticks * 10u);
+	if (!core_fsm && o5_provision_watchdog_ticks && gpon_fsm_state == 5 &&
 	    gpon_fsm_onu_id != 0xff && gpon_o5_entry_tick &&
 	    (gpon_fsm_ticks - gpon_o5_entry_tick) > o5_provision_watchdog_ticks &&
 	    rtl9602c_eth_wan_rx_count() == 0) {
@@ -7504,7 +7550,26 @@ static void gpon_fsm_poll(struct timer_list *t)
 		 * SerDes re-seat can blip sds_sdet alone (optic_los stays 0); only a true fiber
 		 * pull drops BOTH. Requiring the AND lets the debounce be short (stock-fast)
 		 * without false-tripping on either transient. */
-		if (optic_los && sds_dark) {
+		/*
+		 * ★★ THE ONE POLL OF THIS SET THAT IS LIVE BY DEFAULT
+		 * (los_rerange_ticks = 30), and it is the fibre-pull path this
+		 * board is validated on: LOS -> re-range -> O5.  So flipping
+		 * core_fsm here is not a formality -- it must be followed by N
+		 * PHYSICAL fibre pulls before anything is concluded.
+		 *
+		 * ⚠ THE TWO WITNESSES ARE READ HERE AND HANDED OVER, never
+		 * re-derived inside the core.  The guard is `optic_los AND NOT
+		 * sds_sdet` deliberately (a pad-steal perturbs optic_los ALONE),
+		 * and a chip with no declared SDS_FIB_STATUS has no second
+		 * witness at all -- which is why sds_dark stays false there
+		 * rather than being manufactured.  A core that re-read these
+		 * would have to know both of those board facts; handed them, it
+		 * does not.
+		 */
+		if (core_fsm)
+			gpon_ploam_poll_los(&luna_ploam, optic_los, sds_dark,
+					    gpon_fsm_ticks * 10u);
+		if (!core_fsm && optic_los && sds_dark) {
 			if (++gpon_los_run == los_rerange_ticks) {
 				pr_info("rtl9602c-gpon: downstream LOS %u ticks (optic_los & !sds_sdet) -> O1 (re-range on light return)\n",
 					gpon_los_run);
@@ -7654,7 +7719,9 @@ static void gpon_fsm_poll(struct timer_list *t)
 	}
 	/* While unregistered in O3, re-offer our Serial_Number_ONU ~twice a second
 	 * (the OLT grants SN windows intermittently). */
-	if (gpon_fsm_state >= 3 && gpon_fsm_onu_id == 0xff &&
+	if (core_fsm)
+		gpon_ploam_poll_sn_reoffer(&luna_ploam, gpon_fsm_ticks * 10u);
+	if (!core_fsm && gpon_fsm_state >= 3 && gpon_fsm_onu_id == 0xff &&
 	    (gpon_fsm_ticks % 50) == 0)
 		gpon_send_sn();
 	/* Periodic O5 upstream-PLOAM keepalive. Once ranged (onu_id != 0xff) the FSM
@@ -7665,7 +7732,9 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * BCM68620 PLOAM/ack-liveness timeout that fires Deactivate(0x05) ~25-35s after
 	 * provision on ~50%% of boots. Mirrors the un-ranged SN cadence above; US-PLOAM
 	 * only, does not touch DS RX or OMCI. */
-	if (gpon_fsm_state == 5 && gpon_fsm_onu_id != 0xff &&
+	if (core_fsm)
+		gpon_ploam_poll_keepalive(&luna_ploam, gpon_fsm_ticks * 10u);
+	if (!core_fsm && gpon_fsm_state == 5 && gpon_fsm_onu_id != 0xff &&
 	    o5_ploam_keepalive_ticks &&
 	    (gpon_fsm_ticks % o5_ploam_keepalive_ticks) == 0) {
 		u8 nomsg[12];

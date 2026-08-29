@@ -8202,17 +8202,17 @@ static int __init rtl9602c_gpon_init(void)
 			if (is_9607c)
 				sret = rtl960x_ponmac_mode_set(RTL960X_CHIP_9607C, RTL960X_REV_C,
 							       RTL960X_SUBTYPE_NONE,
-							       RTL960X_MODE_GPON, &rtl9602c_r960_ops);
+							       &rtl9602c_r960_ops);
 			else if (is_9603cvd)
 				/* rev/subtype are ignored by this chip's path -- one SerDes
 				 * variant for every rev (rtl960x_ponmac.c:786). */
 				sret = rtl960x_ponmac_mode_set(RTL960X_CHIP_9603CVD, RTL960X_REV_A,
 							       RTL960X_SUBTYPE_NONE,
-							       RTL960X_MODE_GPON, &rtl9602c_r960_ops);
+							       &rtl9602c_r960_ops);
 			else
 				sret = rtl960x_ponmac_mode_set(RTL960X_CHIP_9602C, RTL960X_REV_A,
 							       RTL960X_SUBTYPE_NONE,
-							       RTL960X_MODE_GPON, &rtl9602c_r960_ops);
+							       &rtl9602c_r960_ops);
 			via = is_9607c ? "family-lib 9607C"
 			    : is_9603cvd ? "family-lib 9603CVD" : "family-lib 9602C";
 			/* STABILITY fallback: if the lib path ever fails to bring the analog

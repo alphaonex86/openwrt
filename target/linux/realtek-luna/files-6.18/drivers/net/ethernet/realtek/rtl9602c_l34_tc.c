@@ -184,6 +184,20 @@ static int rtl9602c_l34_op_stats(void *sh, u32 idx, void *priv,
 	return 0;
 }
 
+/*
+ * devm release: pull every installed flow out of the hardware, then free the
+ * handle.  gpon_flow_offload_free() walks the cookie table and calls this
+ * driver's remove op per entry, so nothing is left programmed in silicon that
+ * no software knows about.
+ */
+static void rtl9602c_l34_fo_release(void *data)
+{
+	struct rtl9602c_eth *ep = data;
+
+	gpon_flow_offload_free(ep->fo);
+	ep->fo = NULL;
+}
+
 static const struct gpon_flow_ops rtl9602c_l34_flow_ops = {
 	.is_lan_side	= rtl9602c_l34_is_lan_side,
 	.install	= rtl9602c_l34_op_install,

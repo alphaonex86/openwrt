@@ -3651,8 +3651,24 @@ mac_done:
 			 * back healthy.  Registering anyway is what proves the
 			 * core's contract is reachable from this family. */
 			ep->fo = gpon_flow_offload_new(&rtl9602c_l34_flow_ops, ep);
-			if (!ep->fo)
+			if (!ep->fo) {
 				dev_warn(dev, "L34: the common TC lifecycle could not be created; software forwarding\n");
+			} else if (devm_add_action_or_reset(dev, rtl9602c_l34_fo_release,
+							   ep)) {
+				/* ★ THE HANDLE IS OWNED BY THE DEVICE, not by a
+				 * .remove this driver does not have.  It is
+				 * module_platform_driver() with NO .remove at
+				 * all -- a pre-existing gap, and not one this
+				 * change is entitled to close by inventing a
+				 * teardown for the whole driver.  What it IS
+				 * responsible for is the allocation it just
+				 * made, so devm owns it: the flows are pulled
+				 * out of the hardware and the handle freed
+				 * whenever the device goes away, including on
+                                 * a failed probe below this point. */
+				dev_warn(dev, "L34: could not bind the TC lifecycle to the device; software forwarding\n");
+				ep->fo = NULL;
+			}
 #endif
 		}
 	}

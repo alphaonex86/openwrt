@@ -5053,6 +5053,23 @@ free:
 	return ret;
 }
 
+/*
+ * Pull every installed flow out of the hardware and release the core's handle.
+ *
+ * ★ THE ORDER IS NOT A DETAIL: gpon_flow_offload_free() walks the cookie table
+ * and calls cn_flow_remove() per entry, so the L3FE entries and their DMA-AFT
+ * references go first and the memory second.  Freeing the handle without the
+ * walk would leave flows programmed in silicon that no software knows about --
+ * which on this engine means an age-SRAM slot that is never re-armed and a FIB
+ * row that keeps matching.
+ */
+void cortina_ni_flowoffload_exit(void)
+{
+	cn_flow_table_ready = false;
+	gpon_flow_offload_free(cn_fo);
+	cn_fo = NULL;
+}
+
 static int cn_flowoffload_init(void)
 {
 	int ret;

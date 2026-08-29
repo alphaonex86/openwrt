@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# Per-board image definitions for the rtl960x subtarget.
+# Per-board image definitions for the `taroko` subtarget (RLX/Lexra "Taroko"
+# core; renamed from rtl960x 2026-08-29 -- the subtarget selects a CORE).
 # Boards are brought up run-from-RAM first: the initramfs uImage is TFTP'd
 # into RAM and bootm'd by the vendor U-Boot (no flash write during bring-up).
 

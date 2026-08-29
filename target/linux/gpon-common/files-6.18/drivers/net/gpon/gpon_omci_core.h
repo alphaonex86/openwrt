@@ -43,7 +43,7 @@
  *       named at the constant it concerns, below and in the .c.
  *     - dev/rtl9607c-test on x86-64 through fuzz_shims/, where it is fuzzed
  *       under ASan+UBSan thousands of cases per second
- *   The prefix is gpon_ and not rtl960x_ on purpose: the layer must also serve
+ *   The prefix is gpon_ and not luna_ on purpose: the layer must also serve
  *   the future ARM OLT and other brands, so a Realtek-named prefix would be
  *   too narrow for what it covers.
  *

@@ -7,14 +7,21 @@ BOARD:=realtek-luna
 BOARDNAME:=Realtek Luna GPON ONU
 DEVICE_TYPE:=basic
 FEATURES:=ramdisk squashfs gpio
-SUBTARGETS:=rtl960x rtl9607x
+SUBTARGETS:=taroko interaptiv
 
 KERNEL_PATCHVER:=6.18
 
 define Target/Description
-	Build firmware images for Realtek "Luna" GPON ONU SoCs: the RTL960xC /
-	RTL8672 "Europa" family on the RLX "Taroko" core (rtl960x subtarget)
-	and the RTL9607C on a MIPS interAptiv core (rtl9607x subtarget).
+	Build firmware images for Realtek "Luna" GPON ONU SoCs.  The SUBTARGET
+	IS THE CPU CORE, and it is named after it: `taroko` for the RLX/Lexra
+	"Taroko" core (RTL9602C, RTL9603C) and `interaptiv` for the licensed
+	MIPS interAptiv core (RTL9607C, RTL9603CVD).  They were called rtl960x
+	and rtl9607x until 2026-08-29, and both names were wrong in the same
+	way: they claimed a PART-NUMBER RANGE while selecting a CORE, so a
+	part had to be routed against its name rather than by it -- the
+	RTL9603CVD is an interAptiv part and had to live in "rtl9607x", which
+	each target.mk needed a warning paragraph to explain.  A board now
+	goes to the subtarget its own boot banner names.
 endef
 
 include $(INCLUDE_DIR)/target.mk

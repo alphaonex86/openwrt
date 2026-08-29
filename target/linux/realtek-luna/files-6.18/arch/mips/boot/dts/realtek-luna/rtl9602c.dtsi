@@ -7,7 +7,7 @@
  * probing the live device).
  */
 
-#include "rtl960x.dtsi"
+#include "luna.dtsi"
 
 / {
 	#address-cells = <1>;
@@ -130,7 +130,7 @@
 		 * PREFERENCE. With this node enabled the board resets at ~29 s
 		 * on EVERY boot of our image. Proven by a single-variable A/B
 		 * pair and then by three more boots: with
-		 * `initcall_blacklist=rtl960x_wdt_driver_init` on the kernel
+		 * `initcall_blacklist=luna_wdt_driver_init` on the kernel
 		 * command line the board reaches `br-lan: port 1(eth0) entered
 		 * forwarding state` at 29.16 s, GPON `O3 -> O4` at 15.4 s, and
 		 * prints NOT ONE `PRELOADER` line in a 90 s window. Without it,

@@ -82,7 +82,7 @@
  * tree keeps exactly one (operator, 2026-08-05: "la idea es poner en común el
  * código que corresponde para no tener mucho duplicado" and, on the two
  * monoliths that each carried their own, "mal, poner en común").  The prefix is
- * gpon_ and not cortina_/rtl960x_ for the same reason: the layer must outlive
+ * gpon_ and not cortina_/luna_ for the same reason: the layer must outlive
  * this vendor.
  *
  * WHAT STAYED HERE, AND WHY IT HAD TO.  Everything that touches the hardware:

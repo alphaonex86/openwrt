@@ -4,13 +4,13 @@
  * family (RTL9602C, RTL9603CVD, and the siblings that follow).
  *
  * ★ WHY THIS FILE EXISTS, AND WHAT IT MEASURED.  The family had TWO Ethernet
- * drivers -- rtl9602c_eth.c for the X111W and rtl960x_eth.c for the G24W --
+ * drivers -- rtl9602c_eth.c for the X111W and luna_eth.c for the G24W --
  * each carrying its own copy of the register map.  Compared symbol by symbol on
  * 2026-08-28, with the comments stripped so that a re-worded comment could not
  * masquerade as a different value:
  *
  *     34 symbols  IDENTICAL on both chips   -> family facts, and they live here
- *      4 symbols  genuinely per-chip        -> struct rtl960x_sw_map, below
+ *      4 symbols  genuinely per-chip        -> struct luna_sw_map, below
  *
  * That ratio is the argument for the whole port strategy: a new Luna board owes
  * a TABLE, not a driver.  Two copies of 34 agreeing constants is not redundancy,
@@ -39,8 +39,8 @@
  * same shape as the CFG_PHY_CTRL defect that cost this project weeks, and it is
  * exactly why these four are a table and not a #define.
  */
-#ifndef _RTL960X_ETH_REGS_H
-#define _RTL960X_ETH_REGS_H
+#ifndef _LUNA_ETH_REGS_H
+#define _LUNA_ETH_REGS_H
 
 
 #include <linux/etherdevice.h>	/* ETH_ALEN, ether_addr_equal */
@@ -114,7 +114,7 @@
 
 /* ─────────────────────────── the per-chip table ─────────────────────────── */
 /**
- * struct rtl960x_sw_map - the switch-core facts that differ between Luna chips
+ * struct luna_sw_map - the switch-core facts that differ between Luna chips
  * @src_permit:       L2_SRC_PORT_PERMIT -- egress FILTER ENABLE, permissive
  *                    value is 0 (writing all-ones reflects every frame back
  *                    out its own ingress port; that was a real broadcast loop).
@@ -144,8 +144,8 @@
  * "+8 from the 9602C" table is a table that silently follows the wrong chip the
  * day a third revision moves only half the block.
  */
-struct rtl960x_sw_map {
-	/* ★ PORT NUMBERS ARE PER-CHIP AND WERE HALF-TABULATED.  rtl960x_eth.c
+struct luna_sw_map {
+	/* ★ PORT NUMBERS ARE PER-CHIP AND WERE HALF-TABULATED.  luna_eth.c
 	 * already carried pon_port/cpu_port per chip while rtl9602c_eth.c
 	 * hardcoded RTL9602C_PON_PORT=2 and SW_CPU_PORT=3 -- the same shape as
 	 * the MSR value one sibling made tunable and the other did not.  The
@@ -191,7 +191,7 @@ struct rtl960x_sw_map {
 	u32 unkn_uc_flood;
 };
 
-static const struct rtl960x_sw_map rtl9602c_sw_map = {
+static const struct luna_sw_map rtl9602c_sw_map = {
 	.force_ablty	= 0x00180,
 	.p_ablty	= 0,		/* this driver never reads it */
 	.ablty_force	= 0x001B4,
@@ -213,7 +213,7 @@ static const struct rtl960x_sw_map rtl9602c_sw_map = {
 	.unkn_uc_flood	= 0x1C028,
 };
 
-static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
+static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.force_ablty	= 0x00198,
 	.p_ablty	= 0x001B8,
 	.ablty_force	= 0x001DC,
@@ -237,14 +237,14 @@ static const struct rtl960x_sw_map rtl9603cvd_sw_map = {
 
 /* The RTL9607C's eight LUT offsets were CROSS-READ from its own chipdef on
  * 2026-08-28 and are identical to the RTL9603CVD's, every one of them -- so
- * rtl960x_eth.c serving both chips from one constant set was correct, and this
+ * luna_eth.c serving both chips from one constant set was correct, and this
  * table records that rather than leaving it as an assumption.
  *
  * ⚠ swcore_size is NOT from the chipdef: it is an ioremap LENGTH, a decision
  * about how much of the block this driver touches, not a silicon fact.  It
  * carries the value that driver has been using.
  */
-static const struct rtl960x_sw_map rtl9607c_sw_map = {
+static const struct luna_sw_map rtl9607c_sw_map = {
 	.force_ablty	= 0x001CC,
 	.p_ablty	= 0x00200,
 	.ablty_force	= 0x00238,
@@ -292,16 +292,16 @@ static const struct rtl960x_sw_map rtl9607c_sw_map = {
  * visible reason.
  *
  * ⚠ IT LIVES IN THE FAMILY HEADER BECAUSE THE TWO-COPY VERSION ALREADY COST A
- * LIVE DEFECT.  The refusal was written into rtl960x_eth.c alone, while the
+ * LIVE DEFECT.  The refusal was written into luna_eth.c alone, while the
  * RTL9602C's own driver carried a byte-identical IDR reader and a plain
  * `is_valid_ether_addr()` test -- so the 9602C shipped the shared default for
  * as long as the two copies existed, and nothing anywhere said so.  A family
  * fact kept in two chip shells is a repair with a delay fuse on it. */
-#define RTL960X_MAC_BRINGUP_DEFAULT	{ 0x00, 0xe0, 0x4c, 0x86, 0x70, 0x01 }
+#define LUNA_MAC_BRINGUP_DEFAULT	{ 0x00, 0xe0, 0x4c, 0x86, 0x70, 0x01 }
 
-static inline bool rtl960x_mac_is_bringup_default(const u8 *mac)
+static inline bool luna_mac_is_bringup_default(const u8 *mac)
 {
-	static const u8 dflt[ETH_ALEN] = RTL960X_MAC_BRINGUP_DEFAULT;
+	static const u8 dflt[ETH_ALEN] = LUNA_MAC_BRINGUP_DEFAULT;
 
 	return ether_addr_equal(mac, dflt);
 }
@@ -319,7 +319,7 @@ static inline bool rtl960x_mac_is_bringup_default(const u8 *mac)
  * ONLY ONE OF THEM for eight days.  Two copies of one fact do not merely cost
  * lines; they cost the NEXT repair, which lands in whichever copy the author
  * happened to be reading. */
-static inline void rtl960x_idr_get(void __iomem *base, u8 *mac)
+static inline void luna_idr_get(void __iomem *base, u8 *mac)
 {
 	u32 lo = ioread32(base + R_IDR0), hi = ioread32(base + R_IDR4);
 
@@ -327,7 +327,7 @@ static inline void rtl960x_idr_get(void __iomem *base, u8 *mac)
 	mac[4] = hi >> 24; mac[5] = hi >> 16;
 }
 
-static inline void rtl960x_idr_set(void __iomem *base, const u8 *mac)
+static inline void luna_idr_set(void __iomem *base, const u8 *mac)
 {
 	iowrite32(((u32)mac[0] << 24) | ((u32)mac[1] << 16) |
 		  ((u32)mac[2] << 8) | mac[3], base + R_IDR0);
@@ -345,7 +345,7 @@ static inline void rtl960x_idr_set(void __iomem *base, const u8 *mac)
  *
  * ⚠ NO ADDRESS IS EVER SPELLED IN THE KERNEL.  A literal here, or in a DTS,
  * would hand the second unit of the same product the first one's identity. */
-static inline bool rtl960x_mac_from_param(const char *s, u8 *out)
+static inline bool luna_mac_from_param(const char *s, u8 *out)
 {
 	u8 v[ETH_ALEN];
 	int n;
@@ -370,7 +370,7 @@ static inline bool rtl960x_mac_from_param(const char *s, u8 *out)
  * COPIES, which is the quieter half of duplication: the code survives the
  * copy, the REASON does not, and the next reader of the poorer copy has to
  * re-derive it or guess. */
-static inline void rtl960x_eth_hw_stop(void __iomem *base)
+static inline void luna_eth_hw_stop(void __iomem *base)
 {
 	iowrite32(0, base + R_IO_CMD);
 	iowrite32(0, base + R_IO_CMD1);
@@ -384,7 +384,7 @@ static inline void rtl960x_eth_hw_stop(void __iomem *base)
 /* A bridge enslaving the CPU netdev sets promisc; accept-all-physical (RCR
  * bit0) is then REQUIRED to receive LAN-client frames whose DA is not our MAC.
  * Without it a bridged port silently forwards nothing it did not address. */
-static inline void rtl960x_eth_set_promisc(void __iomem *base, bool on)
+static inline void luna_eth_set_promisc(void __iomem *base, bool on)
 {
 	u32 rcr = ioread32(base + R_RCR);
 
@@ -435,7 +435,7 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * fault: the engine simply walks off the end of the ring into whatever follows
  * it, which is the quietest possible corruption.  `nr` is the ring's own entry
  * count, passed in, never a #define read from whichever driver compiled last. */
-static inline int rtl960x_rx_refill(struct net_device *ndev, struct device *dev,
+static inline int luna_rx_refill(struct net_device *ndev, struct device *dev,
 				    struct rx_desc *ring, struct sk_buff **skbs,
 				    dma_addr_t *dmas, unsigned int idx,
 				    unsigned int nr, unsigned int buf_size)
@@ -483,7 +483,7 @@ static inline int rtl960x_rx_refill(struct net_device *ndev, struct device *dev,
  * half of duplication -- the code survives being copied, the reason it is
  * shaped that way does not, and the next author of the poorer copy has nothing
  * to stop them re-running the experiment that hung the board. */
-static inline void rtl960x_ipsel_cycle_gmac0(void)
+static inline void luna_ipsel_cycle_gmac0(void)
 {
 	writel(readl(SOC_IP_SEL) & ~IPSEL_GMAC0, SOC_IP_SEL);
 	msleep(12);
@@ -503,7 +503,7 @@ static inline void rtl960x_ipsel_cycle_gmac0(void)
  * second, and a locally-named pointer in the third.  One home now.
  *
  * ⚠⚠ AND THE TWO DRIVERS DISAGREE ABOUT WHAT BIT 5 IS, which is recorded
- * rather than resolved: rtl960x_eth.c calls it "switch-core enable" and
+ * rather than resolved: luna_eth.c calls it "switch-core enable" and
  * gpon-rtl960x.c calls the SAME bit at the SAME address "PONPBO IP enable".
  * Both set it.  Either one name is wrong, or the bit gates a block both need
  * and neither name says so.  OWED: settle it from the chip's own SDK
@@ -513,4 +513,4 @@ static inline void rtl960x_ipsel_cycle_gmac0(void)
 #define   SW_EN_BIT	BIT(5)		/* see the disagreement above	*/
 #define   SW_PBO_BIT	BIT(25)		/* required on rev > A		*/
 
-#endif /* _RTL960X_ETH_REGS_H */
+#endif /* _LUNA_ETH_REGS_H */

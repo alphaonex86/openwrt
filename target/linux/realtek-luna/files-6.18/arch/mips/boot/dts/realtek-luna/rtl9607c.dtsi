@@ -13,7 +13,7 @@
  * flags 4 = IRQ_TYPE_LEVEL_HIGH.
  */
 
-#include "rtl960x.dtsi"
+#include "luna.dtsi"
 
 / {
 	#address-cells = <1>;

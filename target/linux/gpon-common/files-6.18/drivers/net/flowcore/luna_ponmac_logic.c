@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* See rtl960x_ponmac_logic.h. Moved verbatim; no line was rewritten.
+/* See luna_ponmac_logic.h. Moved verbatim; no line was rewritten.
  */
 #include <linux/types.h>
 
-#include "rtl960x_ponmac_logic.h"
+#include "luna_ponmac_logic.h"
 
 /* True for the SerDes offsets our golden table writes but the stock rev-A bring-up never does. */
 bool c2_off_overconfig(u32 off)

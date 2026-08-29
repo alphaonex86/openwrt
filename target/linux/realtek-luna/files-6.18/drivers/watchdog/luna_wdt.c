@@ -109,24 +109,24 @@
 #include <linux/watchdog.h>
 
 /* --- the register block, offsets from its base (0x18003260 on RTL9602C) --- */
-#define RTL960X_WDT_CNT			0x00
-#define RTL960X_WDT_CNT_KICK		BIT(31)
-#define RTL960X_WDT_INTR		0x04
-#define RTL960X_WDT_CTRL		0x08
-#define RTL960X_WDT_CTRL_EN		BIT(31)
-#define RTL960X_WDT_BLOCK_SIZE		0x0c
+#define LUNA_WDT_CNT			0x00
+#define LUNA_WDT_CNT_KICK		BIT(31)
+#define LUNA_WDT_INTR		0x04
+#define LUNA_WDT_CTRL		0x08
+#define LUNA_WDT_CTRL_EN		BIT(31)
+#define LUNA_WDT_BLOCK_SIZE		0x0c
 
 /*
  * WDT_CTRL fields.  Named for what the silicon's own headers call them, so a
  * reader can carry a name straight from a register dump to this file.
  */
-#define RTL960X_WDT_CLK_SC_SHIFT	29
-#define RTL960X_WDT_CLK_SC_MSK		0x3u
-#define RTL960X_WDT_CLK_SC_MAX		3u
-#define RTL960X_WDT_PH1_TO_SHIFT	22
-#define RTL960X_WDT_PH2_TO_SHIFT	15
-#define RTL960X_WDT_PH_TO_MSK		0x1fu
-#define RTL960X_WDT_RESET_MODE_MSK	0x3u
+#define LUNA_WDT_CLK_SC_SHIFT	29
+#define LUNA_WDT_CLK_SC_MSK		0x3u
+#define LUNA_WDT_CLK_SC_MAX		3u
+#define LUNA_WDT_PH1_TO_SHIFT	22
+#define LUNA_WDT_PH2_TO_SHIFT	15
+#define LUNA_WDT_PH_TO_MSK		0x1fu
+#define LUNA_WDT_RESET_MODE_MSK	0x3u
 
 /*
  * RESET_MODE 0 is the H/W FULL CHIP reset: it takes the CPU down together with
@@ -137,13 +137,13 @@
  * not running when a watchdog is needed.  Proven by this target's own restart
  * path, which has used mode 0 since bring-up.
  */
-#define RTL960X_WDT_RESET_MODE_FULL_CHIP 0u
+#define LUNA_WDT_RESET_MODE_FULL_CHIP 0u
 
 /* One tick is 2^(SCALE_SHIFT + WDT_CLK_SC) cycles of the LX bus clock. */
-#define RTL960X_WDT_SCALE_SHIFT		25
+#define LUNA_WDT_SCALE_SHIFT		25
 
 /* Each phase field is 5 bits and counts from ONE, so 0 means a single tick. */
-#define RTL960X_WDT_TICKS		32u
+#define LUNA_WDT_TICKS		32u
 
 /*
  * Phase 2 is kept at its shortest.  It exists so a vendor kernel can dump state
@@ -151,16 +151,16 @@
  * the probe), so every phase-2 tick is dead time between "the deadline passed"
  * and "the device comes back".
  */
-#define RTL960X_WDT_PH2_TICKS		1u
+#define LUNA_WDT_PH2_TICKS		1u
 
-#define RTL960X_WDT_MIN_TIMEOUT		1u
-#define RTL960X_WDT_DEFAULT_TIMEOUT	30u
+#define LUNA_WDT_MIN_TIMEOUT		1u
+#define LUNA_WDT_DEFAULT_TIMEOUT	30u
 
 static unsigned int timeout;
 module_param(timeout, uint, 0444);
 MODULE_PARM_DESC(timeout,
 		 "Watchdog timeout in seconds (default: device tree, else "
-		 __MODULE_STRING(RTL960X_WDT_DEFAULT_TIMEOUT) ")");
+		 __MODULE_STRING(LUNA_WDT_DEFAULT_TIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0444);
@@ -169,12 +169,12 @@ MODULE_PARM_DESC(nowayout,
 		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
 /**
- * struct rtl960x_wdt_timing - the WDT_CTRL timing fields for one timeout
- * @clk_sc:	WDT_CLK_SC, the tick scale, 0..RTL960X_WDT_CLK_SC_MAX
+ * struct luna_wdt_timing - the WDT_CTRL timing fields for one timeout
+ * @clk_sc:	WDT_CLK_SC, the tick scale, 0..LUNA_WDT_CLK_SC_MAX
  * @ph1:	WDT_PH1_TO field value; the phase lasts @ph1 + 1 ticks
  * @ph2:	WDT_PH2_TO field value; the phase lasts @ph2 + 1 ticks
  */
-struct rtl960x_wdt_timing {
+struct luna_wdt_timing {
 	u32 clk_sc;
 	u32 ph1;
 	u32 ph2;
@@ -186,10 +186,10 @@ struct rtl960x_wdt_timing {
  * Rounded DOWN, deliberately: the number this returns is published to userspace
  * as max_timeout, so it has to be a window the hardware can actually hold.
  */
-static unsigned int rtl960x_wdt_max_timeout(unsigned long rate)
+static unsigned int luna_wdt_max_timeout(unsigned long rate)
 {
-	u64 cycles = (u64)RTL960X_WDT_TICKS <<
-		     (RTL960X_WDT_SCALE_SHIFT + RTL960X_WDT_CLK_SC_MAX);
+	u64 cycles = (u64)LUNA_WDT_TICKS <<
+		     (LUNA_WDT_SCALE_SHIFT + LUNA_WDT_CLK_SC_MAX);
 
 	return rate ? (unsigned int)div_u64(cycles, rate) : 0;
 }
@@ -210,27 +210,27 @@ static unsigned int rtl960x_wdt_max_timeout(unsigned long rate)
  *
  * Returns 0, or -ERANGE when @secs cannot be expressed at any scale.
  */
-static int rtl960x_wdt_calc_timing(unsigned long rate, unsigned int secs,
-				   struct rtl960x_wdt_timing *t)
+static int luna_wdt_calc_timing(unsigned long rate, unsigned int secs,
+				   struct luna_wdt_timing *t)
 {
 	unsigned int sc;
 
 	if (!rate || !secs)
 		return -ERANGE;
 
-	for (sc = 0; sc <= RTL960X_WDT_CLK_SC_MAX; sc++) {
-		unsigned int shift = RTL960X_WDT_SCALE_SHIFT + sc;
+	for (sc = 0; sc <= LUNA_WDT_CLK_SC_MAX; sc++) {
+		unsigned int shift = LUNA_WDT_SCALE_SHIFT + sc;
 		u64 cycles = (u64)secs * rate;
 		u64 ticks = (cycles + (1ULL << shift) - 1) >> shift;
 
-		if (ticks > RTL960X_WDT_TICKS)
+		if (ticks > LUNA_WDT_TICKS)
 			continue;
 		if (!ticks)
 			ticks = 1;
 
 		t->clk_sc = sc;
 		t->ph1 = (u32)ticks - 1;
-		t->ph2 = RTL960X_WDT_PH2_TICKS - 1;
+		t->ph2 = LUNA_WDT_PH2_TICKS - 1;
 		return 0;
 	}
 
@@ -238,24 +238,24 @@ static int rtl960x_wdt_calc_timing(unsigned long rate, unsigned int secs,
 }
 
 /* Pure: those fields packed into the WDT_CTRL bit positions, enable excluded. */
-static u32 rtl960x_wdt_ctrl_timing(const struct rtl960x_wdt_timing *t,
+static u32 luna_wdt_ctrl_timing(const struct luna_wdt_timing *t,
 				   u32 reset_mode)
 {
-	return ((t->clk_sc & RTL960X_WDT_CLK_SC_MSK) << RTL960X_WDT_CLK_SC_SHIFT) |
-	       ((t->ph1 & RTL960X_WDT_PH_TO_MSK) << RTL960X_WDT_PH1_TO_SHIFT) |
-	       ((t->ph2 & RTL960X_WDT_PH_TO_MSK) << RTL960X_WDT_PH2_TO_SHIFT) |
-	       (reset_mode & RTL960X_WDT_RESET_MODE_MSK);
+	return ((t->clk_sc & LUNA_WDT_CLK_SC_MSK) << LUNA_WDT_CLK_SC_SHIFT) |
+	       ((t->ph1 & LUNA_WDT_PH_TO_MSK) << LUNA_WDT_PH1_TO_SHIFT) |
+	       ((t->ph2 & LUNA_WDT_PH_TO_MSK) << LUNA_WDT_PH2_TO_SHIFT) |
+	       (reset_mode & LUNA_WDT_RESET_MODE_MSK);
 }
 
 /**
- * struct rtl960x_wdt - one Luna watchdog instance
+ * struct luna_wdt - one Luna watchdog instance
  * @wdd:	the watchdog the core sees
  * @base:	the three-register block
  * @clk:	LX peripheral bus clock, which the counter is scaled from
  * @rate:	@clk's frequency, cached because every timeout change needs it
  * @lock:	serialises the read-modify-write of WDT_CTRL against the kick
  */
-struct rtl960x_wdt {
+struct luna_wdt {
 	struct watchdog_device	wdd;
 	void __iomem		*base;
 	struct clk		*clk;
@@ -263,9 +263,9 @@ struct rtl960x_wdt {
 	spinlock_t		lock;		/* see kernel-doc above */
 };
 
-static inline struct rtl960x_wdt *to_rtl960x_wdt(struct watchdog_device *wdd)
+static inline struct luna_wdt *to_luna_wdt(struct watchdog_device *wdd)
 {
-	return container_of(wdd, struct rtl960x_wdt, wdd);
+	return container_of(wdd, struct luna_wdt, wdd);
 }
 
 /*
@@ -281,24 +281,24 @@ static inline struct rtl960x_wdt *to_rtl960x_wdt(struct watchdog_device *wdd)
  * other board, where the reset-enable word turned out to also hold the power-down
  * bits for the GPON and the forwarding engine.
  */
-static void rtl960x_wdt_kick(struct rtl960x_wdt *wdt)
+static void luna_wdt_kick(struct luna_wdt *wdt)
 {
-	u32 cnt = readl(wdt->base + RTL960X_WDT_CNT);
+	u32 cnt = readl(wdt->base + LUNA_WDT_CNT);
 
-	writel(cnt | RTL960X_WDT_CNT_KICK, wdt->base + RTL960X_WDT_CNT);
+	writel(cnt | LUNA_WDT_CNT_KICK, wdt->base + LUNA_WDT_CNT);
 
 
 }
 
-static int rtl960x_wdt_start(struct watchdog_device *wdd);
-static int rtl960x_wdt_stop(struct watchdog_device *wdd);
+static int luna_wdt_start(struct watchdog_device *wdd);
+static int luna_wdt_stop(struct watchdog_device *wdd);
 
-static int rtl960x_wdt_ping(struct watchdog_device *wdd)
+static int luna_wdt_ping(struct watchdog_device *wdd)
 {
 	/*
 	 * ★★★ THE KICK ALONE DOES NOT RELOAD THIS COUNTER -- MEASURED ON THE
 	 * BOARD, 2026-08-27.  A bisect first proved the watchdog is what resets
-	 * the X111W at ~30 s (`initcall_blacklist=rtl960x_wdt_driver_init` ->
+	 * the X111W at ~30 s (`initcall_blacklist=luna_wdt_driver_init` ->
 	 * zero resets past 34 s), and an instrumented kick then showed why:
 	 *
 	 *   rtl960x-wdt: kick cnt=0x00000000 -> 0x00000000 ctrl=0xe5800000
@@ -312,7 +312,7 @@ static int rtl960x_wdt_ping(struct watchdog_device *wdd)
 	 *   the enable bit, which is exactly what start() does and what arms the
 	 *   counter in the first place.  start() is a read-modify-write that
 	 *   touches only the decoded fields, so this changes no unknown bit --
-	 *   the reasoning above rtl960x_wdt_kick() about the undecoded 31 bits of
+	 *   the reasoning above luna_wdt_kick() about the undecoded 31 bits of
 	 *   WDT_CNT stands untouched, and the kick stays where it is inside
 	 *   start().
 	 *
@@ -338,7 +338,7 @@ static int rtl960x_wdt_ping(struct watchdog_device *wdd)
 	 * MMIO writes under the driver's own spinlock -- against a 29.5 s window
 	 * fed every 5 s.
 	 */
-	struct rtl960x_wdt *wdt = to_rtl960x_wdt(wdd);
+	struct luna_wdt *wdt = to_luna_wdt(wdd);
 
 	/* ⚠ THE RELOAD EXPERIMENTS ARE NOT KEPT. Both were tried on
 	 * 2026-08-27 and neither moved the deadline by a millisecond:
@@ -347,7 +347,7 @@ static int rtl960x_wdt_ping(struct watchdog_device *wdd)
 	 * they are facts; the code that failed to act on them does not,
 	 * and a ping that disables the watchdog on every feed would be a
 	 * worse default than the one plain kick. */
-	rtl960x_wdt_kick(wdt);
+	luna_wdt_kick(wdt);
 
 	return 0;
 }
@@ -359,27 +359,27 @@ static int rtl960x_wdt_ping(struct watchdog_device *wdd)
  * may already be part-way through an older, possibly shorter window, and without
  * the reload the new timeout would only take effect at the next feed.
  */
-static int rtl960x_wdt_start(struct watchdog_device *wdd)
+static int luna_wdt_start(struct watchdog_device *wdd)
 {
-	struct rtl960x_wdt *wdt = to_rtl960x_wdt(wdd);
-	struct rtl960x_wdt_timing t;
+	struct luna_wdt *wdt = to_luna_wdt(wdd);
+	struct luna_wdt_timing t;
 	unsigned long flags;
 	u32 ctrl;
 	int ret;
 
-	ret = rtl960x_wdt_calc_timing(wdt->rate, wdd->timeout, &t);
+	ret = luna_wdt_calc_timing(wdt->rate, wdd->timeout, &t);
 	if (ret)
 		return ret;
 
 	spin_lock_irqsave(&wdt->lock, flags);
-	ctrl = readl(wdt->base + RTL960X_WDT_CTRL);
-	ctrl &= ~((RTL960X_WDT_CLK_SC_MSK << RTL960X_WDT_CLK_SC_SHIFT) |
-		  (RTL960X_WDT_PH_TO_MSK << RTL960X_WDT_PH1_TO_SHIFT) |
-		  (RTL960X_WDT_PH_TO_MSK << RTL960X_WDT_PH2_TO_SHIFT) |
-		  RTL960X_WDT_RESET_MODE_MSK);
-	ctrl |= rtl960x_wdt_ctrl_timing(&t, RTL960X_WDT_RESET_MODE_FULL_CHIP);
-	writel(ctrl | RTL960X_WDT_CTRL_EN, wdt->base + RTL960X_WDT_CTRL);
-	rtl960x_wdt_kick(wdt);
+	ctrl = readl(wdt->base + LUNA_WDT_CTRL);
+	ctrl &= ~((LUNA_WDT_CLK_SC_MSK << LUNA_WDT_CLK_SC_SHIFT) |
+		  (LUNA_WDT_PH_TO_MSK << LUNA_WDT_PH1_TO_SHIFT) |
+		  (LUNA_WDT_PH_TO_MSK << LUNA_WDT_PH2_TO_SHIFT) |
+		  LUNA_WDT_RESET_MODE_MSK);
+	ctrl |= luna_wdt_ctrl_timing(&t, LUNA_WDT_RESET_MODE_FULL_CHIP);
+	writel(ctrl | LUNA_WDT_CTRL_EN, wdt->base + LUNA_WDT_CTRL);
+	luna_wdt_kick(wdt);
 	spin_unlock_irqrestore(&wdt->lock, flags);
 
 	set_bit(WDOG_HW_RUNNING, &wdd->status);
@@ -387,15 +387,15 @@ static int rtl960x_wdt_start(struct watchdog_device *wdd)
 	return 0;
 }
 
-static int rtl960x_wdt_stop(struct watchdog_device *wdd)
+static int luna_wdt_stop(struct watchdog_device *wdd)
 {
-	struct rtl960x_wdt *wdt = to_rtl960x_wdt(wdd);
+	struct luna_wdt *wdt = to_luna_wdt(wdd);
 	unsigned long flags;
 	u32 ctrl;
 
 	spin_lock_irqsave(&wdt->lock, flags);
-	ctrl = readl(wdt->base + RTL960X_WDT_CTRL);
-	writel(ctrl & ~RTL960X_WDT_CTRL_EN, wdt->base + RTL960X_WDT_CTRL);
+	ctrl = readl(wdt->base + LUNA_WDT_CTRL);
+	writel(ctrl & ~LUNA_WDT_CTRL_EN, wdt->base + LUNA_WDT_CTRL);
 	spin_unlock_irqrestore(&wdt->lock, flags);
 
 	clear_bit(WDOG_HW_RUNNING, &wdd->status);
@@ -403,17 +403,17 @@ static int rtl960x_wdt_stop(struct watchdog_device *wdd)
 	return 0;
 }
 
-static int rtl960x_wdt_set_timeout(struct watchdog_device *wdd,
+static int luna_wdt_set_timeout(struct watchdog_device *wdd,
 				   unsigned int new_timeout)
 {
-	struct rtl960x_wdt *wdt = to_rtl960x_wdt(wdd);
-	struct rtl960x_wdt_timing t;
+	struct luna_wdt *wdt = to_luna_wdt(wdd);
+	struct luna_wdt_timing t;
 	int ret;
 
 	/* Refuse before recording it: a timeout the block cannot hold must not
 	 * end up in wdd->timeout, where the core would derive a feed interval
 	 * from a window the hardware was never given. */
-	ret = rtl960x_wdt_calc_timing(wdt->rate, new_timeout, &t);
+	ret = luna_wdt_calc_timing(wdt->rate, new_timeout, &t);
 	if (ret)
 		return ret;
 
@@ -425,7 +425,7 @@ static int rtl960x_wdt_set_timeout(struct watchdog_device *wdd,
 	 * allows WDIOC_SETTIMEOUT before the start.
 	 */
 	if (watchdog_hw_running(wdd))
-		return rtl960x_wdt_start(wdd);
+		return luna_wdt_start(wdd);
 
 	return 0;
 }
@@ -448,7 +448,7 @@ static int rtl960x_wdt_set_timeout(struct watchdog_device *wdd,
  * field definitions there and here describe one piece of hardware twice, so the
  * offline case luna_wdt_test asserts that the two agree.
  */
-static const struct watchdog_info rtl960x_wdt_info = {
+static const struct watchdog_info luna_wdt_info = {
 	.identity	= "Realtek Luna WDT",
 	/*
 	 * No WDIOF_CARDRESET: see the file header.  Nothing on this SoC has been
@@ -459,18 +459,18 @@ static const struct watchdog_info rtl960x_wdt_info = {
 			  WDIOF_MAGICCLOSE,
 };
 
-static const struct watchdog_ops rtl960x_wdt_ops = {
+static const struct watchdog_ops luna_wdt_ops = {
 	.owner		= THIS_MODULE,
-	.start		= rtl960x_wdt_start,
-	.stop		= rtl960x_wdt_stop,
-	.ping		= rtl960x_wdt_ping,
-	.set_timeout	= rtl960x_wdt_set_timeout,
+	.start		= luna_wdt_start,
+	.stop		= luna_wdt_stop,
+	.ping		= luna_wdt_ping,
+	.set_timeout	= luna_wdt_set_timeout,
 };
 
-static int rtl960x_wdt_probe(struct platform_device *pdev)
+static int luna_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct rtl960x_wdt *wdt;
+	struct luna_wdt *wdt;
 	struct resource *res;
 	resource_size_t phys;
 	unsigned int max_timeout;
@@ -488,10 +488,10 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	if (!res)
 		return dev_err_probe(dev, -EINVAL,
 				     "missing the watchdog register window\n");
-	if (resource_size(res) < RTL960X_WDT_BLOCK_SIZE)
+	if (resource_size(res) < LUNA_WDT_BLOCK_SIZE)
 		return dev_err_probe(dev, -EINVAL,
 				     "window at %pa is too small, need %#x\n",
-				     &res->start, RTL960X_WDT_BLOCK_SIZE);
+				     &res->start, LUNA_WDT_BLOCK_SIZE);
 	phys = res->start;
 
 	/*
@@ -514,8 +514,8 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	if (!wdt->rate)
 		return dev_err_probe(dev, -EINVAL, "input clock reports 0 Hz\n");
 
-	max_timeout = rtl960x_wdt_max_timeout(wdt->rate);
-	if (max_timeout < RTL960X_WDT_MIN_TIMEOUT)
+	max_timeout = luna_wdt_max_timeout(wdt->rate);
+	if (max_timeout < LUNA_WDT_MIN_TIMEOUT)
 		return dev_err_probe(dev, -EINVAL,
 				     "a %lu Hz input clock cannot reach a 1 s window\n",
 				     wdt->rate);
@@ -529,12 +529,12 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	 * block asserts it from phase 2 in hardware.
 	 */
 
-	wdt->wdd.info = &rtl960x_wdt_info;
-	wdt->wdd.ops = &rtl960x_wdt_ops;
+	wdt->wdd.info = &luna_wdt_info;
+	wdt->wdd.ops = &luna_wdt_ops;
 	wdt->wdd.parent = dev;
-	wdt->wdd.min_timeout = RTL960X_WDT_MIN_TIMEOUT;
+	wdt->wdd.min_timeout = LUNA_WDT_MIN_TIMEOUT;
 	wdt->wdd.max_timeout = max_timeout;
-	wdt->wdd.timeout = min(RTL960X_WDT_DEFAULT_TIMEOUT, max_timeout);
+	wdt->wdd.timeout = min(LUNA_WDT_DEFAULT_TIMEOUT, max_timeout);
 
 
 	/*
@@ -545,8 +545,8 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	 * forever, with nothing in any log to see.  So the state is READ and
 	 * reported, never assumed.
 	 */
-	ctrl = readl(wdt->base + RTL960X_WDT_CTRL);
-	adopted = !!(ctrl & RTL960X_WDT_CTRL_EN);
+	ctrl = readl(wdt->base + LUNA_WDT_CTRL);
+	adopted = !!(ctrl & LUNA_WDT_CTRL_EN);
 
 	ret = watchdog_init_timeout(&wdt->wdd, timeout, dev);
 	if (ret)
@@ -578,7 +578,7 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 		 * an inherited window shorter than ours would be fed too slowly
 		 * and bite during our own boot.
 		 */
-		ret = rtl960x_wdt_start(&wdt->wdd);
+		ret = luna_wdt_start(&wdt->wdd);
 		if (ret)
 			return dev_err_probe(dev, ret,
 					     "cannot reprogram the inherited window\n");
@@ -600,20 +600,20 @@ static int rtl960x_wdt_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id rtl960x_wdt_of_match[] = {
+static const struct of_device_id luna_wdt_of_match[] = {
 	{ .compatible = "realtek,rtl960x-wdt" },
 	{ }
 };
-MODULE_DEVICE_TABLE(of, rtl960x_wdt_of_match);
+MODULE_DEVICE_TABLE(of, luna_wdt_of_match);
 
-static struct platform_driver rtl960x_wdt_driver = {
-	.probe	= rtl960x_wdt_probe,
+static struct platform_driver luna_wdt_driver = {
+	.probe	= luna_wdt_probe,
 	.driver	= {
 		.name		= "rtl960x-wdt",
-		.of_match_table	= rtl960x_wdt_of_match,
+		.of_match_table	= luna_wdt_of_match,
 	},
 };
-module_platform_driver(rtl960x_wdt_driver);
+module_platform_driver(luna_wdt_driver);
 
 MODULE_DESCRIPTION("Realtek Luna (RTL960x) SoC watchdog");
 MODULE_LICENSE("GPL");

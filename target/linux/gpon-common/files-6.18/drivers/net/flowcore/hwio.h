@@ -17,7 +17,7 @@
  * that does I/O cannot be shared by two silicons that share no register.
  *
  * ★ THE FIX IS THE ONE THIS TREE ALREADY PROVED ON A SMALL SCALE.
- * rtl960x_ponmac.c carries `struct rtl960x_ops { rd, wr }` and serves FOUR
+ * luna_ponmac.c carries `struct luna_ops { rd, wr }` and serves FOUR
  * chips from one object with per-chip tables. That is the whole idea, and it
  * works today. What is missing is that it stopped there: the accessor is
  * Realtek-shaped (a bare physical address, no context pointer), so the Cortina
@@ -55,7 +55,7 @@
  *   difference that lets one function serve two silicons: the offsets come
  *   from a per-chip table, and the block base lives in @ctx where the shell
  *   put it. An accessor taking absolute addresses -- which is what
- *   rtl960x_ops does today -- silently ties its callers to one memory map.
+ *   luna_ops does today -- silently ties its callers to one memory map.
  */
 struct hwio {
 	u32  (*rd)(void *ctx, u32 off);

@@ -69,7 +69,7 @@
  *     - realtek-luna   (RTL960xC, Luna)     MIPS32,  BIG-endian
  *     - dev/rtl9607c-test on x86-64 through fuzz_shims/, where it is driven
  *       offline against the oracle with no board in the loop
- *   The prefix is gpon_ and not rtl960x_ on purpose: the layer must also serve
+ *   The prefix is gpon_ and not luna_ on purpose: the layer must also serve
  *   the future ARM OLT and other brands, so a Realtek-named prefix would be too
  *   narrow for what it covers.
  *

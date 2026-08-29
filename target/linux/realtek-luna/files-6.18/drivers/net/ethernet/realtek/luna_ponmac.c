@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * TIER: FAMILY (prefix rtl960x_) — hardware shared by one silicon
+ * TIER: FAMILY (prefix luna_) — hardware shared by one silicon
  * family.  Registers and bring-up sequences belong here; GPON PROTOCOL
  * logic does NOT — that is the core tier (drivers/net/gpon).
  * Role: Luna PON-MAC and SerDes bring-up (9602C / 9603CVD / 9607C).
  *
- * SCOPE, and the name is wider than it: the prefix rtl960x_ names Realtek's
+ * SCOPE, and the name is wider than it: the prefix luna_ names Realtek's
  * whole RTL960x part-number series, but this file serves only the LUNA MIPS
  * half of it.  The RTL9607F carries a number from the same series and is a
  * Cortina Access NE core with a different register map, driven by
@@ -17,7 +17,7 @@
  * see "THE THREE TIERS" in gpon-common/files-6.18/drivers/net/gpon/gpon_common.h.
  */
 /*
- * rtl960x_ponmac.c - clean-room RTL960x family GPON PON-MAC / SerDes bring-up.
+ * luna_ponmac.c - clean-room RTL960x family GPON PON-MAC / SerDes bring-up.
  *
  * This is an ORIGINAL, data-driven reimplementation. The per-chip register
  * SEQUENCES (which registers, what values, in what order, with what delays) are
@@ -41,9 +41,9 @@
  * REMOVED 2026-08-29, and the removal is the point: this file also carried a
  * complete RTL9601B bring-up and a complete EPON mode-set for all four chips
  * -- 897 lines, every one of them UNTESTED BY ITS OWN ADMISSION ("no EPON
- * hardware available").  Nothing referenced RTL960X_CHIP_9601B or
- * RTL960X_MODE_EPON outside this file; every live caller passed
- * RTL960X_MODE_GPON, so the mode parameter has gone with them.  We ship a GPON
+ * hardware available").  Nothing referenced LUNA_CHIP_9601B or
+ * LUNA_MODE_EPON outside this file; every live caller passed
+ * LUNA_MODE_GPON, so the mode parameter has gone with them.  We ship a GPON
  * product; code for a protocol we do not ship, on silicon we do not have, is
  * not a spare part -- it is 897 lines a reader must first prove irrelevant.
  *
@@ -55,9 +55,9 @@
  * If you arrived here from the operator's brief - "rtl960x* para la familia
  * para tener codigo comun" - this IS that file, but for the HARDWARE tier
  * only, and it is already doing the job: one object serves two chip drivers
- * (the Makefile links rtl960x_ponmac.o under BOTH CONFIG_RTL9602C_GPON and
+ * (the Makefile links luna_ponmac.o under BOTH CONFIG_RTL9602C_GPON and
  * CONFIG_RTL9607C_GPON) and carries four chips' tables behind one
- * enum rtl960x_chip dispatch. There is nothing to de-duplicate here.
+ * enum luna_chip dispatch. There is nothing to de-duplicate here.
  *
  * The 2026-08-05 refactor added a SECOND, HIGHER contract - the HW-decoupled
  * GPON protocol core and its op table:
@@ -105,7 +105,7 @@
  *     gpon_*        protocol core - decides, no MMIO, runs on x86 too
  *     gpon-rtl960x.c / cortina-gpon.c   the two SHELLS - they implement
  *                                        gpon_shell_ops and do the I/O
- *     rtl960x_ponmac.c (this file) / the Cortina NE bring-up
+ *     luna_ponmac.c (this file) / the Cortina NE bring-up
  *                                        a tier BELOW both shells: silicon
  *                                        bring-up the shell calls at probe
  * So this file is a PEER of the Cortina bring-up, never a base class for it,
@@ -117,14 +117,14 @@
  *   motion - and it would have no caller here. A shared-looking file with no
  *   consumer is exactly what gpon_proto.c became (dead since 2026-06-18,
  *   deleted by the refactor); do not build a second one.
- * ! DO NOT merge struct rtl960x_ops (below) into gpon_shell_ops. It is a raw
+ * ! DO NOT merge struct luna_ops (below) into gpon_shell_ops. It is a raw
  *   REGISTER ACCESSOR {rd, wr} injected so this file needs no struct device.
  *   It is a different contract at a different tier that happens to share the
  *   word "ops".
  *
  * Two things found while verifying the above. Recorded, deliberately NOT
  * fixed - this pass is code motion, and both are pre-existing:
- *   N1. rtl960x_ponmac_serdes_cdr_reset() (the exported dispatcher at the
+ *   N1. luna_ponmac_serdes_cdr_reset() (the exported dispatcher at the
  *       bottom of this file) has ZERO callers tree-wide. The live CDR reset
  *       is gpon-rtl960x.c:3153's own inline pulse under its serdes_cdr_reset
  *       module param. Kept as-is: it is the family API for the boards not on
@@ -140,8 +140,8 @@
  * ===================================================================== *
  */
 
-#include "rtl960x_ponmac.h"
-#include "rtl960x_ponmac_logic.h"	/* hoisted logic */
+#include "luna_ponmac.h"
+#include "luna_ponmac_logic.h"	/* hoisted logic */
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -194,7 +194,7 @@ static void r960_delay_us(unsigned int us)
 	udelay(us);
 }
 
-static int r960_run(const struct rtl960x_ops *o,
+static int r960_run(const struct luna_ops *o,
 		    const struct r960_op *seq, unsigned int n)
 {
 	const struct gpon_regseq_io io = {
@@ -262,19 +262,19 @@ static int r960_run(const struct rtl960x_ops *o,
 #define C3_OMCI_FLOW		127	/* flow id reserved for OMCI            */
 
 /* SID-valid bitmap is packed 1 bit per flow: word = base + (idx/32)*4, bit idx%32 */
-static inline void c3_sidvalid(const struct rtl960x_ops *o, u32 idx, u32 v)
+static inline void c3_sidvalid(const struct luna_ops *o, u32 idx, u32 v)
 {
 	u8 b = idx & 31u;
 
-	rtl960x_rfwr(o, C3_PON_SIDVALID + (idx >> 5) * 4u, b, b, v);
+	luna_rfwr(o, C3_PON_SIDVALID + (idx >> 5) * 4u, b, b, v);
 }
 
 /* SID2QID: 7-bit physical-queue field per flow, 4 flows per 32-bit word */
-static void c3_flow2queue(const struct rtl960x_ops *o, u32 flow, u32 pqid)
+static void c3_flow2queue(const struct luna_ops *o, u32 flow, u32 pqid)
 {
 	u32 lsb = (flow % 4u) * 7u;
 
-	rtl960x_rfwr(o, C3_PON_SID2QID + (flow / 4u) * 4u, lsb + 6u, lsb, pqid);
+	luna_rfwr(o, C3_PON_SID2QID + (flow / 4u) * 4u, lsb + 6u, lsb, pqid);
 }
 
 /*
@@ -416,7 +416,7 @@ static const struct r960_op c3_sds_post[] = {
  * restore it, and bounce the 16<->20-bit transfer FIFO release-B. Used to
  * re-acquire lock without a full re-bring-up.
  */
-static int c3_cdr_reset(const struct rtl960x_ops *o)
+static int c3_cdr_reset(const struct luna_ops *o)
 {
 	u32 v = o->rd(C3_SDS_ANA_COM03);
 
@@ -425,14 +425,14 @@ static int c3_cdr_reset(const struct rtl960x_ops *o)
 	mdelay(10);
 	o->wr(C3_SDS_ANA_COM03, v);		/* restore original analog word    */
 
-	rtl960x_rfwr(o, C3_WSDS_DIG_1D, 14, 14, 0); /* transfer FIFO: assert rstb  */
+	luna_rfwr(o, C3_WSDS_DIG_1D, 14, 14, 0); /* transfer FIFO: assert rstb  */
 	mdelay(10);
-	rtl960x_rfwr(o, C3_WSDS_DIG_1D, 14, 14, 1); /* transfer FIFO: release rstb */
+	luna_rfwr(o, C3_WSDS_DIG_1D, 14, 14, 1); /* transfer FIFO: release rstb */
 	return 0;
 }
 
 /* GPON bring-up driver: pre-config tables + flow/OMCI wiring + analog gate. */
-static int c3_gpon_mode_set(const struct rtl960x_ops *o)
+static int c3_gpon_mode_set(const struct luna_ops *o)
 {
 	u32 f;
 	int rc;
@@ -446,7 +446,7 @@ static int c3_gpon_mode_set(const struct rtl960x_ops *o)
 	}
 	c3_sidvalid(o, C3_OMCI_FLOW, 1);		/* OMCI flow: SID valid    */
 	c3_flow2queue(o, C3_OMCI_FLOW, 0x7f);		/* OMCI flow -> queue      */
-	rtl960x_rfwr(o, C3_PON_OMCI_CFG, 6, 0, C3_OMCI_FLOW); /* OMCI SID select   */
+	luna_rfwr(o, C3_PON_OMCI_CFG, 6, 0, C3_OMCI_FLOW); /* OMCI SID select   */
 
 	rc = r960_run(o, c3_sds_pre,  ARRAY_SIZE(c3_sds_pre));
 	if (rc)
@@ -467,28 +467,28 @@ static int c3_gpon_mode_set(const struct rtl960x_ops *o)
 		POLL(C3_FIB_EXT_REG21, 13, 1000),
 	}, 1);
 	if (rc == 0)
-		rtl960x_rfwr(o, C3_WSDS_DIG_00, 4, 4, 0); /* 125 MHz reference: off */
+		luna_rfwr(o, C3_WSDS_DIG_00, 4, 4, 0); /* 125 MHz reference: off */
 
 	/* DS in-band accumulation low bound for PBO */
-	rtl960x_rfwr(o, C3_PON_INBW_LBOUND, 23, 0, 0xfda000);
+	luna_rfwr(o, C3_PON_INBW_LBOUND, 23, 0, 0xfda000);
 
 	return rc;
 }
 
 /* RTL9603CVD top-level entry points (thin wrappers over the c3_* internals). */
-static int rtl9603cvd_ponmac_init(const struct rtl960x_ops *o)
+static int rtl9603cvd_ponmac_init(const struct luna_ops *o)
 {
 	return r960_run(o, c3_init, ARRAY_SIZE(c3_init));
 }
 
-static int rtl9603cvd_ponmac_mode_set(const struct rtl960x_ops *o,
+static int rtl9603cvd_ponmac_mode_set(const struct luna_ops *o,
 				      int rev, int subtype)
 {
 	(void)rev; (void)subtype;	/* single SerDes variant for every rev */
 	return c3_gpon_mode_set(o);
 }
 
-static int rtl9603cvd_serdes_cdr_reset(const struct rtl960x_ops *o)
+static int rtl9603cvd_serdes_cdr_reset(const struct luna_ops *o)
 {
 	return c3_cdr_reset(o);
 }
@@ -587,7 +587,7 @@ static int c7_init_done;
  * For arroff>=32 each element owns a word (byte stride arroff/8). 'len' is the
  * element field width.
  */
-static void c7_arr(const struct rtl960x_ops *o, u32 base, u32 arroff,
+static void c7_arr(const struct luna_ops *o, u32 base, u32 arroff,
 		   u32 idx, u32 lsp, u32 len, u32 val)
 {
 	u32 phys, lsb;
@@ -601,11 +601,11 @@ static void c7_arr(const struct rtl960x_ops *o, u32 base, u32 arroff,
 		phys = base + idx * (arroff / 8u);
 		lsb  = lsp;
 	}
-	rtl960x_rfwr(o, phys, lsb + len - 1u, lsb, val);
+	luna_rfwr(o, phys, lsb + len - 1u, lsb, val);
 }
 
 /* GPON physical queue id = TCONT_QUEUE_MAX*(sched/8) + logical queue */
-static void c7_flow2queue(const struct rtl960x_ops *o, u32 flow, u32 sched, u32 q)
+static void c7_flow2queue(const struct luna_ops *o, u32 flow, u32 sched, u32 q)
 {
 	c7_arr(o, C7_PON_SID2QID, 7, flow, 0, 7,
 	       C7_TCONT_QUEUE_MAX * (sched / 8u) + q);
@@ -623,7 +623,7 @@ static u32 c7_rate(u32 rate)
  * Drain one T-cont, busy-polling the drain flag. On timeout, recover the
  * upstream NIC by toggling its GMII enables (RX off, TX off->on, RX on).
  */
-static void c7_tcont_drain(const struct rtl960x_ops *o, u32 tcont)
+static void c7_tcont_drain(const struct luna_ops *o, u32 tcont)
 {
 	u32 i;
 
@@ -635,10 +635,10 @@ static void c7_tcont_drain(const struct rtl960x_ops *o, u32 tcont)
 			break;
 
 	if (i >= 200000u) {
-		rtl960x_rfwr(o, C7_IO_CMD_0_US, 5, 5, 0);	/* US NIC RX off */
-		rtl960x_rfwr(o, C7_IO_CMD_0_US, 4, 4, 0);	/* US NIC TX off */
-		rtl960x_rfwr(o, C7_IO_CMD_0_US, 4, 4, 1);	/* US NIC TX on  */
-		rtl960x_rfwr(o, C7_IO_CMD_0_US, 5, 5, 1);	/* US NIC RX on  */
+		luna_rfwr(o, C7_IO_CMD_0_US, 5, 5, 0);	/* US NIC RX off */
+		luna_rfwr(o, C7_IO_CMD_0_US, 4, 4, 0);	/* US NIC TX off */
+		luna_rfwr(o, C7_IO_CMD_0_US, 4, 4, 1);	/* US NIC TX on  */
+		luna_rfwr(o, C7_IO_CMD_0_US, 5, 5, 1);	/* US NIC RX on  */
 	}
 }
 
@@ -649,15 +649,15 @@ static void c7_tcont_drain(const struct rtl960x_ops *o, u32 tcont)
  * OMCI trap priority and dying-gasp comparator polarity. (rev>A would also
  * init switch-PBO; that lives in a separate subsystem.)
  */
-static int c7_ponmac_init(const struct rtl960x_ops *o, int rev, int subtype)
+static int c7_ponmac_init(const struct luna_ops *o, int rev, int subtype)
 {
 	u32 i;
 
 	(void)subtype; (void)rev;
 
-	rtl960x_rfwr(o, C7_SDS_ANA_COM17, 0, 0, 1);	/* BEN TTL output on    */
-	rtl960x_rfwr(o, C7_PON_BW_THRES, 29, 16, 5);	/* US last-grant thresh */
-	rtl960x_rfwr(o, C7_PON_BW_THRES, 13,  0, 5);	/* US runt-request thresh*/
+	luna_rfwr(o, C7_SDS_ANA_COM17, 0, 0, 1);	/* BEN TTL output on    */
+	luna_rfwr(o, C7_PON_BW_THRES, 29, 16, 5);	/* US last-grant thresh */
+	luna_rfwr(o, C7_PON_BW_THRES, 13,  0, 5);	/* US runt-request thresh*/
 
 	if (c7_init_done)
 		for (i = 0; i < C7_GPON_TCONT_MAX; i++)
@@ -668,7 +668,7 @@ static int c7_ponmac_init(const struct rtl960x_ops *o, int rev, int subtype)
 		c7_arr(o, C7_PON_SCH_QMAP, 32, i, 0, 32, 0);	/* clear queue mask*/
 	}
 
-	rtl960x_rfwr(o, C7_PON_SCH_CTRL, 18, 18, 1);	/* drop on PIR overflow */
+	luna_rfwr(o, C7_PON_SCH_CTRL, 18, 18, 1);	/* drop on PIR overflow */
 
 	for (i = 0; i < C7_PON_QUEUE_MAX; i++) {
 		c7_arr(o, C7_PON_WFQ_TYPE,    1,  i, 0,  1, 0);			/* strict   */
@@ -677,8 +677,8 @@ static int c7_ponmac_init(const struct rtl960x_ops *o, int rev, int subtype)
 		c7_arr(o, C7_PON_WFQ_WEIGHT,  10, i, 0, 10, 1);			/* weight=1 */
 	}
 
-	rtl960x_rfwr(o, C7_PON_TRAP_CFG, 2, 0, 7);	/* OMCI/MPCP top priority */
-	rtl960x_rfwr(o, C7_DYNGASP_CTRL, 3, 3, 1);	/* invert dying-gasp cmp  */
+	luna_rfwr(o, C7_PON_TRAP_CFG, 2, 0, 7);	/* OMCI/MPCP top priority */
+	luna_rfwr(o, C7_DYNGASP_CTRL, 3, 3, 1);	/* invert dying-gasp cmp  */
 
 	c7_init_done = 1;
 	return 0;
@@ -690,7 +690,7 @@ static int c7_ponmac_init(const struct rtl960x_ops *o, int rev, int subtype)
  * dedicate the OMCI flow to its own T-cont/queue, mark its SID valid, and point
  * the OMCI SID select at it.
  */
-static void c7_gpon_pre(const struct rtl960x_ops *o)
+static void c7_gpon_pre(const struct luna_ops *o)
 {
 	u32 f;
 
@@ -700,7 +700,7 @@ static void c7_gpon_pre(const struct rtl960x_ops *o)
 	}
 	c7_flow2queue(o, C7_OMCI_FLOW, C7_OMCI_TCONT, C7_OMCI_QUEUE);
 	c7_arr(o, C7_PON_SIDVALID, 1, C7_OMCI_FLOW, 0, 1, 1);
-	rtl960x_rfwr(o, C7_PON_OMCI_CFG, 6, 0, C7_OMCI_FLOW);
+	luna_rfwr(o, C7_PON_OMCI_CFG, 6, 0, C7_OMCI_FLOW);
 }
 
 /*
@@ -710,22 +710,22 @@ static void c7_gpon_pre(const struct rtl960x_ops *o)
  * force mode, set accept max length, wait analog-ready then drop the 125 MHz
  * clock for power saving, and seed the DS in-band low bound.
  */
-static int c7_gpon_post(const struct rtl960x_ops *o)
+static int c7_gpon_post(const struct luna_ops *o)
 {
 	u32 i;
 
-	rtl960x_rfwr(o, C7_SOFTWARE_RST, 10, 10, 1);	/* switch-core reset */
+	luna_rfwr(o, C7_SOFTWARE_RST, 10, 10, 1);	/* switch-core reset */
 	mdelay(10);
 
-	rtl960x_rfwr(o, C7_WSDS_DIG_1D, 16, 16, 0);	/* TX iface FIFO assert rstb  */
-	rtl960x_rfwr(o, C7_WSDS_DIG_1D, 16, 16, 1);	/* TX iface FIFO release rstb */
-	rtl960x_rfwr(o, C7_WSDS_DIG_1D, 15, 15, 0);	/* RX iface FIFO assert rstb  */
-	rtl960x_rfwr(o, C7_WSDS_DIG_1D, 15, 15, 1);	/* RX iface FIFO release rstb */
+	luna_rfwr(o, C7_WSDS_DIG_1D, 16, 16, 0);	/* TX iface FIFO assert rstb  */
+	luna_rfwr(o, C7_WSDS_DIG_1D, 16, 16, 1);	/* TX iface FIFO release rstb */
+	luna_rfwr(o, C7_WSDS_DIG_1D, 15, 15, 0);	/* RX iface FIFO assert rstb  */
+	luna_rfwr(o, C7_WSDS_DIG_1D, 15, 15, 1);	/* RX iface FIFO release rstb */
 
-	rtl960x_rfwr(o, C7_WSDS_DIG_18, 12, 12, 1);	/* BEN output on        */
-	rtl960x_rfwr(o, C7_P_MISC_PON, 2, 2, 1);	/* PON port accept undersize */
-	rtl960x_rfwr(o, C7_FORCE_BEN, 0, 0, 0);		/* BEN force mode off   */
-	rtl960x_rfwr(o, C7_ACCEPT_MAX_LEN + C7_PON_PORT * 4u, 13, 0, 2031); /* max len */
+	luna_rfwr(o, C7_WSDS_DIG_18, 12, 12, 1);	/* BEN output on        */
+	luna_rfwr(o, C7_P_MISC_PON, 2, 2, 1);	/* PON port accept undersize */
+	luna_rfwr(o, C7_FORCE_BEN, 0, 0, 0);		/* BEN force mode off   */
+	luna_rfwr(o, C7_ACCEPT_MAX_LEN + C7_PON_PORT * 4u, 13, 0, 2031); /* max len */
 
 	for (i = 0; i < 10000u; i++) {		/* wait analog-ready (V2ANALOG) */
 		if ((o->rd(C7_FIB_EXT_REG21) >> 13) & 0x1u)
@@ -733,9 +733,9 @@ static int c7_gpon_post(const struct rtl960x_ops *o)
 		udelay(200);
 	}
 	if (i < 10000u)
-		rtl960x_rfwr(o, C7_WSDS_DIG_00, 4, 4, 0);	/* 125 MHz clock off */
+		luna_rfwr(o, C7_WSDS_DIG_00, 4, 4, 0);	/* 125 MHz clock off */
 
-	rtl960x_rfwr(o, C7_PON_INBW_LBOUND, 23, 0, 0xfda000);	/* DS in-band lbound */
+	luna_rfwr(o, C7_PON_INBW_LBOUND, 23, 0, 0xfda000);	/* DS in-band lbound */
 	return 0;
 }
 
@@ -868,7 +868,7 @@ static const struct r960_op c7_sds_v3[] = {
  * GPON mode-set: common SID/OMCI front matter, the rev-selected SerDes patch
  * table, then the common GPON tail. rev A->V1, B->V2, C and later->V3.
  */
-static int c7_gpon_mode_set(const struct rtl960x_ops *o, int rev, int subtype)
+static int c7_gpon_mode_set(const struct luna_ops *o, int rev, int subtype)
 {
 	const struct r960_op *sds;
 	unsigned int n;
@@ -879,9 +879,9 @@ static int c7_gpon_mode_set(const struct rtl960x_ops *o, int rev, int subtype)
 	c7_gpon_pre(o);
 
 	switch (rev) {
-	case RTL960X_REV_A:
+	case LUNA_REV_A:
 		sds = c7_sds_v1; n = ARRAY_SIZE(c7_sds_v1); break;
-	case RTL960X_REV_B:
+	case LUNA_REV_B:
 		sds = c7_sds_v2; n = ARRAY_SIZE(c7_sds_v2); break;
 	default:
 		sds = c7_sds_v3; n = ARRAY_SIZE(c7_sds_v3); break;
@@ -899,7 +899,7 @@ static int c7_gpon_mode_set(const struct rtl960x_ops *o, int rev, int subtype)
  * the original analog word, then bounce the 16<->20-bit transfer FIFO
  * release-B. Re-acquires lock without a full re-bring-up.
  */
-static int c7_cdr_reset(const struct rtl960x_ops *o)
+static int c7_cdr_reset(const struct luna_ops *o)
 {
 	u32 v = o->rd(C7_SDS_ANA_COM09);
 
@@ -908,25 +908,25 @@ static int c7_cdr_reset(const struct rtl960x_ops *o)
 	mdelay(10);
 	o->wr(C7_SDS_ANA_COM09, v);			/* restore original word   */
 
-	rtl960x_rfwr(o, C7_WSDS_DIG_1D, 14, 14, 0);	/* transfer FIFO assert rstb */
+	luna_rfwr(o, C7_WSDS_DIG_1D, 14, 14, 0);	/* transfer FIFO assert rstb */
 	mdelay(10);
-	rtl960x_rfwr(o, C7_WSDS_DIG_1D, 14, 14, 1);	/* transfer FIFO release rstb*/
+	luna_rfwr(o, C7_WSDS_DIG_1D, 14, 14, 1);	/* transfer FIFO release rstb*/
 	return 0;
 }
 
 /* RTL9607C top-level entry points (thin wrappers over the c7_* internals). */
-static int rtl9607c_ponmac_init(const struct rtl960x_ops *o)
+static int rtl9607c_ponmac_init(const struct luna_ops *o)
 {
-	return c7_ponmac_init(o, RTL960X_REV_A, RTL960X_SUBTYPE_NONE);
+	return c7_ponmac_init(o, LUNA_REV_A, LUNA_SUBTYPE_NONE);
 }
 
-static int rtl9607c_ponmac_mode_set(const struct rtl960x_ops *o,
+static int rtl9607c_ponmac_mode_set(const struct luna_ops *o,
 				    int rev, int subtype)
 {
 	return c7_gpon_mode_set(o, rev, subtype);
 }
 
-static int rtl9607c_serdes_cdr_reset(const struct rtl960x_ops *o)
+static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
 {
 	return c7_cdr_reset(o);
 }
@@ -1101,7 +1101,7 @@ static const struct r960_op c2_ponmac_init[] = {
 	/* REG01 (SDS_ANA_COM 0x22584) is handled in rtl9602c_ponmac_init() below — the
 	 * stock-good post-reset value is 0x73a4 (CMU bit14=1, BEN_TTL_OUT bit0=0), which
 	 * the golden-before-reset write cannot achieve (the SDS reset wipes bit14 and the
-	 * old BEN_TTL write set bit0). See rtl960x_c2_stock_analog. */
+	 * old BEN_TTL write set bit0). See luna_c2_stock_analog. */
 	FLD(0x1B0001ECu,  0,  0, 1),	/* DYNGASP_CMP_INV = 1                  */
 	FLD(0x1BF02150u, 29, 16, 5),	/* PON_BW_THRES last-grant              */
 	FLD(0x1BF02150u, 13,  0, 5),	/* PON_BW_THRES runt-grant             */
@@ -1119,7 +1119,7 @@ static const struct r960_op c2_ponmac_init[] = {
  * them post-reset (stock applies its analog config AFTER the reset). bit14 sits in the
  * shared CMU block -> a marginal TX serializer that locks only ~50% per power-on.
  * =0 restores the legacy BEN_TTL_OUT=1 and leaves REG01 bit14 / REG11 at reset defaults. */
-int rtl960x_c2_stock_analog = 1;
+int luna_c2_stock_analog = 1;
 
 /* A/B knob (gpon.serdes_analog_postreset). Default 1 = program the FULL analog
  * CMU/CDR golden table AFTER the SDS reset (stock rev-A order: the SDS reset
@@ -1132,20 +1132,20 @@ int rtl960x_c2_stock_analog = 1;
  * BEFORE the CMU re-locks and BEFORE the RX_EN 0->1 start edge -> deterministic lock on
  * every cold boot AND soft/internal restart (re-derived from scratch each mode_set).
  * =0 keeps the legacy pre-reset placement. */
-int rtl960x_c2_analog_postreset = 1;
+int luna_c2_analog_postreset = 1;
 
-static int rtl9602c_ponmac_init(const struct rtl960x_ops *o)
+static int rtl9602c_ponmac_init(const struct luna_ops *o)
 {
 	int ret = r960_run(o, c2_ponmac_init, ARRAY_SIZE(c2_ponmac_init));
 
 	if (ret)
 		return ret;
-	if (rtl960x_c2_stock_analog) {
-		rtl960x_rfwr(o, 0x1B022584u, 14, 14, 1);	/* REG01 CMU bit14 = 1 (stock) */
-		rtl960x_rfwr(o, 0x1B022584u,  0,  0, 0);	/* REG01 BEN_TTL_OUT = 0 (stock) */
-		rtl960x_rfwr(o, 0x1B0225ACu,  7,  0, 0);	/* REG11 RX_FILT_CONFIG = 0 (stock) */
+	if (luna_c2_stock_analog) {
+		luna_rfwr(o, 0x1B022584u, 14, 14, 1);	/* REG01 CMU bit14 = 1 (stock) */
+		luna_rfwr(o, 0x1B022584u,  0,  0, 0);	/* REG01 BEN_TTL_OUT = 0 (stock) */
+		luna_rfwr(o, 0x1B0225ACu,  7,  0, 0);	/* REG11 RX_FILT_CONFIG = 0 (stock) */
 	} else {
-		rtl960x_rfwr(o, 0x1B022584u,  0,  0, 1);	/* legacy REG_BEN_TTL_OUT = 1 */
+		luna_rfwr(o, 0x1B022584u,  0,  0, 1);	/* legacy REG_BEN_TTL_OUT = 1 */
 	}
 	return 0;
 }
@@ -1161,7 +1161,7 @@ static int rtl9602c_ponmac_init(const struct rtl960x_ops *o)
  * (REG12[15]=REG_RX_SD_POR_SEL; REG08[15] is in the RESERVED top-16 field, so
  * the prior REG08[15] toggle wrote a reserved bit = wrong/no-op-with-side-effects).
  */
-static int rtl9602c_serdes_cdr_reset(const struct rtl960x_ops *o)
+static int rtl9602c_serdes_cdr_reset(const struct luna_ops *o)
 {
 	u32 cdr = o->rd(C2_SDS_ANA_COM_REG12);
 
@@ -1197,7 +1197,7 @@ static const struct r960_op c2_sds_pre[] = {
  * are RMW, asserting it here leaves it LATCHED through the whole bring-up = an extra
  * SDS-config reset domain stock never touches, the prime suspect for the per-power-on
  * US-TX serializer/PLL phase re-roll (cold-start WAN ~50%). bit7 is now applied
- * conditionally in rtl9602c_ponmac_mode_set behind rtl960x_c2_sds_cfgrst (default 0
+ * conditionally in rtl9602c_ponmac_mode_set behind luna_c2_sds_cfgrst (default 0
  * = stock bit0-only = the fix). */
 static const struct r960_op c2_sds_reset[] = {
 	FLD(C2_SW_SOFTWARE_RST, 0, 0, 1),	/* CMD_SDS_RST_PS (bit0 only, stock)  */
@@ -1271,32 +1271,32 @@ static const struct r960_op c2_sds_tx[] = {
  * serdesCdr_reset pulse. These late edges on the already-running serializer are
  * the prime suspect for per-boot serializer-phase jitter (cold-start WAN ~50%).
  * Default 1 = legacy behavior. */
-int rtl960x_c2_postmode_perturb = 1;
+int luna_c2_postmode_perturb = 1;
 
 /* A/B knob (gpon.serdes_cmu_settle_ms): milliseconds to wait AFTER forcing the 125M
  * ref clock and BEFORE releasing the SerDes interface reset-B lines, so the TX CMU PLL
  * locks to the ref before the serializer phase is latched. 0 = legacy (no extra settle).
  * Candidate fix for the cold-start ~50% US-TX "Laser out" metastable serializer phase. */
-int rtl960x_c2_cmu_settle_ms;
+int luna_c2_cmu_settle_ms;
 
 /* A/B knob (gpon.serdes_clkgate_rstb): 1 = gate the SerDes word clock (STOP_CLK=1)
  * across the DIG_1D interface reset-B release and un-gate LAST, so the word divider
  * restarts on one defined edge (defeats the async-reset-on-running-divider ~50%
  * serializer-phase coin-flip). 0 = legacy free-running release. Cold-start fix candidate. */
-int rtl960x_c2_clkgate_rstb;
+int luna_c2_clkgate_rstb;
 
 /* A/B knob (gpon.serdes_skip_rstb_dance): live debug confirmed WSDS_DIG_1D is ALREADY 0x1c000 (interface
  * reset-B released) before mode_set and the SDS reset does not clear it. =1 SKIPS the c2_sds_rstb
  * dance (DIG_00=0xf30 + the DIG_1D[15/16] assert->0/release->1) entirely — issuing it is a gratuitous
  * TX/RX reset-B 1->0->1 pulse on a running serializer (async-reset-on-running-divider phase latch).
  * Stock rev-A bring-up never pulses it. Cold-start determinism fix candidate. 0 = legacy dance. */
-int rtl960x_c2_skip_rstb_dance;
+int luna_c2_skip_rstb_dance;
 
 /* A/B knob set by the board (gpon.serdes_sds_cfgrst). Default 0 = pulse ONLY
  * CMD_SDS_RST_PS bit0 in the SerDes reset (stock rev-A = the cold-start fix); 1 =
  * also assert CMD_SDS_CFG_RST_PS bit7 (legacy, leaves the extra reset domain
  * latched through bring-up -> per-power-on US-TX phase re-roll). */
-int rtl960x_c2_sds_cfgrst;
+int luna_c2_sds_cfgrst;
 
 static const struct r960_op c2_sds_mode[] = {
 	FLD(C2_SDS_ANA_MISC_REG02, 13, 13, 1),	/* FRC_BER_NOTIFY_VAL = 1         */
@@ -1307,7 +1307,7 @@ static const struct r960_op c2_sds_mode[] = {
 };
 
 /* Post-GPON-mode TX-interface reset-B re-sync (DIG_1D[16] 0->1) — stock rev-A
- * OMITS this; gated by rtl960x_c2_postmode_perturb. */
+ * OMITS this; gated by luna_c2_postmode_perturb. */
 static const struct r960_op c2_sds_txresync[] = {
 	FLD(C2_WSDS_DIG_1D, 16, 16, 0),		/* TX interface reset-B 0         */
 	DLY(2),
@@ -1321,7 +1321,7 @@ static const struct r960_op c2_sds_txresync[] = {
  * state; they are redundant and lengthen the bring-up with ~134 extra bus transactions before
  * the CMU/serializer phase latches. The active GPON bank (0x22708) + the FIB PDOWN-clear are
  * kept. Cold-start determinism fix candidate (makes the bring-up timing stock-minimal). */
-int rtl960x_c2_minimal_analog;
+int luna_c2_minimal_analog;
 
 /* Registers the c7 SerDes/fiber DIAGNOSTIC reads.  They were declared inside
  * the (now removed) EPON section, which is why a GPON-only build could not
@@ -1332,13 +1332,13 @@ int rtl960x_c2_minimal_analog;
 
 /* Program the full analog CMU/CDR golden table + clear fiber power-down on every
  * FIB bank. Factored so it can run either BEFORE the SDS reset (legacy) or AFTER it
- * (stock rev-A, the cold-start determinism fix) per rtl960x_c2_analog_postreset. */
-static void c2_program_analog(const struct rtl960x_ops *o)
+ * (stock rev-A, the cold-start determinism fix) per luna_c2_analog_postreset. */
+static void c2_program_analog(const struct luna_ops *o)
 {
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(c2_analog); i++) {
-		if (rtl960x_c2_minimal_analog && c2_off_overconfig(c2_analog[i].off))
+		if (luna_c2_minimal_analog && c2_off_overconfig(c2_analog[i].off))
 			continue;	/* stock rev-A never writes these (over-configure) */
 		o->wr(c2_analog[i].off, c2_analog[i].val);
 	}
@@ -1347,7 +1347,7 @@ static void c2_program_analog(const struct rtl960x_ops *o)
 		      o->rd(c2_fib_reg0_banks[i]) & ~C2_FIB_REG0_PDOWN);
 }
 
-static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
+static int rtl9602c_ponmac_mode_set(const struct luna_ops *o,
 				    int rev, int subtype)
 {
 	unsigned int i;
@@ -1362,17 +1362,17 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 
 	/* Step 2 (LEGACY placement): program the FULL analog block + turn fiber power
 	 * on BEFORE the reset. The SDS reset wipes analog to defaults, so by default
-	 * (rtl960x_c2_analog_postreset=1) this is SKIPPED and the analog is programmed
+	 * (luna_c2_analog_postreset=1) this is SKIPPED and the analog is programmed
 	 * post-reset below (stock rev-A order = the cold-start determinism fix). */
-	if (!rtl960x_c2_analog_postreset)
+	if (!luna_c2_analog_postreset)
 		c2_program_analog(o);
 
 	/* Step 3: pulse the SDS reset (by default the analog is programmed AFTER it,
-	 * not latched by it; see rtl960x_c2_analog_postreset). Stock pulses ONLY bit0
+	 * not latched by it; see luna_c2_analog_postreset). Stock pulses ONLY bit0
 	 * (CMD_SDS_RST_PS); legacy also asserted bit7 (CMD_SDS_CFG_RST_PS) which then
 	 * stays RMW-latched through bring-up. Apply bit7 only when explicitly enabled. */
-	if (rtl960x_c2_sds_cfgrst)
-		rtl960x_rfwr(o, C2_SW_SOFTWARE_RST, 7, 7, 1);	/* legacy CMD_SDS_CFG_RST_PS */
+	if (luna_c2_sds_cfgrst)
+		luna_rfwr(o, C2_SW_SOFTWARE_RST, 7, 7, 1);	/* legacy CMD_SDS_CFG_RST_PS */
 	ret = r960_run(o, c2_sds_reset, ARRAY_SIZE(c2_sds_reset));
 	if (ret)
 		return ret;
@@ -1382,8 +1382,8 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 	 * charge-pump/LDO/tank + GPON CDR hold their FINAL operating-point values before
 	 * the CMU re-locks and before the RX_EN 0->1 start edge (c2_sds_rx_arm). This is
 	 * the cold-start determinism fix (stock rev-A order: the SDS reset runs first,
-	 * then the ModeV1 path programs the analog). Gated by rtl960x_c2_analog_postreset (default 1). */
-	if (rtl960x_c2_analog_postreset)
+	 * then the ModeV1 path programs the analog). Gated by luna_c2_analog_postreset (default 1). */
+	if (luna_c2_analog_postreset)
 		c2_program_analog(o);
 
 	/* Step 4: force the 125M ref clock, OPTIONALLY let the TX CMU PLL lock to it,
@@ -1393,8 +1393,8 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 	 * (cold-start ~50% "Laser out"). A CMU-lock settle therefore MUST be inserted
 	 * HERE — between the ref-force and the reset-B release — not at the end of
 	 * mode_set (by then the phase is already latched). Gated by
-	 * rtl960x_c2_cmu_settle_ms (default 0 = legacy: no extra settle). */
-	if (rtl960x_c2_skip_rstb_dance) {
+	 * luna_c2_cmu_settle_ms (default 0 = legacy: no extra settle). */
+	if (luna_c2_skip_rstb_dance) {
 		/* SKIP the dance entirely. Observed: DIG_1D is already 0x1c000 (interface
 		 * reset-B released) and DIG_00 already 0xf30 here, and the SDS reset does not
 		 * clear them — so the assert->release would be a gratuitous TX/RX reset-B
@@ -1402,7 +1402,7 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 		 * it. Leave both registers at their already-operational values (no edge). */
 		pr_info("rtl9602c-gpon: skip interface reset-B dance (DIG_1D=0x%x already released)\n",
 			o->rd(C2_WSDS_DIG_1D));
-	} else if (rtl960x_c2_clkgate_rstb) {
+	} else if (luna_c2_clkgate_rstb) {
 		/* SYNCHRONOUS clock-gated reset-B release (cold-start metastability fix
 		 * candidate). Legacy releases the DIG_1D[14:16] interface reset-B with the
 		 * word-divider clock FREE-RUNNING (STOP_CLK=0 in DIG00_RUN=0xf30) — the
@@ -1421,8 +1421,8 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 		ret = r960_run(o, c2_sds_rstb, 1);	/* WR DIG_00 = RUN (125M ref forced) */
 		if (ret)
 			return ret;
-		if (rtl960x_c2_cmu_settle_ms)
-			mdelay(rtl960x_c2_cmu_settle_ms);
+		if (luna_c2_cmu_settle_ms)
+			mdelay(luna_c2_cmu_settle_ms);
 		ret = r960_run(o, c2_sds_rstb + 1, ARRAY_SIZE(c2_sds_rstb) - 1); /* reset-B dance */
 		if (ret)
 			return ret;
@@ -1447,11 +1447,11 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 	 * and BEFORE the CFG_SDS_MODE=GPON commit below, so the serializer LOCKS with the
 	 * stock-good analog config. This is the ONLY stock-vs-ours SerDes diff (cold-start
 	 * ~50% US-TX "Laser out"); bit14 is in the shared CMU block. Gated by
-	 * rtl960x_c2_stock_analog (default 1 = fix). */
-	if (rtl960x_c2_stock_analog) {
-		rtl960x_rfwr(o, 0x1B022584u, 14, 14, 1);	/* REG01 CMU bit14 = 1 (stock) */
-		rtl960x_rfwr(o, 0x1B022584u,  0,  0, 0);	/* REG01 BEN_TTL_OUT = 0 (stock) */
-		rtl960x_rfwr(o, 0x1B0225ACu,  7,  0, 0);	/* REG11 RX_FILT_CONFIG = 0 (stock) */
+	 * luna_c2_stock_analog (default 1 = fix). */
+	if (luna_c2_stock_analog) {
+		luna_rfwr(o, 0x1B022584u, 14, 14, 1);	/* REG01 CMU bit14 = 1 (stock) */
+		luna_rfwr(o, 0x1B022584u,  0,  0, 0);	/* REG01 BEN_TTL_OUT = 0 (stock) */
+		luna_rfwr(o, 0x1B0225ACu,  7,  0, 0);	/* REG11 RX_FILT_CONFIG = 0 (stock) */
 	}
 
 	/* Step 7a + 7b: force-SD + commit GPON mode. */
@@ -1461,7 +1461,7 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 
 	/* The TX reset-B re-sync + the post-mode serdesCdr_reset pulse are the two
 	 * perturbations stock rev-A omits; do them only when explicitly enabled. */
-	if (rtl960x_c2_postmode_perturb) {
+	if (luna_c2_postmode_perturb) {
 		ret = r960_run(o, c2_sds_txresync, ARRAY_SIZE(c2_sds_txresync));
 		if (ret)
 			return ret;
@@ -1469,7 +1469,7 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 	}
 
 	/* Keep the MAC clock ungated. */
-	rtl960x_rfwr(o, C2_WSDS_DIG_00, 0, 0, 0);
+	luna_rfwr(o, C2_WSDS_DIG_00, 0, 0, 0);
 
 	/* Wait for the analog to report ready (FIB_EXT_REG21 bit13); ~200 ms cap.
 	 * Return the poll result, matching the stock SerDes-init final return. */
@@ -1478,7 +1478,7 @@ static int rtl9602c_ponmac_mode_set(const struct rtl960x_ops *o,
 	}, 1);
 }
 
-void rtl960x_c7_diag(const struct rtl960x_ops *o, struct seq_file *s)
+void luna_c7_diag(const struct luna_ops *o, struct seq_file *s)
 {
 	u32 fib0, com09, fib21, sds_sts, gtc_los, sds_cfg, wsd18, fib16;
 
@@ -1505,46 +1505,46 @@ void rtl960x_c7_diag(const struct rtl960x_ops *o, struct seq_file *s)
 }
 
 /* ---- dispatch --------------------------------------------------------- */
-int rtl960x_ponmac_init(enum rtl960x_chip chip, int rev, int subtype,
-			const struct rtl960x_ops *o)
+int luna_ponmac_init(enum luna_chip chip, int rev, int subtype,
+			const struct luna_ops *o)
 {
 	(void)rev; (void)subtype;	/* per-chip init takes (o) only */
 	switch (chip) {
-	case RTL960X_CHIP_9602C:
+	case LUNA_CHIP_9602C:
 		return rtl9602c_ponmac_init(o);
-	case RTL960X_CHIP_9603CVD:
+	case LUNA_CHIP_9603CVD:
 		return rtl9603cvd_ponmac_init(o);
-	case RTL960X_CHIP_9607C:
+	case LUNA_CHIP_9607C:
 		return rtl9607c_ponmac_init(o);
 	default:
 		return -ENOTSUPP;
 	}
 }
 
-int rtl960x_ponmac_mode_set(enum rtl960x_chip chip, int rev, int subtype,
-			    const struct rtl960x_ops *o)
+int luna_ponmac_mode_set(enum luna_chip chip, int rev, int subtype,
+			    const struct luna_ops *o)
 {
 	switch (chip) {
-	case RTL960X_CHIP_9602C:
+	case LUNA_CHIP_9602C:
 		return rtl9602c_ponmac_mode_set(o, rev, subtype);
-	case RTL960X_CHIP_9603CVD:
+	case LUNA_CHIP_9603CVD:
 		return rtl9603cvd_ponmac_mode_set(o, rev, subtype);
-	case RTL960X_CHIP_9607C:
+	case LUNA_CHIP_9607C:
 		return rtl9607c_ponmac_mode_set(o, rev, subtype);
 	default:
 		return -ENOTSUPP;
 	}
 }
 
-int rtl960x_ponmac_serdes_cdr_reset(enum rtl960x_chip chip,
-				    const struct rtl960x_ops *o)
+int luna_ponmac_serdes_cdr_reset(enum luna_chip chip,
+				    const struct luna_ops *o)
 {
 	switch (chip) {
-	case RTL960X_CHIP_9602C:
+	case LUNA_CHIP_9602C:
 		return rtl9602c_serdes_cdr_reset(o);
-	case RTL960X_CHIP_9603CVD:
+	case LUNA_CHIP_9603CVD:
 		return rtl9603cvd_serdes_cdr_reset(o);
-	case RTL960X_CHIP_9607C:
+	case LUNA_CHIP_9607C:
 		return rtl9607c_serdes_cdr_reset(o);
 	default:
 		return -ENOTSUPP;

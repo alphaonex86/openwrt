@@ -109,7 +109,7 @@ ccflags-y += -O2
 # BEFORE ADDING AN OBJECT HERE, CHECK IT IS THE RIGHT TIER.  This directory is
 # the CORE tier (prefix gpon_): protocol only, and it must never touch hardware
 # -- no register access, no clock, no lock, no allocator, no device pointer.
-# Family hardware belongs in rtl960x_ or cortina- files, and a single part's
+# Family hardware belongs in luna_ or cortina- files, and a single part's
 # registers in rtl9602c_, rtl9607c_, rtl9607f_ or cortina-gpon.c.  The rule, the
 # file map and the guard are written out ONCE: see "THE THREE TIERS" in
 # gpon_common.h, in this directory.  The guard that enforces purity is

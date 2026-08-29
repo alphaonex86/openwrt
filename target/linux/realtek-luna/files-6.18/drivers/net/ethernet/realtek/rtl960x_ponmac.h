@@ -25,12 +25,18 @@
 
 #include <linux/types.h>
 
+/*
+ * The chips this library actually serves.  It is the LUNA MIPS silicon and
+ * nothing else: the RTL9607F carries a Realtek part number from the same
+ * series but is a Cortina Access NE core with a different register map, and
+ * it is driven by target/linux/realtek-elnath.  It used to sit in this enum
+ * as a placeholder returning -ENOTSUPP, which made the file look like it
+ * covered the whole RTL960x number space while serving one half of it.
+ */
 enum rtl960x_chip {
-	RTL960X_CHIP_9601B = 0,
-	RTL960X_CHIP_9602C,	/* + 9601C / 9601C_VB subtypes */
+	RTL960X_CHIP_9602C = 0,	/* + 9601C / 9601C_VB subtypes */
 	RTL960X_CHIP_9603CVD,
 	RTL960X_CHIP_9607C,
-	RTL960X_CHIP_9607F,	/* no register map observed yet - bring-up TBD */
 };
 
 /* Chip revision id as read from HW: A=0x1, B=0x2, C=0x3, ... rev>A => B+ */
@@ -42,12 +48,6 @@ enum rtl960x_chip {
 #define RTL960X_SUBTYPE_NONE		0x00
 #define RTL960X_SUBTYPE_9601C_VB	0x01
 #define RTL960X_SUBTYPE_9601C		0x03
-
-enum rtl960x_ponmode {
-	RTL960X_MODE_GPON = 0,
-	RTL960X_MODE_EPON = 1,
-	RTL960X_MODE_FIBER = 2,
-};
 
 /*
  * Board-agnostic register accessor. phys is the ABSOLUTE physical address from
@@ -71,13 +71,12 @@ static inline void rtl960x_rfwr(const struct rtl960x_ops *o, u32 phys,
 /*
  * Bring-up entry points. rev = RTL960X_REV_A or the HW chip-revision id; subtype
  * as above. Return 0 on success, -ETIMEDOUT if the SerDes analog-ready gate never
- * asserts (non-fatal; the board driver may proceed + diagnose). chip == 9607F
- * returns -ENOTSUPP until its register map is available.
+ * asserts (non-fatal; the board driver may proceed + diagnose).
  */
 int rtl960x_ponmac_init(enum rtl960x_chip chip, int rev, int subtype,
 			const struct rtl960x_ops *o);
 int rtl960x_ponmac_mode_set(enum rtl960x_chip chip, int rev, int subtype,
-			    enum rtl960x_ponmode mode, const struct rtl960x_ops *o);
+			    const struct rtl960x_ops *o);
 int rtl960x_ponmac_serdes_cdr_reset(enum rtl960x_chip chip,
 				    const struct rtl960x_ops *o);
 

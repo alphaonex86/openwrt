@@ -1088,11 +1088,6 @@ static char *cg_sn_param;
 module_param_named(sn, cg_sn_param, charp, 0444);
 MODULE_PARM_DESC(sn, "GPON serial number override, \"VVVVHHHHHHHH\" (4 ASCII vendor-id chars + 8 hex VSSN digits). Bring-up/A-B use ONLY: the shipping path is the board's own config volume pushed in by /etc/init.d/gpon-identity, so never bake a serial number into an image's bootargs");
 
-static void cg_sn_format(const u8 sn[8], char out[13])
-{
-	gpon_sn_format(sn, out);
-}
-
 static bool cg_do_bosa_init = true;
 module_param_named(bosa_init, cg_do_bosa_init, bool, 0444);
 MODULE_PARM_DESC(bosa_init, "program the GN25L95 BOSA laser driver over per_i2c before ranging (default on; off = no upstream burst, DS-side diagnostics only)");
@@ -1694,7 +1689,7 @@ static void cg_activate_start(struct cortina_gpon *cg)
 	char sn_str[13];
 	u32 vid;
 
-	cg_sn_format(cg->sn, sn_str);
+	gpon_sn_format(cg->sn, sn_str);
 	dev_info(cg->dev, "activating with serial number %s (source: %s)\n",
 		 sn_str, cg_sn_src_name[cg->sn_src]);
 
@@ -1758,7 +1753,7 @@ static int cg_sn_set(struct cortina_gpon *cg, const char *s, enum cg_sn_src src)
 	changed = cg->sn_src == CG_SN_NONE || memcmp(cg->sn, sn, sizeof(sn));
 	memcpy(cg->sn, sn, sizeof(sn));
 	cg->sn_src = src;
-	cg_sn_format(cg->sn, sn_str);
+	gpon_sn_format(cg->sn, sn_str);
 
 	if (!cg_activate)
 		dev_info(cg->dev, "serial number %s latched (source: %s); activate=0, not ranging\n",
@@ -1796,7 +1791,7 @@ static void cg_sn_wait_work(struct work_struct *work)
 	}
 	memcpy(cg->sn, cg_sn_unprovisioned, sizeof(cg->sn));
 	cg->sn_src = CG_SN_FALLBACK;
-	cg_sn_format(cg->sn, sn_str);
+	gpon_sn_format(cg->sn, sn_str);
 	dev_err(cg->dev,
 		"NO per-board GPON serial number after %ds: is /etc/init.d/gpon-identity running, and is ubi0:ubi_Config mountable? Ranging with the placeholder %s - this is NOT this board's identity, the OLT will not admit it. Push the real one:  echo \"sn <VVVVHHHHHHHH>\" > /proc/gpon\n",
 		CG_SN_WAIT_SECS, sn_str);
@@ -2606,7 +2601,7 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 		spin_unlock_bh(&cg->omci_lock);
 		cg->veip_avc_retry_ms = 0;
 		schedule_delayed_work(&cg->veip_avc_work, 31 * HZ);
-		cg_sn_format(cg->sn, sn_str);
+		gpon_sn_format(cg->sn, sn_str);
 		dev_info(cg->dev, "OMCI responder armed (%u MIB rows, mds seed 200, sn %s)\n",
 			 cg->omci->nrows, sn_str);
 	}
@@ -3547,7 +3542,7 @@ static int cg_proc_show(struct seq_file *m, void *v)
 	/* The identity, and WHERE it came from: "board" is the only value that
 	 * means "read from this unit"; NONE = ranging is still held off waiting
 	 * for it, FALLBACK = a placeholder, not this board's serial number. */
-	cg_sn_format(cg->sn, sn_str);
+	gpon_sn_format(cg->sn, sn_str);
 	seq_printf(m, "serial-number  = %s\n",
 		   cg->sn_src == CG_SN_NONE ? "(not provisioned)" : sn_str);
 	seq_printf(m, "sn-source      = %s%s\n", cg_sn_src_name[cg->sn_src],

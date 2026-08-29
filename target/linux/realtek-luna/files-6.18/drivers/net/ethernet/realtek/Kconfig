@@ -66,14 +66,6 @@ config RTL960X_ETH
 	  508 of 1361 switch registers move, which is why the table exists and
 	  why neither chip may borrow the other's offsets.
 
-config RTL9607C_GPON
-	tristate "Realtek RTL9607C GPON PON-MAC"
-	depends on REALTEK_LUNA
-	select GPON_CORE	# shared core: drivers/net/gpon/Kconfig
-	default y
-	help
-	  Clean-room GPON driver for the RTL9607C.
-
 if NET_VENDOR_REALTEK
 
 config ATP

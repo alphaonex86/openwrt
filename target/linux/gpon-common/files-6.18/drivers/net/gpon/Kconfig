@@ -65,3 +65,23 @@ config GPON_CORE
 	  globals -- correct as long as every consumer is built in too.  A vendor
 	  driver set to =m would fail modpost with "undefined!" on those symbols;
 	  the fix then is EXPORT_SYMBOL_GPL in the core, not a change here.
+
+config GPON_FLOW_OFFLOAD
+	bool
+	depends on GPON_CORE
+	help
+	  The TC hardware-offload lifecycle, shared by every family whose
+	  silicon has a flow accelerator: reading a TC rule into a 5-tuple,
+	  keeping the cookie -> flow map, refusing a cookie the other direction
+	  already installed, tearing entries down, answering a stats poll.  A
+	  family supplies an engine (struct gpon_flow_ops) and nothing else.
+
+	  ⚠ SELECT IT ONLY ON A TARGET THAT HAS AN ENGINE.  It is not a
+	  no-op when unselected -- it is ABSENT, which is the point: a board
+	  with no accelerator carries none of these bytes, and this tree ships
+	  to parts with <= 64 MB of RAM and a small NAND.
+
+	  ⚠ AND IT CANNOT BE `default y`: the Luna targets have no
+	  net/flow_offload.h at all, so building it there is a fatal error and
+	  not a wasted object.  That is how this gate came to exist -- an
+	  unconditional obj-y broke both Luna boards on 2026-08-28.

@@ -63,6 +63,11 @@ config CORTINA_GPON
 	depends on HAS_IOMEM
 	select CRC32
 	select GPON_CORE	# shared core: drivers/net/gpon/Kconfig
+	#: ★ THIS board has a flow accelerator (the L3FE), so it takes the
+	#: shared TC-offload lifecycle too.  A family without an engine simply
+	#: does not select this and carries none of it -- the operator's
+	#: "#ifdef" (2026-08-28), expressed where Kconfig can enforce it.
+	select GPON_FLOW_OFFLOAD
 	help
 	  This driver supports the Cortina-Access GPON MAC (CA8277C class)
 	  found in the Realtek RTL9607F "Elnath" GPON ONU SoC: the PON-MAC

@@ -6066,6 +6066,307 @@ void cortina_ni_cpu_fwd_show(struct seq_file *m, struct cortina_ni *ni)
  * CONFIG_DEBUG_FS is off, frequently unmounted, and explicitly not a stable ABI.
  * A case reading it would re-create the same defect one directory over.
  */
+/* ----------------------------------------------------------------------
+ * The /proc dump, split into named topics.
+ *
+ * It was ONE 1026-line function and the topics were already there -- as bare
+ * `{ ... }` scopes, the author sectioning the work with braces instead of
+ * names.  Only the bare scopes were lifted: an `if (...) {` or a `for (...) {`
+ * is control flow, not a section, and hoisting one would change what runs.
+ *
+ * Each helper takes ONLY what its block was measured to read from the
+ * enclosing scope, so nothing became module-wide and the dump still reads the
+ * private state that makes it worth having.
+ *
+ * ⚠ l3fe_rx / l3qm_rx are CLEAR-ON-READ.  The caller samples them ONCE and
+ * passes them in; a helper that re-read them would steal the count from the
+ * block that already holds it -- a defect this project has paid for before.
+ * ---------------------------------------------------------------------- */
+
+/* the forwarding chain, pdpid -> ldpid -> queue, with the two
+ * clear-on-read ingress counters the caller sampled. */
+static void rx_dump_fwd_chain(struct seq_file *m, struct cortina_ni *ni,
+			      u64 l3fe_rx, u64 l3qm_rx)
+{
+	void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
+	u32 addr = CA_NI_RX_PORT << 2;	/* port-0, DLF type 0 */
+	u32 dft = 0, pdpid = 0, p19 = 0, v;
+
+	writel(CA_NI_PLE_ACCESS_GO | addr, acc);
+	if (!readl_poll_timeout(acc, v, !(v & CA_NI_PLE_ACCESS_GO),
+				CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
+		dft = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
+
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+			       CA_NI_RX_CPU_LDPID);
+	pdpid = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+		CA_NI_L2FE_PDPID_MAP_PDPID;
+
+	/* PDPID_MAP[0x19] (L3_LAN classifier output): must read QM(0x08)
+	 * after our remap so my-MAC/ARP frames reach the RMU, not ES8. */
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+			       CA_NI_RX_L3LAN_LDPID);
+	p19 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	      CA_NI_L2FE_PDPID_MAP_PDPID;
+
+	/* PDPID_MAP[0x18] (L3_WAN): the HW-L3 DS ingress admission - a PON
+	 * PDC frame stamped ldpid L3_WAN must resolve to pdpid 0x0a (the
+	 * L3FE WAN physical ingress).  0 here = the DS data GEM's L3_WAN
+	 * frames never enter the L3FE (stock live [0x18]=0xA). */
+	{
+		u32 p18;
+
+		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+				       CA_NI_RX_L3WAN_LDPID);
+		p18 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+		      CA_NI_L2FE_PDPID_MAP_PDPID;
+		seq_printf(m, "fwd-chain: pdpid[0x18]=0x%x (L3_WAN; stock 0x0a = L3FE WAN ingress; 0 = DS never enters L3FE)\n",
+			   p18);
+	}
+
+	/* ★ pdpid[0x19]=0x0d (L3_LAN) is STOCK-CORRECT (vendor aal_port.h: 0x0d=L3_LAN,
+	 * 0x08=QM, 0x09=CPU).  The old "(want 0x8)" was WRONG - 0x08=QM egresses a wire
+	 * via L2TM, NOT the CPU.  On stock the CLS trap overrides L2 fwd -> dest CPU_0
+	 * (0x10) -> pdpid[0x10]=0x09 -> CPU-EPP; pdpid[0x19] is never on the CPU path.
+	 * l3fe_rx(0xa9bc) vs l3qm_rx(0xa9fc) UNDER BROADCAST = the decisive bisect:
+	 * l3fe_rx=0 -> frame never reaches the L3 classifier (routing/demux); l3fe_rx>0 &
+	 * cls_hit=0 -> STG0/CLS not matching; cls_hit>0 & qm_rx=0 -> trap not admitted. */
+	seq_printf(m,
+		   "fwd-chain: dft_fwd[p0]=0x%08x (redir_en=%u mcgid=0x%lx) pdpid[0x10]=0x%x pdpid[0x19]=0x%x(stock 0x0d L3_LAN; NOT 0x8=QM->wire) qm_rx=%u qm_tx=%u l3fe_rx(0xa9bc)=%llu l3qm_rx(0xa9fc)=%llu [totals since boot]\n",
+		   dft, !!(dft & CA_NI_PLE_DFT_REDIR_EN),
+		   FIELD_GET(CA_NI_PLE_DFT_MC_GROUP_ID, dft), pdpid, p19,
+		   readl(ni_base(ni) + CA_NI_QM_RX_CNTR),
+		   readl(ni_base(ni) + CA_NI_QM_TX_CNTR),
+		   l3fe_rx, l3qm_rx);	/* the sampled TOTAL; see the note at the top */
+}
+
+/* the default-forward table and the RMU0 RX header. */
+static void rx_dump_dft_fwd_and_rmu(struct seq_file *m, struct cortina_ni *ni)
+{
+	void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
+	unsigned int i;
+	u32 v;
+
+	seq_puts(m, "build68 dft_fwd[0..15]:");
+	for (i = 0; i < 16; i++) {
+		u32 d = 0;
+
+		writel(CA_NI_PLE_ACCESS_GO | (i << 2), acc);
+		if (!readl_poll_timeout(acc, v, !(v & CA_NI_PLE_ACCESS_GO),
+					CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
+			d = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
+		seq_printf(m, " [%u]=0x%08x", i, d);
+	}
+	/* verify the VLAN check-id map is programmed (the CPU-RX-dead fix) */
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x10);
+	v = readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA);
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x19);
+	seq_printf(m, "  chkid[CPU_0]=%u(want 8) chkid[L3_LAN]=%u(want 15)\n",
+		   v, readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA));
+
+	/* ★ 2026-07-15: real MC_FIB is @0x1644 and STOCK KEEPS IT EMPTY (no
+	 * flood-to-CPU).  Dump it (want all 0) plus the 0x1634 table build70
+	 * misread as MC_FIB (want stock's 0F 04 0F 09 .. values). */
+	seq_puts(m, "mc_fib@0x1644 [0x10..0x1b] D2:");
+	for (i = 0x10; i <= 0x1b; i++) {
+		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_MC_FIB_ACCESS, i);
+		seq_printf(m, " [0x%x]=0x%08x", i,
+			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA2));
+	}
+	seq_puts(m, "  (want all 0 = stock EMPTY)\ntbl@0x1634 [0x10..0x1b]:");
+	for (i = 0x10; i <= 0x1b; i++) {
+		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS, i);
+		seq_printf(m, " [0x%x]=0x%08x", i,
+			   readl(ni_base(ni) + CA_NI_L2FE_NKPOL_MAP_DATA));
+	}
+	seq_printf(m, "  (want stock 0f 04 0f 09 0f 05 0f 0a 0f 0b 0f 0c; arb_ctrl0x1600=0x%08x want 0x89c71c82; dq_tmport0x212c=0x%08x want 0x76543210)\n",
+		   readl(ni_base(ni) + CA_NI_L2FE_ARB_CTRL),
+		   readl(ni_base(ni) + CA_NI_L2TM_BM_DQ_TO_TM_PORT_MAP));
+
+	/* the full mc_fib[0x19] entry - all 5 Elnath data words (want all 0) */
+	{
+		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_MC_FIB_ACCESS, 0x19);
+		seq_printf(m,
+			   "mc_fib[0x19] full D4..D0(0x1648..0x1658): %08x %08x %08x %08x %08x (want all 0 = stock)\n",
+			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA4),
+			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA3),
+			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA2),
+			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA1),
+			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA0));
+	}
+
+	/* ★ build69: the admitted-frame header - THE last-ring witness.  Want
+	 * 0x80000010 (dest 0x10=CPU0, deep_q CLEAR) like stock, NOT 0xc0000020
+	 * (dest 0x20=CPU_MQ + deep_q -> wrong CPU-EPP256 ring). */
+	v = readl(ni_base(ni) + CA_NI_QM_RMU0_RX_HDR_INFO0);
+	seq_printf(m,
+		   "build69 rmu0_rx_hdr(0x6904)=0x%08x dest_ldpid=0x%lx deep_q=%u (want 0x80000010 dest 0x10 deep_q 0); rmu_rx(0x6900)=%u epp_wptr(0x7000)=0x%08x\n",
+		   v, FIELD_GET(CA_NI_QM_RMU0_RX_DEST_LDPID, v),
+		   !!(v & CA_NI_QM_RMU0_RX_DEEP_Q),
+		   readl(ni_base(ni) + CA_NI_QM_RX_CNTR),
+		   readl(ni_base(ni) + CA_NI_QM_EPP64_WRPTR(0, 0)));
+}
+
+/* the L3 classifier KEY/FIB readback -- the ARP-trap tables,
+ * so ours can be diffed against the stock golden. */
+static void rx_dump_cls_keys_and_fib(struct seq_file *m, struct cortina_ni *ni)
+{
+	unsigned int e, w;
+
+	for (e = 0; e < CA_NI_RX_CLS_ENTRIES; e++) {
+		cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_KEY_ACCESS, e);
+		seq_printf(m, "build71 cls_key[%2u]:", e);
+		for (w = 0; w < CA_NI_L3FE_CLS_KEY_WORDS; w++)
+			seq_printf(m, " %08x",
+				   readl(ni_base(ni) +
+					 CA_NI_L3FE_CLS_KEY_DATA_BASE + 4 * w));
+		cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_FIB_ACCESS, e);
+		seq_puts(m, "  fib:");
+		for (w = 0; w < CA_NI_L3FE_CLS_FIB_WORDS; w++)
+			seq_printf(m, " %08x",
+				   readl(ni_base(ni) +
+					 CA_NI_L3FE_CLS_FIB_DATA_BASE + 4 * w));
+		seq_puts(m, "\n");
+	}
+	seq_printf(m, "build73 stg0_ctrl(0x3400)=0x%08x (want 0x001c787c) spcl_pkt_det(0x3218)=0x%08x my_mac lo(0x3210)=0x%08x hi(0x3214)=0x%08x\n",
+		   readl(ni_base(ni) + CA_NI_L3FE_STG0_CTRL),
+		   readl(ni_base(ni) + CA_NI_L3FE_SPCL_PKT_DET_CFG),
+		   readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_LO),
+		   readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_HI));
+
+	/*
+	 * ★★ WITHDRAWN 2026-07-25 - the "build74 cls_hit[0..3]" probe was
+	 * MISDETECTION, of exactly the class this project keeps paying
+	 * for, and every conclusion ever drawn from it ("cls_hit all 0
+	 * => the CLS is never consulted") is VOID.  Two defects: it put
+	 * the monitor ENABLE at bit0 when it is BIT(8) (tier-2 stock
+	 * aal_l3fe_glb_cls_stg_monitor_get), so the monitor was never
+	 * enabled and 0x30b4 returned whatever was already there; and it
+	 * read only 4 words of a read-out port that carries up to 32.
+	 * Left as a read-only register dump here: the CORRECT monitor,
+	 * the DBG per-stage packet counters (0x30b8/0x30bc vector 15 =
+	 * L3FE_IN/OUT/T1_T2/STG3_PE) and the one-shot descriptor latch
+	 * (0x30c0/c4/c8) are implemented in cortina-ni-flowoffload.c and
+	 * surfaced through /proc/cortina_l3fe, which is where the
+	 * flow-offload stage discrimination belongs - duplicating them
+	 * here would just create a second thing to keep in sync.
+	 * ★ Note the naming conflict recorded in cortina-ni-regs.h:
+	 * 0x30b4/0x30bc are ALSO named GLB_LF_CFG / GLB_ILPB_00 and are
+	 * written by cortina_ni_rx_l3fe_glb_init(); per the tier-2
+	 * accessors they are read-data ports, so those writes are inert
+	 * and did NOT unblock the L3FE ingress FIFO.
+	 */
+	seq_printf(m,
+		   "l3fe_glb: cls_mon_ctrl(0x30b0)=0x%08x cls_mon_data(0x30b4)=0x%08x (also written as GLB_LF_CFG=0x%08x - see the conflict note in cortina-ni-regs.h; monitor enable is BIT(8), and the real stage counters live in /proc/cortina_l3fe)\n",
+		   readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_CTRL),
+		   readl(ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG),
+		   CA_NI_L3FE_GLB_LF_CFG_VAL);
+
+	/* ★ build75: profile-1 (LAN) CPU-trap rows - the LAN classifier searches
+	 * KEY[64..127]; KEY[66] (wildcard) is the LAN bcast/DLF catch-all -> FIB[264]
+	 * -> CPU_0.  Confirm they landed. */
+	{
+		static const u16 kr[] = { 64, 65, 66 };
+		static const u16 fr[] = { 256, 257, 260, 264 };
+		unsigned int k;
+
+		seq_puts(m, "build75 profile1:");
+		for (k = 0; k < ARRAY_SIZE(kr); k++) {
+			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_KEY_ACCESS, kr[k]);
+			seq_printf(m, " key[%u]{w0=0x%08x tr=0x%08x}", kr[k],
+				   readl(ni_base(ni) + CA_NI_L3FE_CLS_KEY_ACCESS + 11 * 4),
+				   readl(ni_base(ni) + CA_NI_L3FE_CLS_KEY_ACCESS + 1 * 4));
+		}
+		for (k = 0; k < ARRAY_SIZE(fr); k++) {
+			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_FIB_ACCESS, fr[k]);
+			seq_printf(m, " fib[%u]{d4=0x%08x d6=0x%08x}", fr[k],
+				   readl(ni_base(ni) + CA_NI_L3FE_CLS_FIB_ACCESS + 3 * 4),
+				   readl(ni_base(ni) + CA_NI_L3FE_CLS_FIB_ACCESS + 1 * 4));
+		}
+		seq_puts(m, " (want fib[264] d4=0x1c000000 d6=0x600)\n");
+	}
+}
+
+/* the L2FE arbitration and deep-queue admission. */
+static void rx_dump_l2fe_arbitration(struct seq_file *m, struct cortina_ni *ni)
+{
+	u32 arb = readl(ni_base(ni) + CA_NI_L2FE_ARB_CTRL);
+	u32 portdbuf, pd0, pd1, bmhdr;
+
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_ARB_PORT_DBUF_ACCESS, 0);
+	portdbuf = readl(ni_base(ni) + CA_NI_L2FE_ARB_PORT_DBUF_DATA);
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+			       CA_NI_RX_REDIR_LDPID);
+	pd0 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	      CA_NI_L2FE_PDPID_MAP_PDPID;
+	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+			       CA_NI_L2FE_PDPID_IDX_DBUF | CA_NI_RX_REDIR_LDPID);
+	pd1 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	      CA_NI_L2FE_PDPID_MAP_PDPID;
+	cortina_ni_rx_ind_read(ni, CA_NI_L2TM_BM_PKT_MEM_ACCESS, 0);
+	bmhdr = readl(ni_base(ni) + CA_NI_L2TM_BM_PKT_MEM_DATA7);
+
+	seq_printf(m,
+		   "arb-deepq: arb_ctrl=0x%08x (dbuf_sel=%u dbuf_dpid=%lu use_hdr_a=%u) port_dbuf[0]=0x%08x pdpid{DeepQ0,dbuf0/1}=0x%x/0x%x bm_word0=0x%08x (deep_q=%u cpu=%u)\n",
+		   arb, !!(arb & CA_NI_L2FE_ARB_DBUF_SEL),
+		   FIELD_GET(CA_NI_L2FE_ARB_DBUF_DPID, arb),
+		   !!(arb & CA_NI_L2FE_ARB_USE_HDR_A_DBUF),
+		   portdbuf, pd0, pd1, bmhdr,
+		   !!(bmhdr & BIT(30)), !!(bmhdr & BIT(31)));
+
+	/* ★ FLOW_DBUF (the deep_q source when dbuf_sel=1) at traffic time -
+	 * want all 0 = stock (0x0f = the build100 deep_q regression is back). */
+	{
+		u32 fd[4];
+		unsigned int k;
+
+		for (k = 0; k < 4; k++) {
+			cortina_ni_rx_ind_read(ni,
+				CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, k);
+			fd[k] = readl(ni_base(ni) +
+				      CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
+		}
+		seq_printf(m,
+			   "flow-dbuf[0..3]@0x165c=0x%08x 0x%08x 0x%08x 0x%08x (want all 0 = stock; 0x0f = deep_q regression)\n",
+			   fd[0], fd[1], fd[2], fd[3]);
+	}
+}
+
+/* the HV init-done and ready-enable gates. */
+static void rx_dump_hv_init_and_rdy(struct seq_file *m, struct cortina_ni *ni)
+{
+	u32 initd = readl(ni_base(ni) + CA_NI_HV_INIT_DONE);
+	void __iomem *glb = ni->win[CA_NI_WIN_GLB];
+
+	/* ★ build98: NIRX_MISC_CFG offset is DISPUTED - our driver treats 0xa1bc as
+	 * NIRX_MISC (writes 0x3e80 = rdy_en bits9-13 SET, believing a -0x3c shift vs
+	 * rtl8277c), but the raw rtl8277c map puts NIRX_MISC (l2te_ni_*_rdy_en[13:9],
+	 * bit11=l3felan_port_rdy_en = the LAN->L3FE handoff gate) at 0xa1f8.  Read BOTH:
+	 * whichever holds ~0x3e80 (bits9-13) on stock is the real NIRX_MISC; if OURS
+	 * differs there, that unset rdy-enable is the l3fe_rx=0 gate. */
+	seq_printf(m,
+		   "gate: ni_init_done(a004)=0x%08x (ni_done=%u) nirx_misc@0xa1bc=0x%08x nirx_misc@0xa1f8=0x%08x (real one holds rdy_en bits9-13 ~0x3e80; bit11=l3felan_rdy)\n",
+		   initd, !!(initd & CA_NI_HV_INIT_DONE_NI),
+		   readl(ni_base(ni) + 0xa1bc),
+		   readl(ni_base(ni) + 0xa1f8));
+	if (glb)
+		seq_printf(m,
+			   /* ★ LABELS ANCHORED IN STOCK'S OWN REGISTER TABLE (tier 2),
+			    * 2026-08-05.  They previously named five registers wrongly,
+			    * because our GLB reset constants carried the sibling
+			    * rtl8277C offsets (uniformly -8) - so the wrong NAME and the
+			    * wrong ADDRESS cancelled and nothing ever failed to force the
+			    * fix.  0x28 is a BIST control, 0x98 is the OPTICAL MODULE
+			    * status and 0x9c is PON control: none of the three is a reset
+			    * register.  The block reset really lives at 0xa0. */
+			   "gate glb: bist_ctrl4(28)=0x%08x opt_module_status(98)=0x%08x pon_cntl(9c)=0x%08x block_reset(a0)=0x%08x block_reset_ext(a4)=0x%08x\n",
+			   readl(glb + CA_NI_GLB_BIST_CONTROL4),
+			   readl(glb + CA_NI_GLB_OPT_MODULE_STATUS),
+			   readl(glb + CA_NI_GLB_PON_CNTL),
+			   readl(glb + CA_NI_GLB_BLOCK_RESET),
+			   readl(glb + CA_NI_GLB_BLOCK_RESET_EXT));
+}
+
 int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 {
 	struct cortina_ni *ni = m->private;
@@ -6235,203 +6536,14 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	 * Expect dft_fwd = 0x1820 (redir_en=1, mc_group_id=0x10=CPU_0) and pdpid=0x9
 	 * (CPU).  If the frame reaches TM but qm_rx_cntr stays 0, the death is
 	 * between the redir resolution and the QM. */
-	{
-		void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
-		u32 addr = CA_NI_RX_PORT << 2;	/* port-0, DLF type 0 */
-		u32 dft = 0, pdpid = 0, p19 = 0, v;
-
-		writel(CA_NI_PLE_ACCESS_GO | addr, acc);
-		if (!readl_poll_timeout(acc, v, !(v & CA_NI_PLE_ACCESS_GO),
-					CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
-			dft = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
-
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-				       CA_NI_RX_CPU_LDPID);
-		pdpid = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
-			CA_NI_L2FE_PDPID_MAP_PDPID;
-
-		/* PDPID_MAP[0x19] (L3_LAN classifier output): must read QM(0x08)
-		 * after our remap so my-MAC/ARP frames reach the RMU, not ES8. */
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-				       CA_NI_RX_L3LAN_LDPID);
-		p19 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
-		      CA_NI_L2FE_PDPID_MAP_PDPID;
-
-		/* PDPID_MAP[0x18] (L3_WAN): the HW-L3 DS ingress admission - a PON
-		 * PDC frame stamped ldpid L3_WAN must resolve to pdpid 0x0a (the
-		 * L3FE WAN physical ingress).  0 here = the DS data GEM's L3_WAN
-		 * frames never enter the L3FE (stock live [0x18]=0xA). */
-		{
-			u32 p18;
-
-			cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-					       CA_NI_RX_L3WAN_LDPID);
-			p18 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
-			      CA_NI_L2FE_PDPID_MAP_PDPID;
-			seq_printf(m, "fwd-chain: pdpid[0x18]=0x%x (L3_WAN; stock 0x0a = L3FE WAN ingress; 0 = DS never enters L3FE)\n",
-				   p18);
-		}
-
-		/* ★ pdpid[0x19]=0x0d (L3_LAN) is STOCK-CORRECT (vendor aal_port.h: 0x0d=L3_LAN,
-		 * 0x08=QM, 0x09=CPU).  The old "(want 0x8)" was WRONG - 0x08=QM egresses a wire
-		 * via L2TM, NOT the CPU.  On stock the CLS trap overrides L2 fwd -> dest CPU_0
-		 * (0x10) -> pdpid[0x10]=0x09 -> CPU-EPP; pdpid[0x19] is never on the CPU path.
-		 * l3fe_rx(0xa9bc) vs l3qm_rx(0xa9fc) UNDER BROADCAST = the decisive bisect:
-		 * l3fe_rx=0 -> frame never reaches the L3 classifier (routing/demux); l3fe_rx>0 &
-		 * cls_hit=0 -> STG0/CLS not matching; cls_hit>0 & qm_rx=0 -> trap not admitted. */
-		seq_printf(m,
-			   "fwd-chain: dft_fwd[p0]=0x%08x (redir_en=%u mcgid=0x%lx) pdpid[0x10]=0x%x pdpid[0x19]=0x%x(stock 0x0d L3_LAN; NOT 0x8=QM->wire) qm_rx=%u qm_tx=%u l3fe_rx(0xa9bc)=%llu l3qm_rx(0xa9fc)=%llu [totals since boot]\n",
-			   dft, !!(dft & CA_NI_PLE_DFT_REDIR_EN),
-			   FIELD_GET(CA_NI_PLE_DFT_MC_GROUP_ID, dft), pdpid, p19,
-			   readl(ni_base(ni) + CA_NI_QM_RX_CNTR),
-			   readl(ni_base(ni) + CA_NI_QM_TX_CNTR),
-			   l3fe_rx, l3qm_rx);	/* the sampled TOTAL; see the note at the top */
-	}
+	rx_dump_fwd_chain(m, ni, l3fe_rx, l3qm_rx);
 	/* ★ build68: full DFT_FWD[0..15] + MC_FIB[0x10..0x1b] dump so the coordinator can
 	 * VERIFY the routing tables from /proc (our image has no devmem).  DFT_FWD read =
 	 * addr(lspid<<2|type=0); MC_FIB read = indirect ACCESS[idx] then DATA0..2. */
-	{
-		void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
-		unsigned int i;
-		u32 v;
-
-		seq_puts(m, "build68 dft_fwd[0..15]:");
-		for (i = 0; i < 16; i++) {
-			u32 d = 0;
-
-			writel(CA_NI_PLE_ACCESS_GO | (i << 2), acc);
-			if (!readl_poll_timeout(acc, v, !(v & CA_NI_PLE_ACCESS_GO),
-						CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
-				d = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
-			seq_printf(m, " [%u]=0x%08x", i, d);
-		}
-		/* verify the VLAN check-id map is programmed (the CPU-RX-dead fix) */
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x10);
-		v = readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA);
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x19);
-		seq_printf(m, "  chkid[CPU_0]=%u(want 8) chkid[L3_LAN]=%u(want 15)\n",
-			   v, readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA));
-
-		/* ★ 2026-07-15: real MC_FIB is @0x1644 and STOCK KEEPS IT EMPTY (no
-		 * flood-to-CPU).  Dump it (want all 0) plus the 0x1634 table build70
-		 * misread as MC_FIB (want stock's 0F 04 0F 09 .. values). */
-		seq_puts(m, "mc_fib@0x1644 [0x10..0x1b] D2:");
-		for (i = 0x10; i <= 0x1b; i++) {
-			cortina_ni_rx_ind_read(ni, CA_NI_L2FE_MC_FIB_ACCESS, i);
-			seq_printf(m, " [0x%x]=0x%08x", i,
-				   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA2));
-		}
-		seq_puts(m, "  (want all 0 = stock EMPTY)\ntbl@0x1634 [0x10..0x1b]:");
-		for (i = 0x10; i <= 0x1b; i++) {
-			cortina_ni_rx_ind_read(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS, i);
-			seq_printf(m, " [0x%x]=0x%08x", i,
-				   readl(ni_base(ni) + CA_NI_L2FE_NKPOL_MAP_DATA));
-		}
-		seq_printf(m, "  (want stock 0f 04 0f 09 0f 05 0f 0a 0f 0b 0f 0c; arb_ctrl0x1600=0x%08x want 0x89c71c82; dq_tmport0x212c=0x%08x want 0x76543210)\n",
-			   readl(ni_base(ni) + CA_NI_L2FE_ARB_CTRL),
-			   readl(ni_base(ni) + CA_NI_L2TM_BM_DQ_TO_TM_PORT_MAP));
-
-		/* the full mc_fib[0x19] entry - all 5 Elnath data words (want all 0) */
-		{
-			cortina_ni_rx_ind_read(ni, CA_NI_L2FE_MC_FIB_ACCESS, 0x19);
-			seq_printf(m,
-				   "mc_fib[0x19] full D4..D0(0x1648..0x1658): %08x %08x %08x %08x %08x (want all 0 = stock)\n",
-				   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA4),
-				   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA3),
-				   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA2),
-				   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA1),
-				   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA0));
-		}
-
-		/* ★ build69: the admitted-frame header - THE last-ring witness.  Want
-		 * 0x80000010 (dest 0x10=CPU0, deep_q CLEAR) like stock, NOT 0xc0000020
-		 * (dest 0x20=CPU_MQ + deep_q -> wrong CPU-EPP256 ring). */
-		v = readl(ni_base(ni) + CA_NI_QM_RMU0_RX_HDR_INFO0);
-		seq_printf(m,
-			   "build69 rmu0_rx_hdr(0x6904)=0x%08x dest_ldpid=0x%lx deep_q=%u (want 0x80000010 dest 0x10 deep_q 0); rmu_rx(0x6900)=%u epp_wptr(0x7000)=0x%08x\n",
-			   v, FIELD_GET(CA_NI_QM_RMU0_RX_DEST_LDPID, v),
-			   !!(v & CA_NI_QM_RMU0_RX_DEEP_Q),
-			   readl(ni_base(ni) + CA_NI_QM_RX_CNTR),
-			   readl(ni_base(ni) + CA_NI_QM_EPP64_WRPTR(0, 0)));
-	}
+	rx_dump_dft_fwd_and_rmu(m, ni);
 	/* ★ build71: L3-CLS KEY[0..15] + FIB[0..15] readback (the ARP-trap tables) so the
 	 * coordinator can diff our install vs the stock golden.  Read-only indirect. */
-	{
-		unsigned int e, w;
-
-		for (e = 0; e < CA_NI_RX_CLS_ENTRIES; e++) {
-			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_KEY_ACCESS, e);
-			seq_printf(m, "build71 cls_key[%2u]:", e);
-			for (w = 0; w < CA_NI_L3FE_CLS_KEY_WORDS; w++)
-				seq_printf(m, " %08x",
-					   readl(ni_base(ni) +
-						 CA_NI_L3FE_CLS_KEY_DATA_BASE + 4 * w));
-			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_FIB_ACCESS, e);
-			seq_puts(m, "  fib:");
-			for (w = 0; w < CA_NI_L3FE_CLS_FIB_WORDS; w++)
-				seq_printf(m, " %08x",
-					   readl(ni_base(ni) +
-						 CA_NI_L3FE_CLS_FIB_DATA_BASE + 4 * w));
-			seq_puts(m, "\n");
-		}
-		seq_printf(m, "build73 stg0_ctrl(0x3400)=0x%08x (want 0x001c787c) spcl_pkt_det(0x3218)=0x%08x my_mac lo(0x3210)=0x%08x hi(0x3214)=0x%08x\n",
-			   readl(ni_base(ni) + CA_NI_L3FE_STG0_CTRL),
-			   readl(ni_base(ni) + CA_NI_L3FE_SPCL_PKT_DET_CFG),
-			   readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_LO),
-			   readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_HI));
-
-		/*
-		 * ★★ WITHDRAWN 2026-07-25 - the "build74 cls_hit[0..3]" probe was
-		 * MISDETECTION, of exactly the class this project keeps paying
-		 * for, and every conclusion ever drawn from it ("cls_hit all 0
-		 * => the CLS is never consulted") is VOID.  Two defects: it put
-		 * the monitor ENABLE at bit0 when it is BIT(8) (tier-2 stock
-		 * aal_l3fe_glb_cls_stg_monitor_get), so the monitor was never
-		 * enabled and 0x30b4 returned whatever was already there; and it
-		 * read only 4 words of a read-out port that carries up to 32.
-		 * Left as a read-only register dump here: the CORRECT monitor,
-		 * the DBG per-stage packet counters (0x30b8/0x30bc vector 15 =
-		 * L3FE_IN/OUT/T1_T2/STG3_PE) and the one-shot descriptor latch
-		 * (0x30c0/c4/c8) are implemented in cortina-ni-flowoffload.c and
-		 * surfaced through /proc/cortina_l3fe, which is where the
-		 * flow-offload stage discrimination belongs - duplicating them
-		 * here would just create a second thing to keep in sync.
-		 * ★ Note the naming conflict recorded in cortina-ni-regs.h:
-		 * 0x30b4/0x30bc are ALSO named GLB_LF_CFG / GLB_ILPB_00 and are
-		 * written by cortina_ni_rx_l3fe_glb_init(); per the tier-2
-		 * accessors they are read-data ports, so those writes are inert
-		 * and did NOT unblock the L3FE ingress FIFO.
-		 */
-		seq_printf(m,
-			   "l3fe_glb: cls_mon_ctrl(0x30b0)=0x%08x cls_mon_data(0x30b4)=0x%08x (also written as GLB_LF_CFG=0x%08x - see the conflict note in cortina-ni-regs.h; monitor enable is BIT(8), and the real stage counters live in /proc/cortina_l3fe)\n",
-			   readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_CTRL),
-			   readl(ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG),
-			   CA_NI_L3FE_GLB_LF_CFG_VAL);
-
-		/* ★ build75: profile-1 (LAN) CPU-trap rows - the LAN classifier searches
-		 * KEY[64..127]; KEY[66] (wildcard) is the LAN bcast/DLF catch-all -> FIB[264]
-		 * -> CPU_0.  Confirm they landed. */
-		{
-			static const u16 kr[] = { 64, 65, 66 };
-			static const u16 fr[] = { 256, 257, 260, 264 };
-			unsigned int k;
-
-			seq_puts(m, "build75 profile1:");
-			for (k = 0; k < ARRAY_SIZE(kr); k++) {
-				cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_KEY_ACCESS, kr[k]);
-				seq_printf(m, " key[%u]{w0=0x%08x tr=0x%08x}", kr[k],
-					   readl(ni_base(ni) + CA_NI_L3FE_CLS_KEY_ACCESS + 11 * 4),
-					   readl(ni_base(ni) + CA_NI_L3FE_CLS_KEY_ACCESS + 1 * 4));
-			}
-			for (k = 0; k < ARRAY_SIZE(fr); k++) {
-				cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_FIB_ACCESS, fr[k]);
-				seq_printf(m, " fib[%u]{d4=0x%08x d6=0x%08x}", fr[k],
-					   readl(ni_base(ni) + CA_NI_L3FE_CLS_FIB_ACCESS + 3 * 4),
-					   readl(ni_base(ni) + CA_NI_L3FE_CLS_FIB_ACCESS + 1 * 4));
-			}
-			seq_puts(m, " (want fib[264] d4=0x1c000000 d6=0x600)\n");
-		}
-	}
+	rx_dump_cls_keys_and_fib(m, ni);
 	/* ★ per-port profile readback (the blackhole root-cause tables): expect
 	 * ilpb[0] d2=0x18022163 (stp=3) d1=0x800001cb d0=0xc1000000
 	 * d3=0x00100003, mmshp[0]=ffffffff_fffffffe, elpb[0]=0x3,
@@ -6460,48 +6572,7 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	/* ★ ARB deep-queue diagnostics.  2026-07-15: PORT_DBUF[0] want 0 = stock
 	 * (a dbuf_flg mark here = the deep-queue regression is back); BM word0
 	 * bit30 = the deep_q on the last frame in buffer 0 (want 0). */
-	{
-		u32 arb = readl(ni_base(ni) + CA_NI_L2FE_ARB_CTRL);
-		u32 portdbuf, pd0, pd1, bmhdr;
-
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_ARB_PORT_DBUF_ACCESS, 0);
-		portdbuf = readl(ni_base(ni) + CA_NI_L2FE_ARB_PORT_DBUF_DATA);
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-				       CA_NI_RX_REDIR_LDPID);
-		pd0 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
-		      CA_NI_L2FE_PDPID_MAP_PDPID;
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-				       CA_NI_L2FE_PDPID_IDX_DBUF | CA_NI_RX_REDIR_LDPID);
-		pd1 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
-		      CA_NI_L2FE_PDPID_MAP_PDPID;
-		cortina_ni_rx_ind_read(ni, CA_NI_L2TM_BM_PKT_MEM_ACCESS, 0);
-		bmhdr = readl(ni_base(ni) + CA_NI_L2TM_BM_PKT_MEM_DATA7);
-
-		seq_printf(m,
-			   "arb-deepq: arb_ctrl=0x%08x (dbuf_sel=%u dbuf_dpid=%lu use_hdr_a=%u) port_dbuf[0]=0x%08x pdpid{DeepQ0,dbuf0/1}=0x%x/0x%x bm_word0=0x%08x (deep_q=%u cpu=%u)\n",
-			   arb, !!(arb & CA_NI_L2FE_ARB_DBUF_SEL),
-			   FIELD_GET(CA_NI_L2FE_ARB_DBUF_DPID, arb),
-			   !!(arb & CA_NI_L2FE_ARB_USE_HDR_A_DBUF),
-			   portdbuf, pd0, pd1, bmhdr,
-			   !!(bmhdr & BIT(30)), !!(bmhdr & BIT(31)));
-
-		/* ★ FLOW_DBUF (the deep_q source when dbuf_sel=1) at traffic time -
-		 * want all 0 = stock (0x0f = the build100 deep_q regression is back). */
-		{
-			u32 fd[4];
-			unsigned int k;
-
-			for (k = 0; k < 4; k++) {
-				cortina_ni_rx_ind_read(ni,
-					CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, k);
-				fd[k] = readl(ni_base(ni) +
-					      CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
-			}
-			seq_printf(m,
-				   "flow-dbuf[0..3]@0x165c=0x%08x 0x%08x 0x%08x 0x%08x (want all 0 = stock; 0x0f = deep_q regression)\n",
-				   fd[0], fd[1], fd[2], fd[3]);
-		}
-	}
+	rx_dump_l2fe_arbitration(m, ni);
 	/* ★ LAST-FRAME resolution: the BM latches the last RX FE (L2FE-resolved)
 	 * header + the raw RX-NI + the dequeued TX-NI header.  This shows what a REAL
 	 * ingress frame actually resolved to (deep_q b30 / cpu b31, and the resolved
@@ -6551,38 +6622,7 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	 * NI=0,L2FE=1,L2TM=2,L3FE=3,TQM=5; a BIST/unmapped reg reads 0.  0xa0
 	 * dphy_rst is the known-mapped reference (~0x10000000).  GLOBAL_FABRIC_RESET
 	 * (0xa4) has capsram/global_pe bits - a candidate NI-MCE gate. */
-	{
-		u32 initd = readl(ni_base(ni) + CA_NI_HV_INIT_DONE);
-		void __iomem *glb = ni->win[CA_NI_WIN_GLB];
-
-		/* ★ build98: NIRX_MISC_CFG offset is DISPUTED - our driver treats 0xa1bc as
-		 * NIRX_MISC (writes 0x3e80 = rdy_en bits9-13 SET, believing a -0x3c shift vs
-		 * rtl8277c), but the raw rtl8277c map puts NIRX_MISC (l2te_ni_*_rdy_en[13:9],
-		 * bit11=l3felan_port_rdy_en = the LAN->L3FE handoff gate) at 0xa1f8.  Read BOTH:
-		 * whichever holds ~0x3e80 (bits9-13) on stock is the real NIRX_MISC; if OURS
-		 * differs there, that unset rdy-enable is the l3fe_rx=0 gate. */
-		seq_printf(m,
-			   "gate: ni_init_done(a004)=0x%08x (ni_done=%u) nirx_misc@0xa1bc=0x%08x nirx_misc@0xa1f8=0x%08x (real one holds rdy_en bits9-13 ~0x3e80; bit11=l3felan_rdy)\n",
-			   initd, !!(initd & CA_NI_HV_INIT_DONE_NI),
-			   readl(ni_base(ni) + 0xa1bc),
-			   readl(ni_base(ni) + 0xa1f8));
-		if (glb)
-			seq_printf(m,
-				   /* ★ LABELS ANCHORED IN STOCK'S OWN REGISTER TABLE (tier 2),
-				    * 2026-08-05.  They previously named five registers wrongly,
-				    * because our GLB reset constants carried the sibling
-				    * rtl8277C offsets (uniformly -8) - so the wrong NAME and the
-				    * wrong ADDRESS cancelled and nothing ever failed to force the
-				    * fix.  0x28 is a BIST control, 0x98 is the OPTICAL MODULE
-				    * status and 0x9c is PON control: none of the three is a reset
-				    * register.  The block reset really lives at 0xa0. */
-				   "gate glb: bist_ctrl4(28)=0x%08x opt_module_status(98)=0x%08x pon_cntl(9c)=0x%08x block_reset(a0)=0x%08x block_reset_ext(a4)=0x%08x\n",
-				   readl(glb + CA_NI_GLB_BIST_CONTROL4),
-				   readl(glb + CA_NI_GLB_OPT_MODULE_STATUS),
-				   readl(glb + CA_NI_GLB_PON_CNTL),
-				   readl(glb + CA_NI_GLB_BLOCK_RESET),
-				   readl(glb + CA_NI_GLB_BLOCK_RESET_EXT));
-	}
+	rx_dump_hv_init_and_rdy(m, ni);
 	/* ★ PORT CHECK: which physical GPHY carries the host's link.  Stock's
 	 * only-carrier port may not be our configured port 0 - if link=1 shows on
 	 * a port != 0 (and mac/l2fe counters move only for that port), our

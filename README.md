@@ -1,3 +1,13 @@
+> ## This fork: a clean-room GPON ONU port
+>
+> This is not stock OpenWrt. It carries a from-scratch GPON ONU port by
+> **Confiabits S.R.L.** — PLOAM, OMCI/G.988, GEM and hardware flow offload on
+> kernel 6.18, running on three boards across two silicon families and two CPU
+> architectures, with 91 % of the code shared between them.
+>
+> **→ [GPON-PORT.md](GPON-PORT.md)** — what runs, how it is structured, how it is
+> built and how it is tested.
+
 ![OpenWrt logo](include/logo.png)
 
 OpenWrt Project is a Linux operating system targeting embedded devices. Instead

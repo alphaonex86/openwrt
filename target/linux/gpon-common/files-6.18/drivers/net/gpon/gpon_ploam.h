@@ -525,8 +525,6 @@ void gpon_ploam_init(struct gpon_ploam *o, const struct gpon_ploam_ops *ops,
 /* Parse a provisioned serial number in the G.984.3 CLI form "XPON12345678"
  * (4 ASCII vendor-ID chars + 8 hex digits) into 8 wire bytes.
  * Moved from gpon-rtl9602c.c:5000-5015. Pure; no context needed. */
-void gpon_ploam_parse_sn(const char *s, u8 sn[8]);
-
 /* Install a (re)provisioned serial number and ask the FSM to re-range. The
  * re-range itself happens on the next gpon_ploam_sn_changed() call, exactly as
  * the driver's gpon_sn_changed flag did. */
@@ -584,9 +582,4 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms);
 /* The two computations a SHELL needs at __init, outside any PLOAM dispatch --
  * see the note beside their definitions.  Both are the core's own arithmetic;
  * a shell that re-implements either forks the code it is supposed to share. */
-void gpon_ploam_apply_boh(struct gpon_ploam *o, bool ranged);
-void gpon_ploam_set_eqd(struct gpon_ploam *o, u32 value);
-
-const char *gpon_ploam_state_name(enum gpon_ostate st);
-
 #endif /* GPON_PLOAM_H */

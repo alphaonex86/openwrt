@@ -549,6 +549,7 @@ int cortina_ni_l2fe_fdb_lookup_idx(void __iomem *base, const u8 *mac,
 int cortina_ni_flowoffload_probe(struct cortina_ni *ni);
 int cortina_ni_setup_tc(struct net_device *dev, enum tc_setup_type type,
 			void *type_data);
+void cortina_ni_flowoffload_exit(void);
 /* true only when the hw_l3_fwd experiment is armed AND the L3FE engine init
  * succeeded; the GPON driver keys the DS data-GEM PDC route on it (LDPID
  * L3_WAN into the L3FE vs the proven CPU_0 + FE-bypass delivery). */

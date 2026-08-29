@@ -1464,6 +1464,7 @@ module_init(cortina_ni_module_init);
 static void __exit cortina_ni_module_exit(void)
 {
 	platform_driver_unregister(&cortina_ni_driver);
+	cortina_ni_flowoffload_exit();
 	phy_drivers_unregister(cortina_ni_gphy_driver,
 			       ARRAY_SIZE(cortina_ni_gphy_driver));
 }

@@ -6668,13 +6668,23 @@ static void gpon_cdr_reset_worker(struct work_struct *w)
 /*
  * ===== The core PLOAM shell: this driver, expressed as struct gpon_ploam_ops =====
  *
- * ★★ NOT INSTALLED YET, AND THAT IS THE POINT OF THIS STEP.  Nothing calls
- * gpon_ploam_init() with these ops; the FSM below still runs.  What this buys
- * is the one thing a design note cannot: the COMPILER checks that every
- * callback the core demands can actually be expressed from this driver's
- * existing primitives, with the right types, before a single line of the FSM
- * moves.  A shim of stubs would prove nothing, so every op below either does
- * the real work or is left NULL with the reason.
+ * ★★ INSTALLED AND SWITCHABLE, BEHIND `core_fsm` (default 0).
+ * gpon_ploam_init() IS called with these ops (see the probe), and
+ * gpon_ploam_ds() dispatches through the core when the parameter is set; with
+ * it clear the FSM below runs byte for byte as before.  This is the A/B, not a
+ * design note.
+ *
+ * ⚠ THIS COMMENT SAID "NOT INSTALLED YET.  Nothing calls gpon_ploam_init() with
+ * these ops" UNTIL 2026-08-28, and by then the init call had been there for a
+ * while.  A stale comment that says the core is unwired is worse than none: it
+ * tells the next reader there is no A/B to run, which is the whole state of
+ * this migration.
+ *
+ * What the ops table bought before it was switched on is still worth stating:
+ * the COMPILER checks that every callback the core demands can actually be
+ * expressed from this driver's existing primitives, with the right types,
+ * before a single line of the FSM moves.  A shim of stubs would prove nothing,
+ * so every op either does the real work or is left NULL with the reason.
  *
  * ★ WHY THE SIGNATURES DIFFER WHERE THEY DO.  The core owns the ARITHMETIC and
  * the shell owns the REGISTER.  gpon_set_eqd() here computes eqd1 from

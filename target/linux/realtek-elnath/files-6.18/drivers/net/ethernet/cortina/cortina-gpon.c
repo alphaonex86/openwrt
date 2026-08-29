@@ -108,6 +108,7 @@
  */
 #include "gpon_omci_core.h"	/* G.988 message layer: omci_onu_input()      */
 #include "gpon_omci_me.h"	/* G.988 ME model: struct omci_onu, the store */
+#include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log    */
 #include "gpon_gem_us.h"	/* upstream GEM/T-CONT mapping + bind verdict */
 
 #define DRV_NAME		"cortina-gpon"
@@ -2850,23 +2851,18 @@ static void cg_omci_trace_one(struct cortina_gpon *cg, const u8 *pdu,
 			      const char *name)
 {
 	static DEFINE_RATELIMIT_STATE(rs, 5 * HZ, 512);
-	bool is_get = (pdu[2] & 0x1f) == 9;	/* G.988 Table 11.2.2-1: Get */
 	char det[80];
 
+	/* ★ THE DECODE IS THE CORE'S (gpon_omci_describe_get).  What stays here
+	 * is the POLICY -- the rate limit, the log level and the device -- which
+	 * is this board's fact and not G.988's.  The core FORMATS into a buffer
+	 * and cannot print, so it cannot flood a console. */
 	if (!__ratelimit(&rs))
 		return;
-	det[0] = '\0';
-	if (is_get && len >= 10 && n == OMCI_LEN)
-		scnprintf(det, sizeof(det),
-			  " mask=0x%04x rmask=0x%04x unsup=0x%04x failed=0x%04x rc=%u",
-			  ((u16)pdu[8] << 8) | pdu[9],
-			  ((u16)resp[9] << 8) | resp[10],
-			  ((u16)resp[36] << 8) | resp[37],
-			  ((u16)resp[38] << 8) | resp[39], resp[8]);
-	else if (n != OMCI_LEN)
-		scnprintf(det, sizeof(det), " noresp");
+	gpon_omci_describe_get(pdu, len, n == OMCI_LEN ? resp : NULL, n,
+			       det, sizeof(det));
 	dev_info(cg->dev, "OMCI DS: MT=0x%02x %s class=%u inst=%u len=%u%s\n",
-		 pdu[2], is_get ? "GET" : name,
+		 pdu[2], gpon_omci_is_get(pdu, len) ? "GET" : name,
 		 ((u16)pdu[4] << 8) | pdu[5], ((u16)pdu[6] << 8) | pdu[7],
 		 len, det);
 }
@@ -2887,16 +2883,6 @@ static void cg_omci_trace_one(struct cortina_gpon *cg, const u8 *pdu,
 static void cg_rx_omci(const u8 *pdu, unsigned int len)
 {
 	struct cortina_gpon *cg = READ_ONCE(cg_singleton);
-	static const char *const mt_name[32] = {
-		[4] = "Create", [5] = "Delete", [8] = "Set", [9] = "Get",
-		[11] = "Get-all-alarms", [12] = "Get-all-alarms-next",
-		[13] = "MIB-upload", [14] = "MIB-upload-next",
-		[15] = "MIB-reset", [16] = "Alarm", [17] = "AVC", [18] = "Test",
-		[19] = "Start-SW-dl", [20] = "DL-section", [21] = "End-SW-dl",
-		[22] = "Activate-SW", [23] = "Commit-SW", [24] = "Sync-time",
-		[25] = "Reboot", [26] = "Get-next", [27] = "Test-result",
-		[28] = "Get-current-data", [29] = "Set-table",
-	};
 	const char *name;
 	u8 mt;
 
@@ -2909,7 +2895,7 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 	cg->omci_rx++;
 
 	mt = pdu[2];
-	name = mt_name[mt & 0x1f] ? mt_name[mt & 0x1f] : "?";
+	name = gpon_omci_mt_name(mt);	/* G.988 Table 11.2.2-1, in the core */
 	/* log the first PDUs + then 1-in-64 (the MIB-upload walk is chatty) */
 	if (cg->omci_rx <= 24 || !(cg->omci_rx & 63))
 		dev_info(cg->dev,

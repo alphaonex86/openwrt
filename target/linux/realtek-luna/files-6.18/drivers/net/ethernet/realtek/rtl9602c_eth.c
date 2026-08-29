@@ -40,6 +40,7 @@
 #include <linux/seq_file.h>
 #include "rtl960x_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "gpon_omci_core.h"	/* omci_put_be16 + the responder */
+#include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log */
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
 #include <linux/crc32.h>	/* crc32_le for the optional SW OMCI MIC path */
 #include "rtl9602c_gpon_nic.h"
@@ -1989,16 +1990,29 @@ static void rtl9602c_eth_omci_input(struct rtl9602c_eth *ep, const u8 *msg,
 	if (len < 8)
 		return;
 
-	/* Board-side visibility stays here: WHICH message arrived is a fact
-	 * about this OLT and this link, and the core neither logs nor should.
-	 * Rate-limited on the bulk types so a MIB upload cannot flood. */
+	/* Board-side visibility: WHICH message arrived is a fact about this OLT
+	 * and this link, and the core neither logs nor should.  Rate-limited on
+	 * the bulk types so a MIB upload cannot flood.
+	 *
+	 * ★ THE DECODE IS THE CORE'S (gpon_omci_describe), and this board GAINED
+	 * something by the move: the line used to print MT as a bare number,
+	 * with no message-type NAME and no AR/AK flags.  The Cortina family had
+	 * a richer decode of the SAME PDU -- two implementations of one idea,
+	 * neither aware of the other, and no clone detector could see it because
+	 * they shared not one substring.  There is one now, and it is G.988's.
+	 *
+	 * ⚠ THE POLICY STAYS HERE, and it is the BETTER of the two: Luna limits
+	 * only the bulk types, so a Create or an Alarm is never dropped from the
+	 * log, while the Cortina side rate-limits everything.  The core cannot
+	 * print, so it cannot take this decision away. */
 	if (((msg[2] & 0x1f) != OMCI_MT_GET &&
 	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD_NX &&
-	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD) || net_ratelimit())
-		netdev_info(ep->ndev,
-			    "OMCI DS: TID=%02x%02x MT=0x%02x class=%u inst=%u len=%u\n",
-			    msg[0], msg[1], msg[2],
-			    (msg[4] << 8) | msg[5], (msg[6] << 8) | msg[7], len);
+	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD) || net_ratelimit()) {
+		char det[96];
+
+		gpon_omci_describe(msg, len, det, sizeof(det));
+		netdev_info(ep->ndev, "OMCI DS: %s\n", det);
+	}
 
 	/*
 	 * ★★★ THE G.988 RESPONDER IS THE COMMON ONE (2026-08-27). Operator:

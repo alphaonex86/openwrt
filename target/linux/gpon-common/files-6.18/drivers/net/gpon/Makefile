@@ -197,6 +197,13 @@ obj-y += gpon_omci_core.o
 # ITU-T G.988 MANAGED-ENTITY model and MIB store, called by the message layer.
 obj-y += gpon_omci_me.o
 
+# ITU-T G.988 message DECODE for the log: what a downstream PDU IS, in words.
+# ★ A PROMOTION, not a merge: this existed only in the Cortina family and was
+# ABSENT from Luna, so the Luna boards gain a decode they never had.  It only
+# ever formats INTO A BUFFER -- the caller owns the rate limit and the level,
+# because how chatty a board may be on its console is that board's fact.
+obj-y += gpon_omci_trace.o
+
 # ITU-T G.984.3 PLOAM activation state machine (O1..O7) and message builders.
 # ONE kernel consumer today (realtek-luna): the Elnath PON-MAC runs activation
 # in silicon, so there is no second copy this de-duplicates.  It is here for the

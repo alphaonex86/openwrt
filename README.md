@@ -1,7 +1,7 @@
 > ## This fork: a clean-room GPON ONU port
 >
-> This is not stock OpenWrt. It carries a from-scratch GPON ONU port by
-> **Confiabits S.R.L.** — PLOAM, OMCI/G.988, GEM and hardware flow offload on
+> This is not stock OpenWrt. It carries a from-scratch GPON ONU port —
+> PLOAM, OMCI/G.988, GEM and hardware flow offload on
 > kernel 6.18, running on three boards across two silicon families and two CPU
 > architectures, with 91 % of the code shared between them.
 >

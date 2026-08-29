@@ -13,7 +13,7 @@
  * irq-rtl9603cvd.c said: *"kept apart deliberately for now -- that driver
  * carries two routing overrides established empirically on the X111W, which are
  * facts about THAT board's cascade and must not be inherited here.  Merge them
- * into one rtl960x_* driver once this chip has booted and both routings are
+ * into one luna_* driver once this chip has booted and both routings are
  * proven."*  Both halves were checked before merging rather than assumed:
  *   - the per-board routing is NOT inherited: each chip keeps its own `irr[]`,
  *     which is the whole point of the table;
@@ -110,11 +110,11 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 
-#define RTL960X_INTC_INPUTS	64
-#define RTL960X_INTC_WORDS	(RTL960X_INTC_INPUTS / 32)	/* mask/status */
-#define RTL960X_INTC_GIMR(w)	(0x00 + (w) * 4)
-#define RTL960X_INTC_GISR(w)	(0x08 + (w) * 4)
-#define RTL960X_INTC_IRR(i)	(0x10 + (i) * 4)
+#define LUNA_INTC_INPUTS	64
+#define LUNA_INTC_WORDS	(LUNA_INTC_INPUTS / 32)	/* mask/status */
+#define LUNA_INTC_GIMR(w)	(0x00 + (w) * 4)
+#define LUNA_INTC_GISR(w)	(0x08 + (w) * 4)
+#define LUNA_INTC_IRR(i)	(0x10 + (i) * 4)
 /*
  * ⚠ SEVEN, AND IT IS COUNTED FROM THE HARDWARE, NOT DERIVED FROM THE INPUTS.
  * The routing is 4 bits per input, 8 inputs per word -- 64/8 = 8 words by that
@@ -123,23 +123,23 @@
  * constant and the code disagreed and only the code was right.  The table below
  * is sized by what the hardware is actually given.
  */
-#define RTL960X_INTC_IRR_WORDS	7
-#define RTL960X_INTC_PERIPH_EN	12	/* GIMR0 bit12 = master peripheral enable */
+#define LUNA_INTC_IRR_WORDS	7
+#define LUNA_INTC_PERIPH_EN	12	/* GIMR0 bit12 = master peripheral enable */
 
 /*
  * ★★ THE PER-CHIP TABLE -- the only thing that differs between these two SoCs.
  * A third Luna chip is a table entry, never a fork of the logic.
  */
-struct rtl960x_intc_chip {
+struct luna_intc_chip {
 	const char	*name;
 	/* The vendor's own routing values for CPU 0, word 0 first. */
-	u32		irr[RTL960X_INTC_IRR_WORDS];
+	u32		irr[LUNA_INTC_IRR_WORDS];
 	/* Byte distance to the NEXT CPU's block, or 0 where this chip has only
 	 * one block for this driver to arrange. */
 	u32		cpu_stride;
 };
 
-static const struct rtl960x_intc_chip rtl9602c_intc_chip = {
+static const struct luna_intc_chip rtl9602c_intc_chip = {
 	.name	= "RTL9602C",
 	/*
 	 * ⚠ TWO WORDS DIFFER FROM THE SIBLING'S, AND THEY ARE THIS BOARD'S OWN.
@@ -155,93 +155,93 @@ static const struct rtl960x_intc_chip rtl9602c_intc_chip = {
 	.cpu_stride = 0,	/* this driver arranges one block here */
 };
 
-static const struct rtl960x_intc_chip rtl9603cvd_intc_chip = {
+static const struct luna_intc_chip rtl9603cvd_intc_chip = {
 	.name	= "RTL9603CVD",
 	.irr	= { 0x03333330, 0x30302222, 0x00020222, 0x22020333,
 		    0x33333063, 0x32322022, 0x00333000 },
 	.cpu_stride = 0x40,	/* CPU 1's block, masked shut below */
 };
 
-struct rtl960x_intc {
+struct luna_intc {
 	void __iomem			*base;	/* CPU 0's block */
 	raw_spinlock_t			lock;
 	struct irq_domain		*domain;
-	const struct rtl960x_intc_chip	*c;
+	const struct luna_intc_chip	*c;
 };
 
-static void rtl960x_intc_mask(struct irq_data *d)
+static void luna_intc_mask(struct irq_data *d)
 {
-	struct rtl960x_intc *ic = irq_data_get_irq_chip_data(d);
+	struct luna_intc *ic = irq_data_get_irq_chip_data(d);
 	unsigned int word = d->hwirq / 32;
 	u32 val;
 
 	raw_spin_lock(&ic->lock);
-	val = readl(ic->base + RTL960X_INTC_GIMR(word));
+	val = readl(ic->base + LUNA_INTC_GIMR(word));
 	val &= ~BIT(d->hwirq % 32);
-	writel(val, ic->base + RTL960X_INTC_GIMR(word));
+	writel(val, ic->base + LUNA_INTC_GIMR(word));
 	raw_spin_unlock(&ic->lock);
 }
 
-static void rtl960x_intc_unmask(struct irq_data *d)
+static void luna_intc_unmask(struct irq_data *d)
 {
-	struct rtl960x_intc *ic = irq_data_get_irq_chip_data(d);
+	struct luna_intc *ic = irq_data_get_irq_chip_data(d);
 	unsigned int word = d->hwirq / 32;
 	u32 val;
 
 	raw_spin_lock(&ic->lock);
-	val = readl(ic->base + RTL960X_INTC_GIMR(word));
+	val = readl(ic->base + LUNA_INTC_GIMR(word));
 	val |= BIT(d->hwirq % 32);
-	writel(val, ic->base + RTL960X_INTC_GIMR(word));
+	writel(val, ic->base + LUNA_INTC_GIMR(word));
 	raw_spin_unlock(&ic->lock);
 }
 
-static struct irq_chip rtl960x_intc_irqchip = {
+static struct irq_chip luna_intc_irqchip = {
 	.name		= "rtl960x-intc",
-	.irq_mask	= rtl960x_intc_mask,
-	.irq_unmask	= rtl960x_intc_unmask,
+	.irq_mask	= luna_intc_mask,
+	.irq_unmask	= luna_intc_unmask,
 };
 
-static int rtl960x_intc_map(struct irq_domain *d, unsigned int irq,
+static int luna_intc_map(struct irq_domain *d, unsigned int irq,
 			    irq_hw_number_t hw)
 {
-	struct rtl960x_intc *ic = d->host_data;
+	struct luna_intc *ic = d->host_data;
 
-	irq_set_chip_and_handler(irq, &rtl960x_intc_irqchip, handle_level_irq);
+	irq_set_chip_and_handler(irq, &luna_intc_irqchip, handle_level_irq);
 	irq_set_chip_data(irq, ic);
 	/* routing (GIRR) is pre-loaded with the stock-observed values in init */
 
 	return 0;
 }
 
-static const struct irq_domain_ops rtl960x_intc_domain_ops = {
-	.map	= rtl960x_intc_map,
+static const struct irq_domain_ops luna_intc_domain_ops = {
+	.map	= luna_intc_map,
 	.xlate	= irq_domain_xlate_onecell,
 };
 
-static void rtl960x_intc_dispatch(struct irq_desc *desc)
+static void luna_intc_dispatch(struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_desc_get_chip(desc);
-	struct rtl960x_intc *ic = irq_desc_get_handler_data(desc);
+	struct luna_intc *ic = irq_desc_get_handler_data(desc);
 	int word;
 
 	chained_irq_enter(chip, desc);
-	for (word = 0; word < RTL960X_INTC_WORDS; word++) {
-		unsigned long pending = readl(ic->base + RTL960X_INTC_GISR(word)) &
-					readl(ic->base + RTL960X_INTC_GIMR(word));
+	for (word = 0; word < LUNA_INTC_WORDS; word++) {
+		unsigned long pending = readl(ic->base + LUNA_INTC_GISR(word)) &
+					readl(ic->base + LUNA_INTC_GIMR(word));
 		unsigned int bit;
 
 		if (word == 0)
-			pending &= ~BIT(RTL960X_INTC_PERIPH_EN);  /* aggregate, not an input */
+			pending &= ~BIT(LUNA_INTC_PERIPH_EN);  /* aggregate, not an input */
 		for_each_set_bit(bit, &pending, 32)
 			generic_handle_domain_irq(ic->domain, word * 32 + bit);
 	}
 	chained_irq_exit(chip, desc);
 }
 
-static int __init rtl960x_intc_init(struct device_node *node,
-				    const struct rtl960x_intc_chip *chip)
+static int __init luna_intc_init(struct device_node *node,
+				    const struct luna_intc_chip *chip)
 {
-	struct rtl960x_intc *ic;
+	struct luna_intc *ic;
 	int parent_irq, n = 0, i, ret;
 
 	ic = kzalloc(sizeof(*ic), GFP_KERNEL);
@@ -255,10 +255,10 @@ static int __init rtl960x_intc_init(struct device_node *node,
 		goto err_free;
 	}
 
-	writel(BIT(RTL960X_INTC_PERIPH_EN), ic->base + RTL960X_INTC_GIMR(0));
-	writel(0, ic->base + RTL960X_INTC_GIMR(1));
-	for (i = 0; i < RTL960X_INTC_IRR_WORDS; i++)
-		writel(chip->irr[i], ic->base + RTL960X_INTC_IRR(i));
+	writel(BIT(LUNA_INTC_PERIPH_EN), ic->base + LUNA_INTC_GIMR(0));
+	writel(0, ic->base + LUNA_INTC_GIMR(1));
+	for (i = 0; i < LUNA_INTC_IRR_WORDS; i++)
+		writel(chip->irr[i], ic->base + LUNA_INTC_IRR(i));
 
 	/* Mask a second CPU's block shut where the chip has one: only CPU 0
 	 * carries routing, so a secondary CPU can never take an interrupt this
@@ -266,13 +266,13 @@ static int __init rtl960x_intc_init(struct device_node *node,
 	if (chip->cpu_stride) {
 		void __iomem *other = ic->base + chip->cpu_stride;
 
-		writel(0, other + RTL960X_INTC_GIMR(0));
-		writel(0, other + RTL960X_INTC_GIMR(1));
+		writel(0, other + LUNA_INTC_GIMR(0));
+		writel(0, other + LUNA_INTC_GIMR(1));
 	}
 
 	ic->domain = irq_domain_create_linear(of_fwnode_handle(node),
-					      RTL960X_INTC_INPUTS,
-					      &rtl960x_intc_domain_ops, ic);
+					      LUNA_INTC_INPUTS,
+					      &luna_intc_domain_ops, ic);
 	if (!ic->domain) {
 		ret = -ENOMEM;
 		goto err_unmap;
@@ -280,14 +280,14 @@ static int __init rtl960x_intc_init(struct device_node *node,
 
 	for (n = 0; (parent_irq = irq_of_parse_and_map(node, n)) > 0; n++)
 		irq_set_chained_handler_and_data(parent_irq,
-						 rtl960x_intc_dispatch, ic);
+						 luna_intc_dispatch, ic);
 	if (!n) {
 		ret = -ENODEV;
 		goto err_unmap;
 	}
 
 	pr_info("rtl960x-intc: %s aggregator, %d inputs, %d parent line(s)\n",
-		chip->name, RTL960X_INTC_INPUTS, n);
+		chip->name, LUNA_INTC_INPUTS, n);
 	return 0;
 
 err_unmap:
@@ -302,13 +302,13 @@ err_free:
 static int __init rtl9602c_intc_of_init(struct device_node *node,
 					struct device_node *parent)
 {
-	return rtl960x_intc_init(node, &rtl9602c_intc_chip);
+	return luna_intc_init(node, &rtl9602c_intc_chip);
 }
 
 static int __init rtl9603cvd_intc_of_init(struct device_node *node,
 					  struct device_node *parent)
 {
-	return rtl960x_intc_init(node, &rtl9603cvd_intc_chip);
+	return luna_intc_init(node, &rtl9603cvd_intc_chip);
 }
 
 IRQCHIP_DECLARE(rtl9602c_intc, "realtek,rtl9602c-intc", rtl9602c_intc_of_init);

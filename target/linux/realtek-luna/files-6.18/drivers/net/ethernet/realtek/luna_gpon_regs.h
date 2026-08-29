@@ -19,7 +19,7 @@
  * ships ONE LEAN KERNEL PER MODEL (a GPON ONU has 16 MB of flash and <=64 MB
  * of RAM), so a second chip is a second header selected by Kconfig -- not a
  * pointer indirection on every register access in the datapath hot path.
- * `rtl960x_ponmac.c` uses a runtime table because it must serve four chips
+ * `luna_ponmac.c` uses a runtime table because it must serve four chips
  * from one object; this header is the other, cheaper case.
  *
  * ★ ADDING A CHIP = COPYING THIS FILE AND EDITING THE VALUES. Nothing else.
@@ -31,8 +31,8 @@
  * was changed, no define was renamed, and the file order is preserved so the
  * one define whose value references another still resolves.
  */
-#ifndef _RTL960X_GPON_REGS_H
-#define _RTL960X_GPON_REGS_H
+#ifndef _LUNA_GPON_REGS_H
+#define _LUNA_GPON_REGS_H
 
 
 
@@ -455,7 +455,7 @@
  * -- an SMI transaction that never clears CMD_EN currently returns whatever the
  * data register held, and on this project a silent read is how a dead PHY bus
  * survived five candidate fixes. */
-static inline u16 rtl960x_smi_read(void __iomem *sw, u8 phy, u8 reg)
+static inline u16 luna_smi_read(void __iomem *sw, u8 phy, u8 reg)
 {
 	u32 ctrl, data;
 	int i;
@@ -475,7 +475,7 @@ static inline u16 rtl960x_smi_read(void __iomem *sw, u8 phy, u8 reg)
 	return (u16)(data >> 16);
 }
 
-static inline void rtl960x_smi_write(void __iomem *sw, u8 phy, u8 reg, u16 val)
+static inline void luna_smi_write(void __iomem *sw, u8 phy, u8 reg, u16 val)
 {
 	u32 ctrl;
 	int i;
@@ -495,25 +495,25 @@ static inline void rtl960x_smi_write(void __iomem *sw, u8 phy, u8 reg, u16 val)
 
 /* 32-bit SWCORE access through the PHY-%d proxy: address low/high, then the
  * trigger word, then read the two data halves back. */
-static inline u32 rtl960x_sw_proxy_rd(void __iomem *sw, u32 swc_off)
+static inline u32 luna_sw_proxy_rd(void __iomem *sw, u32 swc_off)
 {
 	u16 lo, hi;
 
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x800b);	/* read trigger */
-	lo = rtl960x_smi_read(sw, SWCORE_PROXY_PHY, 4);
-	hi = rtl960x_smi_read(sw, SWCORE_PROXY_PHY, 5);
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x800b);	/* read trigger */
+	lo = luna_smi_read(sw, SWCORE_PROXY_PHY, 4);
+	hi = luna_smi_read(sw, SWCORE_PROXY_PHY, 5);
 	return ((u32)hi << 16) | lo;
 }
 
-static inline void rtl960x_sw_proxy_wr(void __iomem *sw, u32 swc_off, u32 val)
+static inline void luna_sw_proxy_wr(void __iomem *sw, u32 swc_off, u32 val)
 {
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 2, (u16)(val & 0xffff));
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 3, (u16)((val >> 16) & 0xffff));
-	rtl960x_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x804b);	/* write trigger */
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 2, (u16)(val & 0xffff));
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 3, (u16)((val >> 16) & 0xffff));
+	luna_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x804b);	/* write trigger */
 }
 
-#endif /* _RTL960X_GPON_REGS_H */
+#endif /* _LUNA_GPON_REGS_H */

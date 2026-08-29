@@ -97,7 +97,7 @@ CONFIG_RTL9602C_GPON=y
 # The on-chip NIC + switch live under the Realtek vendor menu, so the kernel
 # only descends into drivers/net/ethernet/realtek/ when this umbrella is set.
 CONFIG_NET_VENDOR_REALTEK=y
-CONFIG_RTL960X_ETH=y
+CONFIG_LUNA_ETH=y
 #
 # ★★★ PCI IS ON SINCE 2026-08-27, AND THE REASON IT WAS OFF IS GONE.
 #

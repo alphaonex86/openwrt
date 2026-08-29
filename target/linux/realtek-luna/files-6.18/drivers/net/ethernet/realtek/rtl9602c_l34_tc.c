@@ -15,7 +15,7 @@
  * ⚠ AND HIS PREMISE IS HALF RIGHT, WHICH MATTERS FOR WHERE THIS LIVES.  The
  * vendor's own abstraction layer carries an `l34` for `rtl9602c` and for
  * nothing else in this family -- not rtl9603cvd, not rtl9607c, not rtl9607f.
- * The G24W does not even compile this file (it builds rtl960x_eth.c, and the
+ * The G24W does not even compile this file (it builds luna_eth.c, and the
  * L34 is textually included by rtl9602c_eth.c alone).  And the X400AXF's
  * accelerator is the CORTINA L3FE, different silicon with different tables --
  * so "use the X400AXF's accelerator on the others" is not available at the

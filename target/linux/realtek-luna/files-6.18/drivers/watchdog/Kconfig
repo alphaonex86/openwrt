@@ -1988,7 +1988,7 @@ config RALINK_WDT
 	help
 	  Hardware driver for the Ralink SoC Watchdog Timer.
 
-config RTL960X_WDT
+config LUNA_WDT
 	tristate "Realtek Luna (RTL960x) SoC watchdog"
 	depends on HAS_IOMEM
 	depends on OF
@@ -2005,7 +2005,7 @@ config RTL960X_WDT
 	  timers, which is the one fault the software detectors cannot see.
 
 	  To compile this driver as a module, choose M here: the module will
-	  be called rtl960x_wdt.
+	  be called luna_wdt.
 
 config GXP_WATCHDOG
 	tristate "HPE GXP watchdog support"

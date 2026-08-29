@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# Per-board image definitions for the rtl9607x subtarget.
+# Per-board image definitions for the `interaptiv` subtarget (MIPS interAptiv
+# core; renamed from rtl9607x 2026-08-29 -- the subtarget selects a CORE).
 # Bring-up is run-from-RAM: the initramfs uImage is TFTP'd into RAM and
 # bootm'd by the vendor U-Boot ("9607C#"), no flash write during bring-up.
 
@@ -18,7 +19,7 @@ TARGET_DEVICES += realtek_rtl9607c
 # LANLY G24W (RTL9603CVD). Same interAptiv MIPS32 R2 core as the RTL9607C
 # above -- MEASURED from the board's own /proc/cpuinfo ("MIPS interAptiv
 # V2.0", isa mips32r2, tlb_entries 64) -- so it belongs in THIS subtarget
-# and shares its 24kc toolchain. It is emphatically NOT an rtl960x/RLX part
+# and shares its 24kc toolchain. It is emphatically NOT a taroko/RLX part
 # despite the "9603" in the name; see rtl9603cvd.dtsi for that argument.
 define Device/lanly_g24w
   DEVICE_VENDOR := LANLY
@@ -59,7 +60,7 @@ define Device/lanly_g24w
   # OFF in this subtarget's kernel config, so no PCI bus exists, no PCIe host
   # driver for this SoC exists, and no DT node declares one. That is three
   # stacked gaps, and none of them is a package.
-  # (2026-08-27: all three closed -- CONFIG_PCI=y, pcie-rtl960x.c, phy0 up.)
+  # (2026-08-27: all three closed -- CONFIG_PCI=y, pcie-luna.c, phy0 up.)
   #
   # ★★★ wifi-scripts IS the AP bring-up, and it was MISSING (2026-08-27).
   # MEASURED on this board with phy0 registered and hostapd running: hostapd's

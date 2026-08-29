@@ -8,7 +8,7 @@
  *
  *	CPU <-> GMAC0 (eth0) <-> switch CPU-port <-> physical LAN port <-> wire
  *
- * ★★ WHY THIS FILE IS NAMED rtl960x_* AND NOT rtl9607c_*.
+ * ★★ WHY THIS FILE IS NAMED luna_* AND NOT rtl9607c_*.
  * It serves TWO chips, and the project's naming rule is explicit: family-shared
  * code may not hide behind one chip's name, because the next human or LLM has to
  * land on the work BY NAME. It was renamed the day the second chip was proven to
@@ -64,7 +64,7 @@
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
 #include <linux/timer.h>
-#include "rtl960x_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
+#include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 
 /* ---- bring-up knobs (live-tunable; the datapath framing is HW-uncertain on
  * first contact, so expose the few values most likely to need a tweak) ------ */
@@ -191,7 +191,7 @@ MODULE_PARM_DESC(rst_rxfifo,
  * precedence -- "U-Boot ethaddr bootarg -> DT/nvmem -> random LAA" -- is to
  * hand the address in on the kernel command line:
  *
- *     rtl960x_eth.mac=5c:19:23:b3:ce:90
+ *     luna_eth.mac=5c:19:23:b3:ce:90
  *
  * ⚠ AND THE VALUE IS NOT WRITTEN HERE OR IN THE DTS. It is per-UNIT, and a DTS
  * literal would hand the second G24W the first one's identity -- silently, on a
@@ -271,7 +271,7 @@ MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (
  *
  * ★★ THE A/B WAS RUN ON THIS BOARD, 2026-08-28, AND IT REFUTED THE TRANSFER.
  * Two cold TFTP boots of the same image, one at 0x10 and one with
- * `rtl960x_eth.msr_top=0xf0` in bootargs: the LAN answered 5/5 BOTH TIMES.  So
+ * `luna_eth.msr_top=0xf0` in bootargs: the LAN answered 5/5 BOTH TIMES.  So
  * the RTL9602C finding does NOT carry to the RTL9603CVD -- forced flow control
  * is not what decides this board's datapath, and nobody should re-chase it.
  *
@@ -335,12 +335,12 @@ struct luna_eth_chip {
 
 	/* ★ The switch-core map for THIS chip -- and the ONLY home of this
 	 * chip's port numbers.  They were briefly duplicated here AND in
-	 * rtl960x_sw_map (2026-08-28, by the same change that tabulated them for
+	 * luna_sw_map (2026-08-28, by the same change that tabulated them for
 	 * the sibling driver); the two agreed, which is luck and not structure.
 	 * Two copies of one silicon fact is how they come to disagree in silence.  Kept as a pointer into
-	 * rtl960x_eth_regs.h rather than copied in, so the sibling driver and
+	 * luna_eth_regs.h rather than copied in, so the sibling driver and
 	 * this one read the SAME numbers and a correction lands once. */
-	const struct rtl960x_sw_map *sw_map;
+	const struct luna_sw_map *sw_map;
 
 	/* --- switch port map ------------------------------------------------ */
 	/* ★ Force the PON port's MAC link like the CPU port's -- 1 only on a
@@ -351,14 +351,14 @@ struct luna_eth_chip {
 	u8	gphy_ports;	/* bitmap: ports whose PHY is a GPHY, not FE	*/
 
 	/* --- switch registers that MOVED ------------------------------------ */
-	/* force_ablty MOVED to rtl960x_sw_map (via ->sw_map) */	/* + 4*port: forced ability values		*/
-	/* p_ablty MOVED to rtl960x_sw_map (via ->sw_map) */	/* + 4*port: LIVE ability, read-only		*/
-	/* ablty_force MOVED to rtl960x_sw_map (via ->sw_map) */	/* + 4*port: which ability fields are forced	*/
+	/* force_ablty MOVED to luna_sw_map (via ->sw_map) */	/* + 4*port: forced ability values		*/
+	/* p_ablty MOVED to luna_sw_map (via ->sw_map) */	/* + 4*port: LIVE ability, read-only		*/
+	/* ablty_force MOVED to luna_sw_map (via ->sw_map) */	/* + 4*port: which ability fields are forced	*/
 	u32	msti_ctrl;	/* + 4*port: per-port spanning-tree state	*/
 	u32	cpu_tag_insert;
 	u32	cpu_tag_aware;
 	u32	swcore_rst;	/* swcore soft reset (bit10), excludes cfg	*/
-	/* gphy_misc MOVED to rtl960x_sw_map (reached via ->sw_map): the RTL9602C
+	/* gphy_misc MOVED to luna_sw_map (reached via ->sw_map): the RTL9602C
 	 * driver needs the same fact and a second home is how the two come to
 	 * disagree.  Same reasoning, and the same fix, as the port numbers. */
 	u32	fephy_poll;	/* 0 on a chip with no FE-PHY auto-poller	*/
@@ -516,7 +516,7 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 #define RTL_CPU_TAG_LEN		8
 #define RTL_CPU_TAG_ETYPE	0x8899
 
-/* SOC_SW_ENABLE and its bits are the FAMILY's -- rtl960x_eth_regs.h, which
+/* SOC_SW_ENABLE and its bits are the FAMILY's -- luna_eth_regs.h, which
  * also records that this driver and gpon-rtl960x.c name bit 5 differently. */
 
 /* Internal-PHY indirect window. The register TRIO and its bit layout are the
@@ -575,10 +575,10 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 #define MII_LSTATUS	0x0004
 
 /* The DMA descriptor address bus window (0 on this SoC). */
-/* DMA_BUS_WINDOW is the FAMILY's -- rtl960x_eth_regs.h, with the measurement
+/* DMA_BUS_WINDOW is the FAMILY's -- luna_eth_regs.h, with the measurement
  * that explains why it is zero and must stay a named knob. */
 
-/* struct rx_desc / struct tx_desc are the FAMILY's -- rtl960x_eth_regs.h.
+/* struct rx_desc / struct tx_desc are the FAMILY's -- luna_eth_regs.h.
  * They were declared identically in both drivers; one type now. */
 
 struct luna_eth {
@@ -1034,30 +1034,30 @@ static void eth_diag_timer(struct timer_list *t)
 
 /* ---- station address ------------------------------------------------------ */
 /* The bring-up default and its predicate are FAMILY facts and live in
- * rtl960x_eth_regs.h.  They were defined here first; the copy was removed on
+ * luna_eth_regs.h.  They were defined here first; the copy was removed on
  * 2026-08-28 after the RTL9602C driver was found shipping that very address,
  * because its own byte-identical IDR reader had never received this refusal. */
 
 /* Thin wrappers over the family helpers, kept at their own names so the call
- * sites and this diff stay small. The BODIES live in rtl960x_eth_regs.h. */
+ * sites and this diff stay small. The BODIES live in luna_eth_regs.h. */
 static void eth_get_hwaddr(struct luna_eth *ep, u8 *mac)
 {
-	rtl960x_idr_get(ep->base, mac);
+	luna_idr_get(ep->base, mac);
 }
 
 static void eth_set_hwaddr(struct luna_eth *ep, const u8 *mac)
 {
-	rtl960x_idr_set(ep->base, mac);
+	luna_idr_set(ep->base, mac);
 }
 
 /* ---- rings ---------------------------------------------------------------- */
 /* Allocate a fresh RX skb, stream-map it, and arm the descriptor on it. */
-/* The body is the FAMILY's (rtl960x_eth_regs.h): both drivers had it character
+/* The body is the FAMILY's (luna_eth_regs.h): both drivers had it character
  * for character apart from the struct that reached `->rx_ring`.  The wrapper
  * keeps the old name and signature so every call site is untouched. */
 static int eth_refill(struct luna_eth *ep, unsigned int idx)
 {
-	return rtl960x_rx_refill(ep->ndev, ep->dev, ep->rx_ring, ep->rx_skb,
+	return luna_rx_refill(ep->ndev, ep->dev, ep->rx_ring, ep->rx_skb,
 				 ep->rx_buf_dma, idx, RX_RING_SIZE, RX_BUF_SIZE);
 }
 
@@ -1364,19 +1364,19 @@ static void eth_switch_init(struct luna_eth *ep)
 }
 
 /* ---- MAC engine ----------------------------------------------------------- */
-/* The body is the family's (rtl960x_eth_regs.h): both drivers had it, identical
+/* The body is the family's (luna_eth_regs.h): both drivers had it, identical
  * but for the struct that reached `->base`. */
 static void eth_hw_stop(struct luna_eth *ep)
 {
-	rtl960x_eth_hw_stop(ep->base);
+	luna_eth_hw_stop(ep->base);
 }
 
 /* GMAC0 IP-block power-cycle: the multi-ring fetch engine only latches its ring
  * state across this reset edge, so it must run before the descriptor program. */
-/* The body and the hang warning are the FAMILY's (rtl960x_eth_regs.h). */
+/* The body and the hang warning are the FAMILY's (luna_eth_regs.h). */
 static void eth_ipsel_cycle(void)
 {
-	rtl960x_ipsel_cycle_gmac0();
+	luna_ipsel_cycle_gmac0();
 }
 
 static void eth_hw_program(struct luna_eth *ep)
@@ -1697,7 +1697,7 @@ static void eth_set_rx_mode(struct net_device *ndev)
 {
 	struct luna_eth *ep = netdev_priv(ndev);
 
-	rtl960x_eth_set_promisc(ep->base,
+	luna_eth_set_promisc(ep->base,
 				 !!(ndev->flags & (IFF_PROMISC | IFF_ALLMULTI)));
 }
 
@@ -1849,7 +1849,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 	 * so recovering it is flash-reading work, and OWED. Until then a unique
 	 * wrong address beats a shared one.
 	 */
-	if (mac_param && rtl960x_mac_from_param(mac_param, mac)) {
+	if (mac_param && luna_mac_from_param(mac_param, mac)) {
 		/* ★ FIRST RUNG, and it is the only one that can carry a PER-UNIT
 		 * value on this product today. Announced, because a MAC that
 		 * arrived from outside the device must be auditable in the log. */
@@ -1857,7 +1857,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 		dev_info(dev, "MAC %pM taken from the `mac=` boot parameter\n", mac);
 	} else if (of_get_ethdev_address(dev->of_node, ndev)) {
 		eth_get_hwaddr(ep, mac);
-		if (is_valid_ether_addr(mac) && !rtl960x_mac_is_bringup_default(mac)) {
+		if (is_valid_ether_addr(mac) && !luna_mac_is_bringup_default(mac)) {
 			eth_hw_addr_set(ndev, mac);
 		} else {
 			eth_hw_addr_random(ndev);

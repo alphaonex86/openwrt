@@ -54,7 +54,7 @@ config RTL9602C_GPON
 	  Clean-room GPON MAC foundation driver for the RTL9602C. Maps the
 	  GPON MAC register block (SWCORE + 0x700000) and exposes /proc/gpon.
 
-config RTL960X_ETH
+config LUNA_ETH
 	tristate "Realtek Luna (interAptiv) GMAC + switch"
 	depends on REALTEK_LUNA
 	default y

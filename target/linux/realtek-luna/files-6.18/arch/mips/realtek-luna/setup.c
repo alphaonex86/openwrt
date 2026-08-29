@@ -45,19 +45,28 @@
  * LX clocks/unit), [26:22] phase-1 timeout (5b), [19:15] phase-2 timeout (5b),
  * [1:0] reset-mode (0=full chip, 1=CPU+IPSec, 2=S/W). Kick reg @0x18003260.
  *
- * ★ THE SAME BLOCK IS ALSO DRIVEN BY drivers/watchdog/rtl960x_wdt.c, which is
+ * ★ THE SAME BLOCK IS ALSO DRIVEN BY drivers/watchdog/luna_wdt.c, which is
  * what serves /dev/watchdog.  This path stays where it is -- it is the proven
  * one, it is what _machine_restart needs, and it must work with no driver bound
  * -- but that means one piece of hardware is described in two files.  The
  * offline case dev/rtl9607c-test/luna_wdt_test asserts that the two agree, so a
  * shift fixed in one place cannot silently rot in the other.
+ *
+ * ★ 2026-08-29 -- THE PREFIX IS LUNA_RSTWDT_, NOT LUNA_WDT_, AND THE DIFFERENCE
+ * IS REAL.  When the family prefix luna_ was renamed to luna_, the driver's
+ * LUNA_WDT_CTRL (an OFFSET, 0x08 from the DT base) and this file's
+ * LUNA_WDT_CTRL (an ABSOLUTE mapped pointer, 0x18003268) collided on one name
+ * with two values.  Same hardware, two views, and a reader who conflated them
+ * would write an offset where a pointer is wanted.  The reset path keeps its
+ * own prefix so the ambiguity cannot exist; the guard still holds the SHIFTS
+ * equal, which is the part that must not drift.
  */
-#define LUNA_WDT_CTRL		((void __iomem *)CKSEG1ADDR(0x18003268))
-#define LUNA_WDT_E		BIT(31)		/* watchdog enable          */
-#define LUNA_WDT_CLK_SC_SHIFT	29		/* overflow scale           */
-#define LUNA_WDT_PH1_TO_SHIFT	22		/* phase-1 timeout          */
-#define LUNA_WDT_PH2_TO_SHIFT	15		/* phase-2 timeout          */
-#define LUNA_WDT_RST_FULLCHIP	0u		/* RESET_MODE = full chip   */
+#define LUNA_RSTWDT_CTRL		((void __iomem *)CKSEG1ADDR(0x18003268))
+#define LUNA_RSTWDT_EN		BIT(31)		/* watchdog enable          */
+#define LUNA_RSTWDT_CLK_SC_SHIFT	29		/* overflow scale           */
+#define LUNA_RSTWDT_PH1_TO_SHIFT	22		/* phase-1 timeout          */
+#define LUNA_RSTWDT_PH2_TO_SHIFT	15		/* phase-2 timeout          */
+#define LUNA_RSTWDT_RST_FULLCHIP	0u		/* RESET_MODE = full chip   */
 
 extern char __dtb_start[];
 void prom_putchar(char c);	/* bring-up bisect markers (remove later) */
@@ -71,12 +80,12 @@ static void luna_machine_restart(char *command)
 	 * phase-2=0, enabled; do NOT kick it -> it times out almost immediately
 	 * and the boot ROM takes over. Spin until the reset lands.
 	 */
-	__raw_writel(LUNA_WDT_E |
-		     (0u << LUNA_WDT_CLK_SC_SHIFT) |
-		     (1u << LUNA_WDT_PH1_TO_SHIFT) |
-		     (0u << LUNA_WDT_PH2_TO_SHIFT) |
-		     LUNA_WDT_RST_FULLCHIP,
-		     LUNA_WDT_CTRL);
+	__raw_writel(LUNA_RSTWDT_EN |
+		     (0u << LUNA_RSTWDT_CLK_SC_SHIFT) |
+		     (1u << LUNA_RSTWDT_PH1_TO_SHIFT) |
+		     (0u << LUNA_RSTWDT_PH2_TO_SHIFT) |
+		     LUNA_RSTWDT_RST_FULLCHIP,
+		     LUNA_RSTWDT_CTRL);
 	while (1)
 		cpu_relax();
 }
@@ -272,7 +281,7 @@ void __init plat_mem_setup(void)
 	 * has no kicker, so disable it before any driver runs. (Replace with
 	 * a real watchdog driver once one is integrated.)
 	 */
-	__raw_writel(0, LUNA_WDT_CTRL);
+	__raw_writel(0, LUNA_RSTWDT_CTRL);
 
 	/* MMIO/peripheral window: SPI-NOR + SoC registers. */
 	ioport_resource.start = 0x14000000;

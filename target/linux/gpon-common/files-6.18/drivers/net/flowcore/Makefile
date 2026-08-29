@@ -24,6 +24,6 @@ obj-$(CONFIG_CORTINA_GPON) += cortina_gpon_logic.o
 obj-$(CONFIG_CORTINA_NI) += cortina_ni_rx_logic.o cortina_ni_tx_logic.o
 obj-$(CONFIG_CORTINA_NI_FLOWOFFLOAD) += cortina_ni_flowoffload_logic.o \
 	cortina_l3fe_logic.o
-obj-$(CONFIG_RTL9602C_GPON) += gpon_rtl9602c_logic.o rtl960x_ponmac_logic.o
-obj-$(CONFIG_RTL9607C_GPON) += rtl960x_ponmac_logic.o
+obj-$(CONFIG_RTL9602C_GPON) += gpon_rtl9602c_logic.o luna_ponmac_logic.o
+obj-$(CONFIG_RTL9607C_GPON) += luna_ponmac_logic.o
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_l34_logic.o

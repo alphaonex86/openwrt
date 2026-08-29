@@ -19,7 +19,7 @@
  *     - realtek-elnath — RTL9607F "Elnath" (Cortina), ARM64 little-endian
  *   and additionally on x86 by the differential suite in dev/rtl9607c-test/,
  *   through the host shims in dev/rtl9607c-test/fuzz_shims/. The prefix is
- *   `gpon_` and deliberately NOT `rtl960x_`: this layer must also serve the
+ *   `gpon_` and deliberately NOT `luna_`: this layer must also serve the
  *   future ARM OLT and other vendors' hardware, so a Realtek-named prefix
  *   would be too narrow.
  *
@@ -71,7 +71,7 @@
  *   them, never an edit to one of them.  `gpon_layer_hostbuild_test.sh` is what
  *   makes that a fact rather than an intention: it builds the list on the host,
  *   and it goes red the day one of them stops being buildable there.
- *     family  rtl960x_  and  cortina-      one silicon FAMILY's     yes
+ *     family  luna_  and  cortina-      one silicon FAMILY's     yes
  *                                          hardware: PON-MAC and
  *                                          SerDes bring-up, the
  *                                          switch/NE datapath
@@ -87,13 +87,13 @@
  *             drivers/net/gpon/gpon_omci_core.[hc]  G.988 message layer
  *             drivers/net/gpon/gpon_omci_me.[hc]    G.988 ME model
  *             drivers/net/gpon/gpon_gem_us.[hc]     US GEM and T-CONT mapping
- *     family  realtek-luna  ... realtek/rtl960x_ponmac.c   PON-MAC, SerDes
+ *     family  realtek-luna  ... realtek/luna_ponmac.c   PON-MAC, SerDes
  *     chip    realtek-luna  ... realtek/gpon-rtl9602c.c    RTL9602C GPON shell
  *             realtek-luna  ... realtek/rtl9602c_eth.c     RTL9602C NIC shell
  *             realtek-elnath ... cortina/cortina-gpon.c    RTL9607F GPON shell
  *
  *   ⚠ TWO TIER TRAPS ALREADY PAID FOR, both measured on 2026-08-05:
- *     - rtl960x_ponmac.c LOOKS like the family protocol home because of its
+ *     - luna_ponmac.c LOOKS like the family protocol home because of its
  *       prefix, and is not: it implements ZERO of the ops below (measured —
  *       the file contains no PLOAM, GEM, alloc, ONU-ID, EqD, AES or BOH
  *       identifier at all).  It is family HARDWARE, one tier below the shells.

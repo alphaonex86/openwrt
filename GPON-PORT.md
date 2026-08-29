@@ -123,4 +123,9 @@ the device's own image as data, never transcribed from a vendor header.
 
 This port is developed in the open at `github.com/alphaonex86/openwrt`. If you build ONU hardware and
 want it supported — or you have a board this should run on — open an issue there, or write to
-**alpha_one_x86@first-world.info** — the same address that authors the commits here.
+**contact@herman-brule.com**.
+
+<!-- NOT the address in this repository's git history (alpha_one_x86@first-world.info): that domain
+     LAPSED and was not renewed, so mail to it does not arrive -- and an expired domain can be
+     re-registered by anyone, which makes republishing it worse than useless.  The commit author field
+     in past history cannot be corrected without rewriting it; this line is the live address. -->

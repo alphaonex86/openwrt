@@ -1,7 +1,11 @@
 # A clean-room OpenWrt port for GPON ONUs
 
-**Confiabits S.R.L.** — an open-source replacement firmware for fibre-to-the-home ONUs, on kernel
-**6.18**, running today on three boards from two silicon families and two CPU architectures.
+An open-source replacement firmware for fibre-to-the-home ONUs, on kernel **6.18**, running today on
+three boards from two silicon families and two CPU architectures.
+
+A semi-personal project by **Herman Brule**, who owns **Confiabits S.R.L.** — which is why the commits
+are authored personally and the work is open. It is offered for collaboration; it is not a company
+product line, and this page does not pretend otherwise.
 
 The vendor firmware on these devices is a 3.18 or 5.10 kernel that will never be patched again. This
 replaces it with a maintained one, and measures both so the claim can be checked rather than believed.
@@ -118,8 +122,5 @@ the device's own image as data, never transcribed from a vendor header.
 ## Working with us
 
 This port is developed in the open at `github.com/alphaonex86/openwrt`. If you build ONU hardware and
-want it supported — or you have a board this should run on — open an issue there.
-
-<!-- A direct contact address is deliberately NOT published here: the commits in this repository are
-     authored under a different address, so putting the company one in a public file would be a new
-     disclosure and that is the owner's call, not the tooling's.  Add it here when you want it. -->
+want it supported — or you have a board this should run on — open an issue there, or write to
+**alpha_one_x86@first-world.info** — the same address that authors the commits here.

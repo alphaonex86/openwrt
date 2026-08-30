@@ -13,6 +13,35 @@
  * generations, which is why everything here is relative to the DT window.
  */
 
+/*
+ * ★★★ THE COMMENT-TO-REGISTER RATIO HERE IS DELIBERATE.  DO NOT "CLEAN IT UP".
+ *
+ * Measured 2026-08-29: 909 defines, ~1500 comment lines, 259 comment blocks.
+ * That looks like bloat and it was nearly cut on exactly that reading.  What
+ * those lines actually hold:
+ *
+ *   68 blocks (602 lines) carry a TIER, a DATE, a build/bisect id, or an
+ *      explicit REFUTATION -- e.g. the CLS monitor's enable is BIT(8) and an
+ *      earlier probe used bit0, so "every conclusion drawn from cls_hit all 0
+ *      is VOID"; or the TX MIB block's "UNVALIDATED - DO NOT USE AS A WITNESS",
+ *      with the measurement that refuted it (1164 frames, every cell moved by
+ *      ZERO).  Deleting those lets the same wrong conclusion be drawn twice.
+ *
+ *   77 blocks (657 lines) carry no such marker and are still not decoration:
+ *      they are pipeline maps and root causes -- the four L2FE profile tables
+ *      consulted BEFORE the forwarding decision, or why the GPHY firmware must
+ *      be seeded before a single frame crosses (until it is, the LINE side
+ *      negotiates and reports link while nothing forwards).
+ *
+ *   114 blocks (236 lines) are one-to-four-line field notes, which is simply
+ *      what a register header is for.
+ *
+ * ⇒ what IS removable here is DEAD DEFINES, and 106 of them were removed the
+ *   same day.  The prose is the reason a clean-room register map can be trusted
+ *   at all: a value without its why is an assertion, and a refuted witness that
+ *   nobody recorded gets re-chased.
+ */
+
 #ifndef _CORTINA_NI_REGS_H
 #define _CORTINA_NI_REGS_H
 

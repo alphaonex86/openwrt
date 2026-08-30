@@ -238,6 +238,23 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 	return OMCI_RC_OK;
 }
 
+/*
+ * The adaptive MIB-Data-Sync walk.  See OMCI_MDS_WALK_STEP in gpon_omci_me.h for
+ * why 0 is outside the search space rather than folded onto 1.
+ */
+void omci_mds_walk(struct omci_onu *o)
+{
+	if (!o->mds_adapt || !o->mds_adapt_reads)
+		return;
+	if (++o->audit_reads < o->mds_adapt_reads)
+		return;
+	o->audit_reads = 0;
+	/* 1..255: an mds of 0 on entry (only reachable straight after an OLT
+	 * MIB-Reset) steps to OMCI_MDS_WALK_STEP, staying inside the range. */
+	o->mds = (u8)(1 + ((unsigned int)o->mds + OMCI_MDS_WALK_STEP - 1) % 255);
+	o->mds_tries++;
+}
+
 int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp)
 {
 	u16 class_id, inst;
@@ -295,6 +312,9 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		o->mds = 0;
 		memset(o->store, 0, sizeof(o->store));
 		o->store_n = 0;
+		/* a provisioning event is the walk's GOAL, reached: rearm it */
+		o->audit_reads = 0;
+		o->mds_tries = 0;
 		resp[8] = OMCI_RC_OK;
 		break;
 	case OMCI_MT_MIB_UPLOAD:
@@ -308,11 +328,20 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 			return 0;
 		resp[8] = omci_get_fill(o, class_id, inst,
 					((u16)msg[8] << 8) | msg[9], resp);
+		/* ★ THE WALK IS CALLED FROM HERE AND NOWHERE ELSE: a GET is the
+		 * unit the OLT's audit is made of, so it is the only event that
+		 * means "read us again without provisioning". */
+		omci_mds_walk(o);
 		break;
 	case OMCI_MT_SET:
 	case OMCI_MT_CREATE:
 	case OMCI_MT_DELETE:
 		resp[8] = omci_config_apply(o, mt, class_id, inst, msg, len);
+		if (resp[8] == OMCI_RC_OK) {
+			/* the OLT provisioned: the walk reached its goal */
+			o->audit_reads = 0;
+			o->mds_tries = 0;
+		}
 		break;
 	case OMCI_MT_GET_ALL_ALARMS:
 		/* Alarm-entry count at contents[8..9], NO result byte — same

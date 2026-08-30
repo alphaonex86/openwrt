@@ -805,6 +805,7 @@ struct cortina_gpon {
 	u32 omci_tx_fail;		/* NI TX rejected (ring/scratch busy) */
 	u32 omci_ds_crc_ok;		/* DS MIC self-check (first PDUs only) */
 	u32 omci_ds_crc_bad;
+	u32 omci_rx_bad_mic;		/* DS frames DISCARDED on an invalid MIC */
 
 	/* Stage D: the OLT-provisioned WAN data path.  The shadow (dt_/dg_)
 	 * survives an O5 exit so a LOS re-range where the OLT does NOT
@@ -2928,6 +2929,30 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 				 want, be, le);
 	}
 
+	/* ★★★ THE MIC GATE, BEFORE STAGE D.  The self-check above is DIAGNOSTIC
+	 * ONLY, and until this existed every frame flowed past it into the snoop
+	 * below -- including 8..47-byte runts that cannot carry a MIC.  The snoop
+	 * installs HW tables: a corrupted alloc-id reaches the T-CONT CAM, worst
+	 * case bursting into ANOTHER ONU's grant slot, and a corrupted mt byte
+	 * fakes a whole MIB-Reset teardown (carrier off, CAM invalidated).
+	 *
+	 * ★ ARMED ONLY ONCE THE SELF-CHECK HAS SPOKEN (>= 4 verified frames).
+	 *   Gating from the first frame would let a wrong CRC convention drop
+	 *   every OMCI frame on a link that is actually fine -- our instrument
+	 *   silencing the OLT.  Four live AAL5-BE agreements is the evidence
+	 *   that the convention is right, and only then does the gate bite.
+	 *
+	 * ★ AND IT IS COUNTED: a drop nobody can see is a link that "just stops
+	 *   working".  omci_rx_bad_mic is in the /proc dump beside crc_ok/bad. */
+	if (cg->omci_ds_crc_ok >= 4 && !omci_mic_ok(pdu, len)) {
+		cg->omci_rx_bad_mic++;
+		dev_warn_ratelimited(cg->dev,
+			"DS OMCI: MIC does not verify (len %u, mt 0x%02x) -- frame DISCARDED, "
+			"acting on nothing in it; the OLT's AR retransmit is the recovery\n",
+			len, mt & 0x1f);
+		return;
+	}
+
 	/* ---- Stage D: snoop the data-path-defining MEs (the responder still
 	 * answers them; the driver additionally installs the HW tables). ---- */
 	{
@@ -3611,6 +3636,8 @@ static int cg_proc_show(struct seq_file *m, void *v)
 		   cg->omci_active ? "armed" : "off",
 		   cg->omci_tx, cg->omci_tx_fail,
 		   cg->omci_ds_crc_ok, cg->omci_ds_crc_bad);
+	seq_printf(m, "omci_rx_bad_mic: %u (DS frames discarded on an invalid MIC)\n",
+		   cg->omci_rx_bad_mic);
 	if (cg->omci)
 		seq_printf(m, "  mds=%u store=%u avc=%u unhandled=%u dup_replay=%u ext=%u no_ack=%u",
 			   cg->omci->mds, cg->omci->store_n,

@@ -163,8 +163,6 @@ enum cortina_ni_win {
  */
 #define CA_NI_CAPSRAM_PHYS		0x4f4322000ULL	/* 40-bit: 0x4_f4322000 */
 #define CA_NI_CAPSRAM_TZCONTROL		0x00	/* SEGSECURE[17:0]; =0 -> all NS */
-#define CA_NI_CAPSRAM_INIT		0x04	/* bit0 INIT (SRAM mem-init)      */
-#define CA_NI_CAPSRAM_INITRANGE		0x08	/* dft 0x11ff0000                 */
 
 /*
  * MDIO master, relative to the DT window idx 2 base (stock: window base is
@@ -175,7 +173,6 @@ enum cortina_ni_win {
  * clause 45 "indirect").  The four INTERNAL GbE PHYs are NOT behind it -
  * see the GPHY window defines below.
  */
-#define CA_NI_MDIO_CFG			0x00
 /* prescale = 125000 kHz / (2 * mdc_speed_khz)   (from aal_mdio_speed_set) */
 
 #define CA_NI_MDIO_ADDR			0x04
@@ -332,10 +329,6 @@ enum cortina_ni_win {
 #define CA_NI_GPHY_WRAP_EN0		0x30
 #define  CA_NI_GPHY_WRAP_EN0_VAL	0xff000000u	/* stock golden */
 #define CA_NI_GPHY_WRAP_EN1		0x34
-#define  CA_NI_GPHY_WRAP_EN1_MDIO_OCP	BIT(0)		/* mdio_ocp_sel  */
-#define  CA_NI_GPHY_WRAP_EN1_PATCH_DONE	BIT(12)		/* GPHY->MAC datapath */
-#define  CA_NI_GPHY_WRAP_EN1_BITS \
-	(CA_NI_GPHY_WRAP_EN1_MDIO_OCP | CA_NI_GPHY_WRAP_EN1_PATCH_DONE)
 #define  CA_NI_GPHY_WRAP_EN1_VAL	CA_NI_GPHY_WRAP_EN1_BITS	/* 0x1001 (stock steady) */
 /* per-GPHY interface enable in EN1 = an EDGE/STROBE (NOT a resting level): the
  * reinit pulses EN1_IF(p) 0->1 between two INTF_RST pulses to connect GPHY p to
@@ -591,7 +584,6 @@ enum cortina_ni_win {
  * off" wall.  This is the SoC reset-mgr at 0xa0, NOT the NI GLB_BLOCK_RST at 0x28 (our
  * old GLB+0x28 pulse hit the wrong reg and stormed).  NI/L2FE/L2TM already run (U-Boot
  * TX + our classified frame), so pulse ONLY TQM (bit5) - never NI (breaks U-Boot TX). */
-#define CA_NI_GLB_SOC_RST		0xa0
 /* L3QM init-done: 0x6988 bit30 (stock aal_l3qm_check_init_done spins on it; stock live
  * 0x6988=0x65FFFFFF has bit30=1).  This is the REAL init-done, NOT the QM_PHY_PORT_STS
  * "qm_init_done" phantom we used before. */
@@ -609,7 +601,6 @@ enum cortina_ni_win {
  * (aal_l3qm_set_epp_axi_attrib): write DATA0, then ACCESS = GO|rbw|ADDR, then
  * poll GO(bit31) clear with a bounded timeout. */
 #define CA_NI_QM_AXI_ATTR_ACCESS	0x67cc	/* [31]=access/GO [30]=rbw(1=wr) [5:0]=ADDR */
-#define CA_NI_QM_AXI_ATTR_DATA1		0x67d0	/* [1:0]=axi_top_bit (40-bit addr high) */
 #define CA_NI_QM_AXI_ATTR_DATA0		0x67d4	/* qos/cache/snoop/bar/domain/prot payload */
 #define  CA_NI_QM_AXI_ATTR_GO		BIT(31)
 #define  CA_NI_QM_AXI_ATTR_RBW		BIT(30)	/* 1 = write the entry */
@@ -676,7 +667,6 @@ enum cortina_ni_win {
  * ⚠ STILL NOT A WITNESS YET: the counter IDs below (UC/MC/BC = 0/1/2) are
  * derived, never measured - fixing the word order is necessary and NOT
  * sufficient before mac_rx_pN is quoted in any verdict. */
-#define CA_NI_HV_RXMIB_DATA1		0xa16c		/* counter value [63:32]  */
 #define CA_NI_HV_RXMIB_DATA0		0xa170		/* counter value [31:0]   */
 #define  CA_NI_MIB_OP_READ_ONLY		0		/* read, do not clear    */
 /* RX counter ids (subset the spy reads) */
@@ -705,9 +695,6 @@ enum cortina_ni_win {
  * as a per-socket TX witness.  Offsets from the shipped firmware's own
  * name->address table, corroborated by a live stock read taken while the port
  * was transmitting: DATA0 = 0x000055fa, DATA1 = 0. */
-#define CA_NI_HV_TXMIB_ACCESS		0xa174
-#define CA_NI_HV_TXMIB_DATA1		0xa178		/* byte-count hi word    */
-#define CA_NI_HV_TXMIB_DATA0		0xa17c		/* counter value [31:0]  */
 /* TX counter ids.  The vendor table's size-bin anchor is
  * counter_id_TxStatsFrm65to127Oct = 0xf, one id LOWER than the RX table's
  * counter_id_RxStatsFrm64Oct = 0xf, which places TX UC/MC/BC at 1/2/3.  That is
@@ -729,7 +716,6 @@ enum cortina_ni_win {
  * Our driver started the port block at 0xa5c4 and never touched 0xa5c0, so a
  * wrong U-Boot int_cfg/phy_mode/lpbk left the internal GMII disconnected
  * non-deterministically.  Force int_cfg=GE_GMII, phy_mode=MAC, lpbk=off. */
-#define CA_NI_PORT_STRIDE		0x90
 #define CA_NI_PORT_STATIC_CFG(p)	(0xa5c0 + (p) * CA_NI_PORT_STRIDE)
 #define  CA_NI_PORT_STATIC_INT_CFG	GENMASK(3, 0)	/* 0 = GE_GMII */
 #define  CA_NI_PORT_STATIC_PHY_MODE	BIT(4)		/* 0 = MAC->PHY */
@@ -740,7 +726,6 @@ enum cortina_ni_win {
  * ca_ni_cpu_tag_init enables this ONLY on RTK_NI_PORT_4 (the external RTL-switch
  * uplink), never the internal GPHY ports - so wiring it on port 0 is a clean-
  * room design extension, not stock behaviour. */
-#define CA_NI_NI_CPU_TAG_CFG		0xa424	/* ELNATH NI_HV_GLB_CPU_TAG_CFG (rtl 0xa42c); stock 0x00048899 */
 /* full stock-measured value (all ports read 0xCB000200 live on stock): low word
  * int_cfg=0/phy_mode=0/lpbk=0 + bit9, and the UPPER byte 0xCB000000 = the per-port
  * MAC<->GPHY datapath enable U-Boot leaves clear.  Write the whole word to match. */
@@ -828,8 +813,6 @@ enum cortina_ni_win {
 #define CA_NI_L2TM_CB_VOQ_THRSH_ACCESS	0x2da0	/* CB_VOQ_THRSH_PROFILE_MEM_ACCESS */
 #define CA_NI_L2TM_CB_VOQ_THRSH_DATA1	0x2da4
 #define CA_NI_L2TM_CB_VOQ_THRSH_DATA0	0x2da8
-#define CA_NI_L2TM_DQSCH_EQ_THRSH	0x2e58	/* DQSCH_EQ_PROFILE_THRSH0 (dft 0x7fff) */
-#define CA_NI_L2TM_DQSCH_PORT_THRSH0	0x2e5c	/* DQSCH_PORT_THRSH_PROFILE0..3 */
 #define CA_NI_L2TM_DQSCH_VOQ_THRSH_ACCESS	0x2e70	/* DQSCH_VOQ_THRSH_PROFILE_MEM_ACCESS */
 #define CA_NI_L2TM_DQSCH_VOQ_THRSH_DATA		0x2e74
 #define CA_NI_L2TM_CB_ABR_CTRL		0x2eec	/* stock 0x88000200 */
@@ -1076,7 +1059,6 @@ enum cortina_ni_win {
 
 /* per-VP block, stride 0xa0, VP 0..11; CPU n transmits on VP n+2
  * (verified in the 07f __ca_ni_start_xmit_buf_for_fc_dirTx: vp = cpu + 2) */
-#define CA_DMA_LSO_VP_STRIDE		0xa0
 #define CA_DMA_LSO_VP_COUNT		12
 #define CA_DMA_LSO_VP_CONTROL(vp)	(0x100 + (vp) * CA_DMA_LSO_VP_STRIDE)
 #define  CA_DMA_LSO_VP_TXQ_ALL_EN	GENMASK(7, 0)	/* txq0..7 enable */
@@ -1124,12 +1106,6 @@ enum cortina_ni_win {
  * @0x4fb40, in ca_ni_init_l3qm after enable_rx).  Without these the RMU dequeue DMA
  * never completes -> a CPU frame reaches the QM but is never admitted (wptr=0,
  * 0x6900=0, no drop).  Same g_ne_axi_reo window (idx 10), low offsets. */
-#define CA_NI_AXI_REO_RD0		0x000
-#define CA_NI_AXI_REO_RD1		0x004
-#define CA_NI_AXI_REO_RD2		0x008
-#define CA_NI_AXI_REO_RD3		0x00c
-#define CA_NI_AXI_REO_WR0		0x400
-#define CA_NI_AXI_REO_WR1		0x404
 /* ★★ build97: the L3FE AXI read-reorder channel (vendor aal_l3fe_axi_reo_init, aal_l3fe.c:341,
  * run LAST in aal_l3fe_init).  It is the SIBLING of the main NI AXI-REO channels our driver
  * already programs (win10+0x000 = rd ORIG 0xF->0xC, win10+0x400 = wr ORIG 4); the L3FE channel
@@ -1264,7 +1240,6 @@ enum cortina_ni_win {
 #define CA_NI_LSPID_L3_WAN		0x18	/* AAL_LPORT_L3_WAN; DS RX lspid after L3FE miss-punt */
 #define CA_NI_PON_DATA_TCONT		1	/* hw data T-CONT (0 = OMCC) */
 #define CA_NI_PON_DATA_COS		0	/* data queue 0 -> VoQ 8 */
-#define CA_NI_PON_DATA_LDPID		(0x20 + CA_NI_PON_DATA_TCONT)
 /* ldpid of an arbitrary hw T-CONT's queue: the upstream logical ports are one
  * per T-CONT starting at 0x20.  A single-alloc OLT puts the data on the OMCC's
  * T-CONT, so the TX ldpid becomes a RUNTIME value - see
@@ -1324,7 +1299,6 @@ enum cortina_ni_win {
  *     One byte per cpu_port: port0 -> bits[7:0] of INT_EN0 (voq0..7). --- */
 #define CA_NI_QM_EPP64_INT_EN0		0x6110	/* cpu ports 0..3 */
 #define CA_NI_QM_EPP64_INT_EN1		0x6114	/* cpu ports 4..7 */
-#define  CA_NI_QM_EPP64_INT_PORT0	GENMASK(7, 0)
 /* ★★ build61: stock LIVE 0x6110 = 0x0000FFFF (bits 0-15), NOT 0xff - we only ever set
  * 0xff (port0 byte) or 0xffffffff (build49, regressed).  bits[15:8] (RE: the writeback-
  * completion / wptr-update latch enable) were the missing piece; the writeback never
@@ -1720,8 +1694,6 @@ enum cortina_ni_win {
 #define CA_NI_RX_CPU_POOL1_BUFSZ	2048u	/* EQ6 buffer_size idx4 (2048B) */
 #define CA_NI_RX_CPU_POOL0_BYTES \
 	(CA_NI_RX_CPU_POOL0_BUFSZ * CA_NI_RX_EQ_TOTAL_BUF)	/* 512*2048 = 1MB */
-#define CA_NI_RX_CPU_POOL1_BYTES \
-	(CA_NI_RX_CPU_POOL1_BUFSZ * CA_NI_RX_EQ2_TOTAL_BUF)	/* 512*2048 = 1MB */
 #define CA_NI_RX_CPU_DRAM_SIZE \
 	(CA_NI_RX_CPU_POOL0_BYTES + CA_NI_RX_CPU_POOL1_BYTES)	/* 2MB */
 /* ★ EQ8 = the RMU's empty-buffer ALLOC pool (dest-9->profile-13->EQ13 queue, but
@@ -1729,7 +1701,6 @@ enum cortina_ni_win {
  * CPU-PUSH pool - reuse EQ13's CFG0 (enable) + CFG2=0xff00 (refill_en=0, NO FBM,
  * so no hanging AXI alloc, unlike stock's 0x66ec) - bid window after EQ14. */
 #define CA_NI_RX_EQ8_ID			8	/* Elnath RMU empty-buffer alloc pool */
-#define CA_NI_RX_EQ8_TOTAL_BUF		383	/* seeded free buffers (stock pa_req ~62) */
 /* ★★ EQ12 = the DEEP-QUEUE CPU pool.  Tier-1 stock: a deep_q=1 frame egresses ES
  * port 8/9 -> EQ_PROFILE(12)=0xEC {eqp0=12,eqp1=14} -> EQ12 buffer -> RMU -> CPU.
  * Stock EQ12: cfg0=0x80000081, cfg1=0x010004b0 (total=256, bid=0x4b0 contiguous
@@ -1788,7 +1759,6 @@ enum cortina_ni_win {
 #define  CA_NI_QM_EPP64_PTR		GENMASK(23, 0)
 
 /* ring geometry: 128 descriptors x 8 bytes, byte pointers wrap at 0x400 */
-#define CA_NI_RX_EPP_PER_VOQ		128
 #define CA_NI_RX_DESC_SIZE		8
 #define CA_NI_RX_RING_BYTES		(CA_NI_RX_EPP_PER_VOQ * \
 					 CA_NI_RX_DESC_SIZE)	/* 0x400 per voq */
@@ -2264,7 +2234,6 @@ enum cortina_ni_win {
  * +0x18 (same shift as PORT_DBUF 0x164c->0x1664 and PDPID_MAP 0x1654->0x166c). */
 #define CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS	0x165c	/* rtl8277c 0x1644 + 0x18 */
 #define CA_NI_L2FE_ARB_FLOW_DBUF_DATA	0x1660	/* rtl8277c 0x1648 + 0x18 */
-#define  CA_NI_L2FE_ARB_FLOW_DBUF_FLG_ALL 0x0000000Fu	/* dbuf_flg_0..3 (build100 regression value; stock=0) */
 #define  CA_NI_L2FE_ARB_FLOW_DBUF_ENTRIES 16u		/* entries 0..15 cover flows 0..63 */
 /* L2TM BM packet-memory read-back (buffer header): ACCESS selects buffer index,
  * DATA7 = Header-A word0 (bit30=deep_q, bit31=cpu_flag). */
@@ -2444,7 +2413,6 @@ enum cortina_ni_win {
  * CN_L3E_GLB_DBG_IDX/DAT and CN_L3E_GLB_LATCH_*) only ever READ them.
  */
 #define CA_NI_L3FE_CLS_MON_CTRL		0x30b0
-#define  CA_NI_L3FE_CLS_MON_ENABLE	BIT(8)	/* ★ NOT bit0 */
 #define CA_NI_L3FE_CLS_KEY_ACCESS	0x3380	/* GO|WR|idx; poll GO clear (CA_NI_IND_ACCESS_GO/WR) */
 #define CA_NI_L3FE_CLS_KEY_DATA_BASE	0x3384	/* 11 words 0x3384..0x33ac */
 #define CA_NI_L3FE_CLS_KEY_WORDS	11
@@ -2474,7 +2442,6 @@ enum cortina_ni_win {
 #define CA_NI_L2FE_PP_HEADER_A_HI	0x11cc
 #define CA_NI_L2FE_DOS_FLOOD_CNT	0x1234	/* DoS/flood drop            */
 #define CA_NI_L2FE_PE_TM_PKT_CNT	0x1760	/* frames L2FE->TM (forwarded)*/
-#define CA_NI_QM_RMU0_RX_PKT_CNTR	0x6900	/* ELNATH (rtl 0x67d8); frames into QM RMU */
 #define CA_NI_QM_RX_EOP_DROP_CNTR	0x6948	/* ELNATH (rtl 0x6820) */
 #define CA_NI_QM_RX_LEN_ERR_CNTR	0x694c	/* ELNATH (rtl 0x6824) */
 #define CA_NI_QM_RX_L2TE_DROP_CNTR	0x6950	/* ELNATH (rtl 0x6828) */

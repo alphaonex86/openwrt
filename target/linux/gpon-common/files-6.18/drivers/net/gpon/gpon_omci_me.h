@@ -153,6 +153,21 @@ struct omci_mib_row {
 struct omci_onu {
 	u8	sn[8];			/* PLOAM serial number (vendor+VSSN) */
 	u8	mds;			/* ME 2 attr 1: MIB-Data-Sync */
+	/* ★★ THE ADAPTIVE MDS WALK's state.  It lived in the Luna shell and was
+	 * DELETED by the 2026-08-27 responder deduplication (836b76be01) --
+	 * deleted, not moved: the core never gained it, the shell kept the two
+	 * fields with no code behind them, and omci_mds_provisionable_test has
+	 * been RED on twelve arms ever since.  A container moved without its
+	 * consumers, which is the failure this project already names. */
+	u16	audit_reads;		/* DS OMCI reads since the OLT last PROVISIONED */
+	u8	mds_tries;		/* how far the adaptive MDS walk has stepped */
+	/* the walk's knobs, set by the shell at init so a bisect can turn the
+	 * shipped behaviour off.  They live HERE and not in the shell's call so
+	 * the "GET arm and nowhere else" property is inside the core, where a
+	 * guard can read it -- a shell calling the walk itself could call it
+	 * from a timer and nothing would say so. */
+	bool	mds_adapt;
+	u16	mds_adapt_reads;
 	u16	nrows;			/* static MIB row count */
 	u16	store_n;		/* provisioned-ME count */
 	struct omci_mib_row	rows[OMCI_MIB_ROWS_MAX];
@@ -252,6 +267,29 @@ static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
  * The default is the measured-safe band; a shell may still expose a tunable,
  * but its DEFAULT is this. */
 #define OMCI_MDS_POISON_SEED	7
+
+/* ★★ THE WALK: WHAT TO DO WHEN THE POISON SEED IS NOT ENOUGH.
+ *
+ * The seed makes the FIRST admit re-provision.  It cannot help once the OLT has
+ * STORED that value: from then on rsync == lsync and every escape clause in its
+ * audit is false, so it reads us forever and provisions nothing -- which is
+ * exactly how the literal 200 failed.  A poisoned value that is STABLE is, from
+ * the ONU's side, indistinguishable from being in sync.
+ *
+ * So after N reads with no MIB-Reset and no applied config, STEP the reported
+ * value: the OLT's next pre-config read sees a different one and its audit
+ * fires.  The arithmetic is 1..255 with 0 EXCLUDED from the search space --
+ * G.988 gives 0 the meaning "just MIB-Reset", so counting must never reach it,
+ * and folding 0 onto 1 (the first form) splices the orbit into an 83-value
+ * CYCLE instead of an exhaustive walk. */
+#define OMCI_MDS_WALK_STEP	37	/* coprime with 255: enumerates 1..255 */
+#define OMCI_MDS_ADAPT_READS	12	/* reads with no provisioning before a step */
+
+/* Step the reported MIB-Data-Sync when the OLT reads without provisioning.
+ * Call ONLY from the GET arm: a timer-driven walk would step on a link the OLT
+ * is not even reading.  The knobs live in @o so the call site stays inside the
+ * core. */
+void omci_mds_walk(struct omci_onu *o);
 
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed);
 

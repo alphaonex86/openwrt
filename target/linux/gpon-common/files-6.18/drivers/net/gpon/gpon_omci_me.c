@@ -731,6 +731,10 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	 * be able to answer an ANI-G GET before the first DDM sample lands (the
 	 * OLT audits within seconds of O5).  anig_live stays false until the shell
 	 * publishes a real measurement. */
+	/* the walk ships ON with the measured threshold; a shell may override
+	 * either field after init for a bisect */
+	o->mds_adapt = true;
+	o->mds_adapt_reads = OMCI_MDS_ADAPT_READS;
 	o->anig_rx_level = OMCI_ANIG_RX_FALLBACK;
 	o->anig_tx_level = OMCI_ANIG_TX_FALLBACK;
 	omci_build_mib(o);

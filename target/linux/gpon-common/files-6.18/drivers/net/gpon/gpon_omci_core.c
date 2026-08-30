@@ -367,6 +367,16 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		/* a provisioning event is the walk's GOAL, reached: rearm it */
 		o->audit_reads = 0;
 		o->mds_tries = 0;
+		/* ★★★ AND THE VEIP OPER-UP AVC MUST BE RE-EMITTED.  A MIB-Reset
+		 * wipes the OLT's view, so it will wait for the port-up AVC
+		 * again -- but the latch said "already sent" and the ~31 s work
+		 * never re-ran, leaving the WAN GATED FOREVER with no recovery
+		 * short of a deact/re-range churn the production bar forbids.
+		 * The boot path only ever worked because the OLT's MIB-Reset
+		 * happens to land BEFORE the 31 s timer fires; a mid-session
+		 * one had nothing behind it.  Clearing the latch here is the
+		 * responder's half; the shell re-arms the timer (its own half). */
+		o->avc_veip_up_sent = false;
 		resp[8] = OMCI_RC_OK;
 		break;
 	case OMCI_MT_MIB_UPLOAD:

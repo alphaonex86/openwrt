@@ -2175,7 +2175,14 @@ static void cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
  * branch — the entry already carries this binding, and re-writing the same
  * value is the existing proven idempotent path (no teardown, no churn).
  */
-static void cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
+/* -> 0, or -ETIMEDOUT when a table op did not complete.  ★ IT USED TO RETURN
+ * void: a timed-out access simply returned and the caller could not tell a bind
+ * from a give-up, so nothing retried and the OMCC T-CONT stayed unbound with the
+ * log as the only trace.  The shadow discipline was already right (omcc_alloc /
+ * _valid are written ONLY after both ops succeed); what was missing was SAYING
+ * SO to the caller -- the same "no silent errors" bar its gem-bind twin already
+ * meets. */
+static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 {
 	u16 old = cg->omcc_alloc;
 	u32 d;
@@ -2189,14 +2196,22 @@ static void cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 	if (cg->omcc_alloc_valid && old != alloc_id)
 		cg_tcont_unbind(cg, old);	/* invalidate the stale OMCC entry */
 
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc_id))
-		return;
+	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc_id)) {
+		dev_warn_ratelimited(cg->dev,
+			"OMCC: T-CONT read access timed out for alloc %u - bind NOT complete\n",
+			alloc_id);
+		return -ETIMEDOUT;
+	}
 	d = readl(cg->mac + CG_REG_TCONT_DATA);
 	d &= ~CG_TCONT_INDEX_MASK;			/* index = 0 (OMCC T-CONT) */
 	d |= CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN;
 	writel(d, cg->mac + CG_REG_TCONT_DATA);
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc_id))
-		return;
+	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc_id)) {
+		dev_warn_ratelimited(cg->dev,
+			"OMCC: T-CONT write access timed out for alloc %u - bind NOT complete\n",
+			alloc_id);
+		return -ETIMEDOUT;
+	}
 
 	cg->omcc_alloc = alloc_id;
 	cg->omcc_alloc_valid = true;	/* set ONLY here, after both table ops
@@ -2204,6 +2219,7 @@ static void cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 					 * the shadow invalid, so the post-O5
 					 * supervisor retries it on the next tick */
 	dev_info(cg->dev, "OMCC: T-CONT[0] bound to alloc-id %u\n", cg->omcc_alloc);
+	return 0;
 }
 
 /*
@@ -2561,14 +2577,55 @@ static void cg_datapath_reset(struct cortina_gpon *cg)
 /* Try to bring the OMCC link up: needs O5 + HW-filled omci_port.en. */
 static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 {
-	u32 omci_port;
+	u32 omci_port, want;
 
-	if (cg->omcc_up || state != CG_STATE_OPERATION)
+	if (state != CG_STATE_OPERATION)
 		return;
 	omci_port = cg_mac_rd(cg, CG_REG_OMCI_PORT);
 	if (!(omci_port & CG_OMCI_PORT_EN)) {
+		/* an en=0 Configure_Port-ID transient: write NOTHING and keep the
+		 * link -- the following en=1 re-latch binds the final id */
 		dev_info(cg->dev, "O5 but omci_port not enabled yet (0x%08x)\n",
 			 omci_port);
+		return;
+	}
+	want = gpon_gem_us_port_id(CG_OMCI_PORT_ID(omci_port));
+
+	/* ★★★ A ONE-SHOT GUARD HERE GAVE UP ON EVERY LATER PORTID EVENT.  It read
+	 * `if (cg->omcc_up || state != ...) return;`, so an OLT that re-sent
+	 * Configure_Port-ID with a NEW port-id while we held O5 -- an OLT-side
+	 * reconfig, exactly the "OLT untouched" event class the production bar
+	 * names -- left us-gem 0..7 on the STALE id.  The MAC re-latches
+	 * omci_port on its own (DS de-encap follows the register), so DS kept
+	 * working while our US OMCI replies rode a GEM port the OLT no longer
+	 * accepted: its audit times out, it DEACTIVATES us, and a full re-range
+	 * -- service outage plus PON churn -- was the only recovery.
+	 *
+	 * ⚠ The vendor's own gen2 handler shares this give-up ("don't need to
+	 *   set twice"), so this is a BEYOND-STOCK robustness fix, which the
+	 *   production bar explicitly asks for.
+	 *
+	 * The guard is now on CHANGE, not on having-run-once:
+	 *   - same id re-sent (PLOAMs come 3x): write NOTHING, so the proven
+	 *     LOS/fiber-pull keep-path stays byte-identical;
+	 *   - new id: REBIND THE TRANSPORT ONLY.  The responder session is NOT
+	 *     re-armed -- an OMCC port move is a transport event, and re-arming
+	 *     would reset the MIB under a live OLT session. */
+	if (cg->omcc_up) {
+		if (cg->omcc_gem == want)
+			return;
+		if (cg_omcc_gem_bind(cg, CG_OMCI_PORT_ID(omci_port))) {
+			/* the shadow keeps the OLD id (bind writes it only on
+			 * success), so the next PORTID event retries to
+			 * convergence rather than latching a half-done rebind */
+			dev_warn_ratelimited(cg->dev,
+				"OMCC: rebind to gem %u FAILED - keeping %u, will retry on the next event\n",
+				want, cg->omcc_gem);
+			return;
+		}
+		dev_info(cg->dev,
+			 "OMCC gem re-assigned mid-O5 -> %u (transport rebound; responder session kept)\n",
+			 cg->omcc_gem);
 		return;
 	}
 	/* LATCH ONLY ON SUCCESS.  A failed bind leaves `omcc_up` clear, so the
@@ -3075,6 +3132,21 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 			if (cg->wan_ndev)
 				netif_carrier_off(cg->wan_ndev);
 			schedule_work(&cg->isr_work);
+			/* ★★★ RE-ARM THE VEIP OPER-UP AVC.  This branch dropped
+			 * carrier and wiped the shadow but never re-scheduled the
+			 * work, so after a MID-SESSION MIB-Reset the OLT waited
+			 * forever for a port-up AVC that would never come again --
+			 * WAN gated, recoverable only by a deact/re-range churn the
+			 * production bar forbids.  The responder clears its
+			 * avc_veip_up_sent latch on the same event (its half); this
+			 * is the timer's half, and the two are needed together.
+			 *
+			 * ★ schedule_delayed_work on an ALREADY-PENDING work keeps
+			 *   the original expiry, so the proven 31 s-post-O5 boot
+			 *   cadence is untouched -- and cg_veip_avc_work is gated on
+			 *   `omci_active && !avc_veip_up_sent`, so a MIB-Reset that
+			 *   arrives before the first AVC re-arms into a no-op. */
+			schedule_delayed_work(&cg->veip_avc_work, 31 * HZ);
 		}
 	}
 
@@ -3140,7 +3212,10 @@ static void cg_isr_work(struct work_struct *work)
 		}
 
 		if ((ev.intr & CG_INT_ONU_ID) && ev.id != CG_ONU_ID_NONE)
-			cg_omcc_tcont_bind(cg, ev.id);
+			if (cg_omcc_tcont_bind(cg, ev.id))
+				dev_warn_ratelimited(cg->dev,
+					"OMCC: T-CONT bind failed for alloc %u - the post-O5 supervisor retries\n",
+					ev.id);
 
 		if (ev.intr & CG_INT_DACT)
 			dev_warn(cg->dev, "Deactivate_ONU-ID received\n");
@@ -3223,7 +3298,10 @@ static void cg_isr_work(struct work_struct *work)
 			 * keep-path). */
 			if (id != CG_ONU_ID_NONE &&
 			    (!cg->omcc_alloc_valid || cg->omcc_alloc != id))
-				cg_omcc_tcont_bind(cg, id);
+				if (cg_omcc_tcont_bind(cg, id))
+					dev_warn_ratelimited(cg->dev,
+						"OMCC: T-CONT bind failed for alloc %u - the post-O5 supervisor retries\n",
+						id);
 			/* A lost DS-PLOAM edge leaves us.frame_var stale = a US
 			 * burst misaligned in the grant window.  Idempotent: it
 			 * writes only on a genuine change, and stock recomputes it

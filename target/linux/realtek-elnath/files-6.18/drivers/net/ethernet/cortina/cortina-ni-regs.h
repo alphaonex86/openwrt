@@ -1265,6 +1265,11 @@ enum cortina_ni_win {
 #define CA_NI_PON_DATA_TCONT		1	/* hw data T-CONT (0 = OMCC) */
 #define CA_NI_PON_DATA_COS		0	/* data queue 0 -> VoQ 8 */
 #define CA_NI_PON_DATA_LDPID		(0x20 + CA_NI_PON_DATA_TCONT)
+/* ldpid of an arbitrary hw T-CONT's queue: the upstream logical ports are one
+ * per T-CONT starting at 0x20.  A single-alloc OLT puts the data on the OMCC's
+ * T-CONT, so the TX ldpid becomes a RUNTIME value - see
+ * cortina_ni_pon_data_set_tcont(). */
+#define CA_NI_PON_TCONT_LDPID(t)	(0x20 + (t))
 
 /* coherent TX scratch: N slots of {16B header block @0, frame @32}.  32 slots
  * (guarded by a u32 bitmap) comfortably absorb the OLT's MIB-Upload-Next reply

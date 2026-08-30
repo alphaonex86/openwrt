@@ -567,6 +567,10 @@ int cortina_l3fe_intf_add(void __iomem *ne, const u8 *lan_mac);
  * ldpid offset) - never a compiled-in constant.
  */
 void cortina_ni_gpon_data_path_set(u16 gem_id, u8 tcont_idx);
+/* Steer the upstream DATA queue to a hw T-CONT at runtime.  Normally T-CONT 1;
+ * a single-alloc OLT puts the data on the OMCC's T-CONT 0 (see cortina-ni-tx.c
+ * and gpon_gem_us_ride_range() in the core). */
+void cortina_ni_pon_data_set_tcont(u8 tcont);
 /*
  * ★ LIVE DS (PON->host) PDC ROUTE push (GPON -> offload backend).  The DS data
  * GEM's PDC entry is written either as {LDPID L3_WAN, LSPID PON} - into the
@@ -659,6 +663,9 @@ static inline int cortina_l3fe_intf_add(void __iomem *ne, const u8 *lan_mac)
 	return 0;
 }
 static inline void cortina_ni_gpon_data_path_set(u16 gem_id, u8 tcont_idx)
+{
+}
+static inline void cortina_ni_pon_data_set_tcont(u8 tcont)
 {
 }
 static inline void cortina_ni_gpon_ds_route_set(bool into_l3fe)

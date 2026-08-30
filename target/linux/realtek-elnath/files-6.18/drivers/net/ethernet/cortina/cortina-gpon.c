@@ -386,6 +386,7 @@
  * The DS broadcast GEM (port-id 4095, carries e.g. the DHCP OFFER on this
  * OLT family) gets the next internal index, DS-only.
  */
+#define CG_OMCC_TCONT_IDX	0	/* hw T-CONT the OMCC alloc-id is bound to */
 #define CG_DATA_TCONT_IDX	1	/* hw T-CONT of the OLT's data alloc-id */
 #define CG_DATA_GEM_IDX		(CG_DATA_TCONT_IDX * 8)	/* intern gem idx = VoQ 8 */
 #define CG_MCAST_GEM_IDX	(CG_DATA_GEM_IDX + 1)	/* DS-only broadcast GEM */
@@ -822,6 +823,10 @@ struct cortina_gpon {
 	u16 dg_tcont_ptr;		/* ME 268 attr 2 (diagnostic) */
 	u8 dg_dir;			/* ME 268 attr 3 direction (diagnostic) */
 	bool data_installed;
+	/* ★ the data rides the OMCC's T-CONT (single-alloc OLT).  A MODE, not a
+	 * failure: the dedicated T-CONT CAM is deliberately left alone and the
+	 * data GEM is stamped into the OMCC T-CONT's spare upstream slots. */
+	bool data_rides_omcc;
 	/*
 	 * HW CAM identity currently ARMED in silicon for the data path, tracked
 	 * separately from the dt_/dg_ OLT-provisioned shadow above: what
@@ -2303,19 +2308,38 @@ static int cg_ds_gem_unbind(struct cortina_gpon *cg, u32 gem_id)
  */
 static void cg_data_teardown(struct cortina_gpon *cg)
 {
+	const struct gpon_gem_us_range *us_slots = &cg_us_data_slots;
+	struct gpon_gem_us_range ride;
 	u32 i;
 
-	/* 1. drain/disable the data T-CONT's VoQs before touching the CAM */
-	cg_puc_pvtbl_program(cg, CG_DATA_TCONT_IDX, false);
-	cg_puc_voq_flush(cg, CG_DATA_TCONT_IDX);
+	/*
+	 * ★ THE TEARDOWN MUST UNDO WHAT THE INSTALL ACTUALLY DID, and in
+	 * ride-the-OMCC mode that is a DIFFERENT T-CONT and a DIFFERENT slot
+	 * run.  Deriving it from the same core call as the install keeps one
+	 * source of truth — a second copy of the split here would rot the day
+	 * the reserved count changes.
+	 */
+	if (cg->data_rides_omcc &&
+	    gpon_gem_us_ride_range(&cg_us_omcc_slots, &ride))
+		us_slots = &ride;
+
+	/* 1. drain/disable the data T-CONT's VoQs before touching the CAM.
+	 * ★ NEVER in ride mode: those VoQs belong to the OMCC's T-CONT, and
+	 * disabling its pvtbl would take OMCI and PLOAM down with the data
+	 * path.  Clearing the port stamps in step 2 is what stops the data
+	 * GEM riding; the queues themselves must stay served. */
+	if (!cg->data_rides_omcc) {
+		cg_puc_pvtbl_program(cg, CG_DATA_TCONT_IDX, false);
+		cg_puc_voq_flush(cg, CG_DATA_TCONT_IDX);
+	}
 
 	/* 2. clear the US GEM port stamps for the data VoQs (8..15), walking the
 	 * declared data slot run.  This is a WHOLE-REGISTER write and not the
 	 * read-modify-write the install path uses — US_PORT_DATA is id[11:0] and
 	 * nothing else, so the two are equivalent here; the asymmetry is
 	 * pre-existing and deliberately left as it was. */
-	for (i = 0; i < cg_us_data_slots.count; i++) {
-		u32 idx = gpon_gem_us_index(&cg_us_data_slots, i);
+	for (i = 0; i < us_slots->count; i++) {
+		u32 idx = gpon_gem_us_index(us_slots, i);
 
 		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx))
 			break;
@@ -2339,8 +2363,16 @@ static void cg_data_teardown(struct cortina_gpon *cg)
 		 cg->hw_data_alloc, cg->hw_data_gem);
 	cg->hw_data_alloc = 0;
 	cg->hw_data_gem = 0;
+	cg->data_rides_omcc = false;
 	/* the L3FE US hit-action must stop targeting the stale GEM */
 	cortina_ni_gpon_data_path_set(0, 0);
+	/* and TX goes back to the dedicated T-CONT, so a later re-provision on a
+	 * distinct alloc is not still steered at the OMCC's.  ★ Named with the
+	 * GPON shell's own constant, not the NI's CA_NI_PON_DATA_TCONT: this
+	 * file does not include cortina-ni-regs.h, and the shell is the side
+	 * that DECIDES the T-CONT — the NI merely follows what it is told, on
+	 * install and on teardown alike. */
+	cortina_ni_pon_data_set_tcont(CG_DATA_TCONT_IDX);
 }
 
 /*
@@ -2367,14 +2399,30 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 {
 	u32 alloc = READ_ONCE(cg->dt_alloc);
 	u32 gem = READ_ONCE(cg->dg_gem);
+	const struct gpon_gem_us_range *us_slots = &cg_us_data_slots;
+	u32 us_tcont = CG_DATA_TCONT_IDX;
+	bool rides_omcc = false;
+	struct gpon_gem_us_range ride;
 	u32 d, i;
 
 	if (!cg->omcc_up)
 		return;
 
+	/*
+	 * ★ THE RIDE'S PREMISE IS PART OF THE ARMED IDENTITY, not just the data
+	 * Alloc-ID and GEM.  The ride-the-OMCC route was chosen because the data
+	 * alloc WAS the OMCC's; if the OLT then moves the OMCC to a different
+	 * Alloc-ID mid-O5 (cg_omcc_try_up rebinds T-CONT 0 and unbinds the old
+	 * CAM entry), that premise is gone — the data alloc now has no CAM entry
+	 * of its own and no longer matches the OMCC's either.  Without this the
+	 * stamps simply stay in T-CONT 0's VoQs and the data silently follows
+	 * whatever alloc the OMCC moved to, which may not be the one the OLT
+	 * provisioned for it.  Tear down and re-decide instead.
+	 */
 	if (cg->hw_data_alloc &&
 	    (cg->hw_data_alloc != (alloc & 0xfff) ||
-	     cg->hw_data_gem != (gem & 0xfff))) {
+	     cg->hw_data_gem != (gem & 0xfff) ||
+	     (cg->data_rides_omcc && cg->hw_data_alloc != cg->omcc_alloc))) {
 		cg_data_teardown(cg);
 		cg->data_installed = false;
 	}
@@ -2416,12 +2464,41 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	case GPON_GEM_US_BIND_DONE:
 		return;
 	case GPON_GEM_US_BIND_IS_OMCC:
-		/* single-alloc OLT: rebinding the CAM would steal the OMCC's
-		 * T-CONT (proven 9602C regression).  Leave the CAM alone and
-		 * warn — the data path then needs the ride-the-OMCC variant. */
-		dev_warn(cg->dev,
-			 "data alloc %u == OMCC alloc: NOT rebinding CAM (single-alloc OLT?)\n",
-			 alloc);
+		/*
+		 * ★★★ SINGLE-ALLOC OLT: RIDE THE OMCC'S T-CONT.
+		 *
+		 * Rebinding the CAM would steal the OMCC's T-CONT (the proven
+		 * 9602C regression), so the CAM is deliberately left alone.
+		 * But refusing the bind and then FALLING THROUGH was the real
+		 * defect: it stamped the data GEM into T-CONT 1's VoQs, armed
+		 * the PUC, raised carrier and set data_installed — while
+		 * T-CONT 1 had no CAM entry at all, so the OLT never granted
+		 * it and every upstream frame (the DHCP DISCOVER first) queued
+		 * forever.  Carrier-on lied to udhcpc and data_installed
+		 * blocked every retry: a silent, permanent dead WAN on the
+		 * whole single-alloc OLT class.
+		 *
+		 * The route instead: stamp the data GEM into the OMCC
+		 * T-CONT's OWN spare upstream slots and steer data TX there,
+		 * so the data rides the management Alloc-ID's grants.  WHICH
+		 * slots are spare is the CORE's decision
+		 * (gpon_gem_us_ride_range) because it is a protocol split, not
+		 * a Cortina one; how many slots exist is ours.
+		 */
+		if (!gpon_gem_us_ride_range(&cg_us_omcc_slots, &ride)) {
+			dev_err(cg->dev,
+				"data alloc %u == OMCC alloc but the OMCC slot run cannot spare a queue: NO data path (refusing to steal an OMCI slot)\n",
+				alloc);
+			return;
+		}
+		us_slots = &ride;
+		us_tcont = CG_OMCC_TCONT_IDX;
+		rides_omcc = true;
+		dev_info(cg->dev,
+			 "data alloc %u == OMCC alloc: single-alloc OLT, data RIDES the OMCC T-CONT %u (US VoQ %u..%u; OMCI keeps the top %u by strict priority)\n",
+			 alloc, us_tcont, ride.base,
+			 ride.base + ride.count - 1,
+			 GPON_GEM_US_OMCI_RESERVED_SLOTS);
 		break;
 	case GPON_GEM_US_BIND_TCONT:
 		if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc & 0xfff))
@@ -2436,9 +2513,9 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 		break;
 	}
 
-	/* US: every VoQ of the data T-CONT stamps the data GEM port-id */
-	for (i = 0; i < cg_us_data_slots.count; i++) {
-		u32 idx = gpon_gem_us_index(&cg_us_data_slots, i);
+	/* US: every VoQ of the SELECTED T-CONT stamps the data GEM port-id */
+	for (i = 0; i < us_slots->count; i++) {
+		u32 idx = gpon_gem_us_index(us_slots, i);
 
 		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx))
 			return;
@@ -2498,19 +2575,24 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	}
 
 	/* PUC: enable the data T-CONT's VoQs, then the flush workaround */
-	if (cg_puc_pvtbl_program(cg, CG_DATA_TCONT_IDX, true))
+	if (cg_puc_pvtbl_program(cg, us_tcont, true))
 		return;
-	cg_puc_voq_flush(cg, CG_DATA_TCONT_IDX);
+	cg_puc_voq_flush(cg, us_tcont);
 
 	cg->data_installed = true;
+	cg->data_rides_omcc = rides_omcc;
+	/* the TX header's ldpid and policer id must target the SAME T-CONT, or
+	 * the frames are queued where no grant ever arrives */
+	cortina_ni_pon_data_set_tcont((u8)us_tcont);
 	cg->hw_data_alloc = alloc & 0xfff;	/* record the armed identity so a */
 	cg->hw_data_gem = gem & 0xfff;		/* later reconfig can invalidate it */
 	/* report the LIVE data-path identity to the L3FE offload backend (the
 	 * US hit-action's mcgid/T-CONT source - never a compiled-in constant) */
-	cortina_ni_gpon_data_path_set(cg->hw_data_gem, CG_DATA_TCONT_IDX);
+	cortina_ni_gpon_data_path_set(cg->hw_data_gem, (u8)us_tcont);
 	dev_info(cg->dev,
-		 "DATA path UP: alloc %u -> T-CONT %u, gem %u (US VoQ %u, DS idx %u), bcast %u -> idx %u\n",
-		 alloc, CG_DATA_TCONT_IDX, gem, CG_DATA_GEM_IDX,
+		 "DATA path UP%s: alloc %u -> T-CONT %u, gem %u (US VoQ %u, DS idx %u), bcast %u -> idx %u\n",
+		 rides_omcc ? " (riding the OMCC T-CONT)" : "",
+		 alloc, us_tcont, gem, gpon_gem_us_index(us_slots, 0),
 		 CG_DATA_GEM_IDX, CG_MCAST_GEM_ID, CG_MCAST_GEM_IDX);
 	if (cg->wan_ndev)
 		netif_carrier_on(cg->wan_ndev);
@@ -3716,6 +3798,12 @@ static int cg_proc_show(struct seq_file *m, void *v)
 		   cg->omci_ds_crc_ok, cg->omci_ds_crc_bad);
 	seq_printf(m, "omci_rx_bad_mic: %u (DS frames discarded on an invalid MIC)\n",
 		   cg->omci_rx_bad_mic);
+	/* ★ SEPARATE FROM bad_mic ON PURPOSE: a runt is a framing / GEM
+	 * reassembly fault UPSTREAM of OMCI, a bad MIC is corruption on a
+	 * well-framed PDU.  One number for both would make a broken reassembler
+	 * read as a noisy fibre. */
+	seq_printf(m, "omci_rx_runt:    %u (DS frames shorter than a 48-byte baseline PDU)\n",
+		   cg->omci ? cg->omci->rx_runt : 0);
 	if (cg->omci)
 		seq_printf(m, "  mds=%u store=%u avc=%u unhandled=%u dup_replay=%u ext=%u no_ack=%u",
 			   cg->omci->mds, cg->omci->store_n,
@@ -3724,7 +3812,9 @@ static int cg_proc_show(struct seq_file *m, void *v)
 			   cg->omci->no_ack);
 	seq_putc(m, '\n');
 	seq_printf(m, "data           = %s alloc=%u (me 0x%04x) gem=%u (tcont-ptr 0x%04x dir %u) bcast=%u carrier=%d\n",
-		   cg->data_installed ? "INSTALLED" : "down",
+		   cg->data_installed
+			? (cg->data_rides_omcc ? "INSTALLED(rides-omcc)" : "INSTALLED")
+			: "down",
 		   cg->dt_alloc, cg->dt_inst, cg->dg_gem, cg->dg_tcont_ptr,
 		   cg->dg_dir, CG_MCAST_GEM_ID,
 		   cg->wan_ndev ? netif_carrier_ok(cg->wan_ndev) : -1);

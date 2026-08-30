@@ -3433,6 +3433,12 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 	seq_printf(m, "omci_tx: resp=%u drop=%u unhandled=%u mds=%u sn=%*ph\n",
 		   ep->dbg_omci_tx, ep->dbg_omci_tx_drop, ep->dbg_omci_unhandled,
 		   ep->omci_mds, 8, ep->omci_sn);
+	/* the shared core's own DS discard counters.  ★ Two numbers, not one: a
+	 * runt is a framing / GEM-reassembly fault upstream of OMCI, a bad MIC
+	 * is corruption on a well-framed PDU, and one figure for both would make
+	 * a broken reassembler read as a noisy fibre. */
+	seq_printf(m, "omci_rx_drop: bad_mic=%u runt=%u\n",
+		   luna_onu.rx_bad_mic, luna_onu.rx_runt);
 	{
 		unsigned int oring = (omci_tx_ring > 5) ? 4 : omci_tx_ring;
 

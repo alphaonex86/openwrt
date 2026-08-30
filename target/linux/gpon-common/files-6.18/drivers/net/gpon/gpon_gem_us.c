@@ -109,6 +109,21 @@ bool gpon_gem_us_range_ok(const struct gpon_gem_us_range *r)
  * it has no such guard, so an Alloc-ID of 0 against a non-zero ONU-ID takes
  * Luna's bind path today and must keep taking it.  Three arms, not four.
  */
+bool gpon_gem_us_ride_range(const struct gpon_gem_us_range *omcc,
+			    struct gpon_gem_us_range *out)
+{
+	if (!omcc || !out || !gpon_gem_us_range_ok(omcc))
+		return false;
+	/* every slot but the reserved top ones; a run that cannot spare one is
+	 * refused rather than served by stealing an OMCI slot */
+	if (omcc->count <= GPON_GEM_US_OMCI_RESERVED_SLOTS)
+		return false;
+	out->base = omcc->base;
+	out->count = (u16)(omcc->count - GPON_GEM_US_OMCI_RESERVED_SLOTS);
+	out->index_max = omcc->index_max;
+	return gpon_gem_us_range_ok(out);
+}
+
 enum gpon_gem_us_bind gpon_gem_us_tcont_decide(u16 alloc, u16 omcc_alloc,
 					       bool already_bound)
 {

@@ -2821,6 +2821,7 @@ static void __init bosa_probe(void)
 		int conn  = bosa_i2c_read8(0x50, 2);
 		int br    = bosa_i2c_read8(0x50, 12);
 		char vend[17];
+		char part[17];
 		int k;
 
 		for (k = 0; k < 16; k++) {
@@ -2829,7 +2830,44 @@ static void __init bosa_probe(void)
 			vend[k] = (b >= 0x20 && b < 0x7f) ? (char)b : '.';
 		}
 		vend[16] = 0;
-		if (ident > 0 && ident < 0x30 && extid >= 0) {
+		for (k = 0; k < 16; k++) {
+			int b = bosa_i2c_read8(0x50, 40 + k);
+
+			part[k] = (b >= 0x20 && b < 0x7f) ? (char)b : '.';
+		}
+		part[16] = 0;
+		/*
+		 * ★★★ THE MODULE'S OWN NAME DECIDES -- IT WAS READ AND NOT USED.
+		 *
+		 * This test used to be `ident > 0 && ident < 0x30 && extid >= 0`, i.e.
+		 * "an SFF-8472 identity exists" -> "therefore NOT an RTL8290B", while
+		 * `vend` was read, formatted into the warning, and never consulted.  An
+		 * RTL8290 that ships an SFF-8472 EEPROM -- and this one does -- was
+		 * classified as a foreign module and had EVERY register write refused
+		 * with -ENODEV, the RX enable among them.
+		 *
+		 * ⚠ MEASURED 2026-08-30 on the LANLY G24W, tier 1, over the board's own
+		 * I2C: slave 0x50 bytes 20..35 read `REALTEK` and bytes 40..55 read
+		 * `RTL8290`, in plain ASCII, while slave 0x54 (the control bank) answered
+		 * 0xff to every address -- which is what a bank nobody may write looks
+		 * like.  The board sat at O1 with sdet=0 on a fibre stock had reached
+		 * Online through hours earlier.
+		 *
+		 * ★ THE STRING IS EVIDENCE, THE IDENT BYTE IS NOT.  A vendor's identity
+		 * page says WHAT the module is; the presence of that page says only that
+		 * it HAS one.  Deciding on the second while holding the first is the
+		 * text-vs-structure family this tree keeps paying for, inverted: the
+		 * structure was there and the weaker signal was believed.
+		 *
+		 * ★ THREE OUTCOMES ARE KEPT, and the middle one is still ours: named as
+		 * ours -> the path stays enabled; named as something else -> refuse the
+		 * writes, which is what this guard is FOR; unreadable -> "could not
+		 * tell", never "it is not one".
+		 */
+		if (strstr(vend, "REALTEK") || strstr(part, "RTL8290")) {
+			pr_info("rtl9602c-gpon: optical module identifies itself as vendor='%s' part='%s' -- RTL8290B register path stays ENABLED (the SFF-8472 page says WHAT it is; merely HAVING one never meant it was foreign)\n",
+				vend, part);
+		} else if (ident > 0 && ident < 0x30 && extid >= 0) {
 			bosa_not_8290b = true;
 			pr_warn("rtl9602c-gpon: optical module is NOT an RTL8290B -- SFF-8472 A0 ident=0x%02x extid=0x%02x connector=0x%02x br=%d00MBd vendor='%s'. RTL8290B register writes are now REFUSED; DDM must come from A2 (slave 0x51) bytes 104/105, not the analog banks.\n",
 				ident, extid, conn, br, vend);

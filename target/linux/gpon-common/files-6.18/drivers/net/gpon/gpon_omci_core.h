@@ -150,6 +150,11 @@ struct omci_onu;
  * exist so each case stays countable from /proc. */
 int omci_onu_input(struct omci_onu *o, const u8 *req, unsigned int len, u8 *resp);
 
+/* Stamp the AAL5-BE MIC into bytes 44..47 of a 48-byte baseline PDU.  The
+ * responder uses it on every response; a host test modelling an OLT must use it
+ * too, or the RX MIC gate will (correctly) discard the frame. */
+void omci_set_mic(u8 *msg);
+
 /* Autonomous VEIP (ME 329) operational-state-up AVC: the OLT never polls the
  * data MEs it created — it gates DOWNSTREAM user-data forwarding on this
  * report.  Fills @out (48 bytes, trailer + MIC done); returns OMCI_LEN. */

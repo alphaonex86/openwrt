@@ -94,7 +94,49 @@
  * it: capture X111W's US OMCI and compare bytes 44..47 against both variants,
  * exactly as the Elnath DS self-check already does for the downstream.
  */
-static void omci_set_mic(u8 *msg)
+/*
+ * ★★★ A DS FRAME WHOSE MIC DOES NOT VERIFY IS DISCARDED (G.988: an
+ * invalid-MIC message is discarded).  Until this existed EVERY frame reached
+ * the responder, including 8..47-byte runts that cannot carry a MIC, and the
+ * consequences were not theoretical:
+ *
+ *   - a corrupted Set was APPLIED and ACKed with the OLT's own TID, so the OLT
+ *     never retransmitted and MDS stayed in LOCKSTEP with its lsync -- no ME2
+ *     audit could ever detect the divergence;
+ *   - a garbage alloc-id so latched reaches the HW T-CONT CAM, worst case
+ *     bursting into ANOTHER ONU's grant slot, which is the never-wedge-the-PON
+ *     bar this project holds itself to;
+ *   - a corrupted mt byte faked a whole MIB-Reset teardown.
+ *
+ * The recovery is the OLT's own: its AR-timeout retransmit (typically x3) is
+ * the fast path, and a lost non-AR config still surfaces at the next ME2 MDS
+ * audit because our un-bumped MDS then mismatches lsync.  TWO OLT-driven
+ * self-heal layers, both proven live on this HG08.
+ *
+ * ★ NO NEW CONVENTION RISK: omci_set_mic below already commits us to AAL5-BE
+ *   on TX and this OLT accepts those MICs, so RX enforces the SAME convention.
+ */
+bool omci_mic_ok(const u8 *msg, unsigned int len)
+{
+	u32 c;
+
+	/* A frame shorter than the baseline 48 cannot CARRY a MIC, so it cannot
+	 * be verified -- and an unverifiable frame is exactly what must not be
+	 * acted on.  This is the runt case that used to reach the MIB-Reset arm. */
+	if (!msg || len < OMCI_LEN)
+		return false;
+	c = ~crc32_be(~0u, msg, 44);
+	return msg[44] == (u8)(c >> 24) && msg[45] == (u8)(c >> 16) &&
+	       msg[46] == (u8)(c >> 8)  && msg[47] == (u8)c;
+}
+
+/* ★ EXPORTED so a host test STAMPS WITH THE SHIPPED STAMPER instead of a copy.
+ * The MIC gate above means an unstamped frame is now correctly discarded, and
+ * several host tests were building PDUs with no MIC at all -- they model an OLT,
+ * and a real OLT always stamps.  Handing them this function rather than letting
+ * each grow its own keeps ONE convention: if AAL5-BE ever changed, the tests
+ * would follow instead of silently testing the old one. */
+void omci_set_mic(u8 *msg)
 {
 	u32 c = ~crc32_be(~0u, msg, 44);
 
@@ -277,6 +319,16 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		 * counter says loudly if one ever does. */
 		if (devid == 0x0b)
 			o->rx_extended++;
+		return 0;
+	}
+
+	/* ★ THE MIC GATE, BEFORE THE REPLAY CACHE.  A corrupted frame must not be
+	 * served from the cache either: the cache is keyed on bytes 0..39, so a
+	 * frame whose corruption lies there would miss it anyway, and one whose
+	 * corruption lies in 40..47 would be REPLAYED as though it were the good
+	 * request.  Counted so a link going bad is visible rather than silent. */
+	if (!omci_mic_ok(msg, len)) {
+		o->rx_bad_mic++;
 		return 0;
 	}
 

@@ -184,6 +184,7 @@ struct omci_onu {
 	u32	unhandled;		/* DS message types with no ONU action */
 	u32	dup_replay;		/* retransmissions served from the cache */
 	u32	rx_extended;		/* devid 0x0b frames seen (not served) */
+	u32	rx_bad_mic;		/* DS frames DISCARDED on an invalid MIC */
 	u32	no_ack;			/* requests with AR clear: applied, not
 					 * answered — a silent path must still be
 					 * countable */
@@ -290,6 +291,10 @@ static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
  * is not even reading.  The knobs live in @o so the call site stays inside the
  * core. */
 void omci_mds_walk(struct omci_onu *o);
+
+/* Does this DS frame's AAL5-BE MIC verify?  A frame shorter than OMCI_LEN
+ * cannot carry one and is therefore NOT ok: unverifiable is not acceptable. */
+bool omci_mic_ok(const u8 *msg, unsigned int len);
 
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed);
 

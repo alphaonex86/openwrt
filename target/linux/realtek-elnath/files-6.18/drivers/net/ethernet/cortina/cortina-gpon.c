@@ -2596,7 +2596,14 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 		spin_lock_bh(&cg->omci_lock);
 		/* CUT SITE: the ME model + MIB reset MOVED to omci_onu_init() in
 		 * drivers/net/gpon/gpon_omci_me.c */
-		omci_onu_init(cg->omci, cg->sn, 200);
+		/* ★ 200 -> OMCI_MDS_POISON_SEED (core).  The literal 200 worked only
+		 * by MISMATCH and fails exactly when the OLT stored our own previous
+		 * seed -- the very warm-readmit lesson the paragraph above cites.
+		 * The core value sits in the 1..30 band this OLT re-provisions on
+		 * UNCONDITIONALLY (rsync < 31 gate, measured on the Luna side).
+		 * ⚠ BEHAVIOUR CHANGE on this board; the X400AXF warm-readmit is the
+		 * validation it is owed. */
+		omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
 		cg->omci_active = true;
 		spin_unlock_bh(&cg->omci_lock);
 		cg->veip_avc_retry_ms = 0;

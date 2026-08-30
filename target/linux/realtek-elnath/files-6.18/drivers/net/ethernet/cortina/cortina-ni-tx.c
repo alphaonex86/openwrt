@@ -809,6 +809,35 @@ static void cortina_ni_tx_reclaim_timer(struct timer_list *t)
 			  jiffies + CA_NI_RECLAIM_INTERVAL);
 }
 
+/*
+ * ★ THE UPSTREAM DATA T-CONT IS A RUNTIME VALUE, NOT A COMPILE-TIME ONE.
+ *
+ * Normally the OLT provisions a dedicated data Alloc-ID and cg_data_try_install
+ * binds it to hw T-CONT 1, so data TX targets ldpid 0x21 / VoQ 8.  But a
+ * single-alloc OLT provisions the data on the SAME Alloc-ID that carries the
+ * OMCC, which is already bound to T-CONT 0 - and re-binding it would move the
+ * OMCC off its own T-CONT (the proven 9602C regression).  The shell then routes
+ * the data ONTO the OMCC's T-CONT instead, and this is the TX half of that: the
+ * ldpid and the policer id must follow, or every frame is queued to a T-CONT the
+ * OLT never grants and the WAN is silently, permanently dead.
+ *
+ * ★ THE COS STAYS 0 ON PURPOSE.  Queues are served by strict priority within a
+ * T-CONT, and the US OMCI keeps the top ones - so data at cos 0 can never starve
+ * a PLOAM/OMCI response, however saturated the user's uplink is.
+ */
+static u8 ca_ni_pon_data_tcont = CA_NI_PON_DATA_TCONT;
+
+void cortina_ni_pon_data_set_tcont(u8 tcont)
+{
+	u8 was = READ_ONCE(ca_ni_pon_data_tcont);
+
+	WRITE_ONCE(ca_ni_pon_data_tcont, tcont);
+	if (was != tcont)
+		pr_info("cortina-ni: upstream data T-CONT %u -> %u (ldpid 0x%02x)\n",
+			was, tcont, CA_NI_PON_TCONT_LDPID(tcont));
+}
+EXPORT_SYMBOL_GPL(cortina_ni_pon_data_set_tcont);
+
 /* ------------------------------------------------------------------ */
 /* xmit                                                                */
 /* ------------------------------------------------------------------ */
@@ -1124,6 +1153,7 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 	dma_addr_t blk_dma, daddr;
 	__le32 *desc, *w;
 	u32 lo, hi;
+	u8 tcont;
 	u8 *blk;
 
 	if (!ni || !ni->tx || !ni->tx->pon_buf) {
@@ -1175,14 +1205,15 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 	/* header block {LSO para0 = 0, LSO para1 = pkt_size, HEADER_A}: the
 	 * same stock word order as the OMCI path (+8 = pkt_info half, +12 =
 	 * cos/ldpid/pkt_size half) */
+	tcont = READ_ONCE(ca_ni_pon_data_tcont);
 	lo = FIELD_PREP(CA_NI_PON_HDRA_LO_COS, CA_NI_PON_DATA_COS) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_LDPID, CA_NI_PON_DATA_LDPID) |
+	     FIELD_PREP(CA_NI_PON_HDRA_LO_LDPID, CA_NI_PON_TCONT_LDPID(tcont)) |
 	     FIELD_PREP(CA_NI_PON_HDRA_LO_LSPID, CA_NI_PON_LSPID) |
 	     FIELD_PREP(CA_NI_PON_HDRA_LO_PKT_SIZE, len) |
 	     CA_NI_PON_HDRA_LO_FE_BYPASS;
 	hi = CA_NI_PON_HDRA_HI_NO_DROP |
 	     FIELD_PREP(CA_NI_PON_HDRA_HI_POL_ID,
-			CA_NI_PON_DATA_TCONT * 8 + CA_NI_PON_DATA_COS);
+			tcont * 8 + CA_NI_PON_DATA_COS);
 	w = (__le32 *)blk;
 	w[0] = 0;
 	w[1] = cpu_to_le32(len);

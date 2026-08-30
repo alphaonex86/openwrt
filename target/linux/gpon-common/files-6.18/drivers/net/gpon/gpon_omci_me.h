@@ -185,6 +185,7 @@ struct omci_onu {
 	u32	dup_replay;		/* retransmissions served from the cache */
 	u32	rx_extended;		/* devid 0x0b frames seen (not served) */
 	u32	rx_bad_mic;		/* DS frames DISCARDED on an invalid MIC */
+	u32	rx_runt;		/* DS frames shorter than a 48-byte baseline PDU */
 	u32	no_ack;			/* requests with AR clear: applied, not
 					 * answered — a silent path must still be
 					 * countable */

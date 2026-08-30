@@ -302,8 +302,28 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 	u16 class_id, inst;
 	u8 mt, devid;
 
-	if (len < 8)
+	/*
+	 * ★ A BASELINE OMCI PDU IS 48 BYTES, FULL STOP (G.988 A.3).  This gate
+	 * used to be `len < 8` — enough to READ the header — so a truncated
+	 * frame was answered with a full 48-byte response built from bytes the
+	 * OLT never sent.  MEASURED 2026-08-30: every length 8..47 drew a
+	 * reply, and the oracle mirrored the same wrong rule, so the
+	 * differential reported ZERO divergence on 1276 malformed frames.  Two
+	 * independent implementations agreeing on a defect is exactly the case
+	 * a differential cannot see, and it is why this needed a spec reading
+	 * rather than a comparison.
+	 *
+	 * ★ COUNTED SEPARATELY FROM rx_bad_mic, because "too short to be a
+	 * message" and "a message whose MIC failed" are different facts about
+	 * the link: the first is a framing or GEM-reassembly fault upstream of
+	 * OMCI, the second is corruption on an otherwise well-framed PDU.
+	 * Collapsing them would make a broken GEM reassembler look like a noisy
+	 * fibre.
+	 */
+	if (len < OMCI_LEN) {
+		o->rx_runt++;
 		return 0;
+	}
 	devid = msg[3];
 	mt = msg[2] & 0x1f;
 	class_id = ((u16)msg[4] << 8) | msg[5];

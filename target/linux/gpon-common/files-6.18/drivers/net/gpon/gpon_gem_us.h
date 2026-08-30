@@ -227,6 +227,43 @@ enum gpon_gem_us_bind {
 };
 
 /*
+ * ★★★ SINGLE-ALLOC OLTs: THE DATA RIDES THE OMCC T-CONT.
+ *
+ * BIND_IS_OMCC says what must NOT happen; it does not say what the data path
+ * should do instead, and a shell that only WARNED then fell through was the
+ * defect: it stamped the data GEM into the dedicated T-CONT's VoQs, raised
+ * carrier and set data_installed -- while that T-CONT had no CAM entry, so no
+ * grant ever drained it.  Every upstream frame (the DHCP DISCOVER first)
+ * queued forever, carrier-on lied to udhcpc, and the latch blocked any retry.
+ * A silent, permanent dead WAN on the WHOLE single-alloc OLT class, against a
+ * bar that says "work with ANY stock OLT, unattended, for months".
+ *
+ * The recovery is 9602C-PROVEN on this same lab OLT class (30/30 soak,
+ * 354/354 DNS): stamp the data GEM into the OMCC T-CONT's OWN upstream slots,
+ * using the ones the US OMCI does not need, and steer data TX to that T-CONT.
+ * The data then rides the management Alloc-ID's grants.
+ *
+ * ★ WHY OMCI STAYS SAFE, and it is the reason the split is at the TOP: the
+ *   chip serves a T-CONT's queues by STRICT PRIORITY, so leaving OMCI on the
+ *   HIGHEST slots means a saturated data flow can never starve a PLOAM/OMCI
+ *   response.  Reversing the split would make an OMCI timeout a function of
+ *   user traffic -- which is how an ONU gets deactivated under load.
+ *
+ * ★ THE GEOMETRY IS THE SHELL'S, THE SPLIT IS OURS.  How many upstream slots a
+ *   T-CONT has is silicon; which of them the OMCI keeps is a protocol
+ *   decision, and it belongs here so both families make it identically.
+ */
+#define GPON_GEM_US_OMCI_RESERVED_SLOTS	2	/* the top two: OMCI + PLOAM */
+
+/*
+ * Derive the sub-range of @omcc the data GEM may use.  -> false when the OMCC
+ * run is too short to spare any slot, in which case the caller must NOT install
+ * a data path at all rather than steal an OMCI slot.
+ */
+bool gpon_gem_us_ride_range(const struct gpon_gem_us_range *omcc,
+			    struct gpon_gem_us_range *out);
+
+/*
  * Decide whether @alloc may be bound to the data T-CONT.
  *
  * @alloc        the Alloc-ID the OLT provisioned for user data.

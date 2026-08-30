@@ -552,18 +552,47 @@ static const u32 l3fe_mask_hi[9][4] = {
 	/* mask 8: 5-tuple only - exclude all L2/lspid/dscp/vlan/pppoe */
 	{ 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff },
 };
-/* {NE-relative offset, value} - profile INI/tuple/type-action, stock-verbatim */
+/* The classifier PROFILE block, stock-verbatim -- and it HAS a structure the
+ * flat list hid (derived 2026-08-29 from the offsets themselves, stride
+ * verified 0x2c five times):
+ *
+ *   0x3700            profile engine enable (1)
+ *   0x3724 + n*0x2c   profile n, n = 0..5:
+ *     +0x00  0x06140000   INI word (identical on all six)
+ *     +0x04  0x06000000   tuple word (identical on all six)
+ *     +0x08.. per-profile type/mask/action words -- the part that DIFFERS:
+ *        n=0  {+8:1, +c:1}                n=3  {+8:0x84211, +c:5}
+ *        n=1  {+8:0x4012, +c:2, +10:0x103} n=4  {+8:2, +c:6, +10:0x107}
+ *        n=2  {+8:0x84211, +c:4}          n=5  (INI/tuple only)
+ *
+ * The VALUES stay a verbatim stock capture (tier-1): what each per-profile
+ * word MEANS is not yet RE'd, and inventing field names for them would be a
+ * name wearing knowledge we do not have.  When one is decoded it gets a name
+ * and a comment ON ITS ROW, like the mask table above.
+ *
+ * ★ WHY THIS IS NOT request_firmware() DATA: it is 25 words.  The external-
+ *   firmware rule exists for blobs another PROCESSOR executes (PHY SRAM, RF
+ *   tables); a 200-byte register seed would trade one readable table for a
+ *   loader, a file in the image, and a failure mode where the L3FE cannot
+ *   classify because the rootfs lost a file. */
 static const u32 l3fe_profile_regs[][2] = {
-	{ 0x3700, 0x00000001 }, { 0x3724, 0x06140000 }, { 0x3728, 0x06000000 },
-	{ 0x372c, 0x00000001 }, { 0x3730, 0x00000001 }, { 0x3750, 0x06140000 },
-	{ 0x3754, 0x06000000 },
+	{ 0x3700, 0x00000001 },				/* profile engine enable    */
+	/* --- profile 0 (base 0x3724) --- */
+	{ 0x3724, 0x06140000 }, { 0x3728, 0x06000000 },
+	{ 0x372c, 0x00000001 }, { 0x3730, 0x00000001 },
+	/* --- profile 1 (base 0x3750) --- */
+	{ 0x3750, 0x06140000 }, { 0x3754, 0x06000000 },
 	{ 0x3758, 0x00004012 }, { 0x375c, 0x00000002 }, { 0x3760, 0x00000103 },
+	/* --- profile 2 (base 0x377c) --- */
 	{ 0x377c, 0x06140000 }, { 0x3780, 0x06000000 },
-	{ 0x3784, 0x00084211 }, { 0x3788, 0x00000004 }, { 0x37a8, 0x06140000 },
-	{ 0x37ac, 0x06000000 },
-	{ 0x37b0, 0x00084211 }, { 0x37b4, 0x00000005 }, { 0x37d4, 0x06140000 },
-	{ 0x37d8, 0x06000000 },
+	{ 0x3784, 0x00084211 }, { 0x3788, 0x00000004 },
+	/* --- profile 3 (base 0x37a8) --- */
+	{ 0x37a8, 0x06140000 }, { 0x37ac, 0x06000000 },
+	{ 0x37b0, 0x00084211 }, { 0x37b4, 0x00000005 },
+	/* --- profile 4 (base 0x37d4) --- */
+	{ 0x37d4, 0x06140000 }, { 0x37d8, 0x06000000 },
 	{ 0x37dc, 0x00000002 }, { 0x37e0, 0x00000006 }, { 0x37e4, 0x00000107 },
+	/* --- profile 5 (base 0x3800): INI/tuple only --- */
 	{ 0x3800, 0x06140000 }, { 0x3804, 0x06000000 },
 };
 

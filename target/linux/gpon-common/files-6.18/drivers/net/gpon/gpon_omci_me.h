@@ -233,6 +233,26 @@ static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
  * MIB-Data-Sync boot value: a POISON that must NOT match the OLT's stored
  * lsync, so its ME2 audit mismatches and it re-provisions from MIB-Reset
  * (the X111W warm-readmit lesson; an on-wire MIB-Reset then zeroes it). */
+/* ★★ THE MIB-DATA-SYNC POISON SEED IS PROTOCOL POLICY, AND IT LIVES ONCE.
+ *
+ * We hold no persistent MIB, so a warm re-admit MUST make the OLT re-provision
+ * from MIB-Reset.  Two mechanisms exist and they are NOT equally strong:
+ *
+ *   1..30       satisfies this OLT's own gate UNCONDITIONALLY -- measured on
+ *               the Luna side: the OLT treats rsync < 31 as not-in-sync and
+ *               re-provisions, whatever lsync it stored.
+ *   any other   works only by MISMATCH against the stored lsync -- and fails
+ *               exactly when the OLT stored OUR OWN previous seed, which is
+ *               the X111W warm-readmit lesson.  The Cortina shell carried a
+ *               literal 200 for weeks: it CITED that lesson in its comment
+ *               while using the value the lesson argues against.
+ *
+ * One family had measured and made it tunable while the other still hardcoded
+ * the weak value -- the exact shape tunable_not_shared_guard.py exists for.
+ * The default is the measured-safe band; a shell may still expose a tunable,
+ * but its DEFAULT is this. */
+#define OMCI_MDS_POISON_SEED	7
+
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed);
 
 /* ------------------------------------------------------------------------

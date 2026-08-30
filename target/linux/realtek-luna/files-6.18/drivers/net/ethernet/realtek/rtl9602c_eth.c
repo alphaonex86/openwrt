@@ -1017,7 +1017,7 @@ MODULE_PARM_DESC(wan_mac_offset, "WAN (gpon0) MAC = board/LAN MAC + this offset 
  * OLT because we read its decision code; the walk is what makes the ONU converge
  * on an OLT whose rule we have NOT read. A derived constant answers the OLT we
  * know; the loop answers the ones we do not. */
-static unsigned int omci_mds_seed = 7;	/* 1..30: satisfies `rsync < 31` unconditionally, so the
+static unsigned int omci_mds_seed = OMCI_MDS_POISON_SEED;	/* 1..30: satisfies `rsync < 31` unconditionally, so the
 					 * OLT provisions whatever it has stored. NOT 0 -- see above. */
 module_param(omci_mds_seed, uint, 0644);
 MODULE_PARM_DESC(omci_mds_seed, "OMCI ME2 MIB-Data-Sync boot seed (1..30 forces the OLT to re-provision: its gate takes rsync<31 as not-in-sync)");

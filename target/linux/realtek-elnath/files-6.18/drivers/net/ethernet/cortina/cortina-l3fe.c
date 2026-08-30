@@ -552,47 +552,55 @@ static const u32 l3fe_mask_hi[9][4] = {
 	/* mask 8: 5-tuple only - exclude all L2/lspid/dscp/vlan/pppoe */
 	{ 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff },
 };
-/* The classifier PROFILE block, stock-verbatim -- and it HAS a structure the
- * flat list hid (derived 2026-08-29 from the offsets themselves, stride
- * verified 0x2c five times):
+/* The HASH-PROFILE block -- RE'd 2026-08-29 from the stock ca-ne.ko (tier 2,
+ * not stripped): aal_hash_profile_init / _tuple_add / _defAct_update all
+ * compute 0x3700 + profile*0x2c, `cmp w0, #6` bounds SEVEN profiles (0..6),
+ * and the module carries the physical base 0xf4303700.  Layout per profile:
  *
- *   0x3700            profile engine enable (1)
- *   0x3724 + n*0x2c   profile n, n = 0..5:
- *     +0x00  0x06140000   INI word (identical on all six)
- *     +0x04  0x06000000   tuple word (identical on all six)
- *     +0x08.. per-profile type/mask/action words -- the part that DIFFERS:
- *        n=0  {+8:1, +c:1}                n=3  {+8:0x84211, +c:5}
- *        n=1  {+8:0x4012, +c:2, +10:0x103} n=4  {+8:2, +c:6, +10:0x107}
- *        n=2  {+8:0x84211, +c:4}          n=5  (INI/tuple only)
+ *   +0x00  DEFAULT-ACTION word.  defAct_update(profile, a, b) is a RMW that
+ *          puts a into [8:4] AND [18:14], b into [13:9] AND [23:19] -- and all
+ *          six live values below satisfy that duplication, so the disasm and
+ *          the dump confirm each other.  Bits [1:0] are set on live stock
+ *          (p0/p1/p3/p4 = 1, p2/p5 = 2) but written by NEITHER init NOR
+ *          defAct_update: armed elsewhere, plausibly a profile enable/mode --
+ *          NOT decoded, and these two bits are the honest remaining gap.
+ *   +0x04  first TUPLE-LIST entry: p1=1 p2=2 p3=4 p4=5 p5=6 -- tuple ids.
+ *   +0x08  second entry where present: 0x103, 0x107 = id | BIT(8); the flag's
+ *          exact meaning (last/valid) is NOT decoded.
+ *   +0x24  init word A: arg3 in [24:0] (stock 0x140000), [27:25] from a
+ *   +0x28  init word B: arg4 in [24:0] (stock 0),        module-global (3 on
+ *          stock for both).  What the 25-bit values MEAN is NOT decoded --
+ *          plausibly key masks/bases; the Cortina SDK is not on this bench.
  *
- * The VALUES stay a verbatim stock capture (tier-1): what each per-profile
- * word MEANS is not yet RE'd, and inventing field names for them would be a
- * name wearing knowledge we do not have.  When one is decoded it gets a name
- * and a comment ON ITS ROW, like the mask table above.
+ * ⚠ CORRECTED 2026-08-29, the same day it was written: the first version of
+ * this comment put the profile base at 0x3724 and called 0x3700 an "engine
+ * enable" -- a frame OFF BY ONE WORD, derived from the offsets alone.  The
+ * disassembly refutes it: 0x3700 IS profile 0's default-action word.  A
+ * structure guessed from data alone can be self-consistent and wrong; the
+ * stock CODE is what settles it.
  *
- * ★ WHY THIS IS NOT request_firmware() DATA: it is 25 words.  The external-
- *   firmware rule exists for blobs another PROCESSOR executes (PHY SRAM, RF
- *   tables); a 200-byte register seed would trade one readable table for a
- *   loader, a file in the image, and a failure mode where the L3FE cannot
- *   classify because the rootfs lost a file. */
+ * ★ WHY THIS IS NOT request_firmware() DATA: it is 25 words.  That rule is for
+ *   blobs another PROCESSOR executes (PHY SRAM, RF tables); a 200-byte register
+ *   seed would trade a readable table for a loader, an image file, and a
+ *   failure mode where the L3FE cannot classify because the rootfs lost a file.
+ */
 static const u32 l3fe_profile_regs[][2] = {
-	{ 0x3700, 0x00000001 },				/* profile engine enable    */
-	/* --- profile 0 (base 0x3724) --- */
-	{ 0x3724, 0x06140000 }, { 0x3728, 0x06000000 },
+	/* -- profile 0 (base 0x3700): defact [1:0]=1, no tuples -- */
+	{ 0x3700, 0x00000001 }, { 0x3724, 0x06140000 }, { 0x3728, 0x06000000 },
+	/* -- profile 1 (0x372c): defact 1, tuple 1 -- */
 	{ 0x372c, 0x00000001 }, { 0x3730, 0x00000001 },
-	/* --- profile 1 (base 0x3750) --- */
 	{ 0x3750, 0x06140000 }, { 0x3754, 0x06000000 },
+	/* -- profile 2 (0x3758): defact acts a=1,b=0 + [1:0]=2, tuples 2, 3|F -- */
 	{ 0x3758, 0x00004012 }, { 0x375c, 0x00000002 }, { 0x3760, 0x00000103 },
-	/* --- profile 2 (base 0x377c) --- */
 	{ 0x377c, 0x06140000 }, { 0x3780, 0x06000000 },
+	/* -- profile 3 (0x3784): acts a=1,b=1 + [1:0]=1, tuple 4 -- */
 	{ 0x3784, 0x00084211 }, { 0x3788, 0x00000004 },
-	/* --- profile 3 (base 0x37a8) --- */
 	{ 0x37a8, 0x06140000 }, { 0x37ac, 0x06000000 },
+	/* -- profile 4 (0x37b0): acts a=1,b=1 + [1:0]=1, tuple 5 -- */
 	{ 0x37b0, 0x00084211 }, { 0x37b4, 0x00000005 },
-	/* --- profile 4 (base 0x37d4) --- */
 	{ 0x37d4, 0x06140000 }, { 0x37d8, 0x06000000 },
+	/* -- profile 5 (0x37dc): defact [1:0]=2, tuples 6, 7|F -- */
 	{ 0x37dc, 0x00000002 }, { 0x37e0, 0x00000006 }, { 0x37e4, 0x00000107 },
-	/* --- profile 5 (base 0x3800): INI/tuple only --- */
 	{ 0x3800, 0x06140000 }, { 0x3804, 0x06000000 },
 };
 

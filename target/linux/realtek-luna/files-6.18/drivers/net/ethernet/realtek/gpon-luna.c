@@ -7399,6 +7399,113 @@ static const struct gpon_ploam_cfg luna_ploam_cfg __maybe_unused = {
 	.data_tcont		= GPON_DATA_TCONT,	/* 8 on Luna */
 };
 
+/*
+ * ★★★ THE CORE'S EVENTS, SPOKEN OUT LOUD.  `trace` is the ONE callback the core
+ * null-checks, so leaving it NULL is legal -- and it made `core_fsm=1` a mode in
+ * which the board CANNOT BE DIAGNOSED.  MEASURED 2026-08-31: with the core
+ * dispatching, the X111W reached O5 (which its own FSM never does) and then
+ * printed
+ *
+ *     rtl9602c-gpon: ONU state O5 -> O1
+ *
+ * and NOTHING ELSE -- no Deactivate event, no LOS, no watchdog.  On the driver's
+ * own path every one of those names itself.  So the better path was the mute
+ * one, and "legal to omit" had quietly become "undiagnosable".
+ *
+ * ★ DESIGNATED INITIALIZERS, NOT A POSITIONAL LIST.  The event enum has no
+ *   terminator, so nothing can static_assert the count; an entry added to the
+ *   core would silently shift a positional table and print the WRONG NAME for
+ *   every event after it.  Here a new event simply leaves a NULL hole and is
+ *   printed as its number -- unknown, never mislabelled.
+ *
+ * ★ AND IT IS NOT A FLOOD.  This file already records a measured cost: a
+ *   per-frame pr_info filled the ring and destroyed another driver's boot
+ *   messages.  So only the events that DECIDE activation speak unconditionally;
+ *   the per-message chatter (DS, ACK, BOH, CAM readback, key/alloc plumbing)
+ *   stays behind the existing `trace` parameter, exactly like the DS PLOAM line
+ *   above it.  A hard failure names itself; a healthy run stays quiet.
+ */
+static const char * const luna_ev_name[] = {
+	[GPON_PLOAM_EV_STATE]		= "state",
+	[GPON_PLOAM_EV_RERANGE_DONE]	= "rerange_done",
+	[GPON_PLOAM_EV_BOH]		= "boh",
+	[GPON_PLOAM_EV_DS]		= "ds",
+	[GPON_PLOAM_EV_O3_FEED_RESET]	= "o3_feed_reset",
+	[GPON_PLOAM_EV_ONU_ID]		= "onu_id",
+	[GPON_PLOAM_EV_CAM_READBACK]	= "cam_readback",
+	[GPON_PLOAM_EV_RANGING_TIME]	= "ranging_time",
+	[GPON_PLOAM_EV_DISABLE_SN]	= "disable_sn",
+	[GPON_PLOAM_EV_DEACT]		= "DEACT",
+	[GPON_PLOAM_EV_DEACT_KEEP_LOCK]	= "DEACT_keep_lock",
+	[GPON_PLOAM_EV_EXT_BURST]	= "ext_burst",
+	[GPON_PLOAM_EV_ACK]		= "ack",
+	[GPON_PLOAM_EV_ASSIGN_ALLOC]	= "assign_alloc",
+	[GPON_PLOAM_EV_DATA_TCONT]	= "data_tcont",
+	[GPON_PLOAM_EV_REQ_KEY]		= "req_key",
+	[GPON_PLOAM_EV_KEY_SENT]	= "key_sent",
+	[GPON_PLOAM_EV_REQ_PW]		= "req_pw",
+	[GPON_PLOAM_EV_KEY_SWITCH_ARM]	= "key_switch_arm",
+	[GPON_PLOAM_EV_KEY_SWITCH]	= "key_switch",
+	[GPON_PLOAM_EV_UNHANDLED]	= "UNHANDLED",
+	[GPON_PLOAM_EV_SN_REPROVISIONED] = "sn_reprovisioned",
+	[GPON_PLOAM_EV_O5_WATCHDOG]	= "O5_WATCHDOG",
+	[GPON_PLOAM_EV_LOS_RERANGE]	= "LOS_RERANGE",
+};
+
+/* The events that DECIDE activation, and therefore speak whatever `trace` says.
+ * Everything else is per-message chatter. */
+static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
+{
+	switch (ev) {
+	case GPON_PLOAM_EV_STATE:
+	case GPON_PLOAM_EV_DEACT:
+	case GPON_PLOAM_EV_DEACT_KEEP_LOCK:
+	case GPON_PLOAM_EV_DISABLE_SN:
+	case GPON_PLOAM_EV_RANGING_TIME:
+	case GPON_PLOAM_EV_ONU_ID:
+	case GPON_PLOAM_EV_O5_WATCHDOG:
+	case GPON_PLOAM_EV_LOS_RERANGE:
+	case GPON_PLOAM_EV_SN_REPROVISIONED:
+	case GPON_PLOAM_EV_UNHANDLED:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * ★★ AND THE INSTRUMENT MUST BE REMOVABLE, because it is a SUSPECT.
+ * MEASURED 2026-08-31: with `core_fsm=1` one boot reached O5 on every cycle and
+ * the next four never did -- and the good boot was the one taken BEFORE this
+ * trace op existed.  Printing several lines per activation cycle costs real
+ * time on a 115200 console (doubled again by `keep_bootcon`), inside the very
+ * path whose timing is under investigation.  That is a textbook observer
+ * effect, and the honest response is not to argue about it but to make it
+ * SWITCHABLE so the same image can be booted both ways.
+ * `gpon_luna.core_trace=0` silences this op completely.
+ */
+static bool core_trace = true;
+module_param(core_trace, bool, 0644);
+MODULE_PARM_DESC(core_trace, "1=the core FSM's events are printed (default; needed to diagnose it). 0=silent, for measuring whether the printing itself perturbs activation");
+
+static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
+{
+	const char *nm = NULL;
+
+	(void)sh;
+	if (!core_trace)
+		return;
+	if (!luna_ev_is_decisive(ev) && !trace)
+		return;
+	if ((unsigned int)ev < ARRAY_SIZE(luna_ev_name))
+		nm = luna_ev_name[ev];
+	if (nm)
+		pr_info("rtl9602c-gpon: core %s a=%u b=%u\n", nm, a, b);
+	else
+		pr_info("rtl9602c-gpon: core ev%u a=%u b=%u (no name in this shell -- the core gained an event)\n",
+			(unsigned int)ev, a, b);
+}
+
 static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.ploam_tx	= luna_op_ploam_tx,
 	.boh_write	= luna_op_boh_write,
@@ -7419,6 +7526,7 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.aes_stage_key	= luna_op_aes_stage_key,
 	.install_omcc	= luna_op_install_omcc,
 	.install_tcont	= luna_op_install_tcont,
+	.trace		= luna_op_trace,
 };
 
 /*

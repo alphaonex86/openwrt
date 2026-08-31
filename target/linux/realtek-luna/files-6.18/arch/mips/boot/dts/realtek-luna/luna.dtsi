@@ -37,6 +37,27 @@
  *   keep_bootcon          do NOT drop the early console when the real one
  *                         registers; the hand-over window is exactly where an
  *                         early driver failure would otherwise vanish.
+ *
+ *                         ⚠ MEASURED 2026-08-31, AND IT IS MORE EXPENSIVE THAN
+ *                         THIS COMMENT ASSUMED.  "the hand-over window" reads
+ *                         as a brief overlap; `keep_bootcon` in fact keeps the
+ *                         boot console registered for the WHOLE boot, and both
+ *                         consoles here are the SAME UART -- so every kernel
+ *                         message is transmitted twice, from `Kernel command
+ *                         line:` to the last one before userspace.  One X111W
+ *                         TFTP boot captured 859 lines of which 383 were
+ *                         distinct (2.24x), and the duplication is ragged
+ *                         (1x, 2x, 3x once ramoops registers too), which also
+ *                         means ANY TOOL COUNTING OCCURRENCES IN A STORED
+ *                         CONSOLE ARTIFACT OVER-COUNTS.
+ *
+ *                         ★ IT IS LEFT ON DELIBERATELY, NOT OVERLOOKED: the
+ *                         reasoning above still holds and a silent early
+ *                         failure still costs days.  But the trade is 2x the
+ *                         bytes on a 115200 line, not a short overlap, and
+ *                         that is a real cost while the GPON driver is
+ *                         talking.  Whoever drops `ignore_loglevel` at ship
+ *                         time should drop this with it.
  *   ignore_loglevel       the default level hides driver messages, which is
  *                         what made this board undebuggable.
  *

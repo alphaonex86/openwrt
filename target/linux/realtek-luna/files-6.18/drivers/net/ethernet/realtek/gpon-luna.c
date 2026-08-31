@@ -343,6 +343,75 @@ struct gpon_swc_map {
 	u32 fib_reg16;		/* FIB_REG16   [10] FRC_SD [2] SEL_RX_SD       */
 	u32 fib_ext_reg21;	/* FIB_EXT_REG21 [13] analog-ready             */
 	u32 wsds_dig_18;	/* WSDS_DIG_18 [15:12] optic-LOS force + BEN_OE */
+	/* The indirect I2C master, whose whole block sits +4 on the RTL9607C.
+	 * It is in this table and NOT a ternary at the call sites because the
+	 * ternary form was written ONCE, in the DDM read path, and the BOSA
+	 * WRITE path a few hundred lines below kept the bare 9602C offsets --
+	 * so on a 9607C the laser writes would have gone to the wrong three
+	 * registers with nothing to read back and no error. Each value is from
+	 * that chip's OWN register map. */
+	u32 i2c_ind_wd;		/* I2C_IND_WD  [31:0] write data               */
+	u32 i2c_ind_adr;	/* I2C_IND_ADR [31:0] target reg offset        */
+	u32 i2c_ind_cmd;	/* I2C_IND_CMD [0]CMD_EN [1]RW_EN [2]BUSY [3]NACK */
+	u32 i2c_ind_rd;		/* I2C_IND_RD  [31:0] read data                */
+	/* The SerDes window base. MEASURED from the three chipdefs 2026-08-31:
+	 * EVERY SerDes register moves by exactly +0x1e000 between the 9602C and
+	 * the other two -- 215 registers on the 9603CVD, 245 on the 9607C, not
+	 * one exception. So the window is ONE fact, and a new chip costs one
+	 * number here rather than a fresh literal per register. */
+	u32 sds_win;		/* base of the SDS_ANA_* / WSDS_DIG_* window   */
+	/* SDS_CFG is NOT in that window and does NOT follow it: it is 0x1d0 /
+	 * 0x200 / 0x270 on the three chips, so it gets its own field. */
+	u32 sds_cfg;		/* SDS_CFG [4:0] SDS_MODE                      */
+	/* Base of the six contiguous OMCI packet counters.
+	 *
+	 * ⚠ AND IT IS A BASE, NOT A WINDOW, because the surrounding block is
+	 * NOT uniform: measured across the three chipdefs, 25 registers in
+	 * 0x32xxx move by +0x580 while seven STAT_* MIB pointers move by
+	 * +0x0, +0x400, +0x600, +0x680, +0x6c0, +0x800 and +0x8d0. Treating
+	 * that block the way the SerDes window is treated would mis-map every
+	 * one of the seven. The six OMCI counters ARE contiguous on all three
+	 * chips (base +0x00,04,08,0c,10,14), which is what makes one number
+	 * enough for them and only them. */
+	u32 omci_cnt;		/* OMCI_DROP_PKT_CNT, the first of six         */
+	/* ── the IRREGULAR movers ──────────────────────────────────────────
+	 * Each of these moves by its OWN delta between the three chips, so
+	 * there is no window and no contiguous block to anchor them: a field
+	 * each is the only honest encoding. Every value is from THAT chip's
+	 * own register map.
+	 *
+	 * They were BARE HEX LITERALS in the code, which is why nothing found
+	 * them for so long -- the guard resolved a moved register only through
+	 * a NAME, and a literal has none.
+	 *
+	 * ★ READ LUT_SYS_LRN_LIMIT FIRST: 0x1c02c on the 9602C and 0x1c014 on
+	 * both others -- it moves BACKWARDS, into what is UNKN_IP4_MC on the
+	 * 9602C. A wrong write there does not fault; it changes multicast
+	 * handling on a different register. */
+	u32 sc_ind_wd;               /* SC_IND_WD */
+	u32 wrap_gphy_misc;          /* WRAP_GPHY_MISC */
+	u32 thermal_ctrl_0;          /* THERMAL_CTRL_0 */
+	u32 force_p_ablty;           /* FORCE_P_ABLTY */
+	u32 ablty_force_mode;        /* ABLTY_FORCE_MODE */
+	u32 dyngasp_ctrl;            /* DYNGASP_CTRL */
+	u32 accept_max_len_ctrl;     /* ACCEPT_MAX_LEN_CTRL */
+	u32 pon_trap_cfg;            /* PON_TRAP_CFG */
+	u32 cf_cfg;                  /* CF_CFG -- ⚠ NOT IN 9603cvd's map */
+	u32 lut_unkn_uc_da_ctrl;     /* LUT_UNKN_UC_DA_CTRL */
+	u32 lut_learn_over_ctrl;     /* LUT_LEARN_OVER_CTRL */
+	u32 unkn_l2_mc;              /* UNKN_L2_MC */
+	u32 unkn_ip4_mc;             /* UNKN_IP4_MC */
+	u32 unkn_mc_cfg;             /* UNKN_MC_CFG */
+	u32 lut_bc_flood;            /* LUT_BC_FLOOD */
+	u32 lut_unkn_mc_flood;       /* LUT_UNKN_MC_FLOOD */
+	u32 lut_unkn_uc_flood;       /* LUT_UNKN_UC_FLOOD */
+	u32 lut_sys_lrn_limit;       /* LUT_SYS_LRN_LIMIT */
+	u32 rma_ctrl01;              /* RMA_CTRL01 */
+	u32 rma_ctrl02;              /* RMA_CTRL02 */
+	u32 rma_cfg;                 /* RMA_CFG */
+	u32 qos_uni_trap_pri_ctrl;   /* QOS_UNI_TRAP_PRI_CTRL */
+	u32 oam_ctrl_0;              /* OAM_CTRL_0 */
+	u32 cfg_unhiol;              /* CFG_UNHIOL */
 };
 
 static const struct gpon_swc_map gpon_swc_9602c = {
@@ -352,6 +421,34 @@ static const struct gpon_swc_map gpon_swc_9602c = {
 	.sds_fib_status = 0x001e4,
 	.sds_reg0 = 0x22800, .fib_reg16 = 0x22c40, .fib_ext_reg21 = 0x22e54,
 	.wsds_dig_18 = 0x22090,
+	.i2c_ind_wd = 0x000b0, .i2c_ind_adr = 0x000b8,
+	.i2c_ind_cmd = 0x000c0, .i2c_ind_rd = 0x000c8,
+	.sds_win = 0x22000, .sds_cfg = 0x001d0,
+	.omci_cnt = 0x329b8,
+	.sc_ind_wd = 0x0003c,
+	.wrap_gphy_misc = 0x00110,
+	.thermal_ctrl_0 = 0x00130,
+	.force_p_ablty = 0x00180,
+	.ablty_force_mode = 0x001b4,
+	.dyngasp_ctrl = 0x001ec,
+	.accept_max_len_ctrl = 0x11008,
+	.pon_trap_cfg = 0x111f8,
+	.cf_cfg = 0x1600c,
+	.lut_unkn_uc_da_ctrl = 0x1c008,
+	.lut_learn_over_ctrl = 0x1c00c,
+	.unkn_l2_mc = 0x1c010,
+	.unkn_ip4_mc = 0x1c014,
+	.unkn_mc_cfg = 0x1c01c,
+	.lut_bc_flood = 0x1c020,
+	.lut_unkn_mc_flood = 0x1c024,
+	.lut_unkn_uc_flood = 0x1c028,
+	.lut_sys_lrn_limit = 0x1c02c,
+	.rma_ctrl01 = 0x1c03c,
+	.rma_ctrl02 = 0x1c040,
+	.rma_cfg = 0x1c084,
+	.qos_uni_trap_pri_ctrl = 0x1c0cc,
+	.oam_ctrl_0 = 0x1c100,
+	.cfg_unhiol = 0x23040,
 };
 
 static const struct gpon_swc_map gpon_swc_9603cvd = {
@@ -361,6 +458,34 @@ static const struct gpon_swc_map gpon_swc_9603cvd = {
 	.sds_fib_status = 0x00214,
 	.sds_reg0 = 0x40800, .fib_reg16 = 0x40c40, .fib_ext_reg21 = 0x40e54,
 	.wsds_dig_18 = 0x40090,
+	.i2c_ind_wd = 0x000b0, .i2c_ind_adr = 0x000b8,
+	.i2c_ind_cmd = 0x000c0, .i2c_ind_rd = 0x000c8,
+	.sds_win = 0x40000, .sds_cfg = 0x00200,
+	.omci_cnt = 0x32f38,
+	.sc_ind_wd = 0x00028,
+	.wrap_gphy_misc = 0x000ec,
+	.thermal_ctrl_0 = 0x0010c,
+	.force_p_ablty = 0x00198,
+	.ablty_force_mode = 0x001dc,
+	.dyngasp_ctrl = 0x0021c,
+	.accept_max_len_ctrl = 0x1100c,
+	.pon_trap_cfg = 0x110ec,
+	.cf_cfg = 0x1600c,
+	.lut_unkn_uc_da_ctrl = 0x1c00c,
+	.lut_learn_over_ctrl = 0x1c010,
+	.unkn_l2_mc = 0x1c018,
+	.unkn_ip4_mc = 0x1c01c,
+	.unkn_mc_cfg = 0x1c024,
+	.lut_bc_flood = 0x1c028,
+	.lut_unkn_mc_flood = 0x1c02c,
+	.lut_unkn_uc_flood = 0x1c030,
+	.lut_sys_lrn_limit = 0x1c014,
+	.rma_ctrl01 = 0x1c064,
+	.rma_ctrl02 = 0x1c068,
+	.rma_cfg = 0x1c0ac,
+	.qos_uni_trap_pri_ctrl = 0x1c214,
+	.oam_ctrl_0 = 0x1c254,
+	.cfg_unhiol = 0x2304c,
 };
 
 static const struct gpon_swc_map gpon_swc_9607c = {
@@ -375,6 +500,34 @@ static const struct gpon_swc_map gpon_swc_9607c = {
 	.sds_fib_status = 0x0028c,
 	.sds_reg0 = 0x40800, .fib_reg16 = 0x40c40, .fib_ext_reg21 = 0x40e54,
 	.wsds_dig_18 = 0x40090,
+	.i2c_ind_wd = 0x000b4, .i2c_ind_adr = 0x000bc,
+	.i2c_ind_cmd = 0x000c4, .i2c_ind_rd = 0x000cc,
+	.sds_win = 0x40000, .sds_cfg = 0x00270,
+	.omci_cnt = 0x32f38,
+	.sc_ind_wd = 0x00024,
+	.wrap_gphy_misc = 0x00114,
+	.thermal_ctrl_0 = 0x00150,
+	.force_p_ablty = 0x001cc,
+	.ablty_force_mode = 0x00238,
+	.dyngasp_ctrl = 0x0029c,
+	.accept_max_len_ctrl = 0x11028,
+	.pon_trap_cfg = 0x11144,
+	.cf_cfg = 0x16004,
+	.lut_unkn_uc_da_ctrl = 0x1c00c,
+	.lut_learn_over_ctrl = 0x1c010,
+	.unkn_l2_mc = 0x1c018,
+	.unkn_ip4_mc = 0x1c01c,
+	.unkn_mc_cfg = 0x1c024,
+	.lut_bc_flood = 0x1c028,
+	.lut_unkn_mc_flood = 0x1c02c,
+	.lut_unkn_uc_flood = 0x1c030,
+	.lut_sys_lrn_limit = 0x1c014,
+	.rma_ctrl01 = 0x1c0c8,
+	.rma_ctrl02 = 0x1c0cc,
+	.rma_cfg = 0x1c110,
+	.qos_uni_trap_pri_ctrl = 0x1c2a8,
+	.oam_ctrl_0 = 0x1c2ec,
+	.cfg_unhiol = 0x23104,
 };
 
 /* Resolved from the DT compatible in probe(), BEFORE any sw_rd/sw_wr of a
@@ -392,6 +545,97 @@ static const struct gpon_swc_map *swc = &gpon_swc_9602c;
 #define FIB_REG16		(swc->fib_reg16)
 #define FIB_EXT_REG21		(swc->fib_ext_reg21)
 #define WSDS_DIG_18		(swc->wsds_dig_18)
+/* These four are DEFINED IN luna_gpon_regs.h with the 9602C's values, which are
+ * right for two of the three chips and silently wrong for the RTL9607C. Undef
+ * and re-point at the table so BOTH the read and the write path get the same
+ * per-chip answer -- the write path had never been corrected. */
+#undef  I2C_IND_WD
+#undef  I2C_IND_ADR
+#undef  I2C_IND_CMD
+#undef  I2C_IND_RD
+#define I2C_IND_WD		(swc->i2c_ind_wd)
+#define I2C_IND_ADR		(swc->i2c_ind_adr)
+#define I2C_IND_CMD		(swc->i2c_ind_cmd)
+#define I2C_IND_RD		(swc->i2c_ind_rd)
+
+/* The SerDes window and SDS_CFG, from the table for the same reason the I2C
+ * block is: luna_gpon_regs.h holds the 9602C's absolute addresses, which are
+ * wrong by 0x1e000 on both other chips. SDS() is written with the 9602C
+ * address the header already carries, so each line stays greppable against it. */
+#define SDS(a9602c)		(swc->sds_win + ((a9602c) - 0x22000u))
+#undef  SDS_ANA_COM_REG03
+#define SDS_ANA_COM_REG03      SDS(0x2258c)
+#undef  SDS_ANA_COM_REG08
+#define SDS_ANA_COM_REG08      SDS(0x225a0)
+#undef  SDS_ANA_COM_REG11
+#define SDS_ANA_COM_REG11      SDS(0x225ac)
+#undef  SDS_ANA_COM_REG12
+#define SDS_ANA_COM_REG12      SDS(0x225b0)
+#undef  SDS_ANA_COM_REG22
+#define SDS_ANA_COM_REG22      SDS(0x225d8)
+#undef  SDS_ANA_COM_REG26
+#define SDS_ANA_COM_REG26      SDS(0x225e8)
+#undef  SDS_ANA_COM_REG27
+#define SDS_ANA_COM_REG27      SDS(0x225ec)
+#undef  SDS_ANA_GPON_REG42
+#define SDS_ANA_GPON_REG42     SDS(0x22728)
+#undef  SDS_ANA_GPON_REG46
+#define SDS_ANA_GPON_REG46     SDS(0x22738)
+#undef  SDS_ANA_MISC_REG00
+#define SDS_ANA_MISC_REG00     SDS(0x22500)
+#undef  SDS_ANA_MISC_REG01
+#define SDS_ANA_MISC_REG01     SDS(0x22504)
+#undef  SDS_ANA_MISC_REG02
+#define SDS_ANA_MISC_REG02     SDS(0x22508)
+#undef  WSDS_DIG_00
+#define WSDS_DIG_00            SDS(0x22030)
+#undef  WSDS_DIG_01
+#define WSDS_DIG_01            SDS(0x22034)
+#undef  WSDS_DIG_02
+#define WSDS_DIG_02            SDS(0x22038)
+#undef  WSDS_DIG_03
+#define WSDS_DIG_03            SDS(0x2203c)
+#undef  WSDS_DIG_1D
+#define WSDS_DIG_1D            SDS(0x220a4)
+#undef  SDS_CFG
+#define SDS_CFG			(swc->sds_cfg)
+/* The six OMCI packet counters, contiguous from the per-chip base. They were
+ * SIX BARE 9602C LITERALS, which on the 9603CVD and the 9607C point 0x580 short
+ * of the real block -- so gpon_fsm_poll counted a different register entirely
+ * on two of the three chips, and nothing could fail: a counter reads SOMETHING
+ * either way. */
+#define OMCI_DROP_PKT_CNT	(swc->omci_cnt + 0x00)
+#define OMCI_TX_PKT_CNT		(swc->omci_cnt + 0x04)
+#define OMCI_RX_PKT_CNT		(swc->omci_cnt + 0x08)
+#define OMCI_TX_BYTE_CNT	(swc->omci_cnt + 0x0c)
+#define OMCI_RX_BYTE_CNT	(swc->omci_cnt + 0x10)
+#define OMCI_CRC_ERROR_PKT_CNT	(swc->omci_cnt + 0x14)
+/* the irregular movers, named after the silicon's own names */
+#define SC_IND_WD               (swc->sc_ind_wd)
+#define WRAP_GPHY_MISC          (swc->wrap_gphy_misc)
+#define THERMAL_CTRL_0          (swc->thermal_ctrl_0)
+#define FORCE_P_ABLTY           (swc->force_p_ablty)
+#define ABLTY_FORCE_MODE        (swc->ablty_force_mode)
+#define DYNGASP_CTRL            (swc->dyngasp_ctrl)
+#define ACCEPT_MAX_LEN_CTRL     (swc->accept_max_len_ctrl)
+#define PON_TRAP_CFG            (swc->pon_trap_cfg)
+#define CF_CFG                  (swc->cf_cfg)
+#define LUT_UNKN_UC_DA_CTRL     (swc->lut_unkn_uc_da_ctrl)
+#define LUT_LEARN_OVER_CTRL     (swc->lut_learn_over_ctrl)
+#define UNKN_L2_MC              (swc->unkn_l2_mc)
+#define UNKN_IP4_MC             (swc->unkn_ip4_mc)
+#define UNKN_MC_CFG             (swc->unkn_mc_cfg)
+#define LUT_BC_FLOOD            (swc->lut_bc_flood)
+#define LUT_UNKN_MC_FLOOD       (swc->lut_unkn_mc_flood)
+#define LUT_UNKN_UC_FLOOD       (swc->lut_unkn_uc_flood)
+#define LUT_SYS_LRN_LIMIT       (swc->lut_sys_lrn_limit)
+#define RMA_CTRL01              (swc->rma_ctrl01)
+#define RMA_CTRL02              (swc->rma_ctrl02)
+#define RMA_CFG                 (swc->rma_cfg)
+#define QOS_UNI_TRAP_PRI_CTRL   (swc->qos_uni_trap_pri_ctrl)
+#define OAM_CTRL_0              (swc->oam_ctrl_0)
+#define CFG_UNHIOL              (swc->cfg_unhiol)
+#define PISO_EXT                (swc->piso_ext)
 /* Open the DS GEM unicast/broadcast pass gate (GEM_DS_MC_CFG). Default OFF: without
  * the PON-IP->GMAC-NIC OMCI drain, opening it backs up the DS path and stalls the US
  * (deactivate ~48s). Set =1 only when drain-path testing. */
@@ -895,6 +1139,49 @@ static u8 gpon_boh_delim[3] = { 0xab, 0x59, 0x83 };	/* Upstream_Overhead d[4..6]
 static u8 gpon_boh_t3pre;			/* Extended_Burst_Length d[0] = Type-3 pre-ranged len */
 static u8 gpon_boh_t3ranged;			/* Extended_Burst_Length d[1] = Type-3 ranged len */
 static u32 gpon_fsm_sn_tx;
+/*
+ * ★★ THE TICK PERIOD IS DEFINED ONCE, AND THE TWO HALVES ARE NOT THE SAME
+ * NUMBER.  We ASK the timer for GPON_FSM_TICK_REQ_MS; what we GET is whatever
+ * the kernel's jiffy granularity allows, because msecs_to_jiffies() rounds UP:
+ *
+ *     msecs_to_jiffies(10) at HZ=100  -> 1 jiffy  = 10 ms   (interaptiv/G24W)
+ *     msecs_to_jiffies(10) at HZ=250  -> 3 jiffies = 12 ms  (taroko/X111W)
+ *
+ * So a literal 10 in the arithmetic is right on one of our two subtargets and
+ * 20 % slow on the other -- and HZ is a per-subtarget choice nobody revisits
+ * when a board is added, which is exactly when nobody is looking at a PLOAM
+ * timeout.  Deriving it means the code cannot disagree with the timer.
+ *
+ * ⚠ THIS MATTERS MOST FOR THE core_fsm A/B.  Only the CORE is handed
+ * milliseconds; this driver's own timeouts count TICKS and are unaffected.  With
+ * a literal here the A/B would have compared two FSMs across two different
+ * clocks, and then blamed the FSM -- see ONU-test-case/OWED-ploam-swap-time-unit.md,
+ * which worried about precisely this and assumed the tick was 10 ms.
+ */
+/*
+ * ★★ THE REQUESTED PERIOD IS TUNABLE SO THE QUESTION CAN BE MEASURED, not
+ * argued.  Stock takes a GPON interrupt (`gpon_isr_entry` in its kernel image,
+ * `GPON_INTR_MASK`=0x22 at rest) where we run a timer, so on taroko we cannot
+ * SEE a downstream PLOAM for up to 12 ms -- and the OLT drops this board 12 ms
+ * after the ONU-ID.  Whether that latency is the CAUSE is not something to
+ * reason our way to: sweep this and watch.
+ *
+ * At HZ=250 a jiffy is 4 ms, so 4 is the floor a jiffies timer can reach and 10
+ * (which rounds to 12) is what ships.  A value below the floor is not refused --
+ * msecs_to_jiffies rounds it up and GPON_FSM_TICK_MS reports what the timer
+ * REALLY does, which is the whole point of deriving it.
+ * ⚠ Default UNCHANGED at 10: this exists to make an experiment possible, not to
+ * quietly re-tune a board that works.
+ */
+static uint gpon_fsm_tick_req_ms = 10;
+module_param(gpon_fsm_tick_req_ms, uint, 0644);
+MODULE_PARM_DESC(gpon_fsm_tick_req_ms,
+	"requested FSM/PLOAM poll period in ms (default 10; the timer rounds UP to a jiffy, so at HZ=250 this becomes 12 -- 4 is the floor). Lower it to test whether downstream-PLOAM latency is what the OLT is reacting to");
+
+#define GPON_FSM_TICK_REQ_MS	gpon_fsm_tick_req_ms
+#define GPON_FSM_TICK_JIFFIES	msecs_to_jiffies(GPON_FSM_TICK_REQ_MS)
+#define GPON_FSM_TICK_MS	((u32)jiffies_to_msecs(GPON_FSM_TICK_JIFFIES))
+
 static u32 gpon_fsm_ticks;
 static u8 gpon_sds_synced;	/* one-shot SDS TX re-sync done */
 static u32 gpon_ds_rx;		/* total downstream PLOAMs drained (DS-lock liveness) */
@@ -1246,9 +1533,11 @@ static int bosa_i2c_read8(u8 slave, u8 reg)
 {
 	u32 cfg, pad_off = SOC_IO_MODE_EN;	/* per-chip: gpon_swc_map */
 	u32 i2c_bus0 = IO_I2C_EN_BUS0;
-	u32 ind_adr = is_9607c ? 0xBCu : I2C_IND_ADR;	/* 9607C i2c-ind regs are +4 */
-	u32 ind_cmd = is_9607c ? 0xC4u : I2C_IND_CMD;
-	u32 ind_rd  = is_9607c ? 0xCCu : I2C_IND_RD;
+	/* Was a per-chip ternary here; the +4 is now in gpon_swc_map, so the
+	 * write path gets it too. */
+	u32 ind_adr = I2C_IND_ADR;
+	u32 ind_cmd = I2C_IND_CMD;
+	u32 ind_rd  = I2C_IND_RD;
 	int i, ret = -ETIMEDOUT;
 
 	/* Route I2C bus 0 to its pads. I2C_EN is a 2-bit field (one bit per bus)
@@ -1310,8 +1599,8 @@ static void ddm_probe_9607c(void)
 			lane, fs, !!(fs & BIT(17)), !!(fs & BIT(4)), !!(fs & BIT(2)));
 	}
 
-	direct = ioread32(swcore_base + 0x270);		/* SDS_CFG: directly mapped */
-	proxy  = sw_proxy_rd(0x270);
+	direct = ioread32(swcore_base + SDS_CFG);	/* SDS_CFG: directly mapped */
+	proxy  = sw_proxy_rd(SDS_CFG);
 	pr_info("rtl9602c-gpon: DDM proxy self-test SDS_CFG direct=0x%x proxy=0x%x %s\n",
 		direct, proxy, direct == proxy ? "OK" : "PROXY-BROKEN");
 
@@ -1338,10 +1627,14 @@ static void ddm_probe_9607c(void)
 /* Read one byte from (bus, slave, reg); *cmd_out = raw I2C_IND_CMD (NACK bit3). */
 static int i2c_rd_bus(int bus, u8 slave, u8 reg, u32 *cmd_out)
 {
-	u32 cfg_off = 0x23004u + bus * 0x20u;
-	u32 ind_adr = 0xBCu + bus * 0x20u;
-	u32 ind_cmd = 0xC4u + bus * 0x20u;
-	u32 ind_rd  = 0xCCu + bus * 0x20u;
+	/* Per-bus stride off the chip's OWN indirect block. These were the four
+	 * 9607C literals repeated a third time; the table is the single place
+	 * that knows the +4, so this scanner cannot disagree with the read and
+	 * write paths above. */
+	u32 cfg_off = I2C_CONFIG0 + bus * 0x20u;
+	u32 ind_adr = I2C_IND_ADR + bus * 0x20u;
+	u32 ind_cmd = I2C_IND_CMD + bus * 0x20u;
+	u32 ind_rd  = I2C_IND_RD  + bus * 0x20u;
 	int i, ret = -ETIMEDOUT;
 	u32 cfg, cmd = 0;
 
@@ -1997,13 +2290,108 @@ static const struct { u16 reg; u8 val; } bosa_rx_golden[] __initconst = {
 	{ 0x26a, 0x10 },	/* RX_DE_TH LOS de-assert       */
 };
 
+/*
+ * ★★ THE RECEIVER BRING-UP AS A SEQUENCE, not as a resting snapshot.
+ *
+ * `bosa_rx_golden[]` above is what its own comment says: the steady-state values
+ * a registered ONU runs.  Stock does something different -- `rtl8290b_rx_init`
+ * performs an ORDERED set of field writes and finishes with three WHOLE-register
+ * writes that supersede bits it set earlier to the same addresses.  This project
+ * already has the rule that collides with a snapshot: a bring-up is an FSM that
+ * must RUN, and a resting state matching stock can still be reached by a wrong
+ * process.
+ *
+ * The order below was RECOVERED BY EXECUTION, not by reading: stock's own
+ * `rtl8290b_rx_init` was run under Unicorn MIPS-BE with its register accessors
+ * intercepted (dev/re-tools/bosa_init_trace.py), giving 38 writes with no
+ * unmodelled call left.  Register addresses, fields and ordering recovered from
+ * a stock binary are facts this project may use directly; none of the vendor's
+ * source text is reproduced here.
+ *
+ * ⚠ IT IS OFF BY DEFAULT.  The X111W reaches O5 with the snapshot, so switching
+ * every Luna board onto a new receiver bring-up unverified would risk a working
+ * board to fix a broken one.  `bosa_rx_seq=1` selects it; the A/B is one boot.
+ *
+ * ⚠ ONE STOCK WRITE IS DELIBERATELY ABSENT: `txsdFaultTimer` (0x256, mask
+ * 0x380).  That mask does not fit an 8-bit register, so it is either a field
+ * spanning two registers or a mis-decode -- `bosa_regmap.py` flags it as the one
+ * entry of 106 that fails a sanity rule.  Shipping a guess for it would be
+ * exactly the kind of invented register fact this tree forbids.
+ */
+static bool bosa_rx_seq;
+module_param(bosa_rx_seq, bool, 0644);
+MODULE_PARM_DESC(bosa_rx_seq,
+	"1 = bring the BOSA receiver up with stock's ORDERED rtl8290b_rx_init sequence instead of the bosa_rx_golden resting snapshot (default 0 = the snapshot, which is what the X111W is known to reach O5 with)");
+
+static void __init bosa_rx_init_seq(void)
+{
+	/* analog front end: LDO, output polarity/swing, offset cancel */
+	bosa_set_field(0x229, 0x30, 2);
+	bosa_set_bit(0x22a, 3, 0);
+	bosa_set_field(0x22a, 0x07, 4);
+	bosa_set_field(0x229, 0xc0, 0);
+	bosa_set_bit(0x229, 3, 0);
+	bosa_set_bit(0x27b, 2, 0);
+	bosa_set_bit(0x22b, 7, 0);
+
+	/* the LOS detector, held in reset while it is configured */
+	bosa_set_bit(0x224, 1, 0);		/* rxlosResetb   */
+	bosa_set_bit(0x224, 0, 0);		/* rxlosClkMode  */
+	bosa_set_field(0x226, 0xc0, 3);
+	bosa_set_field(0x226, 0x07, 0);		/* rxlosHystSel  */
+	bosa_set_bit(0x226, 3, 0);		/* rxlosRangSel  */
+	bosa_set_bit(0x226, 5, 0);		/* rxlosInputSel */
+	bosa_set_field(0x227, 0x7f, 0);		/* rxlosRefDac -- stock ZEROES the
+						 * comparator threshold; the
+						 * snapshot carries 0x27 */
+	bosa_set_field(0x228, 0xc0, 0);		/* rxlosChopperFreq */
+	bosa_set_field(0x228, 0x30, 0);		/* rxlosSampleSel   */
+	bosa_set_bit(0x229, 0, 0);		/* rxlosChopperEn   */
+	bosa_set_bit(0x229, 2, 0);		/* rxlosLaMagComp   */
+	bosa_set_bit(0x229, 1, 0);		/* rxlosBufAutozero */
+	bosa_set_bit(0x231, 1, 0);		/* rxlosTestMode    */
+	bosa_set_bit(0x231, 0, 0);		/* rxlosAssertSel   */
+	bosa_set_field(0x257, 0xc0, 0);		/* rxlosDebounceSel */
+	bosa_set_bit(0x27b, 0, 0);		/* rxlosDebounceOpt */
+	bosa_set_bit(0x27b, 1, 0);
+	bosa_set_bit(0x27b, 3, 1);		/* rxlosSquelch     */
+	bosa_set_bit(0x25e, 0, 0);		/* rxlosPolarity    */
+
+	/* 0x256 txsdFaultTimer is skipped on purpose -- see the note above */
+
+	/* pin control: SD out on, LOS pin off */
+	bosa_set_bit(0x254, 7, 1);		/* txSdPinEn  */
+	bosa_set_bit(0x3c1, 7, 1);
+	bosa_set_bit(0x3c1, 5, 1);
+	bosa_set_field(0x254, 0x03, 0);		/* txdisCtrl  */
+	bosa_set_bit(0x254, 6, 0);		/* rxlosPinEn */
+	bosa_set_bit(0x281, 0, 1);
+	bosa_set_bit(0x257, 0, 0);
+	bosa_set_bit(0x27b, 4, 1);
+
+	/* ★ THE TAIL IS WHOLE REGISTERS AND IT SUPERSEDES BITS SET ABOVE.
+	 * 0x224 carries rxlosClkMode and rxlosResetb, so writing 0xbc here is
+	 * what actually decides them -- a port that replicated only the field
+	 * list would leave this register holding something else entirely. */
+	bosa_write_reg(0x223, 0x08);
+	bosa_write_reg(0x224, 0xbc);
+	bosa_write_reg(0x264, 0x43);
+}
+
 static void __init bosa_rx_enable(void)
 {
 	int i, sdet;
 
-	/* Apply the RX operating point to the BOSA. */
-	for (i = 0; i < ARRAY_SIZE(bosa_rx_golden); i++)
-		bosa_write_reg(bosa_rx_golden[i].reg, bosa_rx_golden[i].val);
+	/* Apply the RX operating point to the BOSA: stock's ordered sequence, or
+	 * the resting snapshot.  Exactly one of them, so the A/B compares two
+	 * bring-ups and not a bring-up layered on another. */
+	if (bosa_rx_seq) {
+		bosa_rx_init_seq();
+	} else {
+		for (i = 0; i < ARRAY_SIZE(bosa_rx_golden); i++)
+			bosa_write_reg(bosa_rx_golden[i].reg,
+				       bosa_rx_golden[i].val);
+	}
 	mdelay(50);					/* RX amp + SD comparator settle */
 
 	/* Re-read so /proc shows the post-config state. */
@@ -3091,7 +3479,7 @@ static int gpon_serdes_init(void)	/* not __init: re-run on re-range from gpon_cd
 	 * by BEN_FORCE_VALUE (off) and never fires the SN burst even though the MAC
 	 * queue drains -> OLT "Power down". (Was wrongly written to 0x400e4, which is
 	 * an unmapped address that bus-aborts — verified via /proc sds_tx readback.) */
-	sw_field(0x220e4, 0, 0, 0x0);
+	sw_field(SDS(0x220e4), 0, 0, 0x0);
 
 	/*
 	 * 6a-ModeV1. US-TX SerDes CMU/PLL + TX-LA-LDO — the rev-A GPON mode-set analog
@@ -3103,14 +3491,14 @@ static int gpon_serdes_init(void)	/* not __init: re-run on re-range from gpon_cd
 	 * (sw_wr), placed before the D2A interconnect to match ModeV1 order. The CMU is shared
 	 * with the RX 25M reference, so watch DS/ranging. */
 	if (serdes_modev1_tx) {
-		sw_wr(0x22588, 0x6df8);		/* SDS_ANA_COM_REG02 TX CMU/PLL */
+		sw_wr(SDS(0x22588), 0x6df8);		/* SDS_ANA_COM_REG02 TX CMU/PLL */
 		sw_wr(SDS_ANA_COM_REG03, 0x8941);	/* SDS_ANA_COM_REG03 TX CMU (0x2258c) */
-		sw_wr(0x225a0, 0x0713);		/* SDS_ANA_COM_REG08 */
-		sw_wr(0x225e4, 0x001f);		/* SDS_ANA_COM_REG25 */
-		sw_wr(0x225e0, 0x8001);		/* SDS_ANA_COM_REG24 REG_TXLA_LDOEN */
+		sw_wr(SDS_ANA_COM_REG08, 0x0713);		/* SDS_ANA_COM_REG08 */
+		sw_wr(SDS(0x225e4), 0x001f);		/* SDS_ANA_COM_REG25 */
+		sw_wr(SDS(0x225e0), 0x8001);		/* SDS_ANA_COM_REG24 REG_TXLA_LDOEN */
 		pr_info("rtl9602c-gpon: ModeV1 TX SerDes applied: COM_REG02=0x%04x 03=0x%04x 08=0x%04x 24=0x%04x 25=0x%04x\n",
-			sw_rd(0x22588) & 0xffff, sw_rd(SDS_ANA_COM_REG03) & 0xffff,
-			sw_rd(0x225a0) & 0xffff, sw_rd(0x225e0) & 0xffff, sw_rd(0x225e4) & 0xffff);
+			sw_rd(SDS(0x22588)) & 0xffff, sw_rd(SDS_ANA_COM_REG03) & 0xffff,
+			sw_rd(SDS_ANA_COM_REG08) & 0xffff, sw_rd(SDS(0x225e0)) & 0xffff, sw_rd(SDS(0x225e4)) & 0xffff);
 	}
 
 	/*
@@ -3134,9 +3522,9 @@ static int gpon_serdes_init(void)	/* not __init: re-run on re-range from gpon_cd
 	 * already match). The old comment claimed they were required for a decodable burst, but the
 	 * working stock is the existence proof: it ranges + bursts WITHOUT them. Match stock. The
 	 * `serdes_tx_xtra` param restores the old behaviour for A/B if this regresses ranging. */
-	sw_field(0x220a8, 5, 4, serdes_tx_xtra ? 0x3 : 0x0);	/* WSDS_DIG_1E D2A interconnect (stock=0) */
-	sw_field(0x2281c, 14, 14, serdes_tx_xtra ? 0x1 : 0x0);	/* SDS_REG7 SP_CFG_NEG_CLKWR_A2D (stock=0) */
-	sw_field(0x22a30, 8, 8, serdes_tx_xtra ? 0x1 : 0x0);	/* SDS_EXT_REG12 SEP_CFG_NEG_CLKRD_D2A (stock=0) */
+	sw_field(SDS(0x220a8), 5, 4, serdes_tx_xtra ? 0x3 : 0x0);	/* WSDS_DIG_1E D2A interconnect (stock=0) */
+	sw_field(SDS(0x2281c), 14, 14, serdes_tx_xtra ? 0x1 : 0x0);	/* SDS_REG7 SP_CFG_NEG_CLKWR_A2D (stock=0) */
+	sw_field(SDS(0x22a30), 8, 8, serdes_tx_xtra ? 0x1 : 0x0);	/* SDS_EXT_REG12 SEP_CFG_NEG_CLKRD_D2A (stock=0) */
 
 	/*
 	 * TX drive level (SDS_ANA_COM_REG22, 0x225d8): REG_TX_AMP[5:3]=0x5,
@@ -3147,8 +3535,8 @@ static int gpon_serdes_init(void)	/* not __init: re-run on re-range from gpon_cd
 	 * our SN/ranging burst (detect-but-no-range). An earlier note mis-labelled the
 	 * resulting 0x29 a "ModeV2" value and skipped it; 0x29 IS the ModeV1 TX drive.
 	 */
-	sw_field(0x225d8, 5, 3, 0x5);			/* SDS_ANA_COM_REG22 REG_TX_AMP = 0x5 */
-	sw_field(0x225d8, 2, 0, 0x1);			/* SDS_ANA_COM_REG22 REG_TX_EMP = 0x1 */
+	sw_field(SDS(0x225d8), 5, 3, 0x5);			/* SDS_ANA_COM_REG22 REG_TX_AMP = 0x5 */
+	sw_field(SDS(0x225d8), 2, 0, 0x1);			/* SDS_ANA_COM_REG22 REG_TX_EMP = 0x1 */
 
 	/*
 	 * 7a. Force signal-detect on. RST_DONE is gated by signal-detect; force it so
@@ -3205,7 +3593,7 @@ static int gpon_serdes_init(void)	/* not __init: re-run on re-range from gpon_cd
 
 	pr_info("rtl9602c-gpon: SDS cfg=0x%08x dig00=0x%08x dig1d=0x%08x fib21=0x%08x fib_reg0=0x%08x\n",
 		sw_rd(SDS_CFG), sw_rd(WSDS_DIG_00), sw_rd(WSDS_DIG_1D),
-		sw_rd(FIB_EXT_REG21), sw_rd(0x22c00));
+		sw_rd(FIB_EXT_REG21), sw_rd(SDS(0x22c00)));
 
 	for (i = 0; i < SDS_LOCK_POLL_MAX; i++) {
 		if (sw_rd(FIB_EXT_REG21) & SDS_ANALOG_READY)
@@ -3650,11 +4038,11 @@ void rtl9602c_datapath_tables_init(void)
 	sw_field(0x25000, 15, 8, 189);
 	sw_field(0x2d89c, 0, 0, 1);			/* SCH_WFQ_TKN_CTRL      */
 	sw_field(0x2d8b8, 18, 0, 0x3ffff);		/* LINE_RATE_2500M       */
-	sw_field(0x00110, 0, 0, 1);			/* PATCH_PHY_DONE        */
-	sw_field(0x23040, 0, 0, 1);			/* CFG_UNHIOL IPG_COMP   */
+	sw_field(WRAP_GPHY_MISC, 0, 0, 1);			/* PATCH_PHY_DONE        */
+	sw_field(CFG_UNHIOL, 0, 0, 1);			/* CFG_UNHIOL IPG_COMP   */
 	sw_field(0x20c04, 2, 2, 1);			/* P_MISC[CPU] RX_SPC    */
 	for (port = 0; port <= 3; port++)
-		sw_field(0x11008 + port * 4, 1, 0, 0x3);	/* ACCEPT_MAX_LEN */
+		sw_field(ACCEPT_MAX_LEN_CTRL + port * 4, 1, 0, 0x3);	/* ACCEPT_MAX_LEN */
 
 	/* 2) l2_init: per-port action defaults (FORWARD). NOTE: a trial that wrote the
 	 * exact stock LUT-action values (0x1c000=0x1a, 0x1c00c=0xaa, ...) + the MSTI/STP
@@ -3663,14 +4051,14 @@ void rtl9602c_datapath_tables_init(void)
 	 * the working FORWARD(0) defaults; do NOT match those stock LUT actions. */
 	sw_field(0x17000, 22, 22, 1);			/* LUT LINKDOWN_AGEOUT   */
 	for (port = 0; port <= 3; port++) {
-		sw_field(0x1c00c, port * 2 + 1, port * 2, 0);
+		sw_field(LUT_LEARN_OVER_CTRL, port * 2 + 1, port * 2, 0);
 		sw_field(0x17004, port, port, 1);
 		sw_field(0x1c004, port * 2 + 1, port * 2, 0);
 		sw_field(0x1c000, port * 2 + 1, port * 2, 0);
-		sw_field(0x1c014, port * 2 + 1, port * 2, 0);
-		sw_field(0x1c010, port * 2 + 1, port * 2, 0);
-		sw_field(0x1c008, port * 2 + 1, port * 2, 0);
-		sw_field(0x1c02c, port, port, 1);
+		sw_field(UNKN_IP4_MC, port * 2 + 1, port * 2, 0);
+		sw_field(UNKN_L2_MC, port * 2 + 1, port * 2, 0);
+		sw_field(LUT_UNKN_UC_DA_CTRL, port * 2 + 1, port * 2, 0);
+		sw_field(LUT_SYS_LRN_LIMIT, port, port, 1);
 	}
 	for (idx = 0; idx < 0x200 && tbl_ok && table_engine_ok; idx++) {
 		sw_wr(TBL_WRDATA_OFF + 0x0, 0);
@@ -3705,22 +4093,22 @@ void rtl9602c_datapath_tables_init(void)
 
 	/* 4) port_init: CPU + PON force link UP (already done in swcore bringup;
 	 *    re-assert for stock fidelity/order). Ports 0,1 stay auto. */
-	sw_field(0x180 + 3 * 4, 1, 0, 2); sw_field(0x180 + 3 * 4, 2, 2, 1);
-	sw_field(0x180 + 3 * 4, 4, 4, 1); sw_wr(0x1b4 + 3 * 4, 0xfff);
-	sw_field(0x180 + 2 * 4, 1, 0, 2); sw_field(0x180 + 2 * 4, 2, 2, 1);
-	sw_field(0x180 + 2 * 4, 4, 4, 1); sw_wr(0x1b4 + 2 * 4, 0xfff);
+	sw_field(FORCE_P_ABLTY + 3 * 4, 1, 0, 2); sw_field(FORCE_P_ABLTY + 3 * 4, 2, 2, 1);
+	sw_field(FORCE_P_ABLTY + 3 * 4, 4, 4, 1); sw_wr(ABLTY_FORCE_MODE + 3 * 4, 0xfff);
+	sw_field(FORCE_P_ABLTY + 2 * 4, 1, 0, 2); sw_field(FORCE_P_ABLTY + 2 * 4, 2, 2, 1);
+	sw_field(FORCE_P_ABLTY + 2 * 4, 4, 4, 1); sw_wr(ABLTY_FORCE_MODE + 2 * 4, 0xfff);
 
 	/* 5) cpu_init: TAG_AWARE AFTER the CPU port is forced link-up. */
 	sw_field(0x23030, 8, 8, 1);			/* TRAP_TAGET_INSERT_EN  */
 	sw_field(0x23030, 9, 9, 1);			/* TAG_AWARE             */
 
 	/* 6) trap_init: RMA baseline */
-	sw_field(0x1c084, 2, 0, 0);
-	sw_field(0x1c01c, 2, 0, 0);
-	sw_field(0x1c03c, 5, 4, 2);
-	sw_field(0x1c040, 5, 4, 2);
-	sw_field(0x1c100, 2, 0, 0);
-	sw_field(0x1c0cc, 0, 0, 0);
+	sw_field(RMA_CFG, 2, 0, 0);
+	sw_field(UNKN_MC_CFG, 2, 0, 0);
+	sw_field(RMA_CTRL01, 5, 4, 2);
+	sw_field(RMA_CTRL02, 5, 4, 2);
+	sw_field(OAM_CTRL_0, 2, 0, 0);
+	sw_field(QOS_UNI_TRAP_PRI_CTRL, 0, 0, 0);
 
 	/* 7) classification setup: CF_CFG = the EXACT live-working-stock value 0x1d009 (diffed
 	 *    stock-vs-mine 2026-06-13). = CF_US_PERMIT=1 (bits[1:0]) + CF_SEL_PON_EN=1
@@ -3731,15 +4119,25 @@ void rtl9602c_datapath_tables_init(void)
 	 *    (A prior round read the classification-init SOURCE default=0 and wrongly reverted
 	 *    CF_US_PERMIT to 0 — the GPON driver init OVERRIDES it to this; the LIVE
 	 *    stock register is the ground truth.) */
-	sw_wr(0x1600c, 0x0001d009u);
+	sw_wr(CF_CFG, 0x0001d009u);
 	/* Port isolation + BUM-flood masks to the live-stock values (we had 0x3fffff /
 	 * 0x0b; stock = 0x000ff9ff / 0x08 CPU-only). */
+	/* ⚠ FOUR CONSECUTIVE ARRAY ELEMENTS, NOT four named registers, and one of
+	 * them was briefly routed through the per-chip table on 2026-08-31 before
+	 * this was read. The chipdefs name 0x27008 `PISO_EXT` on the RTL9602C and
+	 * 0x2700c `PISO_EXT` on the RTL9603CVD -- not because the register moved,
+	 * but because the ARRAY's extent differs and each map names a different
+	 * element of it. Treating one element as a standalone register made the
+	 * G24W write 0x2700c twice and never write 0x27008.
+	 *
+	 * ⇒ an offset carrying a chipdef NAME is not evidence that it is a
+	 *   standalone register. Written as the array it is. */
 	sw_wr(0x27000, 0x000ff9ffu); sw_wr(0x27004, 0x000ff9ffu);
 	sw_wr(0x27008, 0x000ff9ffu); sw_wr(0x2700c, 0x000ff9ffu);
-	sw_wr(0x1c020, 0x00000008u); sw_wr(0x1c024, 0x00000008u); sw_wr(0x1c028, 0x00000008u);
+	sw_wr(LUT_BC_FLOOD, 0x00000008u); sw_wr(LUT_UNKN_MC_FLOOD, 0x00000008u); sw_wr(LUT_UNKN_UC_FLOOD, 0x00000008u);
 
 	/* 8) ponmac_init: PON-IP scheduler + OMCI egress steering */
-	sw_field(0x001ec, 0, 0, 1);			/* DYNGASP_CMP_INV       */
+	sw_field(DYNGASP_CTRL, 0, 0, 1);			/* DYNGASP_CMP_INV       */
 	if (serdes_stock_analog) {
 		/* Match live-stock post-reset SDS_ANA: REG01 (0x22584)=0x73a4 (CMU bit14=1,
 		 * BEN_TTL_OUT bit0=0) + REG11 (0x225ac) RX_FILT_CONFIG=0. The golden table sets
@@ -3747,11 +4145,11 @@ void rtl9602c_datapath_tables_init(void)
 		 * (0x33a4 / 0xb008); we re-apply them here, post-reset, exactly like stock. This
 		 * was the ONLY stock-vs-ours SerDes register diff and bit14 is in the shared CMU
 		 * block -> the marginal TX serializer behind the cold-start ~50% US-TX "Laser out". */
-		sw_field(0x22584, 14, 14, 1);		/* REG01 CMU bit14 = 1 (stock 0x73a4) */
-		sw_field(0x22584,  0,  0, 0);		/* REG01 BEN_TTL_OUT = 0 (stock)      */
-		sw_field(0x225ac,  7,  0, 0);		/* REG11 RX_FILT_CONFIG = 0 (stock)   */
+		sw_field(SDS(0x22584), 14, 14, 1);		/* REG01 CMU bit14 = 1 (stock 0x73a4) */
+		sw_field(SDS(0x22584),  0,  0, 0);		/* REG01 BEN_TTL_OUT = 0 (stock)      */
+		sw_field(SDS(0x225ac),  7,  0, 0);		/* REG11 RX_FILT_CONFIG = 0 (stock)   */
 	} else {
-		sw_field(0x22584, 0, 0, 1);		/* legacy SDS_ANA REG_BEN_TTL_OUT = 1 */
+		sw_field(SDS(0x22584), 0, 0, 1);		/* legacy SDS_ANA REG_BEN_TTL_OUT = 1 */
 	}
 	pi_field(0x02150, 29, 16, 5);			/* PON_BW_THRES last     */
 	pi_field(0x02150, 13, 0, 5);			/* PON_BW_THRES runt     */
@@ -3765,7 +4163,7 @@ void rtl9602c_datapath_tables_init(void)
 		pi_field(0x023e8, idx, idx, 0);		/* WFQ_TYPE = STRICT     */
 		pi_field(0x02198 + idx * 4, 31, 0, 0);	/* QID_CIR_RATE = 0      */
 	}
-	sw_field(0x111f8, 2, 0, 7);			/* PON_TRAP_CFG OMCI_MPCP_PRIORITY=7 -> steer OMCI egress to PON queue 7 */
+	sw_field(PON_TRAP_CFG, 2, 0, 7);			/* PON_TRAP_CFG OMCI_MPCP_PRIORITY=7 -> steer OMCI egress to PON queue 7 */
 	/* PIR_DROP (0x2194 bit18) is cleared for rev-A above (pir_drop param, default 0).
 	 * Do NOT "restore" it to 1: the working stock firmware's own behaviour
 	 * CONFIRMS rev-A clears it ("must turn off due to the tcont 16"). The old
@@ -4122,14 +4520,14 @@ void gpon_pbo_init(void)
 	 * O5 reads 0) — we leave it SET: we want the internal link held up. Addresses +
 	 * values match the stock behavior; the in-word bit shifts are from the field map. */
 	if (!usnic_strip) {
-		sw_field(0x001b4, 4, 0, 0xc);	/* ABLTY_FORCE_MODE[4:0]=0xc — GPON internal-link force   */
+		sw_field(ABLTY_FORCE_MODE, 4, 0, 0xc);	/* ABLTY_FORCE_MODE[4:0]=0xc — GPON internal-link force   */
 		sw_field(0x000f4, 5, 5, 1);	/* CFG_FE_POLL_WD_1[5]=1 — front-end GMII poll/watchdog    */
 		mdelay(10);			/* settle the forced internal link before PCS enables+edge */
-		sw_field(0x22a70, 11, 11, 0);	/* SDS_EXT_REG28[11]=0 — release non-GPON SerDes-select    */
-		sw_field(0x220e0, 9, 8, 1);	/* WSDS_DIG_2C[9:8]=1 — WAN-PCS digital enable            */
+		sw_field(SDS(0x22a70), 11, 11, 0);	/* SDS_EXT_REG28[11]=0 — release non-GPON SerDes-select    */
+		sw_field(SDS(0x220e0), 9, 8, 1);	/* WSDS_DIG_2C[9:8]=1 — WAN-PCS digital enable            */
 		pi_field(0x0a10c, 13, 13, 1);	/* RSVD_PONIP_DS[13]=1 — DS-side datapath enable           */
 		pi_field(0x0a10c, 12, 12, 1);	/* RSVD_PONIP_DS[12]=1                                     */
-		sw_field(0x22080, 12, 12, 1);	/* WSDS_DIG_14[12]=1 — WAN-PCS digital enable             */
+		sw_field(SDS(0x22080), 12, 12, 1);	/* WSDS_DIG_14[12]=1 — WAN-PCS digital enable             */
 	}
 
 	/* CF_CFG.CF_US_PERMIT is set to its stock value (0 = NORMAL/permit) by
@@ -4397,13 +4795,13 @@ static u32 gpon_gem_ds_rx_cnt(u8 flow)
 {
 	int i;
 
-	gpon_wr(0x4040, flow & 0x7f);
+	gpon_wr(PI_TX_CFG_US, flow & 0x7f);
 	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(0x4040) & BIT(15))		/* ETH_PKT_RX_R_ACK */
+		if (gpon_rd(PI_TX_CFG_US) & BIT(15))		/* ETH_PKT_RX_R_ACK */
 			break;
 		udelay(1);
 	}
-	return gpon_rd(0x4044);				/* ETH_PKT_RX count */
+	return gpon_rd(PI_RX_CFG_US);				/* ETH_PKT_RX count */
 }
 
 /* Per-flow downstream GEM FORWARDED-to-PON-IP count (GEM_DS_FWD_CNTR, IND 0x404C /
@@ -4418,9 +4816,9 @@ static u32 gpon_gem_ds_fwd_cnt(u8 flow)
 {
 	int i;
 
-	gpon_wr(0x404c, flow & 0x7f);
+	gpon_wr(PI_CFG_US, flow & 0x7f);
 	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(0x404c) & BIT(15))		/* ETH_PKT_FWD_R_ACK */
+		if (gpon_rd(PI_CFG_US) & BIT(15))		/* ETH_PKT_FWD_R_ACK */
 			break;
 		udelay(1);
 	}
@@ -4436,14 +4834,14 @@ static u32 gpon_ds_cam_read(u8 flow)
 	int i;
 	u32 ind;
 
-	gpon_wr(0x1100, (2u << 8) | (flow & 0x7f));		/* DS_PORT_IND OP_MODE=READ, REQ=0 */
-	gpon_wr(0x1100, (2u << 8) | (flow & 0x7f) | BIT(15));	/* REQ=1 -> trigger */
+	gpon_wr(GPON_GTC_DS_PORT_IND, (2u << 8) | (flow & 0x7f));		/* DS_PORT_IND OP_MODE=READ, REQ=0 */
+	gpon_wr(GPON_GTC_DS_PORT_IND, (2u << 8) | (flow & 0x7f) | BIT(15));	/* REQ=1 -> trigger */
 	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(0x1100) & BIT(14))	/* OP_COMPL */
+		if (gpon_rd(GPON_GTC_DS_PORT_IND) & BIT(14))	/* OP_COMPL */
 			break;
 		udelay(1);
 	}
-	ind = gpon_rd(0x1100);
+	ind = gpon_rd(GPON_GTC_DS_PORT_IND);
 	return ((ind & BIT(13)) ? BIT(16) : 0) | (gpon_rd(0x110c) & 0xfff);	/* HIT | RDATA gem */
 }
 
@@ -4462,10 +4860,10 @@ static void gpon_ds_cam_clear_all(void)
 					 * written right after; the CLEAN op also zeroes the
 					 * entry's TRAFFIC_CFG and races our isOMCI write). */
 			continue;
-		gpon_wr(0x1100, (3u << 8) | (f & 0x7f));		/* OP_MODE=CLEAN, IDX, REQ=0 */
-		gpon_wr(0x1100, (3u << 8) | (f & 0x7f) | BIT(15));	/* REQ=1 -> trigger */
+		gpon_wr(GPON_GTC_DS_PORT_IND, (3u << 8) | (f & 0x7f));		/* OP_MODE=CLEAN, IDX, REQ=0 */
+		gpon_wr(GPON_GTC_DS_PORT_IND, (3u << 8) | (f & 0x7f) | BIT(15));	/* REQ=1 -> trigger */
 		for (i = 0; i < 1000; i++) {
-			if (gpon_rd(0x1100) & BIT(14))			/* OP_COMPL */
+			if (gpon_rd(GPON_GTC_DS_PORT_IND) & BIT(14))			/* OP_COMPL */
 				break;
 			udelay(1);
 		}
@@ -4515,14 +4913,14 @@ static u32 gpon_alloc_cam_read(u8 tcont)
 	int i;
 	u32 ind;
 
-	gpon_wr(0x10c0, (2u << 8) | (tcont & 0x1f));		/* OP_MODE=READ, REQ=0 */
-	gpon_wr(0x10c0, (2u << 8) | (tcont & 0x1f) | BIT(15));	/* REQ=1 -> trigger */
+	gpon_wr(GPON_GTC_DS_ALLOC_IND, (2u << 8) | (tcont & 0x1f));		/* OP_MODE=READ, REQ=0 */
+	gpon_wr(GPON_GTC_DS_ALLOC_IND, (2u << 8) | (tcont & 0x1f) | BIT(15));	/* REQ=1 -> trigger */
 	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(0x10c0) & BIT(14))			/* OP_COMPL */
+		if (gpon_rd(GPON_GTC_DS_ALLOC_IND) & BIT(14))			/* OP_COMPL */
 			break;
 		udelay(1);
 	}
-	ind = gpon_rd(0x10c0);
+	ind = gpon_rd(GPON_GTC_DS_ALLOC_IND);
 	return ((ind & BIT(13)) ? BIT(16) : 0) | (gpon_rd(0x10cc) & 0xfff);
 }
 
@@ -4586,10 +4984,10 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 
 		if (t == keep)
 			continue;
-		gpon_wr(0x10c0, (1u << 8) | (t & 0x1f));		/* OP_MODE=WRITE, REQ=0 */
-		gpon_wr(0x10c4, 0xfff);					/* alloc = 0xFFF (reserved, never granted) */
-		gpon_wr(0x10c0, (1u << 8) | (t & 0x1f) | BIT(15));	/* REQ=1 -> trigger */
-		for (i = 0; i < 1000 && !(gpon_rd(0x10c0) & BIT(14)); i++)
+		gpon_wr(GPON_GTC_DS_ALLOC_IND, (1u << 8) | (t & 0x1f));		/* OP_MODE=WRITE, REQ=0 */
+		gpon_wr(GPON_GTC_DS_ALLOC_WR, 0xfff);					/* alloc = 0xFFF (reserved, never granted) */
+		gpon_wr(GPON_GTC_DS_ALLOC_IND, (1u << 8) | (t & 0x1f) | BIT(15));	/* REQ=1 -> trigger */
+		for (i = 0; i < 1000 && !(gpon_rd(GPON_GTC_DS_ALLOC_IND) & BIT(14)); i++)
 			udelay(1);				/* poll OP_COMPL */
 	}
 }
@@ -4755,7 +5153,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	 * suspect for "configured correctly yet won't frame-lock".
 	 */
 	seq_printf(s, "gtc_cfg: ds_cfg=0x%08x intr_mask=0x%08x r1048=0x%08x r104c=0x%08x r1050=0x%08x\n",
-		   gpon_rd(0x1014), gpon_rd(0x1004), gpon_rd(0x1048),
+		   gpon_rd(0x1014), gpon_rd(GPON_GTC_DS_INTR_MASK), gpon_rd(0x1048),
 		   gpon_rd(0x104c), gpon_rd(0x1050));
 	/* DS_MISC counters (GTC-relative, register-map base 0x7011xx): do we even SEE/accept the
 	 * OLT's BWmap grants + DS PLOAMs? ploam_acpt/bwm_acpt nonzero => GTC recognizes
@@ -4905,7 +5303,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * the US transmit FSM waits on a CPU ack our poll never gives. top_mask/top_sts = 0x0040/44;
 		 * gtcus dlt/mask/sts = 0x5000/04/08; gemus dlt/mask/sts = 0x6000/04/08. */
 		seq_printf(s, "usintr: top[mask0x40=0x%08x sts0x44=0x%08x] gtcus[dlt=0x%08x mask=0x%08x sts=0x%08x] gemus[dlt=0x%08x mask=0x%08x sts=0x%08x] svc_cnt=%u\n",
-			   gpon_rd(0x0040), gpon_rd(0x0044),
+			   gpon_rd(GPON_INTR_MASK), gpon_rd(GPON_INTR_STS),
 			   gpon_rd(0x5000), gpon_rd(0x5004), gpon_rd(0x5008),
 			   gpon_rd(0x6000), gpon_rd(0x6004), gpon_rd(0x6008),
 			   gpon_us_intr_svc_cnt);
@@ -4916,8 +5314,8 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * rx>0 & NIC filled=0 => de-encap OK but trap-to-CPU gap; drop>0 =>
 		 * SID/queue/PBO mapping rejecting the OMCI before it traps. */
 		seq_printf(s, "omci_pi: rx(0x329c0)=%u drop(0x329b8)=%u crcerr(0x329cc)=%u ustx(0x329bc)=%u trapcfg(0x111f8)=0x%08x\n",
-			   sw_rd(0x329c0), sw_rd(0x329b8), sw_rd(0x329cc),
-			   sw_rd(0x329bc), sw_rd(0x111f8));
+			   sw_rd(OMCI_RX_PKT_CNT), sw_rd(OMCI_DROP_PKT_CNT), sw_rd(OMCI_CRC_ERROR_PKT_CNT),
+			   sw_rd(OMCI_TX_PKT_CNT), sw_rd(PON_TRAP_CFG));
 		/* US packet-engine TX counters (PI_PKT_OK_CNT_US 0x04010 / ERR 0x04014 /
 		 * MISS 0x04018). If the ONU transmits ANY upstream GEM on the OLT's BWMAP
 		 * grants these climb; us_tx_ok=0 => the ONU never fills its grants (US PLOAM
@@ -5123,10 +5521,10 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 
 			seq_printf(s, "ds_cam: e64=gem%u hit%u tcfg64=0x%x | e0=gem%u hit%u | e%u(data)=gem%u hit%u tcfg=0x%x\n",
 				   c64 & 0xfff, !!(c64 & BIT(16)),
-				   gpon_rd(0x1400 + 64 * 4) & 0x1f,
+				   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + 64 * 4) & 0x1f,
 				   c0 & 0xfff, !!(c0 & BIT(16)),
 				   GPON_DATA_FLOW, c1 & 0xfff, !!(c1 & BIT(16)),
-				   gpon_rd(0x1400 + GPON_DATA_FLOW * 4) & 0x1f);
+				   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + GPON_DATA_FLOW * 4) & 0x1f);
 		}
 	}
 	/* Full per-flow de-encap sweep: does ANY flow de-encapsulate a GEM frame?
@@ -5195,8 +5593,8 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		   sw_rd(SDS_ANA_MISC_REG02), sw_rd(FIB_EXT_REG21));
 	/* TX-path verification: confirm my TX serializer writes actually landed. */
 	seq_printf(s, "sds_tx: cfg=0x%08x com22_txamp=0x%08x reg24=0x%08x dig1e_d2a=0x%08x dig02_pdben=0x%08x dig03_txdis=0x%08x forceben=0x%08x\n",
-		   sw_rd(SDS_CFG), sw_rd(0x225d8), sw_rd(0x225e0),
-		   sw_rd(0x220a8), sw_rd(0x22038), sw_rd(0x2203c), sw_rd(0x220e4));
+		   sw_rd(SDS_CFG), sw_rd(SDS_ANA_COM_REG22), sw_rd(SDS(0x225e0)),
+		   sw_rd(SDS(0x220a8)), sw_rd(WSDS_DIG_02), sw_rd(WSDS_DIG_03), sw_rd(SDS(0x220e4)));
 	if (SDS_FIB_STATUS) {
 		u32 fibsts = sw_rd(SDS_FIB_STATUS);
 
@@ -5325,12 +5723,12 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	 * non-leasing boot is a live-confirmed candidate (unlike the transient
 	 * mode-set programmed values, which are overwritten by the CDR reset). */
 	seq_printf(s, "sds_run: 280c=%04x[3106] 281c=%04x[1359] 225a0=%04x[713] 220a8=%04x[2] 225d8=%04x[29]\n",
-		   sw_rd(0x2280c) & 0xffff, sw_rd(0x2281c) & 0xffff,
-		   sw_rd(0x225a0) & 0xffff, sw_rd(0x220a8) & 0xffff,
-		   sw_rd(0x225d8) & 0xffff);
+		   sw_rd(SDS(0x2280c)) & 0xffff, sw_rd(SDS(0x2281c)) & 0xffff,
+		   sw_rd(SDS_ANA_COM_REG08) & 0xffff, sw_rd(SDS(0x220a8)) & 0xffff,
+		   sw_rd(SDS_ANA_COM_REG22) & 0xffff);
 	seq_printf(s, "sds_ext: 22a2c=%04x[0] 22a30=%04x[4] 22a34=%04x[326a]\n",
-		   sw_rd(0x22a2c) & 0xffff, sw_rd(0x22a30) & 0xffff,
-		   sw_rd(0x22a34) & 0xffff);
+		   sw_rd(SDS(0x22a2c)) & 0xffff, sw_rd(SDS(0x22a30)) & 0xffff,
+		   sw_rd(SDS(0x22a34)) & 0xffff);
 	return 0;
 }
 
@@ -7034,7 +7432,7 @@ static void gpon_fsm_handle(const u8 *m)
 		 * compare two FSMs AND two clocks, and blame the FSM.
 		 * See ONU-test-case/OWED-ploam-swap-time-unit.md. */
 		gpon_ploam_ds(&luna_ploam, m, GPON_PLOAM_DS_LEN,
-			      gpon_fsm_ticks * 10u);
+			      gpon_fsm_ticks * GPON_FSM_TICK_MS);
 		return;
 	}
 
@@ -7181,7 +7579,7 @@ static void gpon_fsm_handle(const u8 *m)
 		if (onu_id == gpon_fsm_onu_id || onu_id == 0xff) {
 			pr_info("rtl9602c-gpon: EVT t=%u DEACT(0x05) onu=%u | dsrx64=%u pirx=%u omcirx=%u | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
 				gpon_fsm_ticks, gpon_fsm_onu_id,
-				gpon_gem_ds_rx_cnt(64), sw_rd(0x329c0), rtl9602c_eth_omci_rx_count(),
+				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
 				gpon_us_misc_cnt(2), gpon_us_misc_cnt(4), gpon_rd(0x6a00), gpon_rd(0x6c80));
 			gpon_fsm_onu_id = 0xff;
 			/* FULL reset to O1 — mirror the SN-reprovision path (≈line 3068).
@@ -7321,7 +7719,7 @@ static void gpon_fsm_handle(const u8 *m)
 		if (onu_id == gpon_fsm_onu_id) {
 			gpon_send_key();
 			pr_info("rtl9602c-gpon: EVT t=%u REQ_KEY(0x0d) dsrx64=%u pirx=%u omcirx=%u\n",
-				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(64), sw_rd(0x329c0),
+				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT),
 				rtl9602c_eth_omci_rx_count());
 		}
 		break;
@@ -7333,7 +7731,7 @@ static void gpon_fsm_handle(const u8 *m)
 		if (onu_id == gpon_fsm_onu_id || onu_id == 0xff) {
 			gpon_send_password();
 			pr_info("rtl9602c-gpon: EVT t=%u REQ_PW(0x09) -> sent Password dsrx64=%u pirx=%u omcirx=%u\n",
-				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(64), sw_rd(0x329c0),
+				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT),
 				rtl9602c_eth_omci_rx_count());
 		}
 		break;
@@ -7361,7 +7759,7 @@ static void gpon_fsm_handle(const u8 *m)
 			pr_info("rtl9602c-gpon: EVT t=%u KEY_SW(0x13) staged=%d arm@%u hwswt=%u dsrx64=%u pirx=%u omcirx=%u\n",
 				gpon_fsm_ticks, gpon_key_staged, gpon_aes_switch_time,
 				gpon_rd(0x3014) & 0x3fffffff,
-				gpon_gem_ds_rx_cnt(64), sw_rd(0x329c0), rtl9602c_eth_omci_rx_count());
+				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count());
 		}
 		break;
 	case PLM_DS_ENCRYPT_PORT:
@@ -7459,7 +7857,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * placeholder SN, which the OLT auto-ranges as a phantom that never matches
 	 * the provisioned ONU). Drop to O1 and re-offer the new Serial_Number. */
 	if (core_fsm)
-		gpon_ploam_sn_changed(&luna_ploam, gpon_fsm_ticks * 10u);
+		gpon_ploam_sn_changed(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
 	if (!core_fsm && gpon_sn_changed) {
 		gpon_sn_changed = false;
 		if (gpon_fsm_state > 1) {
@@ -7520,7 +7918,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * numbers beside them (:6608-:6610), so they are a copy and not a
 	 * coincidence. */
 	if (core_fsm)
-		gpon_ploam_poll_provision(&luna_ploam, gpon_fsm_ticks * 10u);
+		gpon_ploam_poll_provision(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
 	if (!core_fsm && gpon_fsm_state == 5 && data_gem_en && gpon_omcc_installed &&
 	    gpon_data_gem_solicited && !gpon_data_installed)
 		gpon_install_data_gem();
@@ -7570,7 +7968,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	if (core_fsm)
 		gpon_ploam_poll_watchdog(&luna_ploam,
 					 rtl9602c_eth_wan_rx_count() == 0,
-					 gpon_fsm_ticks * 10u);
+					 gpon_fsm_ticks * GPON_FSM_TICK_MS);
 	if (!core_fsm && o5_provision_watchdog_ticks && gpon_fsm_state == 5 &&
 	    gpon_fsm_onu_id != 0xff && gpon_o5_entry_tick &&
 	    (gpon_fsm_ticks - gpon_o5_entry_tick) > o5_provision_watchdog_ticks &&
@@ -7638,7 +8036,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		 */
 		if (core_fsm)
 			gpon_ploam_poll_los(&luna_ploam, optic_los, sds_dark,
-					    gpon_fsm_ticks * 10u);
+					    gpon_fsm_ticks * GPON_FSM_TICK_MS);
 		if (!core_fsm && optic_los && sds_dark) {
 			if (++gpon_los_run == los_rerange_ticks) {
 				pr_info("rtl9602c-gpon: downstream LOS %u ticks (optic_los & !sds_sdet) -> O1 (re-range on light return)\n",
@@ -7718,7 +8116,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		pr_info("rtl9602c-gpon: O5 t=%u last=0x%02x onu=%u hwst=%u eqd=0x%08x | dsrx64=%u pirx=%u omcirx=%u | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
 			gpon_fsm_ticks, gpon_last_ds_type, gpon_fsm_onu_id,
 			gpon_rd(GPON_GTC_DS_ONU_STATUS) & 0xf, gpon_rd(GPON_GTC_US_EQD),
-			gpon_gem_ds_rx_cnt(64), sw_rd(0x329c0), rtl9602c_eth_omci_rx_count(),
+			gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
 			gpon_us_misc_cnt(2), gpon_us_misc_cnt(4), gpon_rd(0x6a00), gpon_rd(0x6c80));
 	/* US-OMCI EGRESS STALL LOCALIZER (SAFE reads only — sw_rd/gpon_rd, NO pi_rd and
 	 * NO cross-driver accessor; both were the suspected hang sources). Diagnosis:
@@ -7748,8 +8146,8 @@ static void gpon_fsm_poll(struct timer_list *t)
 		 * tcont uses pi_rd in the same FSM context and completes (the earlier hang was
 		 * the cross-driver accessor, NOT pi_rd). */
 		pr_info("rtl9602c-gpon: USDIAG t=%u ustx=%u pirx=%u usdrop=%u uscrc=%u | rxsid=%u/%u/%u/%u/%u\n",
-			gpon_fsm_ticks, sw_rd(0x329bc), sw_rd(0x329c0),
-			sw_rd(0x329b8), sw_rd(0x329cc),
+			gpon_fsm_ticks, sw_rd(OMCI_TX_PKT_CNT), sw_rd(OMCI_RX_PKT_CNT),
+			sw_rd(OMCI_DROP_PKT_CNT), sw_rd(OMCI_CRC_ERROR_PKT_CNT),
 			(u32)pi_rd(0x203c), (u32)pi_rd(0x2040), (u32)pi_rd(0x2044),
 			(u32)pi_rd(0x2048), (u32)pi_rd(0x204c));
 	}
@@ -7790,7 +8188,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	/* While unregistered in O3, re-offer our Serial_Number_ONU ~twice a second
 	 * (the OLT grants SN windows intermittently). */
 	if (core_fsm)
-		gpon_ploam_poll_sn_reoffer(&luna_ploam, gpon_fsm_ticks * 10u);
+		gpon_ploam_poll_sn_reoffer(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
 	if (!core_fsm && gpon_fsm_state >= 3 && gpon_fsm_onu_id == 0xff &&
 	    (gpon_fsm_ticks % 50) == 0)
 		gpon_send_sn();
@@ -7803,7 +8201,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * provision on ~50%% of boots. Mirrors the un-ranged SN cadence above; US-PLOAM
 	 * only, does not touch DS RX or OMCI. */
 	if (core_fsm)
-		gpon_ploam_poll_keepalive(&luna_ploam, gpon_fsm_ticks * 10u);
+		gpon_ploam_poll_keepalive(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
 	if (!core_fsm && gpon_fsm_state == 5 && gpon_fsm_onu_id != 0xff &&
 	    o5_ploam_keepalive_ticks &&
 	    (gpon_fsm_ticks % o5_ploam_keepalive_ticks) == 0) {
@@ -7913,7 +8311,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 				r & 0xff);
 		}
 	}
-	mod_timer(&gpon_fsm_timer, jiffies + msecs_to_jiffies(10));
+	mod_timer(&gpon_fsm_timer, jiffies + GPON_FSM_TICK_JIFFIES);
 }
 
 /* Stock's omitted LDO init step. Byte-exact
@@ -7928,24 +8326,24 @@ static void gpon_fsm_poll(struct timer_list *t)
  * ALARM, NOT the SerDes/laser path -> stock platform hygiene, not the WAN fix. */
 static void __init rtl9602c_sc_ldo_init(void)
 {
-	u32 fdca, t130 = sw_rd(0x130);
+	u32 fdca, t130 = sw_rd(THERMAL_CTRL_0);
 
 	if (!sc_ldo_init)
 		return;
-	sw_wr(0x40, 0x0001fdcau);		/* SC read cmd: reg 0xfdca */
+	sw_wr(GPON_INTR_MASK, 0x0001fdcau);		/* SC read cmd: reg 0xfdca */
 	udelay(1000);
-	fdca = sw_rd(0x44);
+	fdca = sw_rd(GPON_INTR_STS);
 	pr_info("rtl9602c-gpon: sc_ldo_init BEFORE: 0xfdca=0x%08x THERMAL(0x130)=0x%08x (stock 0x130=0x00ec0005)\n",
 		fdca, t130);
-	sw_wr(0x3c, fdca & ~0xcu);		/* clear DRAM-LDO bits 2,3 (stock mask ~0xC) */
+	sw_wr(SC_IND_WD, fdca & ~0xcu);		/* clear DRAM-LDO bits 2,3 (stock mask ~0xC) */
 	udelay(1000);
-	sw_wr(0x40, 0x0003fdcau);		/* SC write commit */
-	sw_wr(0x40, 0x0001fdcau);		/* re-issue read (stock reads back for log) */
+	sw_wr(GPON_INTR_MASK, 0x0003fdcau);		/* SC write commit */
+	sw_wr(GPON_INTR_MASK, 0x0001fdcau);		/* re-issue read (stock reads back for log) */
 	udelay(1000);
-	(void)sw_rd(0x44);
-	sw_wr(0x130, sw_rd(0x130) | 0x00800000u);			/* THERMAL: set bit23 */
-	sw_wr(0x130, (sw_rd(0x130) & 0xff80ffffu) | 0x006c0000u);	/* preserve low-16 */
-	pr_info("rtl9602c-gpon: sc_ldo_init AFTER: 0x130=0x%08x\n", sw_rd(0x130));
+	(void)sw_rd(GPON_INTR_STS);
+	sw_wr(THERMAL_CTRL_0, sw_rd(THERMAL_CTRL_0) | 0x00800000u);			/* THERMAL: set bit23 */
+	sw_wr(THERMAL_CTRL_0, (sw_rd(THERMAL_CTRL_0) & 0xff80ffffu) | 0x006c0000u);	/* preserve low-16 */
+	pr_info("rtl9602c-gpon: sc_ldo_init AFTER: 0x130=0x%08x\n", sw_rd(THERMAL_CTRL_0));
 }
 
 static int __init rtl9602c_gpon_init(void)
@@ -8542,7 +8940,7 @@ skip_bosa_init:
 	 * The SN_REQ/RNG_REQ/PLM_BUF unmask bits gate the GTC's upstream serial-number /
 	 * ranging / PLOAM-buffer event handling; the MAC reset clears this reg, so it
 	 * must be re-set here or the GTC never services the OLT's SN grant. */
-	gpon_wr(0x1004, 0x070f);
+	gpon_wr(GPON_GTC_DS_INTR_MASK, 0x070f);
 
 	/*
 	 * Upstream burst TIMING.  MIN_DELAY1 = 290 bits, MIN_DELAY2 = 50 guard bits

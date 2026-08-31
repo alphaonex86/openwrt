@@ -227,7 +227,7 @@ void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst)
 #define OMCI_B_EQUIP_ID		46	/* "HSGQ-X411AXF"  (20) */
 #define OMCI_B_LOID		66	/* "user"          (24) */
 #define OMCI_B_OPER_ID		90	/* "CTC"           (4)  */
-#define OMCI_B_ZEROS		94	/* zeros           (16) */
+#define OMCI_B_ZEROS		94	/* zeros           (25) */
 
 static const u8 omci_blob[] = {
 	/* [0] vendor ID — ONU-G #1, Circuit-Pack #5.  The OLT recognizes HSGQ
@@ -248,11 +248,20 @@ static const u8 omci_blob[] = {
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	/* [90] CTC #1 operation ID, zero-padded to 4 */
 	'C', 'T', 'C', 0,
-	/* [94] all-zero source: SW-image #5 hash (16), ONU-G #11 logical
-	 * password / CTC #3 password (12) */
+	/* [94] all-zero source: SW-image #5 product code (25) and #6 hash (16),
+	 * VEIP #3 interdomain name (25), ONU-G #11 logical password / CTC #3
+	 * password (12).
+	 *
+	 * ⚠ IT WAS 16 BYTES AND THE LONGEST USER NOW WANTS 25.  Sizing this
+	 * region by its longest consumer is not decoration: the region is the
+	 * LAST thing in the blob, so a row asking for more than it holds reads
+	 * off the END of the array.  ASan caught exactly that the day the VEIP
+	 * interdomain name (25) was corrected -- global-buffer-overflow in
+	 * omci_me_fill's memcpy, nine bytes past the end. */
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
-_Static_assert(sizeof(omci_blob) == 110, "omci_blob offsets and sizes drifted");
+_Static_assert(sizeof(omci_blob) == 119, "omci_blob offsets and sizes drifted");
 
 /* Where a descriptor row takes its value bytes from. */
 enum omci_attr_src {
@@ -358,7 +367,15 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(7, 2,  1, OMCI_DYN_SW_FLAG),	/* #2  Is committed */
 	A_D(7, 3,  1, OMCI_DYN_SW_FLAG),	/* #3  Is active */
 	A_C(7, 4,  1, 1),			/* #4  Is valid */
-	A_B(7, 5, 16, OMCI_B_ZEROS),		/* #5  Image hash */
+	/* ⚠ #5 AND #6 WERE ONE ROW UNTIL 2026-08-31: this table served the image
+	 * hash as #5, which is where the PRODUCT CODE lives. Measured against a
+	 * real ONU's own plugin (V2801RGW mib_SWImage.so: #5 ProductCode(25),
+	 * #6 ImageHash(16)) -- and it is our OWN comment that named the
+	 * attribute, so the off-by-one needed no reading of the spec to see.
+	 * An OLT getting #5 read 16B where 25 were due and everything after it
+	 * in the same response shifted. */
+	A_B(7, 5, 25, OMCI_B_ZEROS),		/* #5  Product code */
+	A_B(7, 6, 16, OMCI_B_ZEROS),		/* #6  Image hash */
 
 	/* ---- ME 11 PPTP Ethernet UNI (inst 0x0101) — THE HGU gate ---- */
 	A_C(11,  1, 1, 47),			/* #1  Expected type */
@@ -433,7 +450,13 @@ static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 329 VEIP (inst 0x0601) — the HGU marker ---- */
 	A_C(329, 1, 1, 0),			/* #1  Admin state */
 	A_C(329, 2, 1, 0),			/* #2  Op state */
-	A_C(329, 3, 2, 0x0000),			/* #3  Interworking-TP ptr */
+	/* ⚠ THE SAME OFF-BY-ONE, and on the ME this port's WAN path depends on.
+	 * This row was #3 at 2 bytes; a real ONU's plugin (V2801RGW mib_VEIP.so)
+	 * has #3 InterDomainName(25) and #4 TcpUdpPtr(2). The 2-byte pointer was
+	 * the right VALUE at the wrong NUMBER, so it moves to #4 and #3 becomes
+	 * the 25-byte name it always was. */
+	A_B(329, 3, 25, OMCI_B_ZEROS),		/* #3  Interdomain name */
+	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
 
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
 	A_B(65530, 1,  4, OMCI_B_OPER_ID),	/* #1  Operation ID */

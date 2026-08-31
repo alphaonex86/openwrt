@@ -54,7 +54,7 @@ bool gpon_gem_us_range_ok(const struct gpon_gem_us_range *r)
  * and BOTH paid for it.  It is three comparisons; it has cost this project more
  * than anything else of its size.
  *
- *   Luna, the months-long wall.  gpon-rtl9602c.c:6432-6440 records it in the
+ *   Luna, the months-long wall.  gpon-luna.c:6863-6440 records it in the
  *   code that replaced it: the old Assign_Alloc-ID handler bound the OLT's
  *   Alloc-ID to T-CONT 16 — the OMCC's — "OVERWRITING the ONU-ID so the OLT's
  *   default-alloc(=ONU-ID) grants missed the alloc-CAM -> T-CONT16 unreachable
@@ -79,7 +79,7 @@ bool gpon_gem_us_range_ok(const struct gpon_gem_us_range *r)
  *   @omcc_alloc — WHAT IT IS COMPARED AGAINST.
  *     Elnath passes cg->omcc_alloc (cortina-gpon.c:2190), the Alloc-ID actually
  *     bound to hw T-CONT 0 at :2050.
- *     Luna passes gpon_fsm_onu_id (gpon-rtl9602c.c:6441), the live ONU-ID.
+ *     Luna passes gpon_fsm_onu_id (gpon-luna.c:6872), the live ONU-ID.
  *     Those agree only while Luna's gpon_omcc_alloc override is 0, because
  *     Luna binds T-CONT 16 to `gpon_omcc_alloc ? gpon_omcc_alloc : onu_id`
  *     (:6264).  0 is the shipped default and is documented as the correct one
@@ -156,7 +156,7 @@ const char *gpon_gem_us_bind_name(enum gpon_gem_us_bind v)
  *
  * 1. The physical queue / VoQ a T-CONT drains on.  The two families compute it
  *    with different formulas over different quantities:
- *      Luna    gpon-rtl9602c.c:5807-5809 — qid = 32 * (tcont / 8), overridden
+ *      Luna    gpon-luna.c:6230-5809 — qid = 32 * (tcont / 8), overridden
  *              to the fixed OMCC qid for T-CONT 16 and for the alt bind.
  *      Elnath  cortina-gpon.c:321, :1222 — voq = tcont * 8 + queue.
  *    A single "portable" formula would have to be wrong on one of them.  It

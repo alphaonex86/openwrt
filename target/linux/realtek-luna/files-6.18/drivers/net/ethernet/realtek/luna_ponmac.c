@@ -126,7 +126,7 @@
  * fixed - this pass is code motion, and both are pre-existing:
  *   N1. luna_ponmac_serdes_cdr_reset() (the exported dispatcher at the
  *       bottom of this file) has ZERO callers tree-wide. The live CDR reset
- *       is gpon-rtl960x.c:3153's own inline pulse under its serdes_cdr_reset
+ *       is gpon-luna.c:3583's own inline pulse under its serdes_cdr_reset
  *       module param. Kept as-is: it is the family API for the boards not on
  *       the bench, the same status as the untested 9607C tables.
  *   N2. That CDR reset is NOT the analog_relock op, despite the similar name.

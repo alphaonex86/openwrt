@@ -4965,7 +4965,32 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 		if (t == keep)
 			continue;
 		rb = gpon_alloc_cam_read(t);
-		if (rb & BIT(16)) {		/* hit: this entry would match a grant */
+		/* ⚠ HIT ALONE IS NOT THE VIOLATION -- AND FOR MONTHS THIS REPORTED
+		 * ITS OWN REPAIR.  The invariant stated above is "every entry but
+		 * `keep` is PARKED AT THE RESERVED 0xFFF the OLT never grants", and
+		 * the loop below is what parks them.  So from the SECOND call
+		 * onwards every other entry reads back exactly 0xFFF *with OP_HIT
+		 * set* -- valid, parked, unable to match any grant by construction
+		 * -- and the old `if (rb & BIT(16))` filed each one as a finding.
+		 *
+		 * ★ THE LINE SAID SO ON ITS FACE and nobody read it, MEASURED on
+		 *   the X111W 2026-08-31:
+		 *
+		 *     UNSUP kind=alloc_cam_stale class=range val=0xfff
+		 *           want=0xfff-on-every-tcont-but-the-kept-one n=128
+		 *
+		 *   `val` EQUALS `want`.  A report whose measured value is the
+		 *   wanted value is not a violation, and `n=128` is how many times
+		 *   it had accumulated -- this board re-ranges every ~15 s, so the
+		 *   function runs every cycle and each pass re-reports the previous
+		 *   pass's parking.
+		 *
+		 * ⇒ the entry is stale only if it would ACTUALLY resolve a grant:
+		 *   hit AND holding something other than the reserved id.  A real
+		 *   stale entry (hit, alloc != 0xFFF) still reports exactly as
+		 *   before -- this narrows the predicate, it does not disable it.
+		 */
+		if ((rb & BIT(16)) && (rb & 0xfff) != 0xfff) {
 			u8 dmp[4];
 
 			dmp[0] = t;

@@ -329,6 +329,10 @@ enum cortina_ni_win {
 #define CA_NI_GPHY_WRAP_EN0		0x30
 #define  CA_NI_GPHY_WRAP_EN0_VAL	0xff000000u	/* stock golden */
 #define CA_NI_GPHY_WRAP_EN1		0x34
+#define  CA_NI_GPHY_WRAP_EN1_MDIO_OCP	BIT(0)		/* mdio_ocp_sel  */
+#define  CA_NI_GPHY_WRAP_EN1_PATCH_DONE	BIT(12)		/* GPHY->MAC datapath */
+#define  CA_NI_GPHY_WRAP_EN1_BITS \
+	(CA_NI_GPHY_WRAP_EN1_MDIO_OCP | CA_NI_GPHY_WRAP_EN1_PATCH_DONE)
 #define  CA_NI_GPHY_WRAP_EN1_VAL	CA_NI_GPHY_WRAP_EN1_BITS	/* 0x1001 (stock steady) */
 /* per-GPHY interface enable in EN1 = an EDGE/STROBE (NOT a resting level): the
  * reinit pulses EN1_IF(p) 0->1 between two INTF_RST pulses to connect GPHY p to
@@ -716,6 +720,7 @@ enum cortina_ni_win {
  * Our driver started the port block at 0xa5c4 and never touched 0xa5c0, so a
  * wrong U-Boot int_cfg/phy_mode/lpbk left the internal GMII disconnected
  * non-deterministically.  Force int_cfg=GE_GMII, phy_mode=MAC, lpbk=off. */
+#define CA_NI_PORT_STRIDE		0x90
 #define CA_NI_PORT_STATIC_CFG(p)	(0xa5c0 + (p) * CA_NI_PORT_STRIDE)
 #define  CA_NI_PORT_STATIC_INT_CFG	GENMASK(3, 0)	/* 0 = GE_GMII */
 #define  CA_NI_PORT_STATIC_PHY_MODE	BIT(4)		/* 0 = MAC->PHY */
@@ -1060,6 +1065,7 @@ enum cortina_ni_win {
 /* per-VP block, stride 0xa0, VP 0..11; CPU n transmits on VP n+2
  * (verified in the 07f __ca_ni_start_xmit_buf_for_fc_dirTx: vp = cpu + 2) */
 #define CA_DMA_LSO_VP_COUNT		12
+#define CA_DMA_LSO_VP_STRIDE		0xa0
 #define CA_DMA_LSO_VP_CONTROL(vp)	(0x100 + (vp) * CA_DMA_LSO_VP_STRIDE)
 #define  CA_DMA_LSO_VP_TXQ_ALL_EN	GENMASK(7, 0)	/* txq0..7 enable */
 #define CA_DMA_LSO_VP_BD_ACCESS(vp)	(0x104 + (vp) * CA_DMA_LSO_VP_STRIDE)
@@ -1315,6 +1321,7 @@ enum cortina_ni_win {
  * driver owns and LEAVES bits[15:8] set, so the writeback engine stays running
  * while the interrupt is masked.  Still a plain write, not a RMW, so the
  * ISR-vs-NAPI enable/disable stays race-free. */
+#define  CA_NI_QM_EPP64_INT_PORT0	GENMASK(7, 0)
 #define  CA_NI_QM_EPP64_INT_EN0_MASKED	(CA_NI_QM_EPP64_INT_EN0_STOCK & \
 					 ~(u32)CA_NI_QM_EPP64_INT_PORT0)
 #define CA_NI_QM_EPP64_INT_EN2		0x6118
@@ -1694,6 +1701,8 @@ enum cortina_ni_win {
 #define CA_NI_RX_CPU_POOL1_BUFSZ	2048u	/* EQ6 buffer_size idx4 (2048B) */
 #define CA_NI_RX_CPU_POOL0_BYTES \
 	(CA_NI_RX_CPU_POOL0_BUFSZ * CA_NI_RX_EQ_TOTAL_BUF)	/* 512*2048 = 1MB */
+#define CA_NI_RX_CPU_POOL1_BYTES \
+	(CA_NI_RX_CPU_POOL1_BUFSZ * CA_NI_RX_EQ2_TOTAL_BUF)	/* 512*2048 = 1MB */
 #define CA_NI_RX_CPU_DRAM_SIZE \
 	(CA_NI_RX_CPU_POOL0_BYTES + CA_NI_RX_CPU_POOL1_BYTES)	/* 2MB */
 /* ★ EQ8 = the RMU's empty-buffer ALLOC pool (dest-9->profile-13->EQ13 queue, but
@@ -1760,6 +1769,7 @@ enum cortina_ni_win {
 
 /* ring geometry: 128 descriptors x 8 bytes, byte pointers wrap at 0x400 */
 #define CA_NI_RX_DESC_SIZE		8
+#define CA_NI_RX_EPP_PER_VOQ		128
 #define CA_NI_RX_RING_BYTES		(CA_NI_RX_EPP_PER_VOQ * \
 					 CA_NI_RX_DESC_SIZE)	/* 0x400 per voq */
 /* ★★ ALL 8 VOQs of the CPU port get their own CPU-EPP FIFO ring (stock
@@ -2529,6 +2539,7 @@ static_assert(CA_NI_L3FE_STG0_CTRL_VAL & CA_NI_NI_FLOWCTRL_EN_BIT,
 #define CA_NI_RX_PORT			0	/* ingress LAN port */
 /* total CPU-PUSH pool = EQ13 primary + EQ14 overflow + EQ8 RMU-alloc.  EQ12 is
  * DRAM-backed (auto-populated), NOT CPU-pushed, so it is NOT in this seed count. */
+#define CA_NI_RX_EQ8_TOTAL_BUF		383	/* seeded free buffers (stock pa_req ~62) */
 #define CA_NI_RX_POOL_SIZE		(CA_NI_RX_EQ_TOTAL_BUF + CA_NI_RX_EQ2_TOTAL_BUF + \
 					 CA_NI_RX_EQ8_TOTAL_BUF)
 #define CA_NI_RX_NUM_IRQS		8	/* DT idx 0..7 = SPI 0x54..0x5b */

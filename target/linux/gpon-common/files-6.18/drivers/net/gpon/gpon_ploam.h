@@ -129,7 +129,7 @@ typedef uint32_t u32;
 
 /* ---------------------------------------------------------------------------
  * G.984.3 PLOAM message types and US queue selectors.
- * Moved verbatim from gpon-rtl9602c.c:4977-4997.
+ * Moved verbatim from gpon-luna.c:5398-4997.
  * These are wire FACTS from ITU-T G.984.3 §9.2.3, not vendor expression.
  * ------------------------------------------------------------------------- */
 #define PLM_DS_UPSTREAM_OVERHEAD	0x01
@@ -150,7 +150,7 @@ typedef uint32_t u32;
 #define PLM_US_PASSWORD			0x02	/* US Password response (to Request_Password) */
 #define PLM_US_SERIAL_NUMBER		0x01
 #define PLM_US_ACKNOWLEDGE		0x09	/* US Acknowledge message type */
-/* The No_message type was a bare 0x04 literal at gpon-rtl9602c.c:6119 and
+/* The No_message type was a bare 0x04 literal at gpon-luna.c:6550 and
  * :6852, commented "GPON_PLOAM_US_NOMESSAGE". Named here; same byte. */
 #define PLM_US_NO_MESSAGE		0x04
 #define PLM_US_QUEUE_SN			0x6	/* US_PLOAM_IND[10:8] auto-SN queue */
@@ -253,25 +253,25 @@ struct gpon_ploam_ops {
 
 	/* --- burst overhead / ranging ------------------------------------- */
 	/* Write BOH_CFG = cfg_word and the first `size` BOH_DATA bytes.
-	 * Replaces gpon-rtl9602c.c:5998-6001. */
+	 * Replaces gpon-luna.c:6421-6001. */
 	void (*boh_write)(void *sh, u32 cfg_word, const u8 *oh, u8 size);
 	/* The ONE hardware read taken mid-decision: US_MIN_DELAY[15:7].
-	 * Replaces gpon-rtl9602c.c:6019. Injected so the EqD computation is
+	 * Replaces gpon-luna.c:6442. Injected so the EqD computation is
 	 * reproducible offline. */
 	u32  (*get_min_delay)(void *sh);
 	/* Write the equalization delay from its two computed halves.
-	 * Replaces gpon-rtl9602c.c:6024-6026. */
+	 * Replaces gpon-luna.c:6447-6026. */
 	void (*set_eqd)(void *sh, u32 multiframe, u32 intraframe);
 	/* Flush the single shared CPU US-PLOAM TX buffer (PLM_FLUSH_BUF 0->1)
 	 * so no pre-ranged-format burst is latched when the first ranged grant
-	 * fires. Replaces gpon-rtl9602c.c:6304-6305. */
+	 * fires. Replaces gpon-luna.c:6735-6305. */
 	void (*us_ploam_flush)(void *sh);
 
 	/* --- state reflection --------------------------------------------- */
 	/* Reflect the canonical O-state into hardware and the PON LED. The
 	 * shell MAPS the canonical state to its own silicon encoding: Luna's
 	 * ONU_STATE field is 1-based and therefore identical, Elnath's is
-	 * 0-based. Replaces gpon-rtl9602c.c:6137 + :6139. */
+	 * 0-based. Replaces gpon-luna.c:6568 + :6139. */
 	void (*set_hw_state)(void *sh, enum gpon_ostate st);
 	/* Write the ONU-ID into both hardware fields (US_ONU_ID[15:8] and
 	 * DS_ONU_STATUS[15:8]). Replaces the gpon_field() pairs at :6235-6236,
@@ -279,19 +279,19 @@ struct gpon_ploam_ops {
 	void (*set_hw_onu_id)(void *sh, u8 onu_id);
 	/* The FSM dropped below O5. The shell re-arms whatever it gates on O5
 	 * (Luna: the VLAN filter, itself gated on its own shell state).
-	 * Replaces gpon-rtl9602c.c:6125-6129. */
+	 * Replaces gpon-luna.c:6556-6129. */
 	void (*on_below_o5)(void *sh);
 	/* The FSM entered O5 and the burst-gate re-arm is enabled: re-apply the
 	 * US packed-burst register cluster. The core emits the No_message that
-	 * follows it. Replaces gpon-rtl9602c.c:6113-6116. */
+	 * follows it. Replaces gpon-luna.c:6544-6116. */
 	void (*o5_rearm_burst)(void *sh);
 
 	/* --- analog / serializer ------------------------------------------ */
 	/* O3-entry TX-CMU/PLL re-lock (the cold-start fix). Replaces
-	 * gpon_txpll_relock(), gpon-rtl9602c.c:6215. */
+	 * gpon_txpll_relock(), gpon-luna.c:6646. */
 	void (*analog_relock)(void *sh);
 	/* The post-relock full GPON-datapath reset-B edge that un-parks the
-	 * GEM-US feed. Replaces gpon-rtl9602c.c:6221-6223. */
+	 * GEM-US feed. Replaces gpon-luna.c:6652-6223. */
 	void (*o3_feed_reset)(void *sh);
 	/* Re-seat the US-TX serializer on a re-range: the interface reset-B
 	 * edge plus the deferred CDR-lock pulse. Replaces the identical block
@@ -300,13 +300,13 @@ struct gpon_ploam_ops {
 
 	/* --- AES key exchange --------------------------------------------- */
 	/* Random bytes. Injected so a differential/fuzz run is reproducible.
-	 * Replaces get_random_bytes(), gpon-rtl9602c.c:5203. */
+	 * Replaces get_random_bytes(), gpon-luna.c:5624. */
 	void (*rng)(void *sh, u8 *out, unsigned int len);
 	/* Load the key into the hardware STAGED bank. Replaces
-	 * gpon_aes_stage_key(), gpon-rtl9602c.c:5221. */
+	 * gpon_aes_stage_key(), gpon-luna.c:5642. */
 	void (*aes_stage_key)(void *sh, const u8 key[16]);
 	/* Arm the key-switch superframe comparator. Replaces
-	 * gpon-rtl9602c.c:6499. */
+	 * gpon-luna.c:6933. */
 	void (*aes_arm_switch)(void *sh, u32 superframe);
 
 	/* --- GEM / T-CONT provisioning ------------------------------------
@@ -447,7 +447,7 @@ struct gpon_ploam {
 	 * Assign_ONU-ID log takes, and this is a code-motion step. */
 	bool tcont_installed;		/* OMCC T-CONT/alloc-id bound (one-shot)     */
 	/* Cleared by the teardowns here and READ by the install gate here, but
-	 * SET by the GEM layer from inside its install (gpon-rtl9602c.c:5673),
+	 * SET by the GEM layer from inside its install (gpon-luna.c:6096),
 	 * deliberately before the US-NIC modeset because the modeset's
 	 * collision fix reads it (:5373, :5388). Setting it from the core after
 	 * the op returned would therefore change behaviour; use
@@ -524,7 +524,7 @@ void gpon_ploam_init(struct gpon_ploam *o, const struct gpon_ploam_ops *ops,
 
 /* Parse a provisioned serial number in the G.984.3 CLI form "XPON12345678"
  * (4 ASCII vendor-ID chars + 8 hex digits) into 8 wire bytes.
- * Moved from gpon-rtl9602c.c:5000-5015. Pure; no context needed. */
+ * Moved from gpon-luna.c:5421-5015. Pure; no context needed. */
 /* Install a (re)provisioned serial number and ask the FSM to re-range. The
  * re-range itself happens on the next gpon_ploam_sn_changed() call, exactly as
  * the driver's gpon_sn_changed flag did. */
@@ -548,7 +548,7 @@ void gpon_ploam_set_data_gem_solicited(struct gpon_ploam *o, bool solicited,
 				       u16 port_id);
 
 /* The GEM layer has installed (or torn down) the WAN data GEM datapath. Called
- * from inside the install, at the point gpon-rtl9602c.c:5673 set the flag —
+ * from inside the install, at the point gpon-luna.c:6096 set the flag —
  * BEFORE the US-NIC modeset, which reads it. */
 void gpon_ploam_set_data_installed(struct gpon_ploam *o, bool installed);
 

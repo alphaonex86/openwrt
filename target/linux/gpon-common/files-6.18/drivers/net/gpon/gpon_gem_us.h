@@ -47,7 +47,7 @@
  *       (CG_REG_GEM_FRAG_DROP 0x1ac, CG_REG_DS_ASMBL_DROP 0x1cc) — i.e. reports
  *       from the MAC's own framer and reassembler.
  *     - realtek-luna: the GTC encapsulates.  The driver writes the port-map
- *       stamp (gpon-rtl9602c.c:5486, :5644) and the reassembly timer / PTI mask
+ *       stamp (gpon-luna.c:5909, :5644) and the reassembly timer / PTI mask
  *       (:5449, :5478) and the engine does the rest.  It builds no GEM header.
  *   ⇒ There is nothing to hoist.  The INDEPENDENT model of what that silicon
  *   does lives in dev/rtl9607c-oracle/ (gem_tc.c, gem_us_encap.c) and MUST stay
@@ -120,7 +120,7 @@
 /* G.984.3 field widths.  Both are SPEC facts (Alloc-ID and GEM Port-ID are each
  * 12 bits, 0..4095), which is why they may live in common code — and both
  * targets already mask with exactly these:  Elnath cortina-gpon.c:2198/:2205
- * (alloc) and :2216/:2071 (port-id); Luna gpon-rtl9602c.c:5770 (alloc) and
+ * (alloc) and :2216/:2071 (port-id); Luna gpon-luna.c:6193 (alloc) and
  * :5645/:5486 (port-id).
  * The T-CONT index width is NOT here: 5 bits is a CAM-index width that both
  * silicons happen to share, not something G.984.3 defines, so it stays a
@@ -180,7 +180,7 @@ struct gpon_gem_us_range {
  * constants, so a bad declared range fails the BUILD and costs nothing at run
  * time — which is what keeps this a pure code-motion addition: it can change
  * no behaviour because it emits no code.  Luna already uses static_assert this
- * way for the port-map stride (gpon-rtl9602c.c:5277).
+ * way for the port-map stride (gpon-luna.c:5698).
  */
 #define GPON_GEM_US_RANGE_OK(base, count, index_max)			\
 	((count) >= 1u && (u32)(base) + (u32)(count) - 1u <= (u32)(index_max))

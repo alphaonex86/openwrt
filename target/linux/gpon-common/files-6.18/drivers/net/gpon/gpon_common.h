@@ -225,7 +225,7 @@
 /* Octets of an upstream PLOAM message the core hands to ->ploam_tx().
  * G.984.3 Table 9-3: ONU-ID[0] + Message-ID[1] + 10 message octets = 12; the
  * 13th octet (CRC) is appended by silicon, so it is NOT part of the buffer.
- * Matches the only implementation today, gpon-rtl9602c.c:5041
+ * Matches the only implementation today, gpon-luna.c:5462
  * gpon_send_cpu_ploam(u8 queue, const u8 m[12]). */
 #define GPON_PLOAM_US_LEN	12u
 
@@ -289,7 +289,7 @@ enum gpon_gem_dir {
  * This is an ABSTRACT urgency class, not a register value: the shell maps it to
  * its own silicon. The class must be carried because it is a CORE decision made
  * per message and the three cases are not interchangeable — realtek-luna
- * selects all three at distinct points of the FSM (gpon-rtl9602c.c:5107 SN,
+ * selects all three at distinct points of the FSM (gpon-luna.c:5528 SN,
  * :5132 Password, :5154 Acknowledge, :5217 Encryption_Key, :6120/:6853/:7410
  * the idle No_message).
  *
@@ -297,7 +297,7 @@ enum gpon_gem_dir {
  *   NO queue argument. Dropping it would put every upstream PLOAM on one queue
  *   and CHANGE LUNA'S BEHAVIOUR — this is a code-motion refactor, so the
  *   argument stays. The concrete RTL9602C mapping (US_PLOAM_IND[10:8]: SN 0x6,
- *   urgent 0x1, No_message 0x7 — gpon-rtl9602c.c:4995-4997) is a chip fact and
+ *   urgent 0x1, No_message 0x7 — gpon-luna.c:5416-4997) is a chip fact and
  *   MUST NOT appear in common code.
  */
 enum gpon_ploam_q {
@@ -498,7 +498,7 @@ struct gpon_shell_ops {
 	 */
 
 	/* Queue one upstream PLOAM. @msg is GPON_PLOAM_US_LEN octets; silicon
-	 * appends the CRC.  <- gpon-rtl9602c.c:5041 gpon_send_cpu_ploam() */
+	 * appends the CRC.  <- gpon-luna.c:5462 gpon_send_cpu_ploam() */
 	void (*ploam_tx)(void *sh, enum gpon_ploam_q q,
 			 const u8 msg[GPON_PLOAM_US_LEN]);
 
@@ -515,7 +515,7 @@ struct gpon_shell_ops {
 	void (*set_hw_onu_id)(void *sh, u8 onu_id);
 
 	/* Program the upstream equalization delay, in bits, as the OLT's
-	 * Ranging_Time gave it.  <- gpon-rtl9602c.c:6017 gpon_set_eqd()
+	 * Ranging_Time gave it.  <- gpon-luna.c:6440 gpon_set_eqd()
 	 * ⚠ COARSER THAN THE PLAN, deliberately. The plan's §3 table declares a
 	 *   `get_min_delay()` op so the core can do the EqD arithmetic itself.
 	 *   Measured, that arithmetic is three CHIP facts to one protocol fact:
@@ -531,7 +531,7 @@ struct gpon_shell_ops {
 
 	/* Apply the burst-overhead parameters the core computed (preamble,
 	 * delimiter, guard) for the pre-ranged or ranged case.
-	 * <- gpon-rtl9602c.c:5947 gpon_apply_boh()
+	 * <- gpon-luna.c:6370 gpon_apply_boh()
 	 * (Absent from the plan's op table; it is a real shell entry the FSM
 	 * calls, and the dead gpon_proto.h:73 already declared it.) */
 	void (*apply_boh)(void *sh, bool ranged);
@@ -548,11 +548,11 @@ struct gpon_shell_ops {
 	/* Load a 128-bit AES key into the STAGED key bank. The core generates
 	 * the key (via ->rng) and answers Request_Key with it; the hardware
 	 * promotes staged->active at the switch time below.
-	 * <- gpon-rtl9602c.c:5180 gpon_aes_stage_key() */
+	 * <- gpon-luna.c:5601 gpon_aes_stage_key() */
 	void (*aes_stage_key)(void *sh, const u8 key[16]);
 
 	/* Arm the superframe counter at which the staged key is promoted, from
-	 * the OLT's Key_Switching_Time.  <- gpon-rtl9602c.c:6499
+	 * the OLT's Key_Switching_Time.  <- gpon-luna.c:6933
 	 * (Absent from the plan's op table; without it the KEY_SWITCH case
 	 * cannot leave the core, and an un-armed switch corrupts AES.) */
 	void (*aes_set_switch_time)(void *sh, u32 superframe);
@@ -560,7 +560,7 @@ struct gpon_shell_ops {
 	/* Fill @out with @len random octets. INJECTED rather than called
 	 * directly so that the core stays deterministic under replay and
 	 * fuzzing — the whole reason the key path can be tested offline at all.
-	 * <- gpon-rtl9602c.c:5203 get_random_bytes() */
+	 * <- gpon-luna.c:5624 get_random_bytes() */
 	void (*rng)(void *sh, u8 *out, unsigned int len);
 
 	/* --- GEM / T-CONT provisioning -------------------------------------
@@ -593,7 +593,7 @@ struct gpon_shell_ops {
 
 	/* Bind the user-data path: the OLT-provisioned alloc-id and data GEM
 	 * port-id, as snooped from ME 262 / ME 268.
-	 * <- gpon-rtl9602c.c:5609 gpon_install_data_gem() + :5765
+	 * <- gpon-luna.c:6032 gpon_install_data_gem() + :5765
 	 *    cortina-gpon.c:2171 cg_data_try_install() */
 	int (*data_install)(void *sh, u16 alloc, u16 gem);
 
@@ -616,7 +616,7 @@ struct gpon_shell_ops {
 	 * spy/dump capability to be first-class rather than bolted on.
 	 * ⚠ It is NOT the mechanism for preserving a target's existing log
 	 *   lines. Those carry register reads and cross-driver counters inside
-	 *   their argument lists (gpon-rtl9602c.c:6327-6333 and three more), so
+	 *   their argument lists (gpon-luna.c:6758-6333 and three more), so
 	 *   they stay in the shell and must be replayed there in the same order
 	 *   — otherwise "bit-identical" quietly stops being true
 	 *   (carve-luna-ploam B4, carve-eln-shell B2).

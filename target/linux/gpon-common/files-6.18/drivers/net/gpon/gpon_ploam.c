@@ -189,7 +189,7 @@ static void ploam_tx(struct gpon_ploam *o, u8 queue,
  * Upstream message builders. Pure byte assembly; the hardware appends the CRC.
  * ------------------------------------------------------------------------- */
 
-/* Serial_Number_ONU (US type 0x01). From gpon-rtl9602c.c:5099-5108. */
+/* Serial_Number_ONU (US type 0x01). From gpon-luna.c:5520-5108. */
 static void send_sn(struct gpon_ploam *o)
 {
 	u8 m[GPON_PLOAM_US_LEN];
@@ -205,7 +205,7 @@ static void send_sn(struct gpon_ploam *o)
 }
 
 /*
- * Password (US type 0x02), from gpon-rtl9602c.c:5125-5132.
+ * Password (US type 0x02), from gpon-luna.c:5546-5132.
  *
  * GROUND TRUTH (OLT poll 2026-06-13): the OLT sits at O5 spamming
  * Request_Password / Encrypted_Port-ID, never advancing to Configure_Port-ID or
@@ -229,7 +229,7 @@ static int send_password(struct gpon_ploam *o)
 }
 
 /*
- * Acknowledge (US type 0x09), from gpon-rtl9602c.c:5146-5154.
+ * Acknowledge (US type 0x09), from gpon-luna.c:5567-5154.
  *
  * The OLT arms a post-ranging timer waiting for this; with no reply it
  * Deactivates the ONU (~43 s) — this is what stops the ONU staying online after
@@ -252,7 +252,7 @@ static int send_ack(struct gpon_ploam *o, const u8 *ds)
 }
 
 /*
- * Encryption_Key (US type 0x05), from gpon-rtl9602c.c:5198-5224.
+ * Encryption_Key (US type 0x05), from gpon-luna.c:5619-5224.
  *
  * Generate a 128-bit AES key and send it in two fragments (m[2]=key index,
  * m[3]=row, m[4..11]=8 key bytes; row 0 = key[0..7], row 1 = key[8..15]), the
@@ -303,7 +303,7 @@ static void build_nomsg(u8 m[GPON_PLOAM_US_LEN])
  * ------------------------------------------------------------------------- */
 
 /*
- * Burst-overhead build, from gpon-rtl9602c.c:5949-5999.
+ * Burst-overhead build, from gpon-luna.c:6372-5999.
  *
  * Extended_Burst_Length (0x14) sets the Type-3 lengths: t3pre for the
  * pre-ranged (SN/ranging) burst, t3ranged for the ranged (operation) burst:
@@ -365,7 +365,7 @@ static void apply_boh(struct gpon_ploam *o, bool ranged)
 }
 
 /*
- * Upstream equalization delay, from gpon-rtl9602c.c:6019-6026.
+ * Upstream equalization delay, from gpon-luna.c:6442-6026.
  *
  * The OLT-visible burst time is `value` plus the local MIN_DELAY1 scaled to
  * bits (x16 x8 = x128), then split across the 19440x8-bit upstream frame into a
@@ -1085,7 +1085,7 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
  * ------------------------------------------------------------------------- */
 
 /* Parse "XPON12345678" -> {'X','P','O','N',0x12,0x34,0x56,0x78}.
- * From gpon-rtl9602c.c:5000-5015, with the kernel's hex_to_bin() re-expressed
+ * From gpon-luna.c:5421-5015, with the kernel's hex_to_bin() re-expressed
  * locally so the core compiles on the host too (the driver's dependency on
  * hex_to_bin was one of the two things stopping this file being fuzzable).
  *

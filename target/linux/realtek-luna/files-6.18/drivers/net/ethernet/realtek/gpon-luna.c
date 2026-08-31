@@ -7446,6 +7446,27 @@ static void gpon_fsm_handle(const u8 *m)
 		pr_info_ratelimited("rtl9602c-gpon: DS PLOAM onu_id=0x%02x type=0x%02x d=%*phN\n",
 				    onu_id, type, 8, d);
 
+	/* ★★ SAY WHICH FSM IS DISPATCHING, ONCE. A switch that changes what the
+	 * code does and leaves NO TRACE in the log makes every later boot log
+	 * ambiguous about its own subject -- and on 2026-08-31 that cost a whole
+	 * investigation: an offline pairing proved the COMMON core's PLOAM FSM
+	 * correct on both axes (18/0) and the conclusion was carried over to a
+	 * board that was running THIS driver's FSM, because nothing anywhere
+	 * said so. The project's standing rule is that a run records which
+	 * firmware produced it; a MODE inside the firmware is the same claim one
+	 * level down. Printed at the first DS PLOAM rather than at probe, so the
+	 * line sits next to the activation it describes. */
+	{
+		static bool said;
+
+		if (!said) {
+			said = true;
+			pr_info("rtl9602c-gpon: PLOAM dispatch = %s (core_fsm=%d)\n",
+				core_fsm ? "COMMON core gpon_ploam.c"
+					 : "this driver's own FSM", core_fsm);
+		}
+	}
+
 	if (core_fsm) {
 		/* ★ TICKS x 10, NOT THE WALL CLOCK, and the more accurate clock is
 		 * the wrong one here.  This FSM does not measure time: it counts

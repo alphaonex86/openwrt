@@ -2633,7 +2633,10 @@ static void __init bosa_tx_enable(void)
 static int bosa_laser_up;
 static int apc_offk_armed;	/* rtl8290b_apc_init armed FSU/OFFK; servo will latch */
 static int apc_offk_latched;	/* runtime servo latched OFFK (R29 0x31d &0x3c==0x3c) */
-static u32 bosa_maint_faults;		/* recovery attempts (rate-limited logging) */
+static u32 bosa_maint_faults;		/* recovery attempts (see the print below) */
+#define BOSA_MAINT_NONE		0xffffffffu
+static u32 bosa_maint_last = BOSA_MAINT_NONE;	/* last (0x383,0x389,R30) printed */
+static u32 bosa_maint_since;		/* fault count when that state began */
 static u32 bosa_stat_ticks;		/* heartbeat counter for the live status log */
 
 /*
@@ -2701,9 +2704,45 @@ static void bosa_laser_maint(void)
 					 * the B-flow; re-arming on it tips the BOSA into
 					 * DEBUG_MODE). */
 
-	if ((bosa_maint_faults++ % 32) == 0)
-		pr_info("rtl9602c-gpon: laser maint re-arm (0x383=0x%02x 0x389=0x%02x R30=0x%02x)\n",
-			s2 & 0xff, fs & 0xff, bosa_read_reg(0x31e) & 0xff);
+	/*
+	 * ⚠⚠ PRINT ON CHANGE, NOT EVERY 32nd TIME -- and the count-based limit
+	 * that was here is MEASURED to be useless. On the G24W 2026-08-31 this
+	 * line came out every 3.22 s for 21 HOURS, which means the fault path
+	 * fires roughly ten times a SECOND and one-in-32 still floods.
+	 *
+	 * ★ THE COST WAS THE WHOLE LOG. `dmesg | wc -l` was 1542 and
+	 *   `dmesg | grep -c "laser maint re-arm"` was ALSO 1542: one hundred
+	 *   percent of the kernel ring was this single message, its oldest entry
+	 *   at t=72138 s on a board up 77087 s. The first twenty hours -- boot,
+	 *   probe, every other driver, and whatever the GPON stack said about
+	 *   WHY the laser is faulting -- had been evicted by the report of the
+	 *   fault. The board's own chatter destroyed the evidence of its own
+	 *   failure, and this file already records that exact cost for a
+	 *   per-frame pr_info in another driver.
+	 *
+	 * ★ ON CHANGE LOSES NOTHING HERE: every one of those 1542 lines read
+	 *   `0x383=0x14 0x389=0x14 R30=0x14`. Identical. So the new form emits
+	 *   ONE line for that whole run, and carries the suppressed count -- it
+	 *   is strictly more informative than the flood it replaces, because it
+	 *   says how many re-arms a state lasted for.
+	 */
+	{
+		u32 r30 = bosa_read_reg(0x31e) & 0xff;
+		u32 now = ((s2 & 0xff) << 16) | ((fs & 0xff) << 8) | r30;
+
+		bosa_maint_faults++;
+		if (now != bosa_maint_last) {
+			pr_info("rtl9602c-gpon: laser maint re-arm (0x383=0x%02x 0x389=0x%02x R30=0x%02x)%s\n",
+				s2 & 0xff, fs & 0xff, r30,
+				bosa_maint_last == BOSA_MAINT_NONE ? "" :
+				" [state changed]");
+			if (bosa_maint_last != BOSA_MAINT_NONE)
+				pr_info("rtl9602c-gpon: ... the previous laser-maint state held for %u re-arm(s)\n",
+					bosa_maint_faults - bosa_maint_since);
+			bosa_maint_last = now;
+			bosa_maint_since = bosa_maint_faults;
+		}
+	}
 	bosa_fault_rearm();
 }
 

@@ -66,6 +66,7 @@
 #define _CORTINA_GPON_DDM_H_
 
 #include <linux/types.h>
+#include "gpon_ddm.h"	/* the one 0.1 uW -> centi-dBm conversion */
 
 /* SFF-8472 A2h real-time diagnostics: byte 96, ten bytes, read-only. */
 #define CG_DDM_BASE		0x60
@@ -185,43 +186,6 @@ static inline u32 cg_ddm_bias_ua(u16 raw)
 }
 
 /*
- * 1000 * log10(x) for 1 <= x <= 65535, integer only.
- *
- * x = 2^msb * (1 + f), f in [0,1).  log10(x) = msb*log10(2) + log10(1+f); the
- * first term is msb * 0.30103 and the second comes from a 17-entry table of
- * 1000*log10(1 + k/16) with linear interpolation on 4 extra fractional bits.
- *
- * Cost: 34 bytes of .rodata plus a few dozen bytes of code.  MEASURED against
- * libm over the whole 1..65535 domain (host case [A] of
- * optic_ddm_decode_test): worst error 3 milli-decades = 0.03 dB, at x=1039.
- * That is two orders of magnitude tighter than the +-3 dB accuracy SFF-8472
- * itself allows for RX power.  A direct lookup table would cost 128 KB and the
- * kernel has no floating point, so this is the cheap honest middle.
- */
-static inline s32 cg_ddm_log10_milli(u32 x)
-{
-	static const u16 mant[17] = {
-		0,  26,  51,  75,  97, 118, 138, 158, 176,
-		194, 211, 227, 243, 258, 273, 287, 301,
-	};
-	u32 r, frac, k, rem;
-	int msb = 0;
-
-	if (!x)
-		return 0;		/* caller must special-case zero */
-	while (x >> (msb + 1))
-		msb++;
-
-	r = x - ((u32)1 << msb);		/* 0 <= r < 2^msb */
-	frac = msb ? ((r << 8) >> msb) : 0;	/* mantissa fraction, /256 */
-	k = frac >> 4;				/* table index 0..15 */
-	rem = frac & 0xf;			/* interpolation weight /16 */
-
-	return ((s32)msb * 30103 + 50) / 100 + mant[k] +
-	       (s32)((mant[k + 1] - mant[k]) * rem) / 16;
-}
-
-/*
  * Optical power in centi-dBm from an SFF-8472 0.1 uW word.
  *
  * P_mW = raw / 10000, so dBm = 10*log10(raw) - 40 and
@@ -235,7 +199,7 @@ static inline s32 cg_ddm_uw10_to_cdbm(u16 raw)
 {
 	if (!raw)
 		return CG_DDM_CDBM_NONE;
-	return cg_ddm_log10_milli(raw) - 4000;
+	return gpon_ddm_uw10_to_cdbm(raw);
 }
 
 /*

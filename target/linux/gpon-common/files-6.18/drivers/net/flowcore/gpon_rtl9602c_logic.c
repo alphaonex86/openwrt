@@ -2,6 +2,7 @@
 /* See gpon_rtl9602c_logic.h. Moved verbatim; no line was rewritten.
  */
 #include <linux/types.h>
+#include "gpon_ddm.h"	/* the one 0.1 uW -> centi-dBm conversion */
 #include <linux/bitops.h>
 #include <linux/limits.h>
 
@@ -29,21 +30,17 @@ u8 bosa_slave_for(u16 reg)
  */
 s32 ddm_word_to_level(int raw)
 {
-	int e;
-	u32 frac;
-	s64 log2_q16, level;
+	s32 level;
 
 	if (raw <= 0 || raw >= 0xffff)
 		return INT_MIN;
-	e = fls((u32)raw) - 1;				/* floor(log2(raw))      */
-	frac = e ? (((u32)(raw - (1u << e)) << 16) >> e) : 0;	/* mantissa frac, Q16 */
-	log2_q16 = ((s64)e << 16) | frac;		/* log2(raw) in Q16      */
-	level = ((log2_q16 * 1505) >> 16) - 20000;
+	/* ANI-G (ME 263) reports in 0.002 dB steps, i.e. 5 per centi-dBm. */
+	level = gpon_ddm_uw10_to_cdbm((u32)raw) * 5;
 	if (level > 32767)
 		level = 32767;
 	else if (level < -32768)
 		level = -32768;
-	return (s32)level;
+	return level;
 }
 
 /* Linear power code (0.1uW) -> centi-dBm (0.01 dBm).
@@ -54,17 +51,12 @@ s32 ddm_word_to_level(int raw)
  * for TX power too (positive dBm). Floor -40.00 dBm for a dark/"n/a" read. */
 s32 bosa_code_to_cdbm(u32 code)
 {
-	int e;
-	u32 frac;
-	s64 log2_q16, cdbm;
-
+	/* A dark or "n/a" read floors at -40.00 dBm here rather than returning a
+	 * sentinel -- that is this family's reporting policy, so it stays here and
+	 * only the arithmetic is shared. */
 	if (code < 1)
 		return -4000;
-	e = fls(code) - 1;
-	frac = e ? (((u64)(code - (1u << e)) << 16) >> e) : 0;
-	log2_q16 = ((s64)e << 16) | frac;
-	cdbm = ((log2_q16 * 301) >> 16) - 4000;		/* 301 = round(1000*log10(2)) */
-	return cdbm < -4000 ? -4000 : (s32)cdbm;
+	return gpon_ddm_uw10_to_cdbm(code);
 }
 
 /* ===== BOSA/DDM optical measurement logic (hoisted 2026-09-02) ==========

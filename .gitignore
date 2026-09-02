@@ -69,3 +69,6 @@ CLAUDE.md
 *-bak-*
 .config.*bak*
 config-*.bak*
+
+# a symlink into staging_dir created by the build; never part of the source
+/host

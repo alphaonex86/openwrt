@@ -1,4 +1,4 @@
-# ★★★ SUBTARGET (rtl9607x) OVERRIDE OF THE SHARED wireless CONFIG -- ONE
+# ★★★ SUBTARGET (interaptiv) OVERRIDE OF THE SHARED wireless CONFIG -- ONE
 # DIFFERENCE ONLY: radio0 ships DISABLED, as a TEMPORARY hold.
 #
 # MEASURED 2026-08-27 on the LANLY G24W, twice (transcript
@@ -24,6 +24,30 @@
 # REMOVE THIS FILE the day the storm is fixed -- the shared target file then
 # ships again, byte-identical minus this hold. wifi_ap_onair keeps FAILING
 # while this hold stands, and that is CORRECT: the AP truly is not on air.
+#
+# ★★ A CANDIDATE FIX EXISTS AS OF 2026-09-01, AND IT IS ONU-SIDE -- which is
+# what the paragraph above predicted when it said this is NOT a one-register
+# host-bridge fix.  Three coupled repairs, all in the SHARED rtlwifi driver
+# this subtarget and the X111W both build:
+#   * _rtl_pci_interrupt() returned IRQ_HANDLED on two paths that touch NO
+#     endpoint register, so the ISR was never write-1-to-cleared, DEASSERT_INTx
+#     was never sent, and the level stayed asserted.  It returns IRQ_NONE now.
+#   * rtl92fe_enable_interrupt() armed HIMR/HIMRE BEFORE setting irq_enabled,
+#     so an assertion arriving in that window met a handler that refused to
+#     service it.  The flag leads now; the disarm is read-back-flushed.
+#   * the X111W's PCIe INTC input was 15 where every other source says 16.
+#     (That one is 9602C-scoped and does not touch this board.)
+# Upstream describes the same race for this driver family: "rtlwifi: rtl8192x:
+# Enabling and disabling hardware interrupts after enabling local irq flags".
+#
+# ⚠ DO NOT DELETE THIS FILE ON THE STRENGTH OF THAT.  The fix is BUILT and
+# UNPROVEN -- no board has booted it.  The order is: boot the X111W with it
+# (that board dies silently rather than printing, so it is the harder test),
+# then boot THIS board with the hold still in place and open wlan0 BY HAND on
+# a live console while watching /proc/interrupts.  Only a G24W that survives
+# that open earns the deletion, and `disabled '1'` is what keeps a failed
+# attempt from costing a watchdog reset into stock.
+#   guard: python3 ONU-test-case/irq_claim_order_guard.py
 config wifi-device 'radio0'
 	option type 'mac80211'
 	option phy 'phy0'

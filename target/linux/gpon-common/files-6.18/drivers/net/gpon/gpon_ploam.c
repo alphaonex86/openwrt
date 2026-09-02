@@ -10,6 +10,14 @@
  * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17) —
  * it COMPILES this tier against stubs that declare no register accessor,
  * no clock, no lock and no allocator, so impurity cannot build.
+ * ⚠ PROVENANCE POINTERS BELOW NAME gpon-luna.c, WHICH WAS CALLED
+ *   gpon-rtl9602c.c / gpon-rtl960x.c UNTIL THE 2026-08-29 RENAME.  The
+ *   LINE NUMBERS ARE AS THEY WERE WHEN THE MOVE WAS RECORDED -- later
+ *   edits moved them, and they are kept because a provenance note is a
+ *   dated fact about where code CAME FROM, not a pointer to today.
+ *   Renaming without saying so would turn a dated record into a claim
+ *   about the current file, which is the 'wrong in a new way' that
+ *   citation_guard warns a bare sed produces.
  */
 /*
  * gpon_ploam.c — G.984.3 PLOAM activation state machine (O1..O7):
@@ -47,7 +55,7 @@
  *
  * PROVENANCE AND FIDELITY
  *   Pure code motion out of
- *   realtek-luna/files-6.18/drivers/net/ethernet/realtek/gpon-rtl9602c.c,
+ *   realtek-luna/files-6.18/drivers/net/ethernet/realtek/gpon-luna.c,
  *   which is at stock parity. Every block names the source lines it came from.
  *   Nothing was "improved" on the way: where a defect was found it was moved
  *   unchanged and recorded below, because a fix folded into a move makes the
@@ -389,10 +397,18 @@ static void set_eqd(struct gpon_ploam *o, u32 value)
 
 
 /* ---------------------------------------------------------------------------
- * State transitions, from gpon-rtl9602c.c:6068-6140.
+ * State transitions, from gpon-luna.c:6068-6140.
  * ------------------------------------------------------------------------- */
 static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 {
+	/* ★ THE O4 CLOCK, set here for the same reason o5_entry_tick is: the
+	 * ONLY place every transition passes through. Kept beside it so a
+	 * future state cannot acquire a timer that some paths never start. */
+	if (st == GPON_O4_RANGING)
+		o->o4_entry_tick = o->ticks ? o->ticks : 1;
+	else
+		o->o4_entry_tick = 0;
+
 	enum gpon_ostate prev = o->state;
 
 	/* hold: keep the FSM parked at O1 — refuse every advance past O1 so the
@@ -475,7 +491,7 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
  * ------------------------------------------------------------------------- */
 
 /* ---------------------------------------------------------------------------
- * Downstream PLOAM dispatch, from gpon-rtl9602c.c:6180-6553.
+ * Downstream PLOAM dispatch, from gpon-luna.c:6180-6553.
  * ------------------------------------------------------------------------- */
 int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_ms)
 {
@@ -956,6 +972,21 @@ int gpon_ploam_poll_provision(struct gpon_ploam *o, u32 now_ms)
 int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 {
 	u32 tx0 = o->tx_total;
+
+	/* ★★ THE RANGING TIMER (G.984.3). An ONU-ID has been assigned but no
+	 * Ranging_Time followed, so this ONU is invisible to the OLT's ranging
+	 * and can only be deactivated. Going back to O1 makes onu_id 0xff again,
+	 * which is what re-arms poll_sn_reoffer() -- that is the whole point of
+	 * the state change, not the state itself. */
+	if (o->cfg->o4_ranging_timeout_ticks &&
+	    o->state == GPON_O4_RANGING && o->o4_entry_tick &&
+	    (o->ticks - o->o4_entry_tick) > o->cfg->o4_ranging_timeout_ticks) {
+		ev(o, GPON_PLOAM_EV_O4_TIMEOUT, o->ticks - o->o4_entry_tick, 0);
+		o->onu_id = 0xff;
+		o->ops->set_hw_onu_id(o->sh, 0xff);
+		set_state(o, GPON_O1_INITIAL, now_ms);
+		return (int)(o->tx_total - tx0);
+	}
 
 	if (o->cfg->o5_provision_watchdog_ticks &&
 	    o->state == GPON_O5_OPERATION && o->onu_id != 0xff &&

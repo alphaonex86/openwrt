@@ -116,7 +116,20 @@
 #include <linux/types.h>
 #include <linux/printk.h>
 
-#include "gpon_common.h"	/* enum gpon_unsup_class — ONE spelling */
+#include "gpon_common.h"	/* GPON_UNSUP_RANGE, GPON_UNSUP_UNKNOWN */
+/* ★ THE MEMBERS, NOT THE TYPE.  This line used to say "enum
+ * gpon_unsup_class", and that name appears nowhere below: gpon_common.h
+ * deliberately widens @cls to int so the table needs no enum, so the
+ * type never reaches a consumer.  What IS needed are its MEMBERS, used
+ * as values.  A justification naming something the file does not use
+ * reads as a dependency that could be dropped -- it cannot.
+ *
+ * ⚠ AND THE FIRST REPAIR OF THIS LINE ALSO LISTED "gpon_common",
+ * which is not a symbol either: the measurement that produced it
+ * searched the file WITH its #include lines, so the header's own
+ * name answered for itself.  source_balance_guard.py caught that
+ * within the minute, because strip() removes string literals and
+ * an #include's filename is one. */
 
 /*
  * The subsystem prefix the line opens with.  DEFINE IT BEFORE INCLUDING THIS

@@ -430,7 +430,12 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		 * shape as MIB-Upload.  (At 9..10 the count's high byte lands
 		 * where the OLT reads a result code: latent while the count is
 		 * always 0, wrong the moment an alarm is reported.) */
-		omci_put_be16(resp + 8, 0x0000);	/* no active alarms */
+		/* ★★ WHAT IS ACTUALLY ASSERTED, not a constant. This answered a
+		 * hardcoded 0 until 2026-09-02, so the ONU told every OLT that
+		 * nothing was wrong however loudly the silicon disagreed -- and
+		 * the comment above was the only record that the byte layout was
+		 * correct BY ACCIDENT while the count could not be non-zero. */
+		omci_put_be16(resp + 8, omci_alarm_count(o));
 		break;
 	case OMCI_MT_MIB_UPLOAD_NX: {
 		/* Request seq at msg[8..9]; reply = class[8..9] + inst[10..11]
@@ -530,8 +535,69 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
  * @mask changed to @val.  The OLT never GETs the data-plane MEs after
  * creating them — its per-class AVC handlers gate DOWNSTREAM user-data
  * forwarding on the ONU's operational report. */
-static void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
-			  const u8 *val, unsigned int vlen, u8 *out)
+void omci_onu_set_alarms(struct omci_onu *o, u16 class_id, u16 inst,
+			 u16 bitmap)
+{
+	if (!o)
+		return;
+	/* ★ ONE ME'S WORTH TODAY, and the shape says so rather than pretending
+	 * otherwise: both shipping families report their PON conditions against
+	 * a single ME. A second asserting ME needs a small array here, not a
+	 * different design -- the message, the edge and the count are already
+	 * per-instance. */
+	o->alarm_class = class_id;
+	o->alarm_inst = inst;
+	o->alarm_active = bitmap;
+}
+
+u16 omci_alarm_count(const struct omci_onu *o)
+{
+	/* G.988: the number of ME INSTANCES currently reporting an alarm, not
+	 * the number of alarm BITS. One instance with three conditions is one
+	 * entry the OLT would walk. */
+	return (o && o->alarm_class && o->alarm_active) ? 1 : 0;
+}
+
+int omci_onu_emit_alarm(struct omci_onu *o, u8 *out)
+{
+	if (!o || !out)
+		return 0;
+	if (!o->alarm_class)
+		return 0;			/* nobody has reported anything */
+	if (o->alarm_active == o->alarm_told)
+		return 0;			/* ★ no EDGE -> no message */
+
+	memset(out, 0, OMCI_LEN);
+	/* TCI stays 0: G.988 marks an ONU-autonomous notification with a zero
+	 * transaction id, the same convention omci_emit_avc uses one function
+	 * below. AR/AK stay clear -- the OLT does not acknowledge an alarm. */
+	out[2] = OMCI_MT_ALARM;
+	out[3] = 0x0a;				/* DevID: baseline */
+	omci_put_be16(out + 4, o->alarm_class);
+	omci_put_be16(out + 6, o->alarm_inst);
+
+	/* Contents (octets 8..39). G.988 clause 11.2.2: the alarm BITMAP occupies
+	 * the first 28 octets, alarm number N living in bit (7 - N % 8) of octet
+	 * N / 8 -- alarm 0 is the MOST significant bit of the first octet. The
+	 * remaining octets are reserved, and the LAST octet of the contents area
+	 * carries the alarm SEQUENCE NUMBER, which is how an OLT detects that it
+	 * missed one. */
+	out[8] = (u8)(o->alarm_active >> 8);
+	out[9] = (u8)(o->alarm_active & 0xff);
+
+	o->alarm_seq++;				/* wraps at 255 by construction */
+	if (!o->alarm_seq)
+		o->alarm_seq = 1;		/* 0 is reserved for "no sequence" */
+	out[39] = o->alarm_seq;
+
+	omci_finalize(out);
+	o->alarm_told = o->alarm_active;	/* the edge is consumed HERE */
+	o->alarm_emitted++;
+	return OMCI_LEN;
+}
+
+void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
+		   const u8 *val, unsigned int vlen, u8 *out)
 {
 	memset(out, 0, OMCI_LEN);
 	out[2] = OMCI_MT_AVC;

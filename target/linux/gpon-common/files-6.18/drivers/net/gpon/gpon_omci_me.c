@@ -942,3 +942,47 @@ bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
 	}
 	return false;
 }
+
+/* ME 262 T-CONT snoop: the parse (Set-with-mask vs Create SBC layout) and the
+ * against-the-shadow decision, hoisted from cortina-gpon.c cg_rx_omci Stage D
+ * bit-for-bit (its guard was len >= 12, i.e. blen >= 4 -- kept exactly, so a
+ * 2-octet Create is refused, never read). */
+enum omci_tcont_verdict omci_tcont_snoop(u8 mt, const u8 *body,
+					 unsigned int blen, u16 inst,
+					 u16 cur_alloc, u16 cur_inst,
+					 u16 *alloc)
+{
+	u8 m = mt & 0x1f;
+	u16 a = 0;
+
+	if (!body || blen < 4)
+		return OMCI_TCONT_NONE;
+
+	if (m == OMCI_MT_SET && ((((u16)body[0] << 8) | body[1]) & 0x8000))
+		a = ((u16)body[2] << 8) | body[3];	/* attr 1, via the mask */
+	else if (m == OMCI_MT_CREATE)
+		a = ((u16)body[0] << 8) | body[1];	/* SBC: alloc first */
+
+	/* ★★ 0xffff IS THE G.988 DEALLOCATE, NOT NOISE (2026-08-05).  An
+	 * `a != 0xffff` filter alone DROPPED it, so an OLT that detached the
+	 * T-CONT the standard way left the shell's shadow -- and therefore the
+	 * armed HW T-CONT CAM -- still matching an alloc-id the OLT was free
+	 * to hand to ANOTHER subscriber.  Only a MIB-Reset cleared it.  It is
+	 * the teardown half of the same message, and it is decided here so a
+	 * third board cannot re-lose it. */
+	if (a == 0xffff && cur_alloc && (!cur_inst || inst == cur_inst))
+		return OMCI_TCONT_DEALLOC;
+	if (a && a != 0xffff && a != cur_alloc) {
+		if (alloc)
+			*alloc = a;
+		return OMCI_TCONT_ALLOC;
+	}
+	return OMCI_TCONT_NONE;
+}
+
+bool omci_dgem_delete(u8 mt, u16 inst, u16 cur_gem, u16 cur_inst)
+{
+	if ((mt & 0x1f) != OMCI_MT_DELETE)
+		return false;
+	return cur_gem && (!cur_inst || inst == cur_inst);
+}

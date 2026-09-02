@@ -81,3 +81,48 @@ u16 flowcore_crc16_ccitt_reflected(const u8 *p, u32 len)
 	return (u16)((flowcore_bitrev8((u8)(crc & 0xff)) << 8) |
 		     flowcore_bitrev8((u8)(crc >> 8)));
 }
+
+/* ===== packed-array slot addressing (moved from gpon_rtl9602c_logic.c
+ * 2026-09-02, round 3 -- see flowcore.h for why it lives in THIS object) ===
+ * PACKING CORRECTED 2026-06-13 (from the stock array-field-write routine):
+ * the reg-array helper packs entries `entries_per_word = 32/bits` PER 32-bit
+ * WORD, word-aligned, leaving the top (32 - entries_per_word*bits) bits of each
+ * word UNUSED. A field NEVER straddles a word boundary. So:
+ *   epw   = 32 / bits
+ *   word  = idx / epw          (byte addr = base + word*4)
+ *   shift = (idx % epw) * bits
+ * The OLD code used CONTIGUOUS bit-packing (bit = idx*bits) which is only
+ * correct when bits divides 32 evenly (1b, 2b, 4b). For the 7-bit SID2QID
+ * array it addressed the wrong word: SID 64 -> 0x2130 (== HW SID 56's slot)
+ * instead of the true 0x2138. That single off-by-one-word bug pointed the OMCI
+ * SID-64 classify entry at a data flow's queue, so the US-NIC never classified
+ * upstream OMCI to its T-CONT16/q0 -> the OLT never received the MIB-upload.
+ * (Matches stock: SID 64 -> base 0x20f8 + 16*4 = 0x2138.) This is the same
+ * class as l34_field_set: a self-consistent wrong offset survives every
+ * readback, so the addressing lives HERE, x86-testable, and set/get share it.
+ * bits must be 1..32 (epw = 32/bits; bits = 0 is a caller bug). */
+struct pi_packed_slot pi_packed_locate(u32 base, unsigned int idx,
+				       unsigned int bits)
+{
+	unsigned int epw = 32u / bits;		/* entries per 32-bit word (top bits wasted) */
+	struct pi_packed_slot slot;
+
+	slot.reg   = base + (idx / epw) * 4;
+	slot.shift = (idx % epw) * bits;
+	slot.mask  = (bits >= 32) ? 0xffffffffu : ((1u << bits) - 1);
+	return slot;
+}
+
+/* Insert `val` into its slot inside the sampled 32-bit word; the shell writes
+ * the result back (read-modify-write stays at the register). */
+u32 pi_packed_insert(u32 word, const struct pi_packed_slot *slot, u32 val)
+{
+	return (word & ~(slot->mask << slot->shift)) |
+	       ((val & slot->mask) << slot->shift);
+}
+
+/* Extract the slot's field from the sampled 32-bit word. */
+u32 pi_packed_extract(u32 word, const struct pi_packed_slot *slot)
+{
+	return (word >> slot->shift) & slot->mask;
+}

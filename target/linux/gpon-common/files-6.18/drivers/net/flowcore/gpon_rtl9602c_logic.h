@@ -70,4 +70,42 @@ struct pi_packed_slot pi_packed_locate(u32 base, unsigned int idx,
 u32 pi_packed_insert(u32 word, const struct pi_packed_slot *slot, u32 val);
 u32 pi_packed_extract(u32 word, const struct pi_packed_slot *slot);
 
+/* ===== round 2 (2026-09-02): module identity + sample selection ========= */
+
+/*
+ * Three-outcome optical-module identity, decided from the SFF-8472 A0 bytes
+ * the shell sampled. The module's own NAME outranks the mere presence of an
+ * SFF-8472 identity page -- deciding on the ident byte while holding the
+ * vendor string is what mis-classified the G24W's RTL8290 as foreign and
+ * refused every register write (measured 2026-08-30, tier 1). The middle
+ * outcome is ours: unreadable is "could not tell", never "it is not one".
+ */
+enum bosa_module_verdict {
+	BOSA_MODULE_NAMED_OURS,		/* strings name REALTEK/RTL8290: path stays enabled */
+	BOSA_MODULE_FOREIGN,		/* plausible SFF-8024 ident AND a foreign name:
+					 * refuse the register writes (they would land in
+					 * an identity EEPROM) */
+	BOSA_MODULE_COULD_NOT_TELL,	/* no plausible identity read: path stays enabled */
+};
+
+enum bosa_module_verdict bosa_module_classify(int ident, int extid,
+					      const char *vend, const char *part);
+
+/* Render one SFF-8472 string field: n sampled bytes (a negative byte is a
+ * failed read) -> printable ASCII, '.' elsewhere, NUL-terminated (dst[n+1]). */
+void bosa_sff_text(char *dst, const int *raw, unsigned int n);
+
+/* Median of the first n samples (insertion sort in place, upper median
+ * v[n/2]; n >= 1). This is THE reading-selection rule for the glitch-tolerant
+ * BOSA reads: for the RX code chain BOSA_RX_CODE_NA == 0 deliberately sorts
+ * to the bottom, so one glitched sample is discarded and only a majority of
+ * NA samples makes the verdict NA. */
+u32 bosa_median_u32(u32 *v, unsigned int n);
+
+/* The MPD sample validity test + ratiometric mV conversion (the one
+ * un-hoisted link of the TX-power chain): hi == 0 or code at/below the zero
+ * tap is the taps-agree dead-bus shape -> INT_MIN ("not a measurement");
+ * else mV = (hi - zero) * 1200 / (code - zero). */
+s32 bosa_vmpd_mv_calc(u32 code, s32 hi, s32 zero);
+
 #endif /* _GPON_RTL9602C_LOGIC_H */

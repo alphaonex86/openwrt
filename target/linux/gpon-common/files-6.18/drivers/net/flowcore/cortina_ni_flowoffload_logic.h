@@ -225,4 +225,55 @@ struct cn_pppoe_punt_info {
 u32 cn_pppoe_punt_classify(const u8 *f, unsigned int len, u16 exp_sid,
 			   struct cn_pppoe_punt_info *pi);
 
+/* ------------------------------------------------------------------ */
+/* SWO CRC algebra - one MSB-first CRC LFSR step per polynomial.       */
+/* (d << 1) ^ (msb ? poly : 0), textbook normal-form CRC math.  The    */
+/* shell's SWO selftest uses these to assert the on-chip engine steps  */
+/* the polynomial correctly across adjacent key bits - the polynomials */
+/* are an engine fact both silicons must agree on, the stepping is     */
+/* pure arithmetic, so both live beside the other CRC primitives.      */
+/* ------------------------------------------------------------------ */
+#define CN_L3E_SWO_POLY32		0x04C11DB7u
+#define CN_L3E_SWO_POLY16		0x1021u
+
+u32 cn_l3e_poly32_step(u32 d);
+u16 cn_l3e_poly16_step(u16 d);
+
+/* ------------------------------------------------------------------ */
+/* The packed 4-slot TPID table: slots 0-3 as {lo, hi} halves of two   */
+/* 32-bit words - slot i = (i & 1) ? (w[i>>1] >> 16) : (w[i>>1] &      */
+/* 0xffff).  The extraction was spelled character-for-character in TWO */
+/* shell functions (the DMA-AFT slot search and the L3FE parser-gate   */
+/* walk); this makes the packing a single fact.  The 4-slot count is   */
+/* intrinsic to the packing (two words of two halves), matching the    */
+/* register pair's CA_DMA_AFT_TPID_SLOTS.                              */
+/* ------------------------------------------------------------------ */
+u16 cn_tpid_slot_at(const u32 w[2], unsigned int i);
+int cn_tpid_find(const u32 w[2], u16 tpid);	/* slot index, or -1 */
+
+/*
+ * cn_wan_vlan_walk_verdict() verdicts - the under-encap tail of the shell's
+ * cn_wan_vlan_programmable(), i.e. everything decided AFTER the WAN chain
+ * walk has run.  The DECLINE ORDER is part of the policy (a frame refused
+ * for its TPID must never be counted as a missing sid), and it must mirror
+ * cn_flow_refuse_vlan_wan()'s arms about WHICH flows are VLAN-carrying -
+ * pure here so that ordering is host-testable, exactly like the already-
+ * hoisted cn_pppoe_leg_check().  The shell keeps the walk itself, the
+ * direct-802.1Q-upper arm (board-certified, deliberately not routed through
+ * the walk), the mode gates that decide whether the walk runs at all, and
+ * the decline ledger.
+ */
+enum cn_wan_vlan_verdict {
+	CN_WAN_VLAN_OK_PPPOE = 0,	/* tag + session both expressible */
+	CN_WAN_VLAN_WALK_MISMATCH,	/* walk failed, or resolved another vid */
+	CN_WAN_VLAN_BAD_TPID,		/* not 0x8100: no registered TPID slot */
+	CN_WAN_VLAN_NO_SID,		/* a tag under something not RE'd */
+	CN_WAN_VLAN_NO_MAC,		/* no access-concentrator MAC resolved */
+};
+
+enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
+						  int walk_vid,
+						  bool tpid_8021q, int sid,
+						  bool ac_mac_vld);
+
 #endif /* _CORTINA_NI_FLOWOFFLOAD_LOGIC_H */

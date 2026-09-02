@@ -55,6 +55,176 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport)
 	return (fold ^ mix) & 0x3ff;
 }
 
+/* Inverse of l34_field_set: extract a (possibly word-straddling) field.
+ * Moved verbatim from rtl9602c_l34.c (2026-09-02) so the set/get pair shares
+ * one home -- the SID2QID lesson: a wrong get mirroring a wrong set is
+ * invisible when the two live apart. */
+u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width)
+{
+	unsigned int word = lsp / 32, bit = lsp % 32, take, got = 0;
+	u32 val = 0;
+
+	while (width) {
+		take = min(width, 32 - bit);
+		val |= ((w[word] >> bit) & ((take >= 32) ? ~0u : ((1u << take) - 1)))
+		       << got;
+		got += take;
+		width -= take;
+		word++;
+		bit = 0;
+	}
+	return val;
+}
+
+/* ===== entry encoders, SPLIT from rtl9602c_l34.c (2026-09-02) ==========
+ * Each is the pure entry-word build of a mixed shell function; the shell
+ * keeps the lock, the lazy engine-on, the free-way scans, the table writes
+ * and the unwind ordering.  The l34_field_set sequences are byte-identical
+ * to the shell's; the declared deviations are (a) struct-member reads
+ * became arguments (f->orig_sip and friends -- this file reads no shell
+ * state), and (b) the triple-spelled 48-bit-MAC two-word split now exists
+ * once, as l34_mac48_set().  Proven equal old-vs-new on x86
+ * (hoist2-luna-eth harness).
+ */
+
+/* 48-bit MAC into a packed entry: octet[0] sits at the field's
+ * most-significant byte.  Was spelled VERBATIM three times (the L2 unicast
+ * key, the WAN netif, the LAN netif). */
+void l34_mac48_set(u32 *w, unsigned int lsp, const u8 *mac)
+{
+	l34_field_set(w, lsp, 32,
+		      ((u32)mac[2] << 24) | ((u32)mac[3] << 16) |
+		      ((u32)mac[4] << 8)  |  (u32)mac[5]);
+	l34_field_set(w, lsp + 32, 16,
+		      ((u32)mac[0] << 8) | (u32)mac[1]);
+}
+
+/* NAPTR_IN rewrite entry: internal host addr/port + post-NAT port, WAN side
+ * via the EXTIP slot; written full-cone (remHash unused) so the return path
+ * matches on the WAN addr/port alone. */
+void l34_naptr_encode(u32 *w, u32 int_ip, u16 int_port, u8 extip_idx,
+		      u16 ext_port, bool is_tcp)
+{
+	l34_field_set(w, L34_NAPTR_INTIP_LSP,    L34_NAPTR_INTIP_W,    int_ip);
+	l34_field_set(w, L34_NAPTR_INTPORT_LSP,  L34_NAPTR_INTPORT_W,  int_port);
+	l34_field_set(w, L34_NAPTR_EXTIPIDX_LSP, L34_NAPTR_EXTIPIDX_W, extip_idx);
+	l34_field_set(w, L34_NAPTR_EXTPORT_LSP,  L34_NAPTR_EXTPORT_W,  ext_port);
+	l34_field_set(w, L34_NAPTR_TCP_LSP,      L34_NAPTR_TCP_W,      is_tcp);
+	l34_field_set(w, L34_NAPTR_VALID_LSP,    L34_NAPTR_VALID_W,    L34_NAPTR_TYPE_FULLCONE);
+}
+
+/* NAPT_OUT hash slot: the entry index IS the outbound hash; the word only
+ * points at the rewrite entry. */
+void l34_napt_encode(u32 *w, u16 naptr_idx)
+{
+	l34_field_set(w, L34_NAPT_HASHIN_IDX_LSP, L34_NAPT_HASHIN_IDX_W, naptr_idx);
+	l34_field_set(w, L34_NAPT_VALID_LSP,      L34_NAPT_VALID_W,      1);
+}
+
+/* NETIF entry: egress source MAC + VLAN/MTU/IP, routing enabled, classified
+ * into the L34 NAT domain.  Was spelled VERBATIM twice (wan_setup and
+ * lan_setup, 11 identical l34_field_set lines differing only in arguments). */
+void l34_netif_encode(u32 *w, const u8 *mac, u32 ip, u16 vlan)
+{
+	l34_field_set(w, L34_NETIF_VALID_LSP,   L34_NETIF_VALID_W,   1);
+	l34_field_set(w, L34_NETIF_VLANID_LSP,  L34_NETIF_VLANID_W,  vlan);
+	l34_mac48_set(w, L34_NETIF_GMAC_LSP, mac);
+	l34_field_set(w, L34_NETIF_MACMASK_LSP, L34_NETIF_MACMASK_W, L34_NETIF_DEF_MACMASK);
+	l34_field_set(w, L34_NETIF_ENRTR_LSP,   L34_NETIF_ENRTR_W,   1);
+	l34_field_set(w, L34_NETIF_MTU_LSP,     L34_NETIF_MTU_W,     L34_NETIF_DEF_MTU);
+	l34_field_set(w, L34_NETIF_L34_LSP,     L34_NETIF_L34_W,     1);
+	l34_field_set(w, L34_NETIF_IP_LSP,      L34_NETIF_IP_W,      ip);
+}
+
+/* WAN local route: classify L34-domain ingress on this WAN netif and set the
+ * US/DS direction the NAPT path keys on (the vendor leaves valid=0 here,
+ * which is why offload silently fails -- we set valid=1).  IP/MASK/INT left
+ * 0 (WAN). */
+void l34_rt_wan_encode(u32 *w, u8 netif_idx)
+{
+	l34_field_set(w, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_ARP);
+	l34_field_set(w, L34_RT_DENTIF_LSP,    L34_RT_DENTIF_W,    netif_idx);
+	l34_field_set(w, L34_RT_RT2WANINF_LSP, L34_RT_RT2WANINF_W, 1);
+	l34_field_set(w, L34_RT_VALID_LSP,     L34_RT_VALID_W,     1);
+}
+
+/* LAN subnet route (process=ARP, internal=1).  ⚠ mask = prefix - 1: the
+ * 5-bit MASK field is a prefix CODE (0 => /1 anchor, 31 => /32) -- the
+ * off-by-one fact a host test pins here. */
+void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
+{
+	l34_field_set(w, L34_RT_IP_LSP,      L34_RT_IP_W,      lan_net);
+	l34_field_set(w, L34_RT_MASK_LSP,    L34_RT_MASK_W,    prefix - 1);
+	l34_field_set(w, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W, L34_RT_PROCESS_ARP);
+	l34_field_set(w, L34_RT_INT_LSP,     L34_RT_INT_W,     1);	/* LAN */
+	l34_field_set(w, L34_RT_DENTIF_LSP,  L34_RT_DENTIF_W,  netif_idx);
+	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
+}
+
+/* The more-specific /32 CPU self-route (mask code 31): traffic addressed to
+ * the interface's OWN IP terminates locally instead of being ARP-routed by
+ * the subnet route -- which black-holes management once the LAN netif is in
+ * the L34 domain. */
+void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx)
+{
+	l34_field_set(w, L34_RT_IP_LSP,      L34_RT_IP_W,      own_ip);
+	l34_field_set(w, L34_RT_MASK_LSP,    L34_RT_MASK_W,    31);	/* /32 */
+	l34_field_set(w, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W, L34_RT_PROCESS_CPU);
+	l34_field_set(w, L34_RT_INT_LSP,     L34_RT_INT_W,     1);
+	l34_field_set(w, L34_RT_DENTIF_LSP,  L34_RT_DENTIF_W,  netif_idx);
+	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
+}
+
+/* Ethernet next-hop via NETIF[ifidx], dst MAC = L2[l2idx]. */
+void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx)
+{
+	l34_field_set(w, L34_NH_TYPE_LSP,  L34_NH_TYPE_W,  0);	/* ETHER */
+	l34_field_set(w, L34_NH_IFIDX_LSP, L34_NH_IFIDX_W, ifidx);
+	l34_field_set(w, L34_NH_NHIDX_LSP, L34_NH_NHIDX_W, l2idx);
+}
+
+/* EXTIP slot: the WAN source IP a NAPT rewrite applies, via NEXTHOP[nhidx]. */
+void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx)
+{
+	l34_field_set(w, L34_EXTIP_EXTIP_LSP, L34_EXTIP_EXTIP_W, wan_ip);
+	l34_field_set(w, L34_EXTIP_VALID_LSP, L34_EXTIP_VALID_W, 1);
+	l34_field_set(w, L34_EXTIP_TYPE_LSP,  L34_EXTIP_TYPE_W,  0);	/* NAPT */
+	l34_field_set(w, L34_EXTIP_NHIDX_LSP, L34_EXTIP_NHIDX_W, nhidx);
+}
+
+/* ARP entry: gateway IP -> the L2 entry holding its MAC. */
+void l34_arp_encode(u32 *w, u32 gw_ip, unsigned int l2idx)
+{
+	l34_field_set(w, L34_ARP_IP_LSP,    L34_ARP_IP_W,    gw_ip);
+	l34_field_set(w, L34_ARP_VALID_LSP, L34_ARP_VALID_W, 1);
+	l34_field_set(w, L34_ARP_NHIDX_LSP, L34_ARP_NHIDX_W, l2idx);
+}
+
+/* The 3-word static L2 unicast (FDB) key: MAC + static/spa/age/arpused/valid.
+ * The Cortina family's cortina_ni_l2fe_fdb_key is the same job for its
+ * silicon -- the pair now sits in the same tier. */
+void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port)
+{
+	/* 48-bit MAC: octet[0] sits at the field's most-significant byte. */
+	l34_mac48_set(w, L2UC_MAC_LSP, mac);
+	l34_field_set(w, L2UC_STATIC_LSP,  L2UC_STATIC_W,  1);
+	l34_field_set(w, L2UC_SPA_LSP,     L2UC_SPA_W,     port);
+	l34_field_set(w, L2UC_AGE_LSP,     L2UC_AGE_W,     1);
+	l34_field_set(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W, 1);
+	l34_field_set(w, L2UC_VALID_LSP,   L2UC_VALID_W,   1);
+}
+
+/* Decode the L2 insert engine's reply: the hardware-assigned entry index
+ * ((cam << 10) | addr), or -1 when the engine reports no hit (table full).
+ * Declared deviation: the errno (-ENOSPC) stays shell-side -- this file
+ * includes no errno.h. */
+int l34_l2uc_sts_index(u32 sts)
+{
+	if (!(sts & L2_STS_HIT))
+		return -1;
+	return ((sts & L2_STS_CAM) ? (1 << 10) : 0) | (sts & L2_STS_ADDR_MASK);
+}
+
 /* ===== hoisted from rtl9602c_eth.c (same shell TU) =====================
  * The verbatim rule holds per function below; where a function is a SPLIT
  * (the pure verdict extracted from a mixed function) the extracted
@@ -232,4 +402,25 @@ u32 rtl9602c_omci_txd_word2(u32 ovr)
 u32 rtl9602c_omci_txd_word3(u32 ovr, unsigned int sid)
 {
 	return ovr ? ovr : TXD3_OMCI_9602C(sid);
+}
+
+/*
+ * Bad-frame verdict, SPLIT from rtl9602c_eth_rx(): is a returned RX
+ * descriptor discarded?  Completes the RX verdict trio (rtl9602c_rx_is_ds_omci
+ * and rtl9602c_rx_wan_demux above) so fuzz_rx.c can drive the WHOLE shipping
+ * RX classification chain on x86, not two-thirds of it.
+ *
+ * @err_mask is the family's RXD_CRCERR | RXD_RCDF -- those bits are LUNA
+ * FAMILY descriptor facts (luna_eth_regs.h / the shell) and passing the mask
+ * keeps this header from re-spelling them (a second spelling of BIT(27) is
+ * the drift this tier exists to remove).  The 60 is ETH_ZLEN re-expressed
+ * (if_ether.h is not includable here) -- same declared deviation as
+ * ether_addr_copy in rtl9602c_wan_mac_add().
+ */
+bool rtl9602c_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
+			   unsigned int cpu_prefix, u32 buf_size)
+{
+	return (opts1 & err_mask) ||
+	       len < 60 + cpu_prefix ||	/* 60 = ETH_ZLEN, the min Ethernet frame */
+	       len > buf_size;
 }

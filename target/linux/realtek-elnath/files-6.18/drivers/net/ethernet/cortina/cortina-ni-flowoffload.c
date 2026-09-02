@@ -2931,12 +2931,9 @@ static int cn_aft_tpid_slot(struct cn_l3e *l3e, u16 tpid)
 
 	w[0] = readl(l3e->dma_base + CA_DMA_AFT_TPID01);
 	w[1] = readl(l3e->dma_base + CA_DMA_AFT_TPID23);
-	for (i = 0; i < CA_DMA_AFT_TPID_SLOTS; i++) {
-		u16 slot = (i & 1) ? (w[i >> 1] >> 16) : (w[i >> 1] & 0xffff);
-
-		if (slot == tpid)
-			return i;
-	}
+	i = cn_tpid_find(w, tpid);	/* slots packed 2/word - one fact in flowcore */
+	if (i >= 0)
+		return i;
 	l3e->aft_no_tpid++;
 	dev_warn(l3e->dev,
 		 "DMA-AFT: TPID 0x%04x matches none of the 4 slots (0x%04x 0x%04x 0x%04x 0x%04x) - the hardware would silently drop the VLAN edit, so this flow stays on the software fastpath\n",
@@ -2975,7 +2972,7 @@ static int cn_l3fe_tpid_ensure(struct cn_l3e *l3e, u16 tpid)
 	mask = FIELD_GET(CA_NI_L3FE_PP_TPID_TOP_MASK, ctrl);
 
 	for (i = 0; i < CA_DMA_AFT_TPID_SLOTS; i++) {
-		u16 slot = (i & 1) ? (w[i >> 1] >> 16) : (w[i >> 1] & 0xffff);
+		u16 slot = cn_tpid_slot_at(w, i);	/* slots packed 2/word */
 		bool en = mask & BIT(i);
 
 		if (slot == tpid && en)
@@ -3384,26 +3381,32 @@ static bool cn_wan_vlan_programmable(struct net_device *wan_dev, u16 vid,
 		enc->sid = -1;
 		return true;
 	}
-	/* (2) a tag UNDER an encapsulation.  Only PPPoE is modelled. */
+	/* (2) a tag UNDER an encapsulation.  Only PPPoE is modelled.  The walk
+	 * itself and the ledger stay here; the verdict + its DECLINE ORDER are
+	 * the hoisted pure predicate (cn_wan_vlan_walk_verdict), so they cannot
+	 * silently drift from cn_flow_refuse_vlan_wan()'s arms. */
 	if (!hw_vlan_pppoe)
 		return false;
 	cn_wan_chain_encap(wan_dev, enc);
-	if (!enc->walk_ok || enc->vid != (int)vid)
+	switch (cn_wan_vlan_walk_verdict(vid, enc->walk_ok, enc->vid,
+					 enc->vproto == htons(ETH_P_8021Q),
+					 enc->sid, enc->ac_mac_vld)) {
+	case CN_WAN_VLAN_WALK_MISMATCH:
 		return false;
-	if (enc->vproto != htons(ETH_P_8021Q)) {
+	case CN_WAN_VLAN_BAD_TPID:
 		/* only 0x8100 is registered in the packet-editor's TPID slots;
 		 * a QinQ outer would need a different slot and a different
 		 * nesting, neither of which has been established here */
 		atomic_inc(&cn_vlan_pppoe_badtpid);
 		return false;
-	}
-	if (enc->sid < 0 || enc->sid > 0xffff) {
+	case CN_WAN_VLAN_NO_SID:
 		atomic_inc(&cn_vlan_pppoe_no_sid);
 		return false;	/* a tag under something we have not RE'd */
-	}
-	if (!enc->ac_mac_vld) {
+	case CN_WAN_VLAN_NO_MAC:
 		atomic_inc(&cn_vlan_pppoe_no_mac);
 		return false;
+	case CN_WAN_VLAN_OK_PPPOE:
+		break;
 	}
 	atomic_inc(&cn_vlan_pppoe_ok);
 	return true;
@@ -4606,23 +4609,14 @@ static int cn_flowoffload_init(void)
 /*                     (CRC-32) and x mod 0x1021 (CRC-16)              */
 /* ------------------------------------------------------------------ */
 
-#define CN_L3E_SWO_POLY32	0x04C11DB7u
-#define CN_L3E_SWO_POLY16	0x1021u
+/* CN_L3E_SWO_POLY32 / CN_L3E_SWO_POLY16 and cn_l3e_poly32_step /
+ * cn_l3e_poly16_step are hoisted into cortina_ni_flowoffload_logic.{c,h}
+ * (pure CRC algebra, host-testable beside the other CRC primitives). */
 #define CN_L3E_SWO_BIT0		240	/* inside the selected key window */
 #define CN_L3E_SWO_NBITS	8
 /* the selftest needs an all-ones mask; use a spare mask-table index so it
  * never clobbers the real classify masks 0-7 (cortina_l3fe_classify_setup) */
 #define CN_L3E_SELFTEST_MASK	63
-
-static u32 cn_l3e_poly32_step(u32 d)
-{
-	return (d << 1) ^ ((d & BIT(31)) ? CN_L3E_SWO_POLY32 : 0);
-}
-
-static u16 cn_l3e_poly16_step(u16 d)
-{
-	return ((d << 1) ^ ((d & BIT(15)) ? CN_L3E_SWO_POLY16 : 0)) & 0xffff;
-}
 
 static int cn_l3e_swo_key(struct cn_l3e *l3e, const u32 *w, u32 *c32, u16 *c16)
 {

@@ -404,7 +404,15 @@ enum omci_dgem {
 /* Classify ONE stored ME 268 Set-by-Create body. @body/@blen are the bytes the
  * store holds (attribute 1 first, i.e. the wire from octet 8). On
  * OMCI_DGEM_YES, *@port_id is the 12-bit G.984.3 wire Port-ID.
- * Pure: no state, no side effect, safe from any context. */
+ * Pure: no state, no side effect, safe from any context.
+ *
+ * ⚠ @blen IS A u8, SO THE CALLER MUST CLAMP -- NEVER CAST. A shell that wrote
+ *   `(u8)(len - 8)` for a received frame WRAPPED: len 264 became 0 and was read
+ *   as a RUNT, and len 512 became 248 -- a plausible-looking body length that is
+ *   simply wrong, which is the worse of the two. An OMCI baseline message is
+ *   OMCI_LEN, so bound the frame first (`len > OMCI_LEN ? OMCI_LEN : len`) and
+ *   subtract the 8-octet header from THAT. Found in cortina-gpon.c by a
+ *   neighbourhood audit, 2026-09-02. */
 enum omci_dgem omci_dgem_classify(const u8 *body, u8 blen,
 				  u16 omcc_gem, u16 mcast_gem, u16 *port_id);
 

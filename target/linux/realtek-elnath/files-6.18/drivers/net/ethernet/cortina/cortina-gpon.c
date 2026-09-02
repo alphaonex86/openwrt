@@ -3202,8 +3202,18 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 		 */
 		if (class_id == 268 && m == 4) {
 			u16 g = 0;
+			/* ⚠ CLAMP TO THE BASELINE FRAME, DO NOT CAST. The core
+			 * takes `u8 blen`, and `(u8)(len - 8)` WRAPS: len 264
+			 * became 0 -- read as a RUNT -- and len 512 became 248,
+			 * a plausible-looking body length that is simply wrong.
+			 * An OMCI baseline message is OMCI_LEN and its body is
+			 * what follows the 8-byte header; anything past that is
+			 * padding, so the length is BOUNDED, never truncated
+			 * modulo 256. Found by a neighbourhood audit 2026-09-02.
+			 */
+			u16 blen = len > OMCI_LEN ? OMCI_LEN : len;
 			int v = omci_dgem_classify(pdu + 8,
-						   len > 8 ? (u8)(len - 8) : 0,
+						   blen > 8 ? (u8)(blen - 8) : 0,
 						   cg->omcc_gem, CG_MCAST_GEM_ID,
 						   &g);
 

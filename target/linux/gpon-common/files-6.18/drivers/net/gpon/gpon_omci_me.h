@@ -191,6 +191,26 @@ struct omci_onu {
 					 * countable */
 	u32	avc_count;		/* autonomous AVC frames emitted */
 	bool	avc_veip_up_sent;
+	/* ★★★ THE ALARM STATE, added 2026-09-02 -- see
+	 * dev/ONU-test-case/FINDING-onu-never-raises-an-alarm-to-the-olt.md.
+	 * Our ONU saw LOS/LOF in silicon, printed it to /proc, and told every
+	 * OLT that nothing was wrong: nothing in the port ever built an
+	 * ONU-autonomous alarm (MT 0x10), and Get-all-alarms answered a
+	 * hardcoded zero.
+	 *
+	 * ★ WHAT THE CORE OWNS AND WHAT IT DOES NOT. The core owns the MESSAGE
+	 *   (G.988 layout, the sequence number), the EDGE (report a change once,
+	 *   never per poll) and the ACCOUNTING (Get-all-alarms must report what
+	 *   is actually asserted). It does NOT own which silicon bit means what
+	 *   -- that is the one genuinely per-family fact, and the family passes
+	 *   it in as (class, instance, bitmap).
+	 */
+	u16	alarm_class;	/* the ME the conditions belong to (0 = none) */
+	u16	alarm_inst;
+	u16	alarm_active;	/* what the SILICON asserts right now */
+	u16	alarm_told;	/* what the OLT has been told -- the EDGE */
+	u8	alarm_seq;	/* G.988 alarm sequence number, wraps at 255 */
+	u32	alarm_emitted;	/* spy counter: autonomous alarms sent */
 	/* ME 263 ANI-G #10 RX / #14 TX optical level, in the G.988 wire form
 	 * (2's complement, 0.002 dB increments referred to 1 mW).  Seeded by
 	 * omci_onu_init() to the conformant STATIC fallback below and overwritten
@@ -241,6 +261,8 @@ static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
 #define OMCI_ME_TCONT		262
 #define OMCI_ME_ANI_G		263
 #define OMCI_ME_UNI_G		264
+#define OMCI_ME_GEM_CTP		268	/* GEM Port Network CTP -- the ME that
+					 * NAMES the WAN data GEM Port-ID */
 #define OMCI_ME_PRIORITY_QUEUE	277
 #define OMCI_ME_TRAFFIC_SCHED	278
 #define OMCI_ME_VEIP		329
@@ -330,5 +352,69 @@ bool omci_class_modelled(u16 class_id);
 
 /* is (class, inst) a MIB instance this ONU holds? */
 bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst);
+
+/* ------------------------------------------------------------------------
+ * ★★★ WHICH ME 268 IS THE WAN DATA GEM -- a decision, in the core, once.
+ *
+ * WHY IT IS HERE AND NOT IN EITHER SHELL.  Both targets answered this
+ * question privately and they had DIVERGED, which is the same shape as
+ * gpon_gem_us_tcont_decide()'s ("both targets implemented this predicate
+ * independently and both produced a real outage from it"):
+ *
+ *   rule                                    elnath   luna (pre-2026-08-27)
+ *   direction must be BIDIRECTIONAL          yes      ABSENT
+ *   refuse the OMCC's own GEM                yes      ABSENT
+ *   refuse Port-ID 0                         yes      ABSENT
+ *   refuse the multicast GEM                 via dir  yes, by port-id
+ *
+ * ⚠ AND LUNA'S COPY IS NOT MERELY WEAKER, IT IS GONE. Its ME 268 snoop lived
+ *   inside the shell's own responder and was deleted with it by 836b76be01
+ *   ("the OMCI responder is the COMMON one"); the core gained no replacement,
+ *   so `data_gem_solicited` lost its only setter and the WAN data GEM is never
+ *   installed from the OLT's Create at all. Two more consumers went the same
+ *   way in that one commit -- see
+ *   dev/ONU-test-case/FINDING-luna-responder-swap-orphaned-three-consumers.md.
+ *
+ * ★ IT NEEDS NO CALLBACK AND NO NEW LIFECYCLE, which is why it is a query and
+ *   not a notification: the responder ALREADY stores every Set-by-Create body
+ *   (struct omci_me_inst.body, filled from msg+8), so the answer is a pure
+ *   read of state the core is holding anyway. A shell asks after feeding a
+ *   PDU in; nothing is pushed at it, nothing can be missed while it is busy,
+ *   and the whole thing is exercisable on x86 with no board.
+ *
+ * ★ THE GEOMETRY STAYS THE SHELL'S: @omcc_gem and @mcast_gem are INPUTS. The
+ *   core decides WHICH candidate wins; it does not know what this silicon
+ *   reserved.
+ * ------------------------------------------------------------------------ */
+
+/* Why a candidate ME 268 is, or is not, the WAN data GEM. Six outcomes,
+ * because "not the data GEM" is five different facts and a shell that cannot
+ * say WHICH one is a shell that cannot explain a dead WAN. */
+enum omci_dgem {
+	OMCI_DGEM_YES = 0,	/* adopt: bidirectional, and nobody else's */
+	OMCI_DGEM_RUNT,		/* Create body too short to carry attr 1..3 */
+	OMCI_DGEM_ZERO,		/* Port-ID 0 is not a provisioned port */
+	OMCI_DGEM_IS_OMCC,	/* the management GEM -- adopting it as the
+				 * data GEM points the WAN at the OMCC */
+	OMCI_DGEM_IS_MCAST,	/* the broadcast GEM (this OLT Creates it FIRST,
+				 * so a first-match rule picks it by default) */
+	OMCI_DGEM_NOT_BIDIR,	/* a uni-directional CTP: G.988 direction != 3 */
+};
+
+/* Classify ONE stored ME 268 Set-by-Create body. @body/@blen are the bytes the
+ * store holds (attribute 1 first, i.e. the wire from octet 8). On
+ * OMCI_DGEM_YES, *@port_id is the 12-bit G.984.3 wire Port-ID.
+ * Pure: no state, no side effect, safe from any context. */
+enum omci_dgem omci_dgem_classify(const u8 *body, u8 blen,
+				  u16 omcc_gem, u16 mcast_gem, u16 *port_id);
+
+/* One-line name for a verdict, for logs and test failure messages. */
+const char *omci_dgem_name(enum omci_dgem v);
+
+/* Walk the provisioned store and return the WAN data GEM Port-ID, if the OLT
+ * has created one. -> false when it has not, which is the NORMAL state before
+ * provisioning and must never be read as a failure. */
+bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
+			u16 *port_id);
 
 #endif /* GPON_OMCI_ME_H */

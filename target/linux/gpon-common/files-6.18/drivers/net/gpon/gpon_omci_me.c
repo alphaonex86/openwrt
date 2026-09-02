@@ -17,7 +17,7 @@
  *
  * WHAT THIS IS
  *   The data half of the ONU's OMCI responder, in three parts:
- *     1. the board identity blob + the TABLE-DRIVEN attribute descriptors
+ *     1. the board identity fields + the TABLE-DRIVEN attribute descriptors
  *        (one row per (class, attribute): number, wire size, value source) and
  *        the ONE generic filler that walks them, shared by GET and
  *        MIB-Upload-Next so both byte-match by construction;
@@ -90,8 +90,11 @@
  *   - ME 257 attribute 1 (equipment ID) is "HSGQ-X411AXF" on a unit certified
  *     as X400AXF.  It is on the wire to the OLT.  Plan follow-up F18 — check it
  *     against the stock dump before anyone "corrects" it.
- *   - the _Static_assert on omci_blob guards the TOTAL size, not the individual
- *     offsets; only the exhaustive x86 sweep pins those.
+ *   - RESOLVED 2026-09-02: the identity pool's _Static_assert guarded only
+ *     the TOTAL size.  The pool is now struct omci_identity — offsets come
+ *     from offsetof() over named members and each member's wire size is
+ *     pinned by its own assert, so a length drift is a build error naming
+ *     the field, not a silent shift of every field after it.
  *   - omci_me_fill()'s `over` flag is currently UNOBSERVABLE.  It turns the
  *     return into OMCI_RC_ATTR_FAILED, and the only caller that reads the
  *     return tests it solely for OMCI_RC_UNKNOWN_ME; the MIB-Upload-Next caller
@@ -103,6 +106,7 @@
  */
 #include <linux/string.h>
 
+#include "gpon_common.h"	/* GPON_GEM_BIDIR -- G.988 ME 268 direction 3 */
 #include "gpon_omci_me.h"
 
 /* ---- dynamic (OLT-provisioned) ME store ---- */
@@ -215,58 +219,88 @@ void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst)
 /*
  * ---- ME attribute model ----
  *
- * Constant attribute bytes live in one pool so a descriptor row can name them
- * with a 2-byte offset instead of a pointer (no relocation, no per-row
- * padding).  Every offset is verified byte-for-byte by Step 4d's exhaustive
- * GET-equivalence sweep, so a mis-typed offset fails on x86, not on a board.
+ * Constant attribute bytes live in ONE pool so a descriptor row can name
+ * them with a 2-byte offset instead of a pointer (no relocation, no per-row
+ * padding).  The pool is a struct with one NAMED member per G.988 identity
+ * field: a row names its field (A_ID below), the offset is offsetof() and
+ * the wire size is sizeof() over that member — so the reader of a row sees
+ * WHICH field it serves, and a member whose length changes moves every
+ * later offset WITH it instead of silently shifting the bytes under fixed
+ * numbers.  The per-field _Static_asserts below pin each length to its
+ * G.988 wire size, so the drift itself is a build error naming the field;
+ * the flat 119-byte array this replaced could only assert the TOTAL, which
+ * cannot tell 4+14 from 5+13.  Byte-for-byte equivalence with what the OLT
+ * reads stays pinned by Step 4d's exhaustive GET-equivalence sweep on x86.
  */
-#define OMCI_B_VENDOR		0	/* "HSGQ"          (4)  */
-#define OMCI_B_ONU_G_VER	4	/* "02A5B1"        (14) */
-#define OMCI_B_SW_BANK0		18	/* "M225-260525"   (14) */
-#define OMCI_B_SW_BANK1		32	/* "M225-260515"   (14) */
-#define OMCI_B_EQUIP_ID		46	/* "HSGQ-X411AXF"  (20) */
-#define OMCI_B_LOID		66	/* "user"          (24) */
-#define OMCI_B_OPER_ID		90	/* "CTC"           (4)  */
-#define OMCI_B_ZEROS		94	/* zeros           (25) */
-
-static const u8 omci_blob[] = {
-	/* [0] vendor ID — ONU-G #1, Circuit-Pack #5.  The OLT recognizes HSGQ
+struct omci_identity {
+	/* vendor ID — ONU-G #1, Circuit-Pack #5.  The OLT recognizes HSGQ
 	 * ONUs; "XPON" was rejected. */
-	'H', 'S', 'G', 'Q',
-	/* [4] ONU-G #2 version, zero-padded to 14 */
-	'0', '2', 'A', '5', 'B', '1', 0, 0, 0, 0, 0, 0, 0, 0,
-	/* [18] SW-image bank 0 (active) version — also Circuit-Pack #4 */
-	'M', '2', '2', '5', '-', '2', '6', '0', '5', '2', '5', 0, 0, 0,
-	/* [32] SW-image bank 1 version */
-	'M', '2', '2', '5', '-', '2', '6', '0', '5', '1', '5', 0, 0, 0,
-	/* [46] ONU2-G #1 equipment ID, zero-padded to 20 */
-	'H', 'S', 'G', 'Q', '-', 'X', '4', '1', '1', 'A', 'X', 'F',
-	0, 0, 0, 0, 0, 0, 0, 0,
-	/* [66] logical ONU ID — ONU-G #10, CTC LoID #2, zero-padded to 24 */
-	'u', 's', 'e', 'r',
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* [90] CTC #1 operation ID, zero-padded to 4 */
-	'C', 'T', 'C', 0,
-	/* [94] all-zero source: SW-image #5 product code (25) and #6 hash (16),
+	u8 vendor_id[4];
+	/* ONU-G #2 version, zero-padded to 14 */
+	u8 onu_g_version[14];
+	/* SW-image bank 0 (active) version — also Circuit-Pack #4 */
+	u8 sw_bank0_version[14];
+	/* SW-image bank 1 version */
+	u8 sw_bank1_version[14];
+	/* ONU2-G #1 equipment ID, zero-padded to 20 */
+	u8 equipment_id[20];
+	/* logical ONU ID — ONU-G #10, CTC LoID #2, zero-padded to 24 */
+	u8 loid[24];
+	/* CTC #1 operation ID, zero-padded to 4 */
+	u8 operator_id[4];
+	/* all-zero source: SW-image #5 product code (25) and #6 hash (16),
 	 * VEIP #3 interdomain name (25), ONU-G #11 logical password / CTC #3
 	 * password (12).
 	 *
 	 * ⚠ IT WAS 16 BYTES AND THE LONGEST USER NOW WANTS 25.  Sizing this
 	 * region by its longest consumer is not decoration: the region is the
-	 * LAST thing in the blob, so a row asking for more than it holds reads
-	 * off the END of the array.  ASan caught exactly that the day the VEIP
-	 * interdomain name (25) was corrected -- global-buffer-overflow in
-	 * omci_me_fill's memcpy, nine bytes past the end. */
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0,
+	 * LAST member, so an A_ZERO row asking for more than it holds reads
+	 * off the END of the object.  ASan caught exactly that the day the
+	 * VEIP interdomain name (25) was corrected -- global-buffer-overflow
+	 * in omci_me_fill's memcpy, nine bytes past the end. */
+	u8 zeros[25];
 };
-_Static_assert(sizeof(omci_blob) == 119, "omci_blob offsets and sizes drifted");
+
+static const struct omci_identity omci_id = {
+	.vendor_id	  = { 'H', 'S', 'G', 'Q' },
+	.onu_g_version	  = { '0', '2', 'A', '5', 'B', '1' },
+	.sw_bank0_version = { 'M', '2', '2', '5', '-',
+			      '2', '6', '0', '5', '2', '5' },
+	.sw_bank1_version = { 'M', '2', '2', '5', '-',
+			      '2', '6', '0', '5', '1', '5' },
+	.equipment_id	  = { 'H', 'S', 'G', 'Q', '-',
+			      'X', '4', '1', '1', 'A', 'X', 'F' },
+	.loid		  = { 'u', 's', 'e', 'r' },
+	.operator_id	  = { 'C', 'T', 'C' },
+	/* .zeros and the tails above are 0 by omission — C zero-fills what a
+	 * designated initializer does not name. */
+};
+
+/* One assert per field, NAMING the field.  The descriptor table derives its
+ * wire sizes from these members (A_ID), so shrinking or growing one is
+ * refused here at build time, not discovered as a shifted reply at the OLT. */
+#define OMCI_ID_SIZEOF(member)						\
+	sizeof(((const struct omci_identity *)0)->member)
+#define OMCI_ID_ASSERT(member, n)					\
+	_Static_assert(OMCI_ID_SIZEOF(member) == (n),			\
+		       "omci_identity." #member " must be " #n " octets")
+OMCI_ID_ASSERT(vendor_id, 4);		/* ONU-G #1 / Circuit-Pack #5 */
+OMCI_ID_ASSERT(onu_g_version, 14);	/* ONU-G #2 */
+OMCI_ID_ASSERT(sw_bank0_version, 14);	/* SW-image #1 / Circuit-Pack #4 */
+OMCI_ID_ASSERT(sw_bank1_version, 14);	/* SW-image #1, bank 1 */
+OMCI_ID_ASSERT(equipment_id, 20);	/* ONU2-G #1 */
+OMCI_ID_ASSERT(loid, 24);		/* ONU-G #10 / CTC LoID #2 */
+OMCI_ID_ASSERT(operator_id, 4);		/* CTC #1 */
+OMCI_ID_ASSERT(zeros, 25);		/* == its longest consumer, VEIP #3 */
+/* every member is a u8 array, so equality here also proves no padding crept
+ * in: the pool is the same 119 wire-facing bytes the flat array held */
+_Static_assert(sizeof(struct omci_identity) == 119,
+	       "omci_identity is not the 119-byte pool the OLT reads");
 
 /* Where a descriptor row takes its value bytes from. */
 enum omci_attr_src {
 	OMCI_SRC_CONST,		/* v = the value, big-endian in `size` bytes */
-	OMCI_SRC_BLOB,		/* v = byte offset into omci_blob[] */
+	OMCI_SRC_ID,		/* v = offsetof() into struct omci_identity */
 	OMCI_SRC_SN,		/* the board serial number (8) */
 	OMCI_SRC_MDS,		/* ME 2 #1 = the live MIB-Data-Sync */
 	OMCI_SRC_DYN,		/* v = enum omci_attr_dyn */
@@ -274,7 +308,7 @@ enum omci_attr_src {
 
 /* The few attributes whose value is derived from the ME INSTANCE. */
 enum omci_attr_dyn {
-	OMCI_DYN_SW_VER,	/* ME 7 #1: per-bank version blob */
+	OMCI_DYN_SW_VER,	/* ME 7 #1: per-bank version field */
 	OMCI_DYN_SW_FLAG,	/* ME 7 #2/#3: bank 0 is the active+committed */
 	OMCI_DYN_TCONT_ALLOC,	/* ME 262 #1: alloc-ID of this T-CONT */
 	OMCI_DYN_PQ_PORT,	/* ME 277 #6: related port, counts DOWN in the
@@ -301,7 +335,15 @@ struct omci_attr {
 
 #define AT(cls, n, sz, s, arg)	{ (cls), (arg), (n), (sz), (s) }
 #define A_C(cls, n, sz, val)	AT(cls, n, sz, OMCI_SRC_CONST, val)
-#define A_B(cls, n, sz, off)	AT(cls, n, sz, OMCI_SRC_BLOB, off)
+/* identity field: the wire size IS the named member's size — one source */
+#define A_ID(cls, n, member)	AT(cls, n, OMCI_ID_SIZEOF(member),	\
+				   OMCI_SRC_ID,				\
+				   offsetof(struct omci_identity, member))
+/* @sz octets of zeros, served from omci_id.zeros (@sz <= 25 — see the
+ * zeros member: a larger ask reads off the end, and only the x86 sweep
+ * plus ASan police that bound) */
+#define A_ZERO(cls, n, sz)	AT(cls, n, sz, OMCI_SRC_ID,		\
+				   offsetof(struct omci_identity, zeros))
 #define A_SN(cls, n)		AT(cls, n, 8, OMCI_SRC_SN, 0)
 #define A_MDS(cls, n)		AT(cls, n, 1, OMCI_SRC_MDS, 0)
 #define A_D(cls, n, sz, dyn)	AT(cls, n, sz, OMCI_SRC_DYN, dyn)
@@ -313,8 +355,8 @@ static const struct omci_attr omci_attrs[] = {
 
 	/* ---- ME 256 ONU-G (inst 0).  ALL 14 attributes are servable: a
 	 * missing one answers a short mask and the OLT re-GETs forever. ---- */
-	A_B(256,  1,  4, OMCI_B_VENDOR),	/* #1  Vendor ID */
-	A_B(256,  2, 14, OMCI_B_ONU_G_VER),	/* #2  Version */
+	A_ID(256,  1, vendor_id),		/* #1  Vendor ID */
+	A_ID(256,  2, onu_g_version),		/* #2  Version */
 	A_SN(256, 3),				/* #3  Serial number */
 	A_C(256,  4,  1, 0x02),			/* #4  Traffic-mgmt option */
 	A_C(256,  5,  1, 0x00),			/* #5  ATM CC option */
@@ -322,14 +364,14 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(256,  7,  1, 0x00),			/* #7  Admin state */
 	A_C(256,  8,  1, 0x00),			/* #8  Op state */
 	A_C(256,  9,  1, 0x00),			/* #9  Survival time */
-	A_B(256, 10, 24, OMCI_B_LOID),		/* #10 Logical ONU ID */
-	A_B(256, 11, 12, OMCI_B_ZEROS),		/* #11 Logical password */
+	A_ID(256, 10, loid),			/* #10 Logical ONU ID */
+	A_ZERO(256, 11, 12),			/* #11 Logical password */
 	A_C(256, 12,  1, 0x00),			/* #12 Credentials status */
 	A_C(256, 13,  2, 0x0000),		/* #13 Ext TC-layer options */
 	A_C(256, 14,  1, 0x01),			/* #14 ONT state */
 
 	/* ---- ME 257 ONU2-G (inst 0) ---- */
-	A_B(257,  1, 20, OMCI_B_EQUIP_ID),	/* #1  Equipment ID */
+	A_ID(257,  1, equipment_id),		/* #1  Equipment ID */
 	A_C(257,  2,  1, 0x80),			/* #2  OMCC version: G.984.4,
 						 * BASELINE only — devid 0x0b is
 						 * not served, and the two must
@@ -358,8 +400,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(6,  1,  1, 47),			/* #1  Type */
 	A_C(6,  2,  1, 1),			/* #2  Number of ports */
 	A_SN(6, 3),				/* #3  Serial number */
-	A_B(6,  4, 14, OMCI_B_SW_BANK0),	/* #4  Version */
-	A_B(6,  5,  4, OMCI_B_VENDOR),		/* #5  Vendor ID */
+	A_ID(6,  4, sw_bank0_version),		/* #4  Version */
+	A_ID(6,  5, vendor_id),			/* #5  Vendor ID */
 	A_C(6, 12,  1, 8),			/* #12 Total priority queues */
 
 	/* ---- ME 7 Software-Image, banks 0 (active) + 1 ---- */
@@ -374,8 +416,8 @@ static const struct omci_attr omci_attrs[] = {
 	 * attribute, so the off-by-one needed no reading of the spec to see.
 	 * An OLT getting #5 read 16B where 25 were due and everything after it
 	 * in the same response shifted. */
-	A_B(7, 5, 25, OMCI_B_ZEROS),		/* #5  Product code */
-	A_B(7, 6, 16, OMCI_B_ZEROS),		/* #6  Image hash */
+	A_ZERO(7, 5, 25),			/* #5  Product code */
+	A_ZERO(7, 6, 16),			/* #6  Image hash */
 
 	/* ---- ME 11 PPTP Ethernet UNI (inst 0x0101) — THE HGU gate ---- */
 	A_C(11,  1, 1, 47),			/* #1  Expected type */
@@ -455,13 +497,13 @@ static const struct omci_attr omci_attrs[] = {
 	 * has #3 InterDomainName(25) and #4 TcpUdpPtr(2). The 2-byte pointer was
 	 * the right VALUE at the wrong NUMBER, so it moves to #4 and #3 becomes
 	 * the 25-byte name it always was. */
-	A_B(329, 3, 25, OMCI_B_ZEROS),		/* #3  Interdomain name */
+	A_ZERO(329, 3, 25),			/* #3  Interdomain name */
 	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
 
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
-	A_B(65530, 1,  4, OMCI_B_OPER_ID),	/* #1  Operation ID */
-	A_B(65530, 2, 24, OMCI_B_LOID),		/* #2  LoID */
-	A_B(65530, 3, 12, OMCI_B_ZEROS),	/* #3  Password ("" but MUST be
+	A_ID(65530, 1, operator_id),		/* #1  Operation ID */
+	A_ID(65530, 2, loid),			/* #2  LoID */
+	A_ZERO(65530, 3, 12),			/* #3  Password ("" but MUST be
 						 * servable, proven) */
 	A_C(65530, 4,  1, 0x01),		/* #4  Auth status = success */
 
@@ -514,8 +556,8 @@ static const u8 *omci_attr_bytes(const struct omci_onu *o,
 	u32 val;
 
 	switch (a->src) {
-	case OMCI_SRC_BLOB:
-		return omci_blob + a->v;
+	case OMCI_SRC_ID:
+		return (const u8 *)&omci_id + a->v;
 	case OMCI_SRC_SN:
 		return o->sn;
 	case OMCI_SRC_MDS:
@@ -524,8 +566,8 @@ static const u8 *omci_attr_bytes(const struct omci_onu *o,
 	case OMCI_SRC_DYN:
 		switch (a->v) {
 		case OMCI_DYN_SW_VER:
-			return omci_blob + (inst ? OMCI_B_SW_BANK1 :
-						   OMCI_B_SW_BANK0);
+			return inst ? omci_id.sw_bank1_version :
+				      omci_id.sw_bank0_version;
 		case OMCI_DYN_SW_FLAG:
 			val = inst ? 0 : 1;
 			break;
@@ -664,10 +706,15 @@ static void omci_build_mib(struct omci_onu *o)
 	 * B = hash(16). */
 	ROW(OMCI_ME_SW_IMAGE, 0x0000, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
 				      OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4));
+	/* ★ #6 Image hash (16 octets) is MODELLED and was never uploaded, so an
+	 * OLT walking the MIB never learned it exists.  Its own row, beside #5's:
+	 * 25 and 16 each need one. */
 	ROW(OMCI_ME_SW_IMAGE, 0x0000, OMCI_ATTR_BIT(5));
+	ROW(OMCI_ME_SW_IMAGE, 0x0000, OMCI_ATTR_BIT(6));
 	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
 				      OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4));
 	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(5));
+	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(6));
 
 	/* ME 11 PPTP Ethernet UNI: #1..#15 = 17B, one row.  THE HGU GATE. */
 	ROW(OMCI_ME_PPTP_ETH_UNI, 0x0101, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
@@ -704,7 +751,20 @@ static void omci_build_mib(struct omci_onu *o)
 
 	/* ME 277 Priority-Queue: only the single UNI's 8 queues.  The full
 	 * 96-row stock set made the upload so long the OLT's auth timer
-	 * deactivated us mid-config (proven on the 9602C). */
+	 * deactivated us mid-config (proven on the 9602C).
+	 *
+	 * ⚠ THE 96 IS UNSOURCED AND THE SHIPPED DATA SAYS 64 (measured
+	 * 2026-08-31, OMCI-simulate/mib_init_pair.py): stock's own
+	 * /etc/omci_mib.cfg declares exactly 64 ME 277 records, 0xff00..0xff3f,
+	 * BYTE-IDENTICAL on the X111W and the G24W.  It is NOT corrected to 64
+	 * here, and that restraint is the point: stock has a SECOND creation
+	 * path (MIB_Set -> mib_AddEntry, from OMCI_ResetMib /
+	 * omci_mib_cfg_setup_me) that nobody has decoded, so 96 may well be the
+	 * live total and 64 only the file-declared part.  Changing the number to
+	 * match the half we can read would be inventing a measurement.
+	 * What settles it: count ME 277 instances in a live MIB-Upload from
+	 * stock.  The DECISION above is unaffected either way -- 64 and 96 are
+	 * both far more than 8, and the deactivation was observed. */
 	for (i = 0; i < 8; i++)
 		ROW(OMCI_ME_PRIORITY_QUEUE, i, OMCI_ATTR_BIT(1) |
 					       OMCI_ATTR_BIT(2) |
@@ -722,8 +782,25 @@ static void omci_build_mib(struct omci_onu *o)
 						       OMCI_ATTR_BIT(3) |
 						       OMCI_ATTR_BIT(4));
 
+	/* ★★ THE OTHER HALF OF THE #3/#4 CORRECTION ABOVE, AND IT WAS MISSING.
+	 * The attribute table was fixed against a real vendor plugin -- #3 is the
+	 * 25-octet Interdomain name, #4 the 2-octet TCP/UDP pointer -- and THIS
+	 * ROW was left as it had been computed when #3 was 2 octets.  So it went
+	 * on declaring 1|2|3 while 1+1+25 = 27 needs a 26-octet payload: the ONU
+	 * promised the OLT three attributes and could serve two.
+	 *
+	 * ⚠ WHAT THAT COSTS IS NOT COSMETIC.  An upload row whose returned mask
+	 * is short of its requested mask is the proven OLT re-GET churn-lock
+	 * class -- the OLT keeps asking for what it was told is there.  The host
+	 * case says so in its own words: "row mask 0xe000 but only 0xc000
+	 * servable (OLT re-GET loop)".
+	 *
+	 * Split so each row FITS: 1+2+4 = 4 octets, and #3 alone = 25.  #4 was
+	 * not uploaded at all before, so this also stops modelling an attribute
+	 * the OLT could never see. */
 	ROW(OMCI_ME_VEIP, 0x0601, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				  OMCI_ATTR_BIT(3));
+				  OMCI_ATTR_BIT(4));
+	ROW(OMCI_ME_VEIP, 0x0601, OMCI_ATTR_BIT(3));
 
 	/*
 	 * ME 65530 (CTC LoID authentication) is deliberately NOT uploaded.
@@ -778,5 +855,90 @@ bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst)
 	for (i = 0; i < o->nrows; i++)
 		if (o->rows[i].class_id == class_id && o->rows[i].inst == inst)
 			return true;
+	return false;
+}
+
+/* ========================================================================
+ * THE WAN DATA GEM -- which ME 268 the OLT meant for user traffic.
+ *
+ * G.988 clause 9.2.3, ME 268 (GEM Port Network CTP), Set-by-Create body, as
+ * the store holds it (attribute 1 at body[0], i.e. the wire from octet 8):
+ *
+ *   body[0..1]  attr 1  GEM Port-ID          (12 significant bits, G.984.3)
+ *   body[2..3]  attr 2  T-CONT pointer       (ME 262 instance)
+ *   body[4]     attr 3  direction            1=US, 2=DS, 3=bidirectional
+ *
+ * ★ THE DIRECTION TEST IS THE LOAD-BEARING ONE, and it is why this may not be
+ *   a first-match scan of class 268. On the lab OLT the FIRST ME 268 Create is
+ *   the DS-only broadcast CTP (Port-ID 4095, T-CONT ptr 0, dir 2); the WAN one
+ *   arrives afterwards. A scan without the test adopts the broadcast port and
+ *   points the WAN at it -- which is exactly what the pre-2026-08-27 Luna
+ *   snoop did, guarded only by a multicast Port-ID literal that a different
+ *   OLT need not use.
+ *
+ * ★ AND THE ORDER OF THE REFUSALS IS DELIBERATE: shape (RUNT) before value
+ *   (ZERO) before identity (OMCC/MCAST) before semantics (NOT_BIDIR), so the
+ *   reported reason is always the FIRST thing wrong rather than whichever test
+ *   happened to be written last.
+ * ======================================================================== */
+
+enum omci_dgem omci_dgem_classify(const u8 *body, u8 blen,
+				  u16 omcc_gem, u16 mcast_gem, u16 *port_id)
+{
+	u16 g;
+
+	/* attr 1..3 need 5 octets; a runt Create carries no direction and must
+	 * never be read past -- an unfuzzable implicit length is precisely what
+	 * this project refuses. */
+	if (!body || blen < 5)
+		return OMCI_DGEM_RUNT;
+
+	/* explicit byte math: big-endian on the wire, and this same source is
+	 * compiled for MIPS-BE, ARM64-LE and x86. */
+	g = (u16)(((u16)body[0] << 8) | body[1]) & 0x0fff;
+
+	if (!g)
+		return OMCI_DGEM_ZERO;
+	if (g == (omcc_gem & 0x0fff))
+		return OMCI_DGEM_IS_OMCC;
+	if (g == (mcast_gem & 0x0fff))
+		return OMCI_DGEM_IS_MCAST;
+	if (body[4] != GPON_GEM_BIDIR)
+		return OMCI_DGEM_NOT_BIDIR;
+
+	if (port_id)
+		*port_id = g;
+	return OMCI_DGEM_YES;
+}
+
+const char *omci_dgem_name(enum omci_dgem v)
+{
+	switch (v) {
+	case OMCI_DGEM_YES:		return "data GEM";
+	case OMCI_DGEM_RUNT:		return "runt Create";
+	case OMCI_DGEM_ZERO:		return "Port-ID 0";
+	case OMCI_DGEM_IS_OMCC:		return "the OMCC GEM";
+	case OMCI_DGEM_IS_MCAST:	return "the multicast GEM";
+	case OMCI_DGEM_NOT_BIDIR:	return "uni-directional CTP";
+	}
+	return "?";
+}
+
+bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
+			u16 *port_id)
+{
+	u16 i;
+
+	if (!o)
+		return false;
+	for (i = 0; i < OMCI_STORE_MAX; i++) {
+		const struct omci_me_inst *e = &o->store[i];
+
+		if (!e->used || e->class_id != OMCI_ME_GEM_CTP)
+			continue;
+		if (omci_dgem_classify(e->body, e->blen, omcc_gem, mcast_gem,
+				       port_id) == OMCI_DGEM_YES)
+			return true;
+	}
 	return false;
 }

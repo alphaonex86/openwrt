@@ -88,7 +88,7 @@
  *             drivers/net/gpon/gpon_omci_me.[hc]    G.988 ME model
  *             drivers/net/gpon/gpon_gem_us.[hc]     US GEM and T-CONT mapping
  *     family  realtek-luna  ... realtek/luna_ponmac.c   PON-MAC, SerDes
- *     chip    realtek-luna  ... realtek/gpon-rtl9602c.c    RTL9602C GPON shell
+ *     chip    realtek-luna  ... realtek/gpon-luna.c    RTL9602C GPON shell
  *             realtek-luna  ... realtek/rtl9602c_eth.c     RTL9602C NIC shell
  *             realtek-elnath ... cortina/cortina-gpon.c    RTL9607F GPON shell
  *
@@ -171,6 +171,14 @@
  *   today; the file:line evidence is quoted per member. Where the plan's
  *   proposed shape did not match the measured source, the measurement wins and
  *   the divergence is named in the comment.
+ * ⚠ PROVENANCE POINTERS BELOW NAME gpon-luna.c, WHICH WAS CALLED
+ *   gpon-rtl9602c.c / gpon-rtl960x.c UNTIL THE 2026-08-29 RENAME.  The
+ *   LINE NUMBERS ARE AS THEY WERE WHEN THE MOVE WAS RECORDED -- later
+ *   edits moved them, and they are kept because a provenance note is a
+ *   dated fact about where code CAME FROM, not a pointer to today.
+ *   Renaming without saying so would turn a dated record into a claim
+ *   about the current file, which is the 'wrong in a new way' that
+ *   citation_guard warns a bare sed produces.
  */
 #ifndef GPON_COMMON_H
 #define GPON_COMMON_H
@@ -236,7 +244,7 @@
  *   enum is the core's OWN encoding and each shell maps its hardware field to
  *   it at the boundary (plan D-6):
  *     - realtek-luna is 1-BASED and matches this enum directly
- *       (gpon-rtl9602c.c GPON_ONU_STATE_MASK 0xf, gpon_onu_state_name[1] =
+ *       (gpon-luna.c GPON_ONU_STATE_MASK 0xf, gpon_onu_state_name[1] =
  *       "O1-initial", and the driver's own note "the HW ONU_STATE field uses
  *       the same 1-based encoding");
  *     - realtek-elnath is 0-BASED (cortina-gpon.c CG_STATE_RANGING 3,
@@ -503,14 +511,14 @@ struct gpon_shell_ops {
 			 const u8 msg[GPON_PLOAM_US_LEN]);
 
 	/* Publish the activation state into the GTC status field.
-	 * <- gpon-rtl9602c.c:6068 gpon_fsm_set_state() / :6137 */
+	 * <- gpon-luna.c:6068 gpon_fsm_set_state() / :6137 */
 	void (*set_hw_state)(void *sh, enum gpon_ostate st);
 
 	/* Publish the OLT-assigned ONU-ID (GPON_ONU_ID_BROADCAST on every
 	 * teardown). Writes BOTH the downstream status copy and the upstream
 	 * copy on realtek-luna, which is exactly why it is one op and not two
 	 * register writes the core could get half-right.
-	 * <- gpon-rtl9602c.c:6235-6236 (assign), :6344-6345, :6573-6574,
+	 * <- gpon-luna.c:6235-6236 (assign), :6344-6345, :6573-6574,
 	 *    :6662-6663, :6711-6712 (the four teardown paths) */
 	void (*set_hw_onu_id)(void *sh, u8 onu_id);
 
@@ -538,7 +546,7 @@ struct gpon_shell_ops {
 
 	/* Re-lock the transmit analog at O3 entry: the cold-start TX-CMU/PLL
 	 * relock without which a cold boot never ranges while a warm reboot
-	 * does.  <- gpon-rtl9602c.c:6053 gpon_txpll_relock()
+	 * does.  <- gpon-luna.c:6053 gpon_txpll_relock()
 	 *    cf. cortina-gpon.c:1746 cg_psds_relock()
 	 * ⚠ void, not int as the plan declares: BOTH implementations return
 	 *   void, and an int nobody sets is a return value the core would be
@@ -587,7 +595,7 @@ struct gpon_shell_ops {
 	 */
 
 	/* Bind the OMCC: the management alloc-id and its GEM port-id.
-	 * <- gpon-rtl9602c.c:5420 gpon_install_omcc() + :5765 gpon_install_tcont()
+	 * <- gpon-luna.c:5420 gpon_install_omcc() + :5765 gpon_install_tcont()
 	 *    cortina-gpon.c:2027 cg_omcc_tcont_bind() + :2063 cg_omcc_gem_bind() */
 	int (*omcc_install)(void *sh, u16 alloc, u16 gem);
 

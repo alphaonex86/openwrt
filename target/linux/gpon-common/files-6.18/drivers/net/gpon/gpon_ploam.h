@@ -218,6 +218,7 @@ enum gpon_ploam_ev {
 	GPON_PLOAM_EV_UNHANDLED,	/* a = DS type, b = DS ONU-ID              */
 	GPON_PLOAM_EV_SN_REPROVISIONED,	/* -                                       */
 	GPON_PLOAM_EV_O5_WATCHDOG,	/* a = ticks held at O5 with no WAN RX     */
+	GPON_PLOAM_EV_O4_TIMEOUT,	/* a = ticks held at O4, no Ranging_Time   */
 	GPON_PLOAM_EV_LOS_RERANGE,	/* a = consecutive LOS ticks               */
 };
 
@@ -389,6 +390,19 @@ struct gpon_ploam_cfg {
 	/* Emit a No_message US PLOAM every N ticks at O5. 0 disables (the
 	 * shipped default: stock emits no unsolicited US PLOAM at O5). (:6845) */
 	unsigned int o5_ploam_keepalive_ticks;
+	/* ★★ G.984.3's RANGING TIMER: leave O4 after this many poll ticks with
+	 * no Ranging_Time. 0 disables.
+	 *
+	 * An ONU that has been given an ONU-ID but never a Ranging_Time must
+	 * return to offering its serial. Nothing else can take it out of O4:
+	 * poll_sn_reoffer() only fires while onu_id is 0xff, and the watchdog
+	 * above only covers O5. An ONU stuck in O4 cannot be ranged by ANY OLT,
+	 * so the far end's only remaining move is Deactivate.
+	 *
+	 * ⚠ MEASURED, both halves: the offline pairing holds the FSM in O4 for
+	 * 20000 poll rounds and it never leaves (sim_ploam), and the X111W bench
+	 * shows exactly that shape -- O4, then DEACTIVATE, never O5. */
+	unsigned int o4_ranging_timeout_ticks;
 
 	/* T-CONT indices this silicon uses. */
 	u8 omcc_tcont;		/* Luna 16 */
@@ -418,6 +432,7 @@ struct gpon_ploam {
 	enum gpon_ostate state;
 	u32 ticks;			/* FSM poll ticks (~10 ms each)              */
 	u32 o5_entry_tick;		/* tick of the last O5 entry (0 = not at O5) */
+	u32 o4_entry_tick;		/* tick of the last O4 entry (0 = not at O4) */
 	int avc_sent;			/* oper-state AVCs emitted this O5           */
 	u32 los_run;			/* consecutive real-LOS ticks                */
 

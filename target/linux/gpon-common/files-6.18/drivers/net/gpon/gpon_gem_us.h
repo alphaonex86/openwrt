@@ -90,6 +90,14 @@
  *   rule is being honoured.  What the executed big-endian run does prove is
  *   that the index arithmetic and the field masks below give identical answers
  *   on MIPS-BE and on x86 — which is the only endianness claim this file makes.
+ * ⚠ PROVENANCE POINTERS BELOW NAME gpon-luna.c, WHICH WAS CALLED
+ *   gpon-rtl9602c.c / gpon-rtl960x.c UNTIL THE 2026-08-29 RENAME.  The
+ *   LINE NUMBERS ARE AS THEY WERE WHEN THE MOVE WAS RECORDED -- later
+ *   edits moved them, and they are kept because a provenance note is a
+ *   dated fact about where code CAME FROM, not a pointer to today.
+ *   Renaming without saying so would turn a dated record into a claim
+ *   about the current file, which is the 'wrong in a new way' that
+ *   citation_guard warns a bare sed produces.
  */
 #ifndef GPON_GEM_US_H
 #define GPON_GEM_US_H
@@ -133,7 +141,7 @@
  * ★ Only one target ever writes it: Elnath clears all eight of the data
  * T-CONT's slots on teardown (cortina-gpon.c:2122-2130).  Luna has no upstream
  * unstamp at all — its re-arm is the gpon_data_installed flag
- * (gpon-rtl9602c.c:968), so a stale Port-ID stays in the map until the next
+ * (gpon-luna.c:968), so a stale Port-ID stays in the map until the next
  * install overwrites it.  That asymmetry is REAL and is preserved: making Luna
  * clear its slot would change what the silicon holds after a Deactivate, which
  * is a behaviour change and not part of a code-motion refactor. */

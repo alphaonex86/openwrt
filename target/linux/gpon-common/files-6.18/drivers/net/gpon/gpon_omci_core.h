@@ -160,6 +160,60 @@ void omci_set_mic(u8 *msg);
  * report.  Fills @out (48 bytes, trailer + MIC done); returns OMCI_LEN. */
 int omci_onu_emit_veip_up_avc(struct omci_onu *o, u8 *out);
 
+/* The general autonomous-notification emitter behind the one above: fills @out
+ * (48 bytes, trailer + MIC done) with an AVC for @class_id / @inst carrying
+ * @vlen octets of @val under @mask.
+ *
+ * ★ EXPORTED 2026-09-01 FOR A SECOND CALLER, and the reason is worth stating so
+ * nobody deletes it as unused: `dev/OMCI-ONU-simulate` simulates OTHER vendors'
+ * ONUs to prove an OLT universal, and some of them raise AVCs this driver does
+ * not (ME 256 LogicalOnuID, for one). Building a second AVC packer there would
+ * be a third copy of a wire format -- the defect this tree has already paid for
+ * -- and would test the OLT against OUR idea of an AVC rather than the one the
+ * shipped code emits. The driver itself calls only the wrapper above; this
+ * costs no extra code in the image. */
+/* ------------------------------------------------------------------------
+ * ★★★ THE ALARM SURFACE (G.988 clause 11.2.2), in the core, once.
+ *
+ * THE DEFECT IT CLOSES: our ONU read LOS/LOF out of the GPON MAC, printed it to
+ * /proc, and never told the OLT -- nothing in the port built an ONU-autonomous
+ * alarm, and Get-all-alarms answered a hardcoded zero. An ISP learns a
+ * subscriber's fibre is degrading because the ONU says so; one that degrades
+ * silently looks healthy until it stops carrying traffic.
+ *
+ * ★ THE SPLIT, by the rule that a family keeps only what is REALLY unique to
+ *   it: the core owns the MESSAGE, the EDGE and the ACCOUNTING; the family owns
+ *   only "read THIS silicon's alarm register and say which conditions are
+ *   asserted", and hands the answer in as (class, instance, bitmap).
+ *
+ * ⚠ THE BIT MEANINGS ARE DELIBERATELY NOT NAMED HERE. Each ME class assigns its
+ *   own alarm numbers in G.988, and inventing a mapping we have not read from
+ *   the standard would be a fabricated register fact -- the thing this project
+ *   refuses. The core carries the bitmap it is given; naming the bits per class
+ *   is OWED, and is a table, not logic.
+ * ------------------------------------------------------------------------ */
+
+/* Tell the core which conditions THIS silicon currently asserts on one ME.
+ * Pure state: it emits nothing, so a caller may poll it from any context. */
+void omci_onu_set_alarms(struct omci_onu *o, u16 class_id, u16 inst,
+			 u16 bitmap);
+
+/* Build the ONU-autonomous alarm (MT 0x10) for a CHANGE, if there is one.
+ * -> OMCI_LEN when a PDU was written into @out, 0 when nothing changed.
+ *
+ * ★ IT IS AN EDGE, NOT A LEVEL, and that is the whole reason it lives here: an
+ *   alarm re-sent every poll is a flood the OLT must filter, and one never
+ *   re-sent after it clears is a permanent false fault. Calling this on a timer
+ *   is therefore correct and cheap -- it answers 0 until something moves. */
+int omci_onu_emit_alarm(struct omci_onu *o, u8 *out);
+
+/* How many alarm-bearing ME instances are asserting right now. This is what
+ * Get-all-alarms must report; it answered a constant 0 before. */
+u16 omci_alarm_count(const struct omci_onu *o);
+
+void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
+		   const u8 *val, unsigned int vlen, u8 *out);
+
 
 /* ---- wire packing ---------------------------------------------------------
  * Store a 16-bit field big-endian, by explicit byte math.

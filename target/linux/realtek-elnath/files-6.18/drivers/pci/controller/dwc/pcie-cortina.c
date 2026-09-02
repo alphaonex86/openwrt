@@ -230,6 +230,20 @@ static void cortina_pcie_long_cal(struct cortina_pcie *cp, void __iomem *s,
  * it runs only when cmu=true (sub-lane 0); the RX-EQ held-enables + 0x40 walk +
  * captures are per-sub-lane.  Run the two sub-lanes SEQUENTIALLY (interleaving
  * them cancels the bit0 qualification).
+ *
+ * ★ NOT gpon_regseq MATERIAL (classified 2026-09-02: zero of the 51 accesses
+ * convert; a falsifiable census agreed).  Every step misses the interpreter's
+ * contract on >=1 axis: (1) all addresses are `s + b + off` -- `s` is THIS
+ * controller's ioremap cookie (two RCs exist) and `b` the per-call sub-lane
+ * base, while rd/wr take a bare u32 with no context cookie; (2) every settle
+ * is usleep_range(10, 20) and GPON_REGSEQ_DLY is milliseconds-only; (3) the
+ * cal-done poll runs at a 10-20 us cadence and CONTINUES on timeout -- the
+ * release steps after it MUST still run or the held-enables stay asserted --
+ * where GPON_REGSEQ_POLL is fixed 200 us and aborts the sequence; (4) three
+ * writes carry a field copied from a live 0x7c read (-> 0x0c, 0x2c, 0x90) and
+ * FLD takes literals; (5) the `cmu` conditionals would force two tables
+ * duplicating the shared steps.  Converting any subset changes an analog
+ * cal's timing or re-types the same silicon facts twice.
  */
 static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool cmu)
 {

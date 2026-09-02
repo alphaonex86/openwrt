@@ -46,6 +46,7 @@
 #include <linux/types.h>
 
 #include "cortina-l3fe.h"
+#include "cortina_ni_rx_logic.h"	/* the shared FDB key pack + action word */
 
 /* ------------------------------------------------------------------ *
  *  L3FE HS register map, NE-relative (NI window phys 0xf4300000).      *
@@ -1011,12 +1012,20 @@ static int l3fe_pdpid_map_set(void __iomem *ne, u32 idx, u32 pdpid)
  * always precedes this probe-time call. */
 static int l3fe_fdb_static_add(void __iomem *ne, const u8 *mac, u32 ldpid)
 {
-	u32 d3 = (mac[0] >> 5) & 0x7;
-	u32 d2 = ((u32)(mac[0] & 0x1f) << 27) | ((u32)mac[1] << 19) |
-		 ((u32)mac[2] << 11) | ((u32)mac[3] << 3) | ((mac[4] >> 5) & 0x7);
-	u32 d1 = (u32)(((mac[4] & 0x1f) << 8) | mac[5]) << 19;
-	u32 d0 = FIELD_PREP(L3FE_FDB_LPID, ldpid) | L3FE_FDB_VALID |
-		 L3FE_FDB_STATIC | L3FE_FDB_DA_PERMIT | L3FE_FDB_SA_PERMIT;
+	/* ★ THE KEY PACK AND THE ACTION WORD ARE THE COMMON LAYER'S, NOT OURS.
+	 * This function spelled both inline, character-for-character identical to
+	 * what cortina-ni-rx.c spelled -- two copies of one hardware format, and
+	 * the L2FE and L3FE field vocabularies are the SAME BITS under two names:
+	 * LPID GENMASK(5,0) == 0x3f, VALID BIT(9), STATIC BIT(19), DA_PERMIT
+	 * BIT(20), SA_PERMIT BIT(21). Verified value-by-value before this call
+	 * replaced them, because a shared spelling of two DIFFERENT formats is a
+	 * far worse defect than the duplication it removes.
+	 * The WRITES stay here: this file owns a different register base, and only
+	 * the value computation is common. */
+	u32 d3, d2, d1;
+	u32 d0 = cortina_ni_l2fe_fdb_action(ldpid);
+
+	cortina_ni_l2fe_fdb_key(mac, &d3, &d2, &d1);
 
 	writel(0, ne + L3FE_FDB_CMD_RETURN);
 	writel(d3, ne + L3FE_FDB_DATA3);

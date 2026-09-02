@@ -66,3 +66,176 @@ s32 bosa_code_to_cdbm(u32 code)
 	cdbm = ((log2_q16 * 301) >> 16) - 4000;		/* 301 = round(1000*log10(2)) */
 	return cdbm < -4000 ? -4000 : (s32)cdbm;
 }
+
+/* ===== BOSA/DDM optical measurement logic (hoisted 2026-09-02) ==========
+ * The shell samples the RTL8290B over I2C (channel select, latch strobe,
+ * settle sleeps) and hands the raw values here; these functions decide what
+ * the samples MEAN. div_u64/div64_u64 are pure math helpers (math64.h), needed
+ * because MIPS32 has no libgcc 64-bit divide -- they are not a kernel service
+ * in the hoist-rule sense (no device, no state, no time). */
+#include <linux/math64.h>
+
+#define BOSA_ADC_VREF_UV	3300000		/* stock 3.3V ADC full-scale (0x325aa0) */
+
+/* Faithful RX power code (0.1uW) from the raw ratiometric ADC samples
+ * (europa_drv.ko rtl8290b_rxPower_get + _rtl8290b_rx_power_cal). The shell
+ * passes rssi = SD-ADC at the single in-range gain (0xC2) and the two on-die
+ * reference taps (0x314 low anchor, 0x305 span endpoint). All 64-bit divides
+ * go through the kernel helpers (no __divdi3 on MIPS32); /8192 and /4096 are
+ * shifts.
+ *
+ * ★ A FLOOR CONSTANT IS NOT A MEASUREMENT.
+ *
+ * The three sentinel exits used to return 11, the same value the tail clamps a
+ * genuine faint reading to -- and bosa_code_to_cdbm(11) is EXACTLY -2985,
+ * so /proc/gpon published "rx=-29.85dBm" whenever the I2C bus was dead.
+ * That constant was read as an optical measurement in three separate
+ * project documents. It is now BOSA_RX_CODE_NA, which the printers render
+ * as "n/a"; only the tail clamp still returns a real (floored) 11.
+ *
+ * tap_hi <= tap_lo is the direct dead-bus witness: a NACKing bus makes
+ * the shell's bosa_read24() return 0 and a floating bus returns 0xffffff, so
+ * both reference taps read alike. The old code papered over it with span = 1,
+ * manufacturing a denominator out of a failed read.
+ */
+u32 bosa_rx_code_calc(u32 rssi, u32 tap_lo, u32 tap_hi,
+		      const struct bosa_optical_cal *cal)
+{
+	u32 span;
+	u64 v_uv, irssi, code;
+	u32 s1, q;
+
+	if (tap_hi <= tap_lo)			/* dead/floating I2C: taps read alike */
+		return BOSA_RX_CODE_NA;
+	span = tap_hi - tap_lo;
+	if (rssi <= tap_lo)			/* below the low reference tap        */
+		return BOSA_RX_CODE_NA;
+	v_uv = div64_u64((u64)(rssi - tap_lo) * BOSA_ADC_VREF_UV, span);
+	if (v_uv <= cal->rx_vthr)		/* at/below the dark level -> no light */
+		return BOSA_RX_CODE_NA;
+	irssi = div64_u64((u64)(v_uv - cal->rx_vthr) * 1000 * (cal->rx_r1 + cal->rx_r2),
+			  (u64)cal->rx_r1 * cal->rx_r2);
+	s1 = (irssi < 65536) ? 10 : 100;
+	q  = (u32)div64_u64(irssi, s1);
+	code = (((u64)cal->rx_poly_b * q) >> 13) * s1 + ((1000u * (u32)cal->rx_poly_c) >> 12);
+	code = div64_u64(code, 100);
+	return code < 11 ? 11 : (u32)code;
+}
+
+/* Module temperature in deci-degC from 14 raw (0x302, 0x303) register pairs.
+ * Kelvin code assembly (a[7:0]<<1 | b[7], 233..383 K = -40..+110 C), per-sample
+ * clamp (catches torn/glitch reads, e.g. -292 C), sort, drop 2 low + 2 high,
+ * mean the middle 10, minus the per-board Kelvin trim (stock
+ * rtl8290b_temperature_get; stock stores SFF-8472 1/256 C). A negative sample
+ * is a failed I2C read: INT_MIN, the "no reading" sentinel -- the check is
+ * repeated here (the shell already aborts its sampling loop) so this function
+ * is total over any input a host fuzzer hands it. */
+s32 bosa_temp_dc_calc(const int *a, const int *b, s16 temp_off)
+{
+	u16 s[14];
+	u32 sum = 0;
+	int i, j;
+
+	for (i = 0; i < 14; i++) {
+		u16 code;
+
+		if (a[i] < 0 || b[i] < 0)
+			return INT_MIN;
+		code = ((u16)(a[i] & 0xff) << 1) | ((b[i] >> 7) & 1);
+		if (code < 233) code = 233;
+		if (code > 383) code = 383;
+		s[i] = code;
+	}
+	for (i = 0; i < 13; i++)
+		for (j = 0; j < 13 - i; j++)
+			if (s[j + 1] < s[j]) { u16 t = s[j]; s[j] = s[j + 1]; s[j + 1] = t; }
+	for (i = 2; i < 12; i++)
+		sum += s[i];
+	sum /= 10;
+	return ((int)sum - temp_off - 273) * 10;
+}
+
+/* Laser bias current in micro-amps from the raw (0x321, 0x322) register pair.
+ * 12-bit monitor code (h[7:0]<<4 | l[3:0]), full-scale ~100 mA at code 8192
+ * (stock A2 word is 2 uA/LSB). A negative input is a failed read -> 0. */
+u32 bosa_bias_ua_calc(int h, int l)
+{
+	u32 code12;
+
+	if (h < 0 || l < 0)
+		return 0;
+	code12 = ((u32)(h & 0xff) << 4) | (u32)(l & 0x0f);
+	return (u32)div_u64((u64)code12 * 100000, 8192) * 2;
+}
+
+/* One TX-power sample's contribution to the 10-sample accumulator
+ * (europa_drv update_ddmi_tx_power chain): MPD-minus-dark voltage -> power
+ * code c (the /1374 slope and +50 offset), bias CLASSIFICATION of iavg into 5
+ * classes, range compensation shift, and the shifted result. vmpd and dark are
+ * millivolts from the shell's SD-ADC ch2 sequence; iavg is 0x23A[7:0], range
+ * is 0x246[7:6]. */
+u32 bosa_tx_sample_contrib(s32 vmpd, s32 dark, int iavg, int range)
+{
+	s32 c = (((vmpd - dark) * 1000 / 1374) >> 4) + 50;
+	int cls, shift;
+
+	if (c < 0)
+		c = 0;
+	cls   = iavg < 64 ? 0 : iavg < 96 ? 1 : iavg < 128 ? 2 : iavg < 160 ? 3 : 4;
+	shift = cls - (range == 1 ? 1 : range == 2 ? 2 : 0);
+	return shift >= 0 ? (u32)c << shift : (u32)c >> -shift;
+}
+
+/* Fold the accumulated TX sample contributions into the per-board 0.1uW word:
+ * word = (avg*slope*10)>>8 + (offset*10>>5). The caller feeds the word to
+ * bosa_code_to_cdbm for centi-dBm. n must be >= 1 (the shell returns its
+ * "no reading" sentinel when no sample survived). */
+u32 bosa_tx_word_calc(u64 sum, int n, s32 tx_slope, s32 tx_offset)
+{
+	return (u32)((((u64)div_u64(sum, n) * tx_slope * 10) >> 8) +
+		     ((tx_offset * 10) >> 5));
+}
+
+/* ===== packed pi-register array addressing (hoisted 2026-09-02) =========
+ * PACKING CORRECTED 2026-06-13 (from the stock array-field-write routine):
+ * the reg-array helper packs entries `entries_per_word = 32/bits` PER 32-bit
+ * WORD, word-aligned, leaving the top (32 - entries_per_word*bits) bits of each
+ * word UNUSED. A field NEVER straddles a word boundary. So:
+ *   epw   = 32 / bits
+ *   word  = idx / epw          (byte addr = base + word*4)
+ *   shift = (idx % epw) * bits
+ * The OLD code used CONTIGUOUS bit-packing (bit = idx*bits) which is only
+ * correct when bits divides 32 evenly (1b, 2b, 4b). For the 7-bit SID2QID
+ * array it addressed the wrong word: SID 64 -> 0x2130 (== HW SID 56's slot)
+ * instead of the true 0x2138. That single off-by-one-word bug pointed the OMCI
+ * SID-64 classify entry at a data flow's queue, so the US-NIC never classified
+ * upstream OMCI to its T-CONT16/q0 -> the OLT never received the MIB-upload.
+ * (Matches stock: SID 64 -> base 0x20f8 + 16*4 = 0x2138.) This is the same
+ * class as l34_field_set: a self-consistent wrong offset survives every
+ * readback, so the addressing lives HERE, x86-testable, and set/get share it.
+ * bits must be 1..32 (epw = 32/bits; bits = 0 is a caller bug). */
+struct pi_packed_slot pi_packed_locate(u32 base, unsigned int idx,
+				       unsigned int bits)
+{
+	unsigned int epw = 32u / bits;		/* entries per 32-bit word (top bits wasted) */
+	struct pi_packed_slot slot;
+
+	slot.reg   = base + (idx / epw) * 4;
+	slot.shift = (idx % epw) * bits;
+	slot.mask  = (bits >= 32) ? 0xffffffffu : ((1u << bits) - 1);
+	return slot;
+}
+
+/* Insert `val` into its slot inside the sampled 32-bit word; the shell writes
+ * the result back (read-modify-write stays at the register). */
+u32 pi_packed_insert(u32 word, const struct pi_packed_slot *slot, u32 val)
+{
+	return (word & ~(slot->mask << slot->shift)) |
+	       ((val & slot->mask) << slot->shift);
+}
+
+/* Extract the slot's field from the sampled 32-bit word. */
+u32 pi_packed_extract(u32 word, const struct pi_packed_slot *slot)
+{
+	return (word >> slot->shift) & slot->mask;
+}

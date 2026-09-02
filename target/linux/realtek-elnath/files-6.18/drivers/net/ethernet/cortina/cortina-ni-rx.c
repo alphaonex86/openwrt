@@ -2470,19 +2470,6 @@ static void cortina_ni_rx_mc_group_init(struct cortina_ni *ni)
  * 0xf4300000 window).  Exported for the flow-offload next-hop path.
  */
 /*
- * Pack a MAC into the FDB key words (aal __aal_mac_2_fdb_data; vid/scind/dot1p
- * = 0) - shared by the append and the lookup-only path below so both hash to
- * the same bucket.
- */
-static void cortina_ni_l2fe_fdb_key(const u8 *mac, u32 *d3, u32 *d2, u32 *d1)
-{
-	*d3 = (mac[0] >> 5) & 0x7;
-	*d2 = ((u32)(mac[0] & 0x1f) << 27) | ((u32)mac[1] << 19) |
-	      ((u32)mac[2] << 11) | ((u32)mac[3] << 3) | ((mac[4] >> 5) & 0x7);
-	*d1 = (u32)(((mac[4] & 0x1f) << 8) | mac[5]) << 19;
-}
-
-/*
  * Issue one OP_READ (look-up) for the packed key and return the 13-bit entry
  * index, or -1 when the key is not present / the engine times out.  DATA0 is
  * deliberately NOT written here: on a HIT the engine returns the matched
@@ -3036,6 +3023,36 @@ static void cortina_ni_rx_l2tm_es_init(struct cortina_ni *ni)
 }
 
 /*
+ * A register RUN: `count` consecutive u32 registers (stride 4) starting at
+ * NI-window offset `base`, every one written with the same `val`.  The stock
+ * register-image tables below were flat {off, val} lists - 142 and 149 entries
+ * of bare numbers; as runs they keep the identical values and the identical
+ * write ORDER (the expansion walks runs in declaration order), verified
+ * element-by-element against the flat originals when they were converted.
+ */
+struct cortina_ni_reg_run {
+	u16 base;
+	u16 count;
+	u32 val;
+};
+
+/* Expand `runs` in declaration order: for each, write `val` to `count`
+ * consecutive registers from `base`.  Returns how many registers were
+ * written, so a caller can log the expanded count, not the run count. */
+static unsigned int cortina_ni_rx_write_runs(struct cortina_ni *ni,
+					     const struct cortina_ni_reg_run *runs,
+					     unsigned int nruns)
+{
+	unsigned int i, k, wrote = 0;
+
+	for (i = 0; i < nruns; i++)
+		for (k = 0; k < runs[i].count; k++, wrote++)
+			writel(runs[i].val,
+			       ni_base(ni) + runs[i].base + 4 * k);
+	return wrote;
+}
+
+/*
  * ★★ Deep-queue / central-buffer SCHEDULER init (L2TE_CB + DQSCH).  Tier-1 stock
  * (stock_l2tm_deepq_2000_2fff.txt) populates this whole block; our driver never
  * touched it, so a deep_q=1 frame is enqueued into the central buffer but the
@@ -3043,149 +3060,77 @@ static void cortina_ni_rx_l2tm_es_init(struct cortina_ni *ni)
  * replicate stock's DIRECT threshold regs verbatim + the per-VOQ threshold
  * indirect tables.  (Counters/status and the policer block are NOT touched.)
  */
-static const struct { u16 off; u32 val; } cortina_ni_deepq_cb_cfg[] = {
-	{ 0x2364, 0x000600ffu },
-	{ 0x237c, 0x000600ffu },
-	{ 0x23a0, 0x000600ffu },
-	{ 0x23b8, 0x01010101u },
-	{ 0x23bc, 0x01010101u },
-	{ 0x23c0, 0x01010101u },
-	{ 0x23c4, 0x01000101u },
-	{ 0x23c8, 0x00000014u },
-	{ 0x23cc, 0x00000740u },
-	{ 0x23d0, 0x00003fffu },
-	{ 0x23e4, 0xffffffffu },
-	{ 0x23e8, 0xffffffffu },
-	{ 0x23ec, 0xffffffffu },
-	{ 0x23f0, 0xffffffffu },
-	{ 0x23f4, 0xffffffffu },
-	{ 0x2404, 0x0700000fu },
-	{ 0x2410, 0x8700f000u },
-	{ 0x2414, 0x000007ffu },
-	{ 0x241c, 0x20000f00u },
-	{ 0x2500, 0x00000500u },
-	{ 0x2504, 0x00000502u },
-	{ 0x2508, 0x00000502u },
-	{ 0x250c, 0x00000502u },
-	{ 0x2510, 0x00000502u },
-	{ 0x2514, 0x00000502u },
-	{ 0x2518, 0x00000502u },
-	{ 0x251c, 0x00000502u },
-	{ 0x2520, 0x00000502u },
-	{ 0x2524, 0x00000502u },
-	{ 0x2528, 0x00000502u },
-	{ 0x252c, 0x00000502u },
-	{ 0x2530, 0x00000502u },
-	{ 0x2534, 0x00000502u },
-	{ 0x2538, 0x00000502u },
-	{ 0x253c, 0x00000502u },
-	{ 0x2540, 0x4000000au },
-	{ 0x2544, 0x00000064u },
-	{ 0x2548, 0x00017c01u },
-	{ 0x254c, 0x900005f0u },
-	{ 0x2550, 0x00000502u },
-	{ 0x2554, 0x00000502u },
-	{ 0x2558, 0x00000502u },
-	{ 0x255c, 0x00000502u },
-	{ 0x2560, 0x00000502u },
-	{ 0x2564, 0x00000502u },
-	{ 0x2568, 0x00000502u },
-	{ 0x256c, 0x00000502u },
-	{ 0x2570, 0x00000502u },
-	{ 0x2574, 0x00000502u },
-	{ 0x2578, 0x00000502u },
-	{ 0x257c, 0x00000502u },
-	{ 0x2580, 0x00000502u },
-	{ 0x2584, 0x00000502u },
-	{ 0x2588, 0x00000502u },
-	{ 0x258c, 0x00000502u },
-	{ 0x2590, 0x00000502u },
-	{ 0x2594, 0x00000502u },
-	{ 0x2598, 0x00000502u },
-	{ 0x259c, 0x40000006u },
-	{ 0x25a0, 0x00000040u },
-	{ 0x25a4, 0x7ffff9ffu },
-	{ 0x25a8, 0xfdffffe7u },
-	{ 0x25ac, 0x00000502u },
-	{ 0x25b0, 0x00000502u },
-	{ 0x25b4, 0x00000502u },
-	{ 0x25b8, 0x00000502u },
-	{ 0x25bc, 0x00000502u },
-	{ 0x25c0, 0x00000502u },
-	{ 0x25c4, 0x00000502u },
-	{ 0x25c8, 0x00000502u },
-	{ 0x25cc, 0x00000502u },
-	{ 0x25d0, 0x00000502u },
-	{ 0x25d4, 0x00000502u },
-	{ 0x25f4, 0x2ff3e723u },
-	{ 0x25f8, 0x000001f3u },
-	{ 0x25fc, 0x001fffffu },
-	{ 0x2600, 0x001fffffu },
-	{ 0x2604, 0x001fffffu },
-	{ 0x2608, 0x001fffffu },
-	{ 0x260c, 0xdc0087c0u },
-	{ 0x2700, 0x14141414u },
-	{ 0x2714, 0x0000007cu },
-	{ 0x2718, 0x40000006u },
-	{ 0x271c, 0x3ffffe01u },
-	{ 0x2720, 0x01ffffe7u },
-	{ 0x2748, 0x001fffffu },
-	{ 0x274c, 0x2ff3e723u },
-	{ 0x2750, 0x000001f3u },
-	{ 0x2d7c, 0x02000010u },
-	{ 0x2d80, 0x7fff7fffu },
-	{ 0x2d84, 0x03000010u },
-	{ 0x2d88, 0x7fff7fffu },
-	{ 0x2d8c, 0x7fff3fffu },
-	{ 0x2d90, 0x7fff7fffu },
-	{ 0x2d94, 0x7fff3fffu },
-	{ 0x2d98, 0x7fff7fffu },
-	{ 0x2db0, 0x00000002u },
-	{ 0x2db4, 0x4000000fu },
-	{ 0x2db8, 0x8e308000u },
-	{ 0x2dcc, 0x0e200020u },
-	{ 0x2dd0, 0x00200010u },
-	{ 0x2dd4, 0x00200010u },
-	{ 0x2dd8, 0x00200010u },
-	{ 0x2ddc, 0x00200010u },
-	{ 0x2de0, 0x00200010u },
-	{ 0x2de4, 0x00200010u },
-	{ 0x2de8, 0x00200010u },
-	{ 0x2dec, 0x00200010u },
-	{ 0x2df4, 0x0c000100u },
-	{ 0x2df8, 0x0c000100u },
-	{ 0x2dfc, 0x0c000100u },
-	{ 0x2e00, 0x0c000100u },
-	{ 0x2e08, 0x02800110u },
-	{ 0x2e0c, 0x01800110u },
-	{ 0x2e10, 0x01800110u },
-	{ 0x2e14, 0x01800110u },
-	{ 0x2e18, 0x01800110u },
-	{ 0x2e1c, 0x01800110u },
-	{ 0x2e20, 0x01800110u },
-	{ 0x2e24, 0x01800110u },
-	{ 0x2e28, 0x02800110u },
-	{ 0x2e2c, 0x01800060u },
-	{ 0x2e30, 0x01800060u },
-	{ 0x2e34, 0x01800060u },
-	{ 0x2e38, 0x01800060u },
-	{ 0x2e3c, 0x01800060u },
-	{ 0x2e40, 0x01800060u },
-	{ 0x2e44, 0x01800060u },
-	{ 0x2e58, 0x00007fffu },
-	{ 0x2e5c, 0x00200020u },
-	{ 0x2e60, 0x05200020u },
-	{ 0x2e64, 0x3fff3fffu },
-	{ 0x2e68, 0x3fff3fffu },
-	{ 0x2ec8, 0x7fff7fffu },
-	{ 0x2ecc, 0x7fff7fffu },
-	{ 0x2ed0, 0x7fff7fffu },
-	{ 0x2ed4, 0x7fff7fffu },
-	{ 0x2ed8, 0x7fff7fffu },
-	{ 0x2edc, 0x7fff7fffu },
-	{ 0x2ee0, 0x7fff7fffu },
-	{ 0x2ee4, 0x7fff7fffu },
-	{ 0x2ee8, 0x7fff7fffu },
+static const struct cortina_ni_reg_run cortina_ni_deepq_cb_cfg[] = {
+	/* L2TM ES per-scheduler cfg words for instances 8, 10, 13 (instance 8 =
+	 * CA_NI_L2TM_ES_PORT_L3QM, the port that drains the deep queue); low byte
+	 * 0xff = the voq_en field l2tm_es_init re-asserts */
+	{ CA_NI_L2TM_ES_SCH_CFG(8), 1, 0x000600ffu },
+	{ CA_NI_L2TM_ES_SCH_CFG(10), 1, 0x000600ffu },
+	{ CA_NI_L2TM_ES_SCH_CFG(13), 1, 0x000600ffu },
+	{ 0x23b8, 3, 0x01010101u },	/* ..0x23c0 */
+	{ 0x23c4, 1, 0x01000101u },
+	{ 0x23c8, 1, 0x00000014u },
+	{ 0x23cc, 1, 0x00000740u },
+	{ 0x23d0, 1, 0x00003fffu },
+	{ 0x23e4, 5, 0xffffffffu },	/* ..0x23f4 */
+	{ 0x2404, 1, 0x0700000fu },
+	{ 0x2410, 1, 0x8700f000u },
+	{ 0x2414, 1, 0x000007ffu },
+	{ 0x241c, 1, 0x20000f00u },
+	{ 0x2500, 1, 0x00000500u },
+	{ 0x2504, 15, 0x00000502u },	/* ..0x253c */
+	{ 0x2540, 1, 0x4000000au },
+	{ 0x2544, 1, 0x00000064u },
+	{ 0x2548, 1, 0x00017c01u },
+	{ 0x254c, 1, 0x900005f0u },
+	{ 0x2550, 19, 0x00000502u },	/* ..0x2598 */
+	{ 0x259c, 1, 0x40000006u },
+	{ 0x25a0, 1, 0x00000040u },
+	{ 0x25a4, 1, 0x7ffff9ffu },
+	{ 0x25a8, 1, 0xfdffffe7u },
+	{ 0x25ac, 11, 0x00000502u },	/* ..0x25d4 */
+	{ 0x25f4, 1, 0x2ff3e723u },
+	{ 0x25f8, 1, 0x000001f3u },
+	{ 0x25fc, 4, 0x001fffffu },	/* ..0x2608 */
+	{ 0x260c, 1, 0xdc0087c0u },
+	{ 0x2700, 1, 0x14141414u },
+	{ 0x2714, 1, 0x0000007cu },
+	{ 0x2718, 1, 0x40000006u },
+	{ 0x271c, 1, 0x3ffffe01u },
+	{ 0x2720, 1, 0x01ffffe7u },
+	{ 0x2748, 1, 0x001fffffu },
+	{ 0x274c, 1, 0x2ff3e723u },
+	{ 0x2750, 1, 0x000001f3u },
+	/* 0x2d80..0x2d98: DIRECT DQSCH regs whose 0x7fff7fff/0x7fff3fff MATCH
+	 * stock - NOT the indexed VOQ profile tables (see the "TWO different
+	 * things at 0x2d../0x2e.." comment below) */
+	{ 0x2d7c, 1, 0x02000010u },
+	{ 0x2d80, 1, 0x7fff7fffu },
+	{ 0x2d84, 1, 0x03000010u },
+	{ 0x2d88, 1, 0x7fff7fffu },
+	{ 0x2d8c, 1, 0x7fff3fffu },
+	{ 0x2d90, 1, 0x7fff7fffu },
+	{ 0x2d94, 1, 0x7fff3fffu },
+	{ 0x2d98, 1, 0x7fff7fffu },
+	{ 0x2db0, 1, 0x00000002u },
+	/* stock's RESTING values of the CB port-freecnt indirect ACCESS/DATA
+	 * pair; step (2) of deepq_sched_init later drives the same pair
+	 * properly, once per port */
+	{ CA_NI_L2TM_CB_PORT_FREECNT_ACCESS, 1, 0x4000000fu },
+	{ CA_NI_L2TM_CB_PORT_FREECNT_DATA, 1, 0x8e308000u },
+	{ 0x2dcc, 1, 0x0e200020u },
+	{ 0x2dd0, 8, 0x00200010u },	/* ..0x2dec */
+	{ 0x2df4, 4, 0x0c000100u },	/* ..0x2e00 */
+	{ 0x2e08, 1, 0x02800110u },
+	{ 0x2e0c, 7, 0x01800110u },	/* ..0x2e24 */
+	{ 0x2e28, 1, 0x02800110u },
+	{ 0x2e2c, 7, 0x01800060u },	/* ..0x2e44 */
+	{ 0x2e58, 1, 0x00007fffu },
+	{ 0x2e5c, 1, 0x00200020u },
+	{ 0x2e60, 1, 0x05200020u },
+	{ 0x2e64, 2, 0x3fff3fffu },	/* ..0x2e68 */
+	/* 0x2ec8..0x2ee8: direct 0x7fff7fff words, stock-matching (see below) */
+	{ 0x2ec8, 9, 0x7fff7fffu },	/* ..0x2ee8 */
 };
 
 /*
@@ -3359,9 +3304,8 @@ static void cortina_ni_rx_deepq_sched_init(struct cortina_ni *ni)
 	unsigned int i;
 
 	/* (1) DIRECT threshold/watermark/credit/per-queue config (stock resting values) */
-	for (i = 0; i < ARRAY_SIZE(cortina_ni_deepq_cb_cfg); i++)
-		writel(cortina_ni_deepq_cb_cfg[i].val,
-		       ni_base(ni) + cortina_ni_deepq_cb_cfg[i].off);
+	cortina_ni_rx_write_runs(ni, cortina_ni_deepq_cb_cfg,
+				 ARRAY_SIZE(cortina_ni_deepq_cb_cfg));
 
 	/* (2) CB per-port free-buffer count (indexed, all 48 ports) - without it the CB
 	 * has 0 free deep-queue buffers and drops the frame at the L2TM->CB enqueue. */
@@ -4227,7 +4171,7 @@ static void cortina_ni_rx_stock_routing(struct cortina_ni *ni)
  * credit; the per-queue CPU-EPP-FIFO profile-sel (0x66d0-0x67c8) + AXI-attr
  * access + misc QM cfg complete the delivery.  Written before EQ_CFG_LOAD so the
  * EQ-pool words latch.  (Minimize AFTER CPU-RX is proven working.) */
-static const struct { u16 off; u32 val; } cortina_ni_stock_qm_cfg[] = {
+static const struct cortina_ni_reg_run cortina_ni_stock_qm_cfg[] = {
 	/* ★ EQ8/EQ12 pool-enable INTENTIONALLY OMITTED (they HUNG the CPU): stock's
 	 * C2 (EQ8=0x66ec / EQ12=0xff02) has refill_en=1 (FBM auto-refill from EQ6),
 	 * but we have no FBM/EQ6, so enabling them + EQ_CFG_LOAD triggers a hanging
@@ -4238,27 +4182,9 @@ static const struct { u16 off; u32 val; } cortina_ni_stock_qm_cfg[] = {
 	 * pa_req>0 - that is the RMU's empty-buffer source for admission.  NB: C2 must
 	 * be 0x0D (cpu_eq=1), NOT 0xff00 - 0xff00 has cpu_eq=0 so the EQM never issues
 	 * EQM_PA_REQ and every pushed buffer lands nowhere (pa_req stuck at 0). */
-	{ 0x656c, 0x01010101 }, { 0x6570, 0x01010101 }, { 0x6574, 0x01010101 },
-	{ 0x6578, 0x01010101 }, { 0x657c, 0x01010101 }, { 0x6580, 0x01010101 },
-	{ 0x6584, 0x01010101 }, { 0x6588, 0x01010101 }, { 0x658c, 0x01010101 },
-	{ 0x6590, 0x01010101 }, { 0x6594, 0x01010101 }, { 0x6598, 0x01010101 },
-	{ 0x659c, 0x01010101 }, { 0x65a0, 0x01010101 }, { 0x65a4, 0x01010101 },
-	{ 0x65a8, 0x01010101 }, { 0x65ac, 0x01010101 }, { 0x65b0, 0x01010101 },
-	{ 0x65b4, 0x01010101 }, { 0x65b8, 0x01010101 }, { 0x65bc, 0x01010101 },
-	{ 0x65c0, 0x01010101 }, { 0x65c4, 0x01010101 }, { 0x65c8, 0x01010101 },
-	{ 0x65cc, 0x01010101 }, { 0x65d0, 0x01010101 }, { 0x65d4, 0x01010101 },
-	{ 0x65d8, 0x01010101 }, { 0x65dc, 0x01010101 }, { 0x65e0, 0x01010101 },
-	{ 0x65e4, 0x01010101 }, { 0x65e8, 0x01010101 }, { 0x65ec, 0x01010101 },
-	{ 0x65f0, 0x01010101 }, { 0x65f4, 0x01010101 }, { 0x65f8, 0x01010101 },
-	{ 0x65fc, 0x01010101 }, { 0x6600, 0x01010101 }, { 0x6604, 0x01010101 },
-	{ 0x6608, 0x01010101 }, { 0x660c, 0x01010101 }, { 0x6610, 0x01010101 },
-	{ 0x6614, 0x01010101 }, { 0x6618, 0x01010101 }, { 0x661c, 0x01010101 },
-	{ 0x6620, 0x01010101 }, { 0x6624, 0x01010101 }, { 0x6628, 0x01010101 },
-	{ 0x662c, 0x01010101 }, { 0x6630, 0x01010101 }, { 0x6634, 0x01010101 },
-	{ 0x6638, 0x01010101 }, { 0x663c, 0x01010101 }, { 0x6640, 0x01010101 },
-	{ 0x6644, 0x01010101 }, { 0x6648, 0x01010101 }, { 0x664c, 0x01010101 },
-	{ 0x6650, 0x01010101 }, { 0x6654, 0x01010101 }, { 0x6658, 0x01010101 },
-	{ 0x665c, 0x01010101 }, { 0x6660, 0x01010101 },
+	/* DWRR VOQ weights 0x656c..0x6660 (stock aal_l3qm_config_DWRR): scheduler
+	 * credit for every CPU VOQ */
+	{ 0x656c, 62, 0x01010101 },	/* ..0x6660 */
 	/* ★ build17 THE DRAIN-DELIVERY block (0x6664-0x66cc) stock programs but our
 	 * table SKIPPED (it jumped 0x6660 -> 0x66d0), leaving it 0.  Stock ground-truth
 	 * (stock_qm_epp_rmu.txt + live devmem): with these 0, the QM never pushes a
@@ -4268,40 +4194,30 @@ static const struct { u16 off; u32 val; } cortina_ni_stock_qm_cfg[] = {
 	 * deliver a drained frame into the CPU-EPP FIFO/ring (distinct from the DWRR
 	 * credit 0x65fc-0x6660 and the FIFO_CFG 0x66d0+ we already set).  All values
 	 * tier-1 from the stock golden.  (0x6680-0x66a0 read 0 on stock too - skip.) */
-	{ 0x6664, 0x11111111 }, { 0x6668, 0x11111111 }, { 0x666c, 0x11111111 },
-	{ 0x6670, 0x11111111 }, { 0x6674, 0x11111111 }, { 0x6678, 0x11111111 },
-	{ 0x667c, 0x000C0114 },
-	{ 0x66a4, 0xE0008001 }, { 0x66a8, 0xE0008001 }, { 0x66ac, 0xE0008001 },
-	{ 0x66b0, 0xE0008001 }, { 0x66b4, 0xE00040F1 }, { 0x66b8, 0x20006801 },
-	{ 0x66bc, 0x2000C801 }, { 0x66c0, 0xE0080001 }, { 0x66cc, 0x00000004 },
-	{ 0x66d0, 0x00000004 }, { 0x66d4, 0x00000004 }, { 0x66d8, 0x00000004 },
-	{ 0x66dc, 0x00000004 }, { 0x66e0, 0x00000004 }, { 0x66e4, 0x00000004 },
-	{ 0x66e8, 0x00000004 }, { 0x66ec, 0x00000004 }, { 0x66f0, 0x00000004 },
-	{ 0x66f4, 0x00000004 }, { 0x66f8, 0x00000004 }, { 0x66fc, 0x00000004 },
-	{ 0x6700, 0x00000004 }, { 0x6704, 0x00000004 }, { 0x6708, 0x00000004 },
-	{ 0x670c, 0x00000006 }, { 0x6710, 0x00000005 }, { 0x6714, 0x00000005 },
-	{ 0x6718, 0x00000005 }, { 0x671c, 0x00000006 }, { 0x6720, 0x00000005 },
-	{ 0x6724, 0x00000005 }, { 0x6728, 0x00000005 }, { 0x672c, 0x00000007 },
-	{ 0x6730, 0x00000007 }, { 0x6734, 0x00000007 }, { 0x6738, 0x00000007 },
-	{ 0x673c, 0x00000007 }, { 0x6740, 0x00000007 }, { 0x6744, 0x00000007 },
-	{ 0x6748, 0x00000007 }, { 0x674c, 0x00000007 }, { 0x6750, 0x00000007 },
-	{ 0x6754, 0x00000007 }, { 0x6758, 0x00000007 }, { 0x675c, 0x00000007 },
-	{ 0x6760, 0x00000007 }, { 0x6764, 0x00000007 }, { 0x6768, 0x00000007 },
-	{ 0x676c, 0x00000007 }, { 0x6770, 0x00000007 }, { 0x6774, 0x00000007 },
-	{ 0x6778, 0x00000007 }, { 0x677c, 0x00000007 }, { 0x6780, 0x00000007 },
-	{ 0x6784, 0x00000007 }, { 0x6788, 0x00000007 }, { 0x678c, 0x00000007 },
-	{ 0x6790, 0x00000007 }, { 0x6794, 0x00000007 }, { 0x6798, 0x00000007 },
-	{ 0x679c, 0x00000007 }, { 0x67a0, 0x00000007 }, { 0x67a4, 0x00000007 },
-	{ 0x67a8, 0x00000007 }, { 0x67ac, 0x00000007 }, { 0x67b0, 0x00000007 },
-	{ 0x67b4, 0x00000007 }, { 0x67b8, 0x00000007 }, { 0x67bc, 0x00000007 },
-	{ 0x67c0, 0x00000007 }, { 0x67c4, 0x00000007 }, { 0x67c8, 0x00000007 },
+	{ 0x6664, 6, 0x11111111 },	/* ..0x6678 */
+	{ 0x667c, 1, 0x000c0114 },
+	/* the eight per-FIFO delivery descriptors, profiles 0..7 */
+	{ CA_NI_QM_CPU_EPP_FIFO_PROF(0), 4, 0xe0008001 },	/* ..0x66b0 */
+	{ CA_NI_QM_CPU_EPP_FIFO_PROF(4), 1, 0xe00040f1 },
+	{ CA_NI_QM_CPU_EPP_FIFO_PROF(5), 1, 0x20006801 },
+	{ CA_NI_QM_CPU_EPP_FIFO_PROF(6), 1, 0x2000c801 },
+	{ CA_NI_QM_CPU_EPP_FIFO_PROF(7), 1, 0xe0080001 },
+	/* per-queue CPU-EPP-FIFO cfg: CA_NI_QM_CPU_EPP_FIFO_CFG(p, q), 64 words
+	 * covering ports 0..7 x queues 0..7 (0x66cc..0x67c8) */
+	{ CA_NI_QM_CPU_EPP_FIFO_CFG(0, 0), 16, 0x00000004 },	/* ..0x6708: ports 0-1, q0..7 */
+	{ CA_NI_QM_CPU_EPP_FIFO_CFG(2, 0), 1, 0x00000006 },
+	{ CA_NI_QM_CPU_EPP_FIFO_CFG(2, 1), 3, 0x00000005 },	/* ..0x6718 */
+	{ CA_NI_QM_CPU_EPP_FIFO_CFG(2, 4), 1, 0x00000006 },
+	{ CA_NI_QM_CPU_EPP_FIFO_CFG(2, 5), 3, 0x00000005 },	/* ..0x6728 */
+	{ CA_NI_QM_CPU_EPP_FIFO_CFG(3, 0), 40, 0x00000007 },	/* ..0x67c8: ports 3-7, q0..7 */
 	/* ★ 0x67cc CONFIRMED TOXIC + REQUIRED: per-queue CPU-EPP-FIFO indirect COMMIT
 	 * (bit30) - hangs the CPU (AXI back-pressure) even with EQ13/14 populated.
 	 * Needed to bind queue->pool for RMU admission but can't be written cold.
 	 * EXCLUDED pending the safe precondition/sequence (Fable RE). */
 	/* SAFE QM config (added back): int-en / maps / misc - plain config, needed for
 	 * admission/delivery, no HW-trigger. */
-	{ 0x69b4, 0x80080000 }, { 0x69bc, 0x06061616 },
+	{ 0x69b4, 1, 0x80080000 },
+	{ 0x69bc, 1, 0x06061616 },
 	/* ★ 0x69bc corrected 0x06006666 -> stock 0x06061616 (fixes OUR own past
 	 * divergence - this word IS in our table).  NOTE (RE a4ee42, ca-ne.ko): the
 	 * rest of the RMU 0x6900-0x69fc block (0x6934/0x6988/0x698c/0x6994...) is NOT
@@ -4309,9 +4225,14 @@ static const struct { u16 off; u32 val; } cortina_ni_stock_qm_cfg[] = {
 	 * STATUS reg ca_ni_init_l3qm POLLS (bit30).  So we deliberately do NOT blind-write
 	 * them (a status/trigger write risks a regression that would confound the
 	 * drain-map fix); if ours truly differs there, hunt the clobber, don't poke. */
-	{ 0x69f8, 0x000000FF }, { 0x6a00, 0x0000FF00 },
-	{ 0x6110, 0x0000FFFF }, { 0x6118, 0x00000100 }, { 0x611c, 0x10000000 },
-	{ 0x6120, 0xE6D54F85 },
+	{ 0x69f8, 1, 0x000000ff },
+	{ CA_NI_QM_EPP_CPU_EGR_EN, 1, 0x0000ff00 },	/* 0x6a00 */
+	{ CA_NI_QM_EPP64_INT_EN0, 1, 0x0000ffff },	/* 0x6110 */
+	{ CA_NI_QM_EPP64_INT_EN2, 1, 0x00000100 },	/* 0x6118 */
+	/* 0x611c: the header names it CA_NI_QM_INT_SRC, eqm_readback prints it as
+	 * "refill_en" - two in-tree claims, unresolved, so the number stays */
+	{ 0x611c, 1, 0x10000000 },
+	{ 0x6120, 1, 0xe6d54f85 },
 	/* ★ EXCLUDED (hang triggers / board-specific DMA state): 0x67cc=0x4000000F
 	 * (bit30 per-queue indirect COMMIT) + the 0x69c4-0x69e0 block (0x0863A000 etc.
 	 * = STOCK's CPU-EPP ring/DMA addresses; ours live at 0x0bc48000 - replicating
@@ -4344,13 +4265,12 @@ static void cortina_ni_rx_eqm_readback(struct cortina_ni *ni, const char *label)
 
 static void __maybe_unused cortina_ni_rx_match_stock_qm(struct cortina_ni *ni)
 {
-	unsigned int k;
+	unsigned int wrote;
 
-	for (k = 0; k < ARRAY_SIZE(cortina_ni_stock_qm_cfg); k++)
-		writel(cortina_ni_stock_qm_cfg[k].val,
-		       ni_base(ni) + cortina_ni_stock_qm_cfg[k].off);
-	dev_info(ni->dev, "match-stock-qm: wrote %zu QM cfg regs (EQ8/12 pools, DWRR, per-queue, misc)\n",
-		 ARRAY_SIZE(cortina_ni_stock_qm_cfg));
+	wrote = cortina_ni_rx_write_runs(ni, cortina_ni_stock_qm_cfg,
+					 ARRAY_SIZE(cortina_ni_stock_qm_cfg));
+	dev_info(ni->dev, "match-stock-qm: wrote %u QM cfg regs (EQ8/12 pools, DWRR, per-queue, misc)\n",
+		 wrote);
 }
 
 static int cortina_ni_rx_eq_init(struct cortina_ni *ni)
@@ -5203,37 +5123,6 @@ static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
 
 /* 1 Hz self-rearming poll, stock cadence ("recover check first").  Runs
  * between open and stop; each pass is one register read unless faulted. */
-/* THE BACKOFF LADDER for the decoupled LAN bring-up.  The recovery worker
- * runs at 1 Hz, so these are seconds: every second for the first half
- * minute, then one in 8, then one a minute - FOREVER.  There is
- * deliberately no attempt ceiling: a bank that becomes lockable at minute
- * 40 (a slow PHY, a cable inserted later, a cold-boot race) must still be
- * picked up, and the cost of asking once a minute is one idempotent
- * register walk. */
-#define CA_NI_RX_BRINGUP_FAST_TICKS	30u	/* 1/s for the first 30 s */
-#define CA_NI_RX_BRINGUP_MID_TICKS	300u	/* then 1/8 s out to 5 min */
-#define CA_NI_RX_BRINGUP_MID_PERIOD	8u
-#define CA_NI_RX_BRINGUP_SLOW_PERIOD	60u	/* then once a minute, forever */
-
-static unsigned int cortina_ni_rx_bringup_period(const struct cortina_ni_rx *rx)
-{
-	if (rx->bringup_ticks <= CA_NI_RX_BRINGUP_FAST_TICKS)
-		return 1u;
-	if (rx->bringup_ticks <= CA_NI_RX_BRINGUP_MID_TICKS)
-		return CA_NI_RX_BRINGUP_MID_PERIOD;
-	return CA_NI_RX_BRINGUP_SLOW_PERIOD;
-}
-
-static bool cortina_ni_rx_bringup_due(const struct cortina_ni_rx *rx)
-{
-	unsigned int period = cortina_ni_rx_bringup_period(rx);
-
-	/* `bringup_ticks` has already been incremented for THIS tick, so tick
-	 * 1 is due (1 % 1 == 0) and the ladder never leaves a silent gap at a
-	 * phase boundary. */
-	return (rx->bringup_ticks % period) == 0u;
-}
-
 static void cortina_ni_rx_recovery_work(struct work_struct *work)
 {
 	struct cortina_ni_rx *rx = container_of(to_delayed_work(work),
@@ -5307,8 +5196,8 @@ static void cortina_ni_rx_recovery_work(struct work_struct *work)
 			dev_warn(ni->dev,
 				 "LAN bring-up still owed after %llu tick(s) (%llu attempt(s)); backing the cadence off to 1/%us - NOT giving up\n",
 				 rx->bringup_ticks, rx->bringup_calls,
-				 cortina_ni_rx_bringup_period(rx));
-		if (cortina_ni_rx_bringup_due(rx)) {
+				 cortina_ni_rx_bringup_period(rx->bringup_ticks));
+		if (cortina_ni_rx_bringup_due(rx->bringup_ticks)) {
 			rx->bringup_calls++;
 			cortina_ni_rx_link_up(ni);
 		}
@@ -5896,80 +5785,27 @@ static void cortina_ni_rx_dump_regs(struct seq_file *m, struct cortina_ni *ni)
 /* ★ QM+L2TM full-block offset sweep (ours-vs-stock diff hunt for the L2TM->QM
  * admit gate).  These are the ONLY mapped offsets in the NI window's QM/L2TM
  * region (proven by a stock devmem sweep - readl is SAFE); an offset OUTSIDE
- * this list is an unmapped hole that would fault.  Read-only. */
-static const u16 cortina_ni_qmdump_offs[] = {
-	0x2000, 0x2004, 0x2008, 0x200c, 0x2010, 0x2014, 0x2018, 0x201c, 0x2020, 0x2024, 0x2100, 0x2104,
-	0x2108, 0x210c, 0x2110, 0x2114, 0x2118, 0x211c, 0x2120, 0x2124, 0x2128, 0x212c, 0x2130, 0x2134,
-	0x2138, 0x213c, 0x2140, 0x2144, 0x2148, 0x214c, 0x2150, 0x2154, 0x2158, 0x215c, 0x2160, 0x2164,
-	0x2168, 0x216c, 0x2170, 0x2174, 0x2178, 0x217c, 0x2180, 0x2184, 0x2188, 0x218c, 0x2190, 0x2194,
-	0x2198, 0x219c, 0x21a0, 0x21a4, 0x21a8, 0x21ac, 0x21b0, 0x21b4, 0x2200, 0x2204, 0x2208, 0x220c,
-	0x2210, 0x2214, 0x2218, 0x221c, 0x2220, 0x2224, 0x2228, 0x222c, 0x2230, 0x2234, 0x2238, 0x223c,
-	0x2240, 0x2244, 0x2248, 0x224c, 0x2250, 0x2254, 0x2258, 0x225c, 0x2260, 0x2264, 0x2268, 0x226c,
-	0x2270, 0x2274, 0x2278, 0x227c, 0x2280, 0x2284, 0x2288, 0x228c, 0x2290, 0x2294, 0x2298, 0x229c,
-	0x22a0, 0x22a4, 0x22a8, 0x2300, 0x2304, 0x2308, 0x230c, 0x2310, 0x2314, 0x2318, 0x231c, 0x2320,
-	0x2324, 0x2328, 0x232c, 0x2330, 0x2334, 0x2338, 0x233c, 0x2340, 0x2344, 0x2348, 0x234c, 0x2350,
-	0x2354, 0x2358, 0x235c, 0x2360, 0x2364, 0x2368, 0x236c, 0x2370, 0x2374, 0x2378, 0x237c, 0x2380,
-	0x2384, 0x2388, 0x238c, 0x2390, 0x2394, 0x2398, 0x239c, 0x23a0, 0x23a4, 0x23a8, 0x23ac, 0x23b0,
-	0x23b4, 0x23b8, 0x23bc, 0x23c0, 0x23c4, 0x23c8, 0x23cc, 0x23d0, 0x23d4, 0x23d8, 0x23dc, 0x23e0,
-	0x23e4, 0x23e8, 0x23ec, 0x23f0, 0x23f4, 0x23f8, 0x23fc, 0x6000, 0x6004, 0x6008, 0x600c, 0x6100,
-	0x6104, 0x6108, 0x610c, 0x6110, 0x6114, 0x6118, 0x611c, 0x6120, 0x6124, 0x6128, 0x612c, 0x6130,
-	0x6134, 0x6138, 0x613c, 0x6140, 0x6144, 0x6148, 0x614c, 0x6150, 0x6154, 0x6158, 0x615c, 0x6160,
-	0x6164, 0x6168, 0x616c, 0x6170, 0x6174, 0x6178, 0x617c, 0x6180, 0x6184, 0x6188, 0x618c, 0x6190,
-	0x6194, 0x6198, 0x619c, 0x61a0, 0x61a4, 0x61a8, 0x61ac, 0x61b0, 0x61b4, 0x61b8, 0x61bc, 0x61c0,
-	0x61c4, 0x61c8, 0x61cc, 0x61d0, 0x61d4, 0x61d8, 0x61dc, 0x61e0, 0x61e4, 0x61e8, 0x61ec, 0x61f0,
-	0x61f4, 0x61f8, 0x61fc, 0x6200, 0x6204, 0x6208, 0x620c, 0x6210, 0x6214, 0x6218, 0x621c, 0x6220,
-	0x6224, 0x6228, 0x622c, 0x6230, 0x6234, 0x6238, 0x623c, 0x6240, 0x6244, 0x6248, 0x624c, 0x6250,
-	0x6254, 0x6258, 0x625c, 0x6260, 0x6264, 0x6268, 0x626c, 0x6270, 0x6274, 0x6278, 0x627c, 0x6280,
-	0x6284, 0x6288, 0x628c, 0x6290, 0x6294, 0x6298, 0x629c, 0x62a0, 0x62a4, 0x62a8, 0x62ac, 0x62b0,
-	0x62b4, 0x62b8, 0x62bc, 0x62c0, 0x62c4, 0x62c8, 0x62cc, 0x62d0, 0x62d4, 0x62d8, 0x62dc, 0x62e0,
-	0x62e4, 0x62e8, 0x62ec, 0x62f0, 0x62f4, 0x62f8, 0x62fc, 0x6300, 0x6304, 0x6308, 0x630c, 0x6310,
-	0x6314, 0x6318, 0x631c, 0x6320, 0x6324, 0x6328, 0x632c, 0x6330, 0x6334, 0x6338, 0x633c, 0x6340,
-	0x6344, 0x6348, 0x634c, 0x6350, 0x6354, 0x6358, 0x635c, 0x6360, 0x6364, 0x6368, 0x636c, 0x6370,
-	0x6374, 0x6378, 0x637c, 0x6380, 0x6384, 0x6388, 0x638c, 0x6390, 0x6394, 0x6398, 0x639c, 0x63a0,
-	0x63a4, 0x63a8, 0x63ac, 0x63b0, 0x63b4, 0x63b8, 0x63bc, 0x63c0, 0x63c4, 0x63c8, 0x63cc, 0x63d0,
-	0x63d4, 0x63d8, 0x63dc, 0x63e0, 0x63e4, 0x63e8, 0x63ec, 0x63f0, 0x63f4, 0x63f8, 0x63fc, 0x6400,
-	0x6404, 0x6408, 0x640c, 0x6410, 0x6414, 0x6418, 0x641c, 0x6420, 0x6424, 0x6428, 0x642c, 0x6430,
-	0x6434, 0x6438, 0x643c, 0x6440, 0x6444, 0x6448, 0x644c, 0x6450, 0x6454, 0x6458, 0x645c, 0x6460,
-	0x6464, 0x6468, 0x646c, 0x6470, 0x6474, 0x6478, 0x647c, 0x6480, 0x6484, 0x6488, 0x648c, 0x6490,
-	0x6494, 0x6498, 0x649c, 0x64a0, 0x64a4, 0x64a8, 0x64ac, 0x64b0, 0x64b4, 0x64b8, 0x64bc, 0x64c0,
-	0x64c4, 0x64c8, 0x64cc, 0x64d0, 0x64d4, 0x64d8, 0x64dc, 0x64e0, 0x64e4, 0x64e8, 0x64ec, 0x64f0,
-	0x64f4, 0x64f8, 0x64fc, 0x6500, 0x6504, 0x6508, 0x650c, 0x6510, 0x6514, 0x6518, 0x651c, 0x6520,
-	0x6524, 0x6528, 0x652c, 0x6530, 0x6534, 0x6538, 0x653c, 0x6540, 0x6544, 0x6548, 0x654c, 0x6550,
-	0x6554, 0x6558, 0x655c, 0x6560, 0x6564, 0x6568, 0x656c, 0x6570, 0x6574, 0x6578, 0x657c, 0x6580,
-	0x6584, 0x6588, 0x658c, 0x6590, 0x6594, 0x6598, 0x659c, 0x65a0, 0x65a4, 0x65a8, 0x65ac, 0x65b0,
-	0x65b4, 0x65b8, 0x65bc, 0x65c0, 0x65c4, 0x65c8, 0x65cc, 0x65d0, 0x65d4, 0x65d8, 0x65dc, 0x65e0,
-	0x65e4, 0x65e8, 0x65ec, 0x65f0, 0x65f4, 0x65f8, 0x65fc, 0x6600, 0x6604, 0x6608, 0x660c, 0x6610,
-	0x6614, 0x6618, 0x661c, 0x6620, 0x6624, 0x6628, 0x662c, 0x6630, 0x6634, 0x6638, 0x663c, 0x6640,
-	0x6644, 0x6648, 0x664c, 0x6650, 0x6654, 0x6658, 0x665c, 0x6660, 0x6664, 0x6668, 0x666c, 0x6670,
-	0x6674, 0x6678, 0x667c, 0x6680, 0x6684, 0x6688, 0x668c, 0x6690, 0x6694, 0x6698, 0x669c, 0x66a0,
-	0x66a4, 0x66a8, 0x66ac, 0x66b0, 0x66b4, 0x66b8, 0x66bc, 0x66c0, 0x66c4, 0x66c8, 0x66cc, 0x66d0,
-	0x66d4, 0x66d8, 0x66dc, 0x66e0, 0x66e4, 0x66e8, 0x66ec, 0x66f0, 0x66f4, 0x66f8, 0x66fc, 0x6700,
-	0x6704, 0x6708, 0x670c, 0x6710, 0x6714, 0x6718, 0x671c, 0x6720, 0x6724, 0x6728, 0x672c, 0x6730,
-	0x6734, 0x6738, 0x673c, 0x6740, 0x6744, 0x6748, 0x674c, 0x6750, 0x6754, 0x6758, 0x675c, 0x6760,
-	0x6764, 0x6768, 0x676c, 0x6770, 0x6774, 0x6778, 0x677c, 0x6780, 0x6784, 0x6788, 0x678c, 0x6790,
-	0x6794, 0x6798, 0x679c, 0x67a0, 0x67a4, 0x67a8, 0x67ac, 0x67b0, 0x67b4, 0x67b8, 0x67bc, 0x67c0,
-	0x67c4, 0x67c8, 0x67cc, 0x67d0, 0x67d4, 0x67d8, 0x67dc, 0x67e0, 0x67e4, 0x67e8, 0x67ec, 0x67f0,
-	0x67f4, 0x67f8, 0x67fc, 0x6800, 0x6804, 0x6808, 0x680c, 0x6810, 0x6814, 0x6818, 0x681c, 0x6820,
-	0x6824, 0x6828, 0x682c, 0x6830, 0x6834, 0x6838, 0x683c, 0x6840, 0x6844, 0x6848, 0x684c, 0x6850,
-	0x6854, 0x6858, 0x685c, 0x6860, 0x6864, 0x6868, 0x686c, 0x6870, 0x6874, 0x6878, 0x687c, 0x6880,
-	0x6884, 0x6888, 0x688c, 0x6890, 0x6894, 0x6898, 0x689c, 0x68a0, 0x68a4, 0x68a8, 0x68ac, 0x68b0,
-	0x68b4, 0x68b8, 0x68bc, 0x68c0, 0x68c4, 0x68c8, 0x68cc, 0x68d0, 0x68d4, 0x68d8, 0x68dc, 0x68e0,
-	0x68e4, 0x68e8, 0x68ec, 0x68f0, 0x68f4, 0x68f8, 0x68fc, 0x6900, 0x6904, 0x6908, 0x690c, 0x6910,
-	0x6914, 0x6918, 0x691c, 0x6920, 0x6924, 0x6928, 0x692c, 0x6930, 0x6934, 0x6938, 0x693c, 0x6940,
-	0x6944, 0x6948, 0x694c, 0x6950, 0x6954, 0x6958, 0x695c, 0x6960, 0x6964, 0x6968, 0x696c, 0x6970,
-	0x6974, 0x6978, 0x697c, 0x6980, 0x6984, 0x6988, 0x698c, 0x6990, 0x6994, 0x6998, 0x699c, 0x69a0,
-	0x69a4, 0x69a8, 0x69ac, 0x69b0, 0x69b4, 0x69b8, 0x69bc, 0x69c0, 0x69c4, 0x69c8, 0x69cc, 0x69d0,
-	0x69d4, 0x69d8, 0x69dc, 0x69e0, 0x69e4, 0x69e8, 0x69ec, 0x69f0, 0x69f4, 0x69f8, 0x69fc, 0x6a00,
-	0x6a04, 0x6a08, 0x6a0c, 0x6a10, 0x6a14, 0x6a18, 0x6a1c, 0x6a20, 0x6a24, 0x6a28, 0x6a2c, 0x6a30,
-	0x6a34, 0x6a38, 0x6a3c, 0x6a40, 0x6a44, 0x6a48, 0x6a4c, 0x6a50, 0x6a54, 0x6a58, 0x6a5c, 0x6a60,
-	0x6a64, 0x6a68, 0x6a6c, 0x6a70, 0x6a74, 0x6a78, 0x6a7c, 0x6a80, 0x6a84, 0x6a88, 0x6a8c, 0x6a90,
-	0x6a94, 0x6a98, 0x6a9c, 0x6aa0, 0x6aa4, 0x6aa8, 0x6aac, 0x6ab0, 0x6ab4, 0x6ab8, 0x6abc, 0x6ac0,
-	0x6ac4, 0x6ac8,
-	/* ★ CPU-EPP ring pointer block (wptr 0x7000 = THE drain-alive discriminator:
-	 * stock advances, ours stuck 0) + per-voq ring config, so the qmblock dump
-	 * shows the EPP delivery stage next to the QM drain-map. */
-	0x7000, 0x7004, 0x7008, 0x700c, 0x7010, 0x7014, 0x7018, 0x701c,
-	0x7020, 0x7024, 0x7028, 0x702c,
+ * this list is an unmapped hole that would fault.  Read-only.
+ *
+ * Seven arithmetic ranges at stride 4, 806 words in all.  The flat 806-entry
+ * offset list this replaces expanded to exactly this sequence - same length,
+ * same order - so the dump layout (the `ethtool -d` ABI, see below) is
+ * unchanged. */
+static const struct cortina_ni_reg_range {
+	u16 base;
+	u16 count;	/* consecutive u32 regs at stride 4 */
+} cortina_ni_qmdump_ranges[] = {
+	{ 0x2000,  10 },	/* ..0x2024 */
+	{ 0x2100,  46 },	/* ..0x21b4  L2TM TM/BM cfg + counters */
+	{ 0x2200,  43 },	/* ..0x22a8  L2TM QM EQ/buffer cfg */
+	{ 0x2300,  64 },	/* ..0x23fc  L2TM ES + the deepq direct cfg */
+	{ 0x6000,   4 },	/* ..0x600c  QM AXIM cfg */
+	{ 0x6100, 627 },	/* ..0x6ac8  the whole QM block */
+	/* ★ CPU-EPP ring pointer block (wptr 0x7000 = THE drain-alive
+	 * discriminator: stock advances, ours stuck 0) + per-voq ring config, so
+	 * the qmblock dump shows the EPP delivery stage next to the QM
+	 * drain-map. */
+	{ 0x7000,  12 },	/* ..0x702c */
 };
 
 /* ------------------------------------------------------------------ */
@@ -5992,13 +5828,16 @@ static const u16 cortina_ni_qmdump_offs[] = {
  */
 unsigned int cortina_ni_regdump_len(void)
 {
-	return ARRAY_SIZE(cortina_ni_rx_regs) +
-	       ARRAY_SIZE(cortina_ni_qmdump_offs);
+	unsigned int i, n = ARRAY_SIZE(cortina_ni_rx_regs);
+
+	for (i = 0; i < ARRAY_SIZE(cortina_ni_qmdump_ranges); i++)
+		n += cortina_ni_qmdump_ranges[i].count;
+	return n;
 }
 
 void cortina_ni_regdump_fill(struct cortina_ni *ni, u32 *buf)
 {
-	unsigned int i, n = 0;
+	unsigned int i, k, n = 0;
 
 	if (!ni_base(ni)) {
 		memset(buf, 0, cortina_ni_regdump_len() * sizeof(*buf));
@@ -6006,8 +5845,10 @@ void cortina_ni_regdump_fill(struct cortina_ni *ni, u32 *buf)
 	}
 	for (i = 0; i < ARRAY_SIZE(cortina_ni_rx_regs); i++)
 		buf[n++] = readl(ni_base(ni) + cortina_ni_rx_regs[i].off);
-	for (i = 0; i < ARRAY_SIZE(cortina_ni_qmdump_offs); i++)
-		buf[n++] = readl(ni_base(ni) + cortina_ni_qmdump_offs[i]);
+	for (i = 0; i < ARRAY_SIZE(cortina_ni_qmdump_ranges); i++)
+		for (k = 0; k < cortina_ni_qmdump_ranges[i].count; k++)
+			buf[n++] = readl(ni_base(ni) +
+					 cortina_ni_qmdump_ranges[i].base + 4 * k);
 }
 
 /* Decode key for word @i of the dump above: its name and its NI-window offset.
@@ -6016,16 +5857,21 @@ void cortina_ni_regdump_fill(struct cortina_ni *ni, u32 *buf)
  * so it is identified by its offset alone and says so. */
 void cortina_ni_regdump_entry(unsigned int i, const char **name, u32 *off)
 {
+	unsigned int r;
+
 	if (i < ARRAY_SIZE(cortina_ni_rx_regs)) {
 		*name = cortina_ni_rx_regs[i].name;
 		*off = cortina_ni_rx_regs[i].off;
 		return;
 	}
 	i -= ARRAY_SIZE(cortina_ni_rx_regs);
-	if (i < ARRAY_SIZE(cortina_ni_qmdump_offs)) {
-		*name = "qm_l2tm_sweep";
-		*off = cortina_ni_qmdump_offs[i];
-		return;
+	for (r = 0; r < ARRAY_SIZE(cortina_ni_qmdump_ranges); r++) {
+		if (i < cortina_ni_qmdump_ranges[r].count) {
+			*name = "qm_l2tm_sweep";
+			*off = cortina_ni_qmdump_ranges[r].base + 4 * i;
+			return;
+		}
+		i -= cortina_ni_qmdump_ranges[r].count;
 	}
 	*name = "<out of range>";
 	*off = 0;
@@ -7003,7 +6849,7 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	 * to see. */
 	seq_printf(m, "bringup: intf_done=%d ticks=%llu calls=%llu period=%us\n",
 		   rx->intf_done ? 1 : 0, rx->bringup_ticks, rx->bringup_calls,
-		   cortina_ni_rx_bringup_period(rx));
+		   cortina_ni_rx_bringup_period(rx->bringup_ticks));
 	seq_printf(m, "frames=%llu bytes=%llu polls=%llu swid=%llu pon=%llu wan=%llu wan_l3=%llu\n",
 		   rx->frames, rx->bytes, rx->polls, rx->swid_frames,
 		   rx->pon_frames, rx->wan_frames, rx->wan_l3_frames);
@@ -7097,13 +6943,17 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	/* ★ QM+L2TM full-block sweep (grep/diff-friendly, one per line) - the
 	 * ours-vs-stock hunt for the L2TM->QM admit gate (qm_rx_cntr=0). */
 	{
-		unsigned int k;
+		unsigned int r, k;
 
 		seq_puts(m, "qmblock:\n");
-		for (k = 0; k < ARRAY_SIZE(cortina_ni_qmdump_offs); k++)
-			seq_printf(m, "  0x%04x=0x%08x\n",
-				   cortina_ni_qmdump_offs[k],
-				   readl(ni_base(ni) + cortina_ni_qmdump_offs[k]));
+		for (r = 0; r < ARRAY_SIZE(cortina_ni_qmdump_ranges); r++)
+			for (k = 0; k < cortina_ni_qmdump_ranges[r].count; k++) {
+				unsigned int off =
+					cortina_ni_qmdump_ranges[r].base + 4 * k;
+
+				seq_printf(m, "  0x%04x=0x%08x\n", off,
+					   readl(ni_base(ni) + off));
+			}
 	}
 
 	/* ★ axi_reo (RMU DMA-reorder) window dump - a SEPARATE MMIO window (idx 10),

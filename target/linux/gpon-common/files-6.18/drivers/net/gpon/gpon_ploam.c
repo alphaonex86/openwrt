@@ -649,6 +649,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			 * whose Alloc-ID the OLT is free to change (fix 1). */
 			o->onu_id = 0xff;
 			o->omcc_installed = false;
+			o->omcc_gem = 0;
 			o->tcont_installed = false;
 			o->data_installed = false;
 			o->data_gem_solicited = false;
@@ -708,9 +709,17 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		if (onu_id == o->onu_id) {
 			u16 gem = ((u16)d[1] << 4) | (d[2] >> 4);
 
-			if ((d[0] & 0x1) && !o->omcc_installed) {
-				if (!o->ops->install_omcc(o->sh, gem))
+			/* ★ REBIND ON CHANGE, not once. A one-shot install drops
+			 * an OLT that moves the OMCC to another GEM after O5 --
+			 * the ONU keeps binding the old port and management dies
+			 * with nothing to read. The Elnath shell already had this
+			 * shape; this FSM did not, and no test watched it. */
+			if ((d[0] & 0x1) &&
+			    (!o->omcc_installed || gem != o->omcc_gem)) {
+				if (!o->ops->install_omcc(o->sh, gem)) {
 					o->omcc_installed = true;
+					o->omcc_gem = gem;
+				}
 			}
 			send_ack(o, m);
 			if (o->cfg->trace)
@@ -906,6 +915,7 @@ int gpon_ploam_sn_changed(struct gpon_ploam *o, u32 now_ms)
 		if (o->state > GPON_O1_INITIAL) {
 			o->onu_id = 0xff;
 			o->omcc_installed = false;
+			o->omcc_gem = 0;
 			o->tcont_installed = false;
 			o->data_installed = false;
 			o->data_gem_solicited = false;
@@ -996,6 +1006,7 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 		ev(o, GPON_PLOAM_EV_O5_WATCHDOG, o->ticks - o->o5_entry_tick, 0);
 		o->onu_id = 0xff;
 		o->omcc_installed = false;
+		o->omcc_gem = 0;
 		o->tcont_installed = false;
 		o->data_installed = false;
 		o->data_tcont_installed = false;
@@ -1037,6 +1048,7 @@ int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark,
 				ev(o, GPON_PLOAM_EV_LOS_RERANGE, o->los_run, 0);
 				o->onu_id = 0xff;
 				o->omcc_installed = false;
+				o->omcc_gem = 0;
 				o->tcont_installed = false;
 				o->data_installed = false;
 				/* The Alloc-ID is the OLT's to reissue on

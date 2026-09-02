@@ -187,6 +187,7 @@ ccflags-y += -O2
 # two copies it replaces did not merely differ in style: the Elnath decoder
 # refuses a malformed string while the Luna one turned hex_to_bin()'s -1 into
 # 0xff bytes without a word, so the promoted copy is the VERIFIED one.
+obj-y += gpon_ddm.o
 obj-y += gpon_sn.o
 
 obj-y += gpon_gem_us.o

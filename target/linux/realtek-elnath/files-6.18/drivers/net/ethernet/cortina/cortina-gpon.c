@@ -2145,19 +2145,28 @@ static int cg_tbl_op(struct cortina_gpon *cg, u32 access_reg, u32 cmd)
  * genuinely different alloc/onu-id REPLACES a live binding, so a grant now
  * addressed to a reassigned alloc no longer makes this ONU burst.
  */
-static void cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
+/*
+ * IT USED TO RETURN void, and that is the same defect its bind twin was fixed
+ * for: both cg_tbl_op failures simply returned, so a CAM entry that never got
+ * invalidated was indistinguishable from one that did.  That failure is not
+ * cosmetic -- a stale T-CONT entry stays armed and can burst into a grant slot
+ * the OLT has since reassigned, which is exactly the hazard cg_omcc_tcont_bind
+ * documents.  Say so to the caller; what the caller then does is its own call.
+ */
+static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
 {
 	u32 d;
 
 	alloc &= 0xfff;
 	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc))
-		return;
+		return -ETIMEDOUT;
 	d = readl(cg->mac + CG_REG_TCONT_DATA);
 	d &= ~(CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN | CG_TCONT_INDEX_MASK);
 	writel(d, cg->mac + CG_REG_TCONT_DATA);
 	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc))
-		return;
+		return -ETIMEDOUT;
 	dev_info(cg->dev, "T-CONT CAM[alloc %u] invalidated (stale)\n", alloc);
+	return 0;
 }
 
 /*
@@ -2192,8 +2201,14 @@ static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 	 * live and able to burst into the reassigned grant slot.  The explicit
 	 * validity flag says exactly what was meant.  Behaviour is unchanged for
 	 * every non-zero id. */
-	if (cg->omcc_alloc_valid && old != alloc_id)
-		cg_tcont_unbind(cg, old);	/* invalidate the stale OMCC entry */
+	/* A failure here is REPORTED but does not abort the rebind: the stale
+	 * entry is a hazard, and having no OMCC bound at all is a worse one --
+	 * that is no OMCI and therefore no service.  Loud, and it continues. */
+	if (cg->omcc_alloc_valid && old != alloc_id &&
+	    cg_tcont_unbind(cg, old))
+		dev_err(cg->dev,
+			"T-CONT CAM[alloc %u] could NOT be invalidated; it stays armed and may burst into the slot reassigned to alloc %u\n",
+			old, alloc_id);
 
 	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc_id)) {
 		dev_warn_ratelimited(cg->dev,
@@ -2350,8 +2365,11 @@ static void cg_data_teardown(struct cortina_gpon *cg)
 	/* 4. finally invalidate the data T-CONT CAM entry — but NEVER the OMCC's:
 	 * on a single-alloc OLT the data path rides the OMCC alloc and its
 	 * T-CONT (index 0) must stay armed for OMCI/PLOAM. */
-	if (cg->hw_data_alloc && cg->hw_data_alloc != cg->omcc_alloc)
-		cg_tcont_unbind(cg, cg->hw_data_alloc);
+	if (cg->hw_data_alloc && cg->hw_data_alloc != cg->omcc_alloc &&
+	    cg_tcont_unbind(cg, cg->hw_data_alloc))
+		dev_err(cg->dev,
+			"data T-CONT CAM[alloc %u] could NOT be invalidated; the teardown below is INCOMPLETE\n",
+			cg->hw_data_alloc);
 
 	dev_info(cg->dev, "data path torn down (alloc %u, gem %u): VoQs drained, CAM cleared\n",
 		 cg->hw_data_alloc, cg->hw_data_gem);

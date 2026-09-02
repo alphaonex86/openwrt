@@ -1335,7 +1335,12 @@ MODULE_PARM_DESC(gpon_fsm_tick_req_ms,
 static u32 gpon_fsm_ticks;
 static u8 gpon_sds_synced;	/* one-shot SDS TX re-sync done */
 static u32 gpon_ds_rx;		/* total downstream PLOAMs drained (DS-lock liveness) */
-static bool gpon_omcc_installed;	/* OMCC GEM datapath installed (one-shot, on Configure_Port-ID) */
+static bool gpon_omcc_installed;	/* OMCC GEM datapath installed, on Configure_Port-ID */
+/* The GEM the install SUCCEEDED on.  Deliberately NOT gpon_omcc_gem_port, which
+ * gpon_install_omcc() stamps on entry and therefore also holds the port of an
+ * install that FAILED -- believing that one would latch the failure as done and
+ * never retry.  Written only beside the flag, cleared with it. */
+static u16 gpon_omcc_installed_gem;
 static bool gpon_tcont_installed;	/* OMCC T-CONT/alloc-id bound (one-shot, on Assign_Alloc-ID) */
 static bool gpon_data_installed;	/* WAN data GEM (193) datapath installed (one-shot, on OMCI GEM-CTP create) */
 static bool gpon_data_gem_solicited;	/* OLT has sent the OMCI GEM-CTP (ME268) Create -> only THEN install
@@ -6984,6 +6989,17 @@ int gpon_install_data_gem(void)
 			break;
 		udelay(1);
 	}
+	/* Same posture as the unicast CAM write above, and it was MISSING here:
+	 * this poll had no completion check at all, so a timed-out mcast CAM fell
+	 * straight through to gpon_data_installed = true.  The comment above says
+	 * what that costs -- without the entry the GTC DROPS the broadcast DS, so
+	 * the DHCP OFFER never arrives -- and the install reported success while
+	 * it happened.  Identical to the unicast branch, so the working path is
+	 * unchanged; only a real timeout now says so. */
+	if (i == 1000) {
+		pr_err("rtl9602c-gpon: MCAST GEM DS install timeout\n");
+		return -ETIMEDOUT;
+	}
 	/* MCAST/broadcast flow DS routing = 0x3 (BIT1|BIT0) — oracle's other data flow value;
 	 * BIT0 = broadcast/flood variant so DHCP-broadcast + ARP DS also drain to the NIC. */
 	gpon_wr(GPON_GTC_DS_TRAFFIC_CFG + GPON_MCAST_FLOW * DS_TRAFFIC_CFG_STRIDE, 0x3);
@@ -8176,6 +8192,7 @@ static void gpon_fsm_handle(const u8 *m)
 			 * so the ONU never rebuilds its OMCI datapath, and the freshly
 			 * rebooted OLT keeps directed-deactivating the stale HW ONU-ID. */
 			gpon_omcc_installed = false;
+			gpon_omcc_installed_gem = 0;
 			gpon_tcont_installed = false;
 			gpon_data_installed = false;	/* re-install WAN data GEM on re-config */
 			gpon_data_gem_solicited = false;	/* re-wait for the OLT's fresh ME268 before re-installing */
@@ -8237,9 +8254,21 @@ static void gpon_fsm_handle(const u8 *m)
 		if (onu_id == gpon_fsm_onu_id) {
 			u16 gem = ((u16)d[1] << 4) | (d[2] >> 4);
 
-			if ((d[0] & 0x1) && !gpon_omcc_installed) {
-				if (!gpon_install_omcc(gem))
+			/* Rebind when the OLT MOVES the OMCC to a different GEM.
+			 * This used to be one-shot (`&& !gpon_omcc_installed`),
+			 * so a mid-session move was silently ignored and every
+			 * later DS OMCI landed on the old port -- OMCI dead with
+			 * the FSM still reporting O5.  The Elnath shell and the
+			 * common core FSM were both already fixed; this native
+			 * FSM is the copy that actually SHIPS on this family
+			 * (core_fsm defaults to 0), so it carried the defect
+			 * into the product after both other copies were repaired. */
+			if ((d[0] & 0x1) &&
+			    (!gpon_omcc_installed || gem != gpon_omcc_installed_gem)) {
+				if (!gpon_install_omcc(gem)) {
 					gpon_omcc_installed = true;
+					gpon_omcc_installed_gem = gem;
+				}
 			}
 			gpon_send_ack(m);
 			/* The WAN data-GEM install is now driven from the FSM poll, gated on the
@@ -8495,6 +8524,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		if (gpon_fsm_state > 1) {
 			gpon_fsm_onu_id = 0xff;
 			gpon_omcc_installed = false;
+			gpon_omcc_installed_gem = 0;
 			gpon_tcont_installed = false;
 			gpon_data_installed = false;	/* re-install WAN data GEM on re-config */
 			/* ★ An SN reprovision is an IDENTITY CHANGE, so it clears
@@ -8609,6 +8639,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 			gpon_fsm_ticks - gpon_o5_entry_tick);
 		gpon_fsm_onu_id = 0xff;
 		gpon_omcc_installed = false;
+		gpon_omcc_installed_gem = 0;
 		gpon_tcont_installed = false;
 		gpon_data_installed = false;
 		/* The data Alloc-ID bind is session state and the OLT may reissue a
@@ -8675,6 +8706,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 					gpon_los_run);
 				gpon_fsm_onu_id = 0xff;
 				gpon_omcc_installed = false;
+				gpon_omcc_installed_gem = 0;
 				gpon_tcont_installed = false;
 				gpon_data_installed = false;
 				/* The data Alloc-ID bind IS session state: the OLT may

@@ -572,27 +572,83 @@ static void cortina_pcie0_hard_relock(struct cortina_pcie *cp)
 }
 
 /* pcie0 serdes-cfg-dataB (stock DTB rtl9607f.dts:1311): lane0's two sub-lanes.
- * Lane1 (0x1000+) has no table and is shaped by the cal.  0x2c=0xa91d = MANUAL. */
+ * Lane1 (0x1000+) has no table and is shaped by the cal.  0x2c=0xa91d = MANUAL.
+ *
+ * ★ THE TWO SUB-LANES RUN THE SAME PROGRAM, and until 2026-09-02 nothing here
+ *   said so.  DERIVED FROM THE TABLE ITSELF, not from a document: sub-lane 1
+ *   repeats sub-lane 0's registers, in the same order, one stride higher, with
+ *   exactly SEVEN differences -- 0x80 and 0x84 written only by sub-lane 0,
+ *   0xbc only by sub-lane 1, and four registers carrying a different value
+ *   (0x04, 0x74, 0x90, 0xc0).  Each one is marked on its own line below.
+ *
+ * ★ AND EACH BLOCK ENDS OUT OF ADDRESS ORDER: 0x24 is written LAST, after
+ *   0xc8, in both sub-lanes.  That is the shape of a register that must land
+ *   after the others, and a reader sorting this table by address would break
+ *   the link with nothing to see.  The write order below is the contract.
+ *
+ * ⚠ NO REGISTER NAME IS INVENTED HERE.  This silicon's SerDes registers are
+ *   not named anywhere in this tree, and making one up would read as a fact
+ *   about hardware that nobody established.  What is added is STRUCTURE and
+ *   what the table's own contents prove.
+ */
+#define CA_SDS_SUBLANE_STRIDE	0x100
+
 static void cortina_pcie0_serdes_table(void __iomem *s)
 {
-	static const struct cortina_serdes_cfg tbl[] = {
-		{ 0x04, 0xa855 }, { 0x08, 0x60c6 }, { 0x10, 0x4000 }, { 0x18, 0x001f },
-		{ 0x20, 0x3591 }, { 0x28, 0xf610 }, { 0x2c, 0xa91d }, { 0x30, 0xc008 },
-		{ 0x34, 0xf732 }, { 0x38, 0x1000 }, { 0x74, 0xca1f }, { 0x78, 0xe0e2 },
-		{ 0x80, 0xd488 }, { 0x84, 0x77dd }, { 0x88, 0x0023 }, { 0x8c, 0x1b63 },
-		{ 0x90, 0x4f30 }, { 0x9c, 0x61d6 }, { 0xa0, 0xf802 }, { 0xac, 0xb813 },
-		{ 0xc0, 0x0055 }, { 0xc8, 0xf0f3 }, { 0x24, 0x520c },
-		{ 0x104, 0xa84a }, { 0x108, 0x60c6 }, { 0x110, 0x4000 }, { 0x118, 0x001f },
-		{ 0x120, 0x3591 }, { 0x128, 0xf610 }, { 0x12c, 0xa91d }, { 0x130, 0xc008 },
-		{ 0x134, 0xf732 }, { 0x138, 0x1000 }, { 0x174, 0xda1f }, { 0x178, 0xe0e2 },
-		{ 0x188, 0x0023 }, { 0x18c, 0x1b63 }, { 0x190, 0x4f0c }, { 0x19c, 0x61d6 },
-		{ 0x1a0, 0xf802 }, { 0x1ac, 0xb813 }, { 0x1bc, 0xe900 }, { 0x1c0, 0x004a },
-		{ 0x1c8, 0xf0f3 }, { 0x124, 0x520c },
+	static const struct cortina_serdes_cfg sublane_cfg[] = {
+		/* sub-lane 0 */
+		{ 0x004, 0xa855 },	/* differs: sub-lane 1 writes 0xa84a */
+		{ 0x008, 0x60c6 },
+		{ 0x010, 0x4000 },
+		{ 0x018, 0x001f },
+		{ 0x020, 0x3591 },
+		{ 0x028, 0xf610 },
+		{ 0x02c, 0xa91d },
+		{ 0x030, 0xc008 },
+		{ 0x034, 0xf732 },
+		{ 0x038, 0x1000 },
+		{ 0x074, 0xca1f },	/* differs: sub-lane 1 writes 0xda1f */
+		{ 0x078, 0xe0e2 },
+		{ 0x080, 0xd488 },	/* only sub-lane 0 writes this */
+		{ 0x084, 0x77dd },	/* only sub-lane 0 writes this */
+		{ 0x088, 0x0023 },
+		{ 0x08c, 0x1b63 },
+		{ 0x090, 0x4f30 },	/* differs: sub-lane 1 writes 0x4f0c */
+		{ 0x09c, 0x61d6 },
+		{ 0x0a0, 0xf802 },
+		{ 0x0ac, 0xb813 },
+		{ 0x0c0, 0x0055 },	/* differs: sub-lane 1 writes 0x004a */
+		{ 0x0c8, 0xf0f3 },
+		{ 0x024, 0x520c },	/* LAST, and deliberately out of address order */
+
+		/* sub-lane 1, at +CA_SDS_SUBLANE_STRIDE */
+		{ 0x104, 0xa84a },	/* differs: sub-lane 0 writes 0xa855 */
+		{ 0x108, 0x60c6 },
+		{ 0x110, 0x4000 },
+		{ 0x118, 0x001f },
+		{ 0x120, 0x3591 },
+		{ 0x128, 0xf610 },
+		{ 0x12c, 0xa91d },
+		{ 0x130, 0xc008 },
+		{ 0x134, 0xf732 },
+		{ 0x138, 0x1000 },
+		{ 0x174, 0xda1f },	/* differs: sub-lane 0 writes 0xca1f */
+		{ 0x178, 0xe0e2 },
+		{ 0x188, 0x0023 },
+		{ 0x18c, 0x1b63 },
+		{ 0x190, 0x4f0c },	/* differs: sub-lane 0 writes 0x4f30 */
+		{ 0x19c, 0x61d6 },
+		{ 0x1a0, 0xf802 },
+		{ 0x1ac, 0xb813 },
+		{ 0x1bc, 0xe900 },
+		{ 0x1c0, 0x004a },	/* differs: sub-lane 0 writes 0x0055 */
+		{ 0x1c8, 0xf0f3 },
+		{ 0x124, 0x520c },	/* LAST, and deliberately out of address order */
 	};
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(tbl); i++)
-		writel(tbl[i].val, s + tbl[i].off);
+	for (i = 0; i < ARRAY_SIZE(sublane_cfg); i++)
+		writel(sublane_cfg[i].val, s + sublane_cfg[i].off);
 }
 
 /* 2-lane (pcie0) / 1-lane (pcie2) LONG RX-cal, faithful replay of the golden

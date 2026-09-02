@@ -325,11 +325,9 @@
  * 2=O3 SerialNumber, 3=O4 Ranging, 4=O5 Operation, 5=O6 POPUP, 6=O7 EmrgStop.
  * (The 2026-07-13 "state=3 at O5" read was BOGUS: it read hdr offset 0xbc,
  * which on silicon is interrupt3 — LOSi|LOFi latched reads 0x3 at O5 too.
- * The real onu reg at 0xdc reads {id=1, state=4} on stock at Online.) */
-#define CG_STATE_RANGING	3
-#define CG_STATE_OPERATION	4
-#define CG_STATE_POPUP		5
-#define CG_STATE_ESTOP		6
+ * The real onu reg at 0xdc reads {id=1, state=4} on stock at Online.)
+ * The CG_STATE_* encodings live in cortina_gpon_logic.h: the O5-exit
+ * classifier (cg_link_down_transition) computes over them in flowcore. */
 
 #define CG_REG_GPON_MAIN	0x0e0	/* hdr 0xc0: equalization delay (EqD) */
 #define CG_REG_OMCI_PORT	0x0e8	/* hdr 0xc8: omci_port id[11:0], en[12]; HW-filled */
@@ -418,16 +416,9 @@
 #define CG_PDC_MAP_DATA1	0x9024	/* pol_en[3:2], pol_id[12:4], pol_grp_id[15:13], deepq[16] */
 #define CG_PDC_MAP_DATA0	0x9028	/* cos[2:0], ldpid[8:3], lspid[14:9], fe_bypass[15], no_drop[31] */
 #define CG_PDC_MAP_ENTRIES	256	/* vendor AAL_PDC_MAP_ENTRY_NUM */
-#define CG_PDC_D1_POL_ID(x)	(((x) & 0x1ff) << 4)
-#define CG_PDC_D0_COS(x)	((x) & 0x7)
-#define CG_PDC_D0_LDPID(x)	(((x) & 0x3f) << 3)
-#define CG_PDC_D0_LSPID(x)	(((x) & 0x3f) << 9)
-#define CG_PDC_D0_FE_BYPASS	BIT(15)
-#define CG_PDC_D0_NO_DROP	BIT(31)
-/* logical port ids (vendor aal_port.h) */
-#define CG_LPORT_CPU_0		0x10	/* CPU port 0 = the NI CPU-RX EPP port we drain */
-#define CG_LPORT_L3_WAN		0x18
-#define CG_LPORT_PON		0x07
+/* The DATA-word field layout (CG_PDC_D0_*, CG_PDC_D1_POL_ID) and the logical
+ * port ids (CG_LPORT_*, vendor aal_port.h) live in cortina_gpon_logic.h:
+ * cg_pdc_map_entry() derives the words over them in flowcore. */
 
 /*
  * PUC (PON Upstream Classifier) sub-block: PON window + 0x8000.  This is the
@@ -635,6 +626,11 @@
 
 #define CG_PUC_TCONT_NUM	32	/* AAL_GPON_SYSTEM_MAX_TCONT_NUM */
 #define CG_PUC_QUEUE_PER_TCONT	8	/* 8Q mode */
+/* ^ cortina_gpon_logic.h carries the SAME define for cg_puc_pvtbl_words(),
+ * the pvtbl packing that fixes it at 8.  The copy here stays because
+ * gpon_gem_us_test extracts it from THIS file (driver-truth anti-drift);
+ * being an IDENTICAL redefinition it is silent, and any drift between the
+ * two turns into a compile-time redefinition warning + that test's red. */
 #define CG_PUC_9TH_QUEUE_VOQ	127	/* the CPU high-prio inject VoQ (ldpid 0xf, cos 7) */
 
 /*
@@ -1228,16 +1224,7 @@ static void cg_pdc_init(struct cortina_gpon *cg)
 	unsigned int dead = 0;		/* entries this pass could not write */
 
 	for (idx = 0; idx < CG_PDC_MAP_ENTRIES; idx++) {
-		if (idx < CG_OMCC_US_GEM_IDX_NUM) {
-			d0 = CG_PDC_D0_COS(6) | CG_PDC_D0_LDPID(CG_LPORT_CPU_0) |
-			     CG_PDC_D0_LSPID(CG_LPORT_PON) |
-			     CG_PDC_D0_FE_BYPASS | CG_PDC_D0_NO_DROP;
-			d1 = CG_PDC_D1_POL_ID(idx + 0x80);
-		} else {
-			d0 = CG_PDC_D0_LDPID(CG_LPORT_L3_WAN) |
-			     CG_PDC_D0_LSPID(CG_LPORT_PON);
-			d1 = CG_PDC_D1_POL_ID(idx - 8);
-		}
+		cg_pdc_map_entry(idx, CG_OMCC_US_GEM_IDX_NUM, &d0, &d1);
 		/* ★★ DO NOT ABANDON THE LIST ON ONE FAILED ENTRY (2026-08-05).
 		 * This used to `return`, and that is the worst of both worlds:
 		 * the map is left HALF written AND PDC_CTRL is never programmed
@@ -1303,23 +1290,16 @@ static void cg_puc_voq_valid(struct cortina_gpon *cg, u32 voq, bool valid)
  * pressure remap and valid bits.  @ena gates the per-queue enable bit (bit 8
  * of each 9-bit voqN field) and the valid-VoQ mask; the entry itself is
  * always marked entryvld so the scheduler walks it.  voqN 9-bit fields are
- * bit-split across the 5 DATA words exactly as the vendor packs them;
- * schmode = 0 (strict priority), wrr weights 0.
+ * bit-split across the 5 DATA words exactly as the vendor packs them (the
+ * packing is cg_puc_pvtbl_words() in flowcore); schmode = 0 (strict
+ * priority), wrr weights 0.
  */
 static int cg_puc_pvtbl_program(struct cortina_gpon *cg, u32 tcont, bool ena)
 {
 	void __iomem *pon = cg->pon;
-	u32 voq[CG_PUC_QUEUE_PER_TCONT];
 	u32 d0, d1, d2, q;
 
-	for (q = 0; q < CG_PUC_QUEUE_PER_TCONT; q++)
-		voq[q] = (q + tcont * CG_PUC_QUEUE_PER_TCONT) | ((u32)ena << 8);
-
-	d0 = voq[0] | (voq[1] << 9) | (voq[2] << 18) |
-	     ((voq[3] & 0x1f) << 27);
-	d1 = ((voq[3] >> 5) & 0xf) | (voq[4] << 4) | (voq[5] << 13) |
-	     (voq[6] << 22) | ((voq[7] & 1) << 31);
-	d2 = ((voq[7] >> 1) & 0xff) | BIT(12);	/* schmode=0, entryvld=1 */
+	cg_puc_pvtbl_words(tcont, ena, &d0, &d1, &d2);
 
 	writel(0, pon + CG_PUC_PVTBL_DATA4);
 	writel(0, pon + CG_PUC_PVTBL_DATA3);
@@ -3180,24 +3160,54 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 			schedule_work(&cg->isr_work);
 		}
 
-		if (class_id == 268 && m == 4 && len >= 13) {
-			u16 g = ((u16)pdu[8] << 8) | pdu[9];
+		/* ★★★ THE DECISION IS THE CORE'S, NOT THIS SHELL'S (2026-09-02).
+		 *
+		 * This block used to answer "is this ME 268 the WAN data GEM?"
+		 * privately, and Luna answered it privately too -- and the two
+		 * had DIVERGED: this side refused a uni-directional CTP, the
+		 * OMCC's own gem and Port-ID 0; Luna's copy refused none of the
+		 * three, and then lost its copy entirely when the responder it
+		 * lived in was replaced (836b76be01). Two boards, two answers,
+		 * one G.988 rule.
+		 *
+		 * omci_dgem_classify() is that rule, once, in the core, where
+		 * gpon_dgem_test exercises it on x86 with no board and the
+		 * emulated OLT drives the sequence that catches a first-match
+		 * scan. The GEOMETRY stays here -- which Port-ID this silicon
+		 * reserved for the OMCC and for broadcast are INPUTS.
+		 *
+		 * ⚠ TWO DELIBERATE BEHAVIOUR CHANGES, both toward the standard:
+		 *   - the Port-ID is masked to 12 bits (G.984.3), so a set
+		 *     reserved bit can no longer become a different port;
+		 *   - the broadcast gem is refused BY ITS PORT-ID as well as by
+		 *     its direction. This side relied on direction alone, which
+		 *     is correct for an OLT that marks 4095 DS-only and silent
+		 *     for one that does not.
+		 */
+		if (class_id == 268 && m == 4) {
+			u16 g = 0;
+			int v = omci_dgem_classify(pdu + 8,
+						   len > 8 ? (u8)(len - 8) : 0,
+						   cg->omcc_gem, CG_MCAST_GEM_ID,
+						   &g);
 
-			if (g && g != cg->omcc_gem) {
-				if (pdu[12] == 3 && g != cg->dg_gem) {
-					WRITE_ONCE(cg->dg_gem, g);
-					cg->dg_inst = inst;	/* so a Delete can match */
-					cg->dg_tcont_ptr = ((u16)pdu[10] << 8) | pdu[11];
-					cg->dg_dir = pdu[12];
-					dev_info(cg->dev,
-						 "OMCI: data GEM port-id %u (tcont-ptr 0x%04x dir %u)\n",
-						 g, cg->dg_tcont_ptr, cg->dg_dir);
-					schedule_work(&cg->isr_work);
-				} else if (pdu[12] != 3) {
-					dev_info(cg->dev,
-						 "OMCI: uni-dir GEM CTP %u (dir %u) — not the data GEM\n",
-						 g, pdu[12]);
-				}
+			if (v == OMCI_DGEM_YES && g != cg->dg_gem) {
+				WRITE_ONCE(cg->dg_gem, g);
+				cg->dg_inst = inst;	/* so a Delete can match */
+				cg->dg_tcont_ptr = ((u16)pdu[10] << 8) | pdu[11];
+				cg->dg_dir = pdu[12];
+				dev_info(cg->dev,
+					 "OMCI: data GEM port-id %u (tcont-ptr 0x%04x dir %u)\n",
+					 g, cg->dg_tcont_ptr, cg->dg_dir);
+				schedule_work(&cg->isr_work);
+			} else if (v != OMCI_DGEM_YES) {
+				/* ★ NAME THE REFUSAL. "not the data GEM" was one
+				 * message for five different facts, and a shell
+				 * that cannot say WHICH one fired cannot explain
+				 * a dead WAN. */
+				dev_info(cg->dev,
+					 "OMCI: GEM CTP me-inst 0x%04x is %s -- not the data GEM\n",
+					 inst, omci_dgem_name(v));
 			}
 		}
 
@@ -3284,11 +3294,7 @@ static void cg_isr_work(struct work_struct *work)
 			 * anything but Operation/Ranging (POPUP->Ranging is the
 			 * Type-B popup, kept alive), or entering EmergencyStop.
 			 */
-			if ((last == CG_STATE_OPERATION && ev.state != CG_STATE_OPERATION &&
-			     ev.state != CG_STATE_POPUP) ||
-			    (last == CG_STATE_POPUP && ev.state != CG_STATE_OPERATION &&
-			     ev.state != CG_STATE_RANGING) ||
-			    ev.state == CG_STATE_ESTOP)
+			if (cg_link_down_transition(last, ev.state))
 				cg_datapath_reset(cg);
 			cg->last_state = ev.state;
 		}
@@ -3634,13 +3640,7 @@ static void cg_wan_create(struct cortina_gpon *cg)
 /* Read the 4 ASCII bytes of the vendor-id register in wire order. */
 static void cg_read_vendor(struct cortina_gpon *cg, char out[5])
 {
-	u32 v = cg_mac_rd(cg, CG_REG_VENDOR);
-
-	out[0] = (v >> 24) & 0xff;
-	out[1] = (v >> 16) & 0xff;
-	out[2] = (v >> 8) & 0xff;
-	out[3] = v & 0xff;
-	out[4] = '\0';
+	cg_vendor_unpack(cg_mac_rd(cg, CG_REG_VENDOR), out);
 }
 
 /*

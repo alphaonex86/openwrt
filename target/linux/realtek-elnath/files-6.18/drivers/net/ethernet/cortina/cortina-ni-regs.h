@@ -2423,6 +2423,23 @@ enum cortina_ni_win {
  * CN_L3E_GLB_DBG_IDX/DAT and CN_L3E_GLB_LATCH_*) only ever READ them.
  */
 #define CA_NI_L3FE_CLS_MON_CTRL		0x30b0
+/* ★ THE ENABLE BIT, WHICH LIVED ONLY IN PROSE.  Two comments in this tree
+ * already state it -- the block note above ("BIT(8) ENABLE | (vector << 5)
+ * | word") and cortina-ni-flowoffload.c's own map -- and no macro carried
+ * it, so nothing could be checked against it and nothing could USE it by
+ * name.  Tier 2, resolved from stock's own accessors
+ * (aal_l3fe_glb_cls_stg_monitor_get / _dbg_get / _dbg_latch_*).
+ *
+ * ⚠ WHY IT MATTERS RATHER THAN BEING TIDINESS: an earlier probe enabled the
+ * monitor at BIT(0).  The monitor therefore never came on, and its output
+ * -- "cls_hit all 0" -- was a PHANTOM read as a finding.  A counter that
+ * reads zero because nobody switched it on is exactly the class this
+ * project bans from a bisect.
+ *
+ * Nothing WRITES this today: 0x30b0 is only read by the /proc dump in
+ * cortina-ni-rx.c.  The name exists so that whoever does enable the
+ * monitor cannot re-derive the bit from a comment. */
+#define CA_NI_L3FE_CLS_MON_ENABLE	BIT(8)
 #define CA_NI_L3FE_CLS_KEY_ACCESS	0x3380	/* GO|WR|idx; poll GO clear (CA_NI_IND_ACCESS_GO/WR) */
 #define CA_NI_L3FE_CLS_KEY_DATA_BASE	0x3384	/* 11 words 0x3384..0x33ac */
 #define CA_NI_L3FE_CLS_KEY_WORDS	11

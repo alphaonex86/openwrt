@@ -27,3 +27,10 @@ obj-$(CONFIG_CORTINA_NI_FLOWOFFLOAD) += cortina_ni_flowoffload_logic.o \
 obj-$(CONFIG_RTL9602C_GPON) += gpon_rtl9602c_logic.o luna_ponmac_logic.o
 obj-$(CONFIG_RTL9607C_GPON) += luna_ponmac_logic.o
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_l34_logic.o
+# ★ luna_gmac_logic.o under BOTH Ethernet gates (the luna_ponmac_logic.o
+# shape): the family's two Ethernet shells are gated on DISJOINT symbols
+# (taroko: RTL9602C_ETH only; interaptiv: LUNA_ETH only), so family GMAC
+# logic listed under one symbol alone links on one board and breaks the
+# other -- the measured crossconfig_call_guard defect.
+obj-$(CONFIG_RTL9602C_ETH) += luna_gmac_logic.o
+obj-$(CONFIG_LUNA_ETH) += luna_gmac_logic.o

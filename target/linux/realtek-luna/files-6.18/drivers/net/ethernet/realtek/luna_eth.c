@@ -65,6 +65,7 @@
 #include <linux/platform_device.h>
 #include <linux/timer.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
+#include "luna_gmac_logic.h"	/* family GMAC ring packings + this shell's hoisted RX verdicts (flowcore) */
 
 /* ---- bring-up knobs (live-tunable; the datapath framing is HW-uncertain on
  * first contact, so expose the few values most likely to need a tweak) ------ */
@@ -1398,8 +1399,9 @@ static void eth_hw_program(struct luna_eth *ep)
 	ep_wr(ep, R_TxFDP0, ep->tx_ring_dma | DMA_BUS_WINDOW);
 	iowrite16(0, ep->base + R_TxCDO0);
 	ep_wr(ep, R_RxFDP0, ep->rx_ring_dma | DMA_BUS_WINDOW);
-	desnum = ((RX_RING_SIZE - 1) & 0xff) << 24 | (TH_ON_VAL & 0xff) << 16 |
-		 (TH_OFF_VAL & 0xff) << 8 | (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4;
+	/* Was this file's own spelling of the family packing -- the THIRD copy
+	 * (rtl9602c_eth.c spells it twice via the same flowcore call). */
+	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
 	/* ★★ 32-BIT, like the vendor and like rtl9602c_eth.c -- NOT iowrite16.
 	 * 0x13F4 is one 32-bit word holding RxCDO[31:16] (hardware-owned; the
@@ -1415,8 +1417,7 @@ static void eth_hw_program(struct luna_eth *ep)
 	 * The identical value is stored 32-bit by rtl9602c_eth.c:3371, whose RX
 	 * WORKS -- a repair that lives in one copy of this driver and not the
 	 * other. Guarded by ONU-test-case/reg_store_width_guard.py.	*/
-	ep_wr(ep, R_RxCDO0, ((RX_RING_SIZE - 1) & 0xff) << 8 |
-			    (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4);
+	ep_wr(ep, R_RxCDO0, luna_gmac_rxcdo_pack(RX_RING_SIZE));
 	/* route every RX class to ring 0. */
 	{
 		unsigned int k;
@@ -1500,8 +1501,13 @@ static int eth_rx(struct luna_eth *ep, int budget)
 				       16, 1, skb->data, min_t(u32, len, 32), false);
 		}
 
-		if ((opts1 & (RXD_CRCERR | RXD_DMAERR)) ||
-		    len <= (u32)rx_prefix + ETH_HLEN || len > RX_BUF_SIZE) {
+		/* Bad-frame verdict hoisted to luna_gmac_rx_frame_bad()
+		 * (flowcore): the error mask and the header floor are passed,
+		 * not re-spelled; the deliberately-lax floor (vs the 9602C
+		 * shell's min-Ethernet-frame bound) is documented there. */
+		if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_DMAERR, len,
+					   (u32)rx_prefix + ETH_HLEN,
+					   RX_BUF_SIZE)) {
 			ndev->stats.rx_errors++;
 			dev_kfree_skb_any(skb);
 		} else {
@@ -1512,9 +1518,11 @@ static int eth_rx(struct luna_eth *ep, int budget)
 			skb_put(skb, len);
 			if (rx_prefix)
 				skb_pull(skb, rx_prefix);
-			if (skb->len > 2 * ETH_ALEN + RTL_CPU_TAG_LEN &&
-			    skb->data[2 * ETH_ALEN] == 0x88 &&
-			    skb->data[2 * ETH_ALEN + 1] == 0x99) {
+			/* Tag classifier hoisted to flowcore; the excision
+			 * memmove/skb_pull below stay -- buffer surgery, not
+			 * a decision. */
+			if (luna_gmac_rx_cpu_tag_present(skb->data, skb->len,
+							 RTL_CPU_TAG_LEN)) {
 				if (ep->rx_dumped <= rx_dump)
 					dev_info(ep->dev, "rx tag: %*ph\n",
 						 RTL_CPU_TAG_LEN,

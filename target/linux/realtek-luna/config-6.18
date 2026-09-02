@@ -2590,3 +2590,17 @@ CONFIG_LOCKUP_DETECTOR=y
 CONFIG_SOFTLOCKUP_DETECTOR=y
 CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y
 # ═══════════════════════════════════════════════════════════════════════════
+# ★ TEMPORARY DIAGNOSTIC, added 2026-09-01 -- REVERT once the X111W wedge is
+#   named. The board stops dead (console AND network at once, no oops, no
+#   reset) on 4 of 5 boots at 28-39 s, and the last line printed differs every
+#   run, so no code pointer survives a repeat. A lockup detector is the only
+#   instrument that can make the board name the code it is stuck in; WQ_WATCHDOG
+#   is here because one suspect IS a work item (the GPON re-range CDR pulse).
+#   DEBUG_KERNEL is already =y above, so it is not repeated here.
+#   Backup before the change:
+#   dev/backup/2026-09-01/openwrt-fork/target/linux/realtek-luna/config-6.18
+CONFIG_SOFTLOCKUP_DETECTOR=y
+# CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC is not set
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=30
+CONFIG_WQ_WATCHDOG=y

@@ -63,6 +63,23 @@
 #define GPON_AES_BYPASS		0x0020
 #define GPON_INTR_MASK		0x0040
 #define GPON_INTR_STS		0x0044
+/* ★★ THE SAME TWO OFFSETS IN THE **SWCORE** WINDOW ARE A SERIAL-COMMAND
+ * CHANNEL, NOT INTERRUPTS.  sc_ldo_init() drives 0x40/0x44 through sw_wr/
+ * sw_rd to issue an SC read of reg 0xfdca, clear the DRAM-LDO bits and
+ * commit -- nothing to do with the GPON block's interrupt mask/status,
+ * which is what those two names mean in the GPON window.
+ *
+ * Writing sw_wr(GPON_INTR_MASK, ...) was a NAME THAT LIES: a reader sees
+ * an interrupt register and the silicon sees a command port.  This
+ * project renames such a name the day it is proven wrong, and
+ * luna_reg_alias_test proved it -- it derives a register's window from the
+ * ACCESSOR it is used with, so one register reached through both gpon_*
+ * and sw_* is a contradiction it reports by name and line.
+ *
+ * The GPON names keep their meaning in their own window; these are for the
+ * SWCORE window only, and they belong to the SC_* family SC_IND_WD is in. */
+#define SC_CMD			0x0040	/* SWCORE: serial-command issue */
+#define SC_DATA			0x0044	/* SWCORE: its read-back / data */
 #define GPON_GTC_DS_INTR_DLT	0x1000
 #define GPON_GTC_DS_INTR_MASK	0x1004
 #define GPON_GTC_DS_INTR_STS	0x1008
@@ -304,6 +321,25 @@
 #define PI_PON_SID_STOP_TH	0x02450		/* [12:0] global stop-all page threshold */
 #define PI_PON_SID_GLB_TH	0x02454		/* [28:16] ON_TH [12:0] OFF_TH (global) */
 #define PI_PON_SID_RPV_TH	0x02458		/* per-SID reserved-page threshold, +sid*4 */
+/*
+ * ⚠ OPEN QUESTION, 2026-09-01, and it is stated rather than guessed.
+ *
+ * The vendor chipdef declares PON_SID_RPV_TH as an ARRAY with "array offset 32"
+ * on BOTH the RTL9602C (65 entries) and the RTL9603CVD (8 entries). 32 could be
+ * 32 BITS -- i.e. 4 bytes, the value below -- or 32 BYTES. The chipdef alone
+ * does not say which, and the neighbours do not settle it either:
+ * PON_SID_STOP_TH and PON_SID_GLB_TH sit 4 bytes below it and are NOT arrays
+ * ("array offset 0"), so there is no interleaved per-SID record to infer from.
+ *
+ * ★ THE DISCRIMINATOR IS A LIVE READ ON STOCK, which works: read
+ *   0xF02458 + n*4 and 0xF02458 + n*32 on the G24W under vendor firmware and
+ *   see which spacing carries the programmed thresholds. Until then this stays
+ *   at the value the port has always used.
+ *
+ * ⚠ AND THE ENTRY COUNT DIFFERS BETWEEN THE CHIPS -- 65 vs 8 -- so PI_SID_NUM
+ *   is a 9602C fact being applied to both. Whatever the stride turns out to be,
+ *   looping 65 times on the RTL9603CVD writes past the end of its array.
+ */
 #define PI_RPV_TH_STRIDE	4u
 #define PI_SID_NUM		65u		/* SIDs 0..64 (64 = OMCI) */
 #define PI_PON_FC_CONFIG_DS	0x0a0fc		/* [28:16] FC_ON_TH [12:0] FC_OFF_TH */
@@ -371,12 +407,51 @@
 #define GPON_GTC_GEM_US_PORT_MAP 0x6400		/* array: base 0x6400, stride 4 (one 32-bit
 						 * word/entry), idx 0..127, [11:0] gemPortId.
 						 * Flow 64 (OMCC) = 0x6400 + 64*4 = 0x6500. */
+/* The LAST valid index of that array.  It was carried only in the sentence
+ * above until 2026-09-01, which meant the host suite hand-typed 127 and could
+ * not tell a real bound from a stale one -- `gpon_gem_us_test` said so in its
+ * own output.  Named here so the number is EXTRACTED, and consumed by the
+ * compile-time GPON_GEM_US_RANGE_OK() assertions on the two flows this driver
+ * actually stamps, exactly as cortina-gpon.c does with CG_US_PORT_IDX_MAX.
+ *
+ * ⚠ THE OBVIOUS GREP IS A TRAP AND COST A WRONG ANSWER ONCE: PI_US_SRAM_NO is
+ * also 127 and is a different block, and PI_SID_NUM is 65 -- a count, not a
+ * maximum, of yet another block, which would read as 64 while still passing
+ * every range this driver uses today.  A write past the end lands in an
+ * unrelated register and is accepted without complaint. */
+#define   GEM_US_PORT_MAP_IDX_MAX 127u
 
 #define GPON_GTC_DS_OMCI_PTI	0x1204		/* [6:4] PTI_MASK [2:0] END_PTI */
 #define   DS_OMCI_PTI_VAL	((1u << 4) | 1u)	/* mask=1 ptn=1 -> 0x11 */
 #define GPON_GEM_DS_MC_CFG	0x4080		/* [6] BROADCAST_PASS [4] NON_MULTICAST_PASS [3] FCS_CHK_EN */
 #define   GEM_DS_MC_CFG_VAL	0x59u		/* stock O5 operating value (read live from an online stock ONU): BROADCAST_PASS(6)|NON_MULTICAST_PASS(4)|FCS_CHK_EN(3)|bit0. The earlier 0x18 (no broadcast/bit0) was a wrong "avoid US stall" guess — stock runs 0x59 stably online with OMCI flowing. */
 #define PI_PON_SID2QID		0x020f8		/* packed 7b/SID: physical queue */
+
+/* ★ ADDED 2026-09-01, because bare_offset_chip_audit found these written as RAW
+ * LITERALS in gpon_pbo_init / gpon_install_tcont / rtl9602c_datapath_tables_init
+ * -- and every one of them names a DIFFERENT register on the RTL9603CVD. A
+ * literal bypasses the per-chip translation entirely, so the macro is not
+ * cosmetic here: it is the only thing that makes PI_X() see the address.
+ * Names and 9602C addresses are the vendor chipdef's own. */
+#define PI_DRN_CMD		0x020e4u	/* SW_PBO_DSCCTRL on the 9603CVD   */
+#define PI_PON_OLT_BW_MTR_FULL	0x0218cu	/* PON_SIDVALID on the 9603CVD     */
+#define PI_PON_WFQ_TYPE		0x023e8u	/* PON_QID_PIR_RATE on the 9603CVD */
+#define PI_RSVD_PONIP_DS	0x0a10cu	/* PON_Q_CONFIG_DS on the 9603CVD  */
+/* ★ ADDED 2026-09-01 (second pass): the READ-only literals the block-aware
+ * audit still reports as MOVED. They MISREPORT rather than corrupt, but a
+ * diagnostic that prints the wrong register under the right label is evidence
+ * pointing the wrong way -- which is what this bench spent a day on. */
+#define PI_PON_DSC_USAGE_DS	0x0a0bcu	/* RX_STS_DS on the 9603CVD        */
+#define PI_PON_IPSTS_US		0x020f4u	/* DSCRUNOUT_US on the 9603CVD     */
+#define PI_PON_DSC_USAGE_US	0x020ecu	/* PONIP_CTL_US on the 9603CVD     */
+#define PI_PON_IPSTS_DS		0x0a0c0u	/* PONIP_CTL_DS on the 9603CVD     */
+#define PI_PON_DSC_STS_DS	0x0a0c8u	/* ARB_TIMEOUT_DS on the 9603CVD   */
+/* ★ The SID2QID array is packed FOUR SIDs per 32-bit word, so an element is the
+ * BASE plus arithmetic -- never a second literal. gpon_pbo_init had 0x2138
+ * written out as one constant, which is 0x20f8 + 16*4 flattened; no per-address
+ * table can translate that, because the address it must translate is the BASE. */
+#define PI_SID2QID_STRIDE	4u
+
 #define PI_PON_SIDVALID		0x0213c		/* packed 1b/SID */
 #define PI_PON_OMCI_CFG		0x02154		/* [6:0] OMCI SID */
 #define PI_PON_SID_Q_MAP_DS	0x0a0e4		/* packed 2b/SID: DS PBO queue */

@@ -107,6 +107,45 @@ struct luna_pcie_phy { u8 reg; u16 val; };
  * config TLP aborts (reads back the 0xeeeeeeee pattern). {reg, val} pairs,
  * terminated by reg 0xff.
  */
+/*
+ * ★★★ THE STOCK TABLE, and it is FIVE PAIRS.
+ *
+ * Two independent disassemblies of the board's own stock kernel (tier 2) put
+ * its ePHY table at 0x80ccc780 with exactly these five entries. Everything in
+ * luna_pcie_phy_9602c[] below that is NOT here, we add on top of stock --
+ * fourteen registers stock leaves at their default, traced to a 9607C
+ * `pcie0_phy_params_revC`. The MDIO register field is masked to 5 bits, so some
+ * of those fourteen alias onto registers nobody intended to touch.
+ *
+ * ⚠ AND THE COMMENT BELOW ALREADY ACCUSES THEM: it names 0x20=0xd4a4 /
+ * 0x21=0x485a as "a sibling part's revC table [that] leaves the endpoint's
+ * config-core clock mistuned so every config TLP aborts" -- and the table
+ * ships those two values verbatim. A comment that is right above code that is
+ * not.
+ *
+ * Default is STOCK'S FIVE. `pcie_phy_full` on the kernel command line restores
+ * the full table, so the shipping behaviour stays reachable as the control arm
+ * of the A/B without a second build.
+ */
+static const struct luna_pcie_phy luna_pcie_phy_9602c_stock[] = {
+	{ 0x03, 0x3031 }, { 0x06, 0xe0b8 }, { 0x0e, 0x98c5 },
+	{ 0x0f, 0x400f }, { 0x19, 0xfc70 },
+	{ 0xff, 0xffff },
+};
+
+static bool pcie_phy_full;
+
+static int __init pcie_phy_full_setup(char *str)
+{
+	pcie_phy_full = true;
+	(void)str;
+	return 1;
+}
+/* early_param, NOT module_param: this table is consumed from arch PCIe init,
+ * which runs before module parameters are parsed. A module_param here would
+ * read as a working knob and silently never take effect. */
+early_param("pcie_phy_full", pcie_phy_full_setup);
+
 static const struct luna_pcie_phy luna_pcie_phy_9602c[] = {
 	{ 0x01, 0xa852 }, { 0x06, 0x0017 }, { 0x08, 0x3591 }, { 0x09, 0x520c },
 	{ 0x0a, 0xf670 }, { 0x0b, 0xa90d }, { 0x0d, 0xe720 }, { 0x0e, 0x1000 },
@@ -185,7 +224,37 @@ struct luna_pcie_chip {
 
 static const struct luna_pcie_chip luna_pcie_9602c = {
 	.name = "RTL9602C", .root_compat = "realtek,rtl9602c",
-	.intc_compat = "realtek,rtl9602c-intc", .hwirq = 15,
+	/* ★★ AGGREGATOR INPUT 16, NOT 15.  Corrected 2026-09-01; 15 was here from
+	 * the start with no evidence recorded beside it -- the only field in this
+	 * struct that carried none.  Everything that CAN be checked says 16:
+	 *
+	 *   - irq-luna.c documents the INTC's named inputs and states the
+	 *     numbering is the native GISR bit, SHARED BY BOTH CHIPS.  Its list
+	 *     contains "16 PCIe" and does not name 15 at all.
+	 *   - that map is corroborated STRUCTURALLY by this chip's OWN device
+	 *     tree, which independently declares uart0=49, timer=43 and nic=26 --
+	 *     exactly the map's "49..52 UART0..3", "43..48 TC0..TC5", "26 GMAC0".
+	 *     Three inputs, from a source that is structure and not prose.
+	 *   - the sibling RTL9603CVD uses 16 with TIER-1 evidence (its vendor
+	 *     kernel prints the translate table, row 16=>50, and the vendor WiFi
+	 *     driver prints virq 73 = 50 + the domain base 23).
+	 *
+	 * ⚠ CHECKED AND REJECTED as a source: the vendor 5.10 tree's
+	 * arch/mips/rtl9607c/bspchip.h says BSP_IRQ_PCIE = ICTL_BASE + 7.  That
+	 * is the RTL9607C, which has a GIC and a small dense enumeration
+	 * (GMAC = base+9), NOT this chip's GISR bit numbering where GMAC0 is 26.
+	 * It does not transfer, and taking it would have been the sibling-SDK
+	 * trap this project already names.
+	 *
+	 * ⚠⚠ THIS CHANGE IS NOT SAFE ALONE, and that is why it ships with the
+	 * IRQ_NONE repair in rtlwifi/pci.c.  A wrong input is SILENT: request_irq
+	 * succeeds on a linear domain whatever the number, and the endpoint's
+	 * interrupt simply never arrives -- a deaf radio on a live board.  Point
+	 * the driver at the line that DOES fire while its ISR still returns
+	 * IRQ_HANDLED without clearing anything, and a deaf radio becomes a level
+	 * storm that takes the whole SoC down.  Land them together or not at all.
+	 */
+	.intc_compat = "realtek,rtl9602c-intc", .hwirq = 16,
 	.hostcfg = 0xb8b00000ul, .devcfg = 0xb8b10000ul, .hostext = 0xb8b01000ul,
 	.mem_phys = 0x19000000u, .mem_size = 0x01000000u,
 	.io_phys = 0x18c00000u, .io_size = 0x00010000u,
@@ -197,7 +266,9 @@ static const struct luna_pcie_chip luna_pcie_9602c = {
 	/* PERST# is not driven by an SoC GPIO here: probing shows the candidate
 	 * lines left as inputs while the link is up, so the endpoint is tied
 	 * released. All four PERST fields stay 0 and the two steps are skipped. */
-	.phy = luna_pcie_phy_9602c, .retries = 3, .link_polls = 10,
+	/* resolved at init: stock's five by default, the full table with
+	 * `pcie_phy_full` on the command line. See luna_pcie_phy_9602c_stock. */
+	.phy = luna_pcie_phy_9602c_stock, .retries = 3, .link_polls = 10,
 };
 
 static const struct luna_pcie_chip luna_pcie_9603cvd = {
@@ -472,12 +543,30 @@ static int __init luna_pcie_reset(void)
 	writel(0x81, pcie_hostext() + HOSTEXT_LTSSM);	/* release PHY reset      */
 	mdelay(50);
 
-	/* 4. SerDes PHY tuning over MDIO -- required before POLLING can complete. */
-	for (i = 0; chip->phy[i].reg != 0xff; i++) {
-		writel(((u32)chip->phy[i].val << 16) |
-		       ((u32)chip->phy[i].reg << 8) | 1,
-		       pcie_hostext() + HOSTEXT_MDIO);
-		mdelay(1);
+	/* 4. SerDes PHY tuning over MDIO -- required before POLLING can complete.
+	 *
+	 * ★ THE TABLE IS RESOLVED HERE, not in the static initialiser, so the
+	 *   control arm of the A/B costs a command line and not a second build.
+	 *   Which table ran is PRINTED: an arm that cannot be told apart in the
+	 *   log is an arm whose result cannot be attributed. */
+	{
+		const struct luna_pcie_phy *tbl = chip->phy;
+		int n;
+
+		if (pcie_phy_full && chip->phy == luna_pcie_phy_9602c_stock)
+			tbl = luna_pcie_phy_9602c;
+		for (n = 0; tbl[n].reg != 0xff; n++)
+			;
+		pr_info("pcie-luna: ePHY table = %s (%d pair(s))\n",
+			tbl == luna_pcie_phy_9602c_stock ? "stock's five"
+			: tbl == luna_pcie_phy_9602c ? "ours, full (pcie_phy_full)"
+			: "per-chip", n);
+		for (i = 0; tbl[i].reg != 0xff; i++) {
+			writel(((u32)tbl[i].val << 16) |
+			       ((u32)tbl[i].reg << 8) | 1,
+			       pcie_hostext() + HOSTEXT_MDIO);
+			mdelay(1);
+		}
 	}
 	mdelay(20);
 

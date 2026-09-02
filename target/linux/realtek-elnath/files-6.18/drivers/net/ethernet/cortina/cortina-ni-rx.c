@@ -547,15 +547,22 @@ static inline void ni_rmw(struct cortina_ni *ni, u32 off, u32 clr, u32 set)
 	writel((readl(ni_base(ni) + off) & ~clr) | set, ni_base(ni) + off);
 }
 
-/* Which CPU pool a buffer belongs to: pool0 (EQ5) occupies the first
- * POOL0_BYTES of the reserved region, pool1 (EQ6) the rest. */
-static inline u32 cortina_ni_rx_pool_eqid(struct cortina_ni *ni, u32 pa)
-{
-	u32 off = pa - lower_32_bits(ni->rx->cpu_dram_dma);
-
-	return off < CA_NI_RX_CPU_POOL0_BYTES ? CA_NI_RX_EQ_ID :
-					        CA_NI_RX_EQ_ID2;
-}
+/* ⚠ cortina_ni_rx_pool_eqid() WAS HERE AND IS DELETED (2026-09-02). It derived
+ * which CPU pool a buffer belonged to FROM ITS ADDRESS -- pool0 below
+ * CPU_POOL0_BYTES, pool1 above -- and it had ZERO CALLERS. Worse than unused:
+ * the software-owned model this driver actually runs (cpu_eq=1 plus the
+ * CPU_PUSH_PADDR recycle, see the ownership note above) does not split the
+ * region that way. A callerless helper that looks authoritative is a trap for
+ * the next reader, who has no way to know the model it encodes was left behind.
+ *
+ * ⚠ AND THE POOL IDS THEMSELVES ARE NOT DEAD -- do not follow this deletion into
+ *   deleting them. CA_NI_RX_EQ_ID2 has 21 live uses (the EQ profile words in
+ *   cortina-ni-regs.h, a static_assert in cortina-ni-ethtool.c) and
+ *   CA_NI_RX_CPU_POOL0_BYTES has 7. The second pool is real; what was dead is
+ *   deriving WHICH pool a buffer is in from its ADDRESS.
+ * ⇒ if a second pool is ever wanted, derive it from OWNERSHIP, not from the
+ *   buffer address, and start from the recycle path rather than from here.
+ */
 
 /*
  * Stage one 128-byte-aligned buffer PA into EQ pool <eqid> through the CPU

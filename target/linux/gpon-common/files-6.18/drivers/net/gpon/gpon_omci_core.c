@@ -116,6 +116,23 @@
  * ★ NO NEW CONVENTION RISK: omci_set_mic below already commits us to AAL5-BE
  *   on TX and this OLT accepts those MICs, so RX enforces the SAME convention.
  */
+/* ★ THE ONE PLACE THE AAL5-BE CONVENTION IS SPELLED.
+ *
+ * It used to be spelled three times -- twice in this file (verify and stamp)
+ * and once more in the Cortina shell's downstream self-check.  Three spellings
+ * of one convention is how a tree ends up with two: this exact CRC had already
+ * diverged once, when rtl9602c_eth.c stamped the reflected zlib crc32_le while
+ * this file verified crc32_be, and every frame that ONU sent was rejected by
+ * an OLT that was behaving correctly.
+ *
+ * I.363.5 / AAL5: non-reflected CRC-32, init all-ones, final complement, over
+ * bytes 0..43, stored big-endian at 44..47.  LIVE-PROVEN against this OLT.
+ */
+u32 omci_mic_compute(const u8 *msg)
+{
+	return ~crc32_be(~0u, msg, 44);
+}
+
 bool omci_mic_ok(const u8 *msg, unsigned int len)
 {
 	u32 c;
@@ -125,7 +142,7 @@ bool omci_mic_ok(const u8 *msg, unsigned int len)
 	 * acted on.  This is the runt case that used to reach the MIB-Reset arm. */
 	if (!msg || len < OMCI_LEN)
 		return false;
-	c = ~crc32_be(~0u, msg, 44);
+	c = omci_mic_compute(msg);
 	return msg[44] == (u8)(c >> 24) && msg[45] == (u8)(c >> 16) &&
 	       msg[46] == (u8)(c >> 8)  && msg[47] == (u8)c;
 }
@@ -138,7 +155,7 @@ bool omci_mic_ok(const u8 *msg, unsigned int len)
  * would follow instead of silently testing the old one. */
 void omci_set_mic(u8 *msg)
 {
-	u32 c = ~crc32_be(~0u, msg, 44);
+	u32 c = omci_mic_compute(msg);
 
 	msg[44] = (u8)(c >> 24);
 	msg[45] = (u8)(c >> 16);

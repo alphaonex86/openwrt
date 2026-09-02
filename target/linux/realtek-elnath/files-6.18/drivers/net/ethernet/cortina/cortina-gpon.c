@@ -3066,7 +3066,7 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 	if (len >= OMCI_LEN && cg->omci_ds_crc_ok + cg->omci_ds_crc_bad < 16) {
 		u32 want = ((u32)pdu[44] << 24) | ((u32)pdu[45] << 16) |
 			   ((u32)pdu[46] << 8) | pdu[47];
-		u32 be = ~crc32_be(~0u, pdu, 44);
+		u32 be = omci_mic_compute(pdu);	/* the core's ONE spelling */
 		u32 le = crc32_le(~0u, pdu, 44) ^ ~0u;
 
 		if (be == want)

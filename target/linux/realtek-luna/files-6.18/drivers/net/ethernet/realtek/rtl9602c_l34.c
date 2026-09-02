@@ -37,27 +37,9 @@ static inline void l34_wr(struct rtl9602c_l34 *l, u32 off, u32 val)
 	writel(val, l->sw + off);
 }
 
-/*
- * Pack/unpack a field that may straddle 32-bit word boundaries within the
- * entry's word array. @lsp is the bit position from bit 0 of word[0].
- */
-/* Inverse of l34_field_set: extract a (possibly word-straddling) field. */
-static u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width)
-{
-	unsigned int word = lsp / 32, bit = lsp % 32, take, got = 0;
-	u32 val = 0;
-
-	while (width) {
-		take = min(width, 32 - bit);
-		val |= ((w[word] >> bit) & ((take >= 32) ? ~0u : ((1u << take) - 1)))
-		       << got;
-		got += take;
-		width -= take;
-		word++;
-		bit = 0;
-	}
-	return val;
-}
+/* l34_field_get() moved to rtl9602c_l34_logic.c (flowcore, 2026-09-02),
+ * beside its inverse l34_field_set -- the set/get pair shares one home so a
+ * wrong get can no longer mirror a wrong set invisibly (the SID2QID lesson). */
 
 /* Issue one indirect table op. The data bank is significance-ordered: WRDATA[i]
  * (and RDDATA[i]) carry entry bits [32*i+31 : 32*i], so w[i] maps 1:1 onto data
@@ -202,18 +184,13 @@ int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 		goto out;
 	}
 
-	l34_field_set(naptr, L34_NAPTR_INTIP_LSP,    L34_NAPTR_INTIP_W,    f->orig_sip);
-	l34_field_set(naptr, L34_NAPTR_INTPORT_LSP,  L34_NAPTR_INTPORT_W,  f->orig_sport);
-	l34_field_set(naptr, L34_NAPTR_EXTIPIDX_LSP, L34_NAPTR_EXTIPIDX_W, f->egress_netif);
-	l34_field_set(naptr, L34_NAPTR_EXTPORT_LSP,  L34_NAPTR_EXTPORT_W,  f->nat_sport);
-	l34_field_set(naptr, L34_NAPTR_TCP_LSP,      L34_NAPTR_TCP_W,      is_tcp);
-	l34_field_set(naptr, L34_NAPTR_VALID_LSP,    L34_NAPTR_VALID_W,    L34_NAPTR_TYPE_FULLCONE);
+	l34_naptr_encode(naptr, f->orig_sip, f->orig_sport, f->egress_netif,
+			 f->nat_sport, is_tcp);
 	ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, naptr, L34_WORDS_NAPTR_IN);
 	if (ret)
 		goto out;
 
-	l34_field_set(napt, L34_NAPT_HASHIN_IDX_LSP, L34_NAPT_HASHIN_IDX_W, naptr_idx);
-	l34_field_set(napt, L34_NAPT_VALID_LSP,      L34_NAPT_VALID_W,      1);
+	l34_napt_encode(napt, naptr_idx);
 	ret = l34_tbl_write(l, L34_TBL_NAPT_OUT, napt_idx, napt, L34_WORDS_NAPT_OUT);
 	if (ret) {
 		memset(naptr, 0, sizeof(naptr));	/* roll back the rewrite entry */
@@ -285,20 +262,9 @@ static int l2_busy_wait(struct rtl9602c_l34 *l)
 static int l2uc_add_static(struct rtl9602c_l34 *l, const u8 *mac, u8 port)
 {
 	u32 w[L34_WORDS_L2UC] = { 0 };
-	u32 sts;
 	int ret;
 
-	/* 48-bit MAC: octet[0] sits at the field's most-significant byte. */
-	l34_field_set(w, L2UC_MAC_LSP, 32,
-		      ((u32)mac[2] << 24) | ((u32)mac[3] << 16) |
-		      ((u32)mac[4] << 8)  |  (u32)mac[5]);
-	l34_field_set(w, L2UC_MAC_LSP + 32, 16,
-		      ((u32)mac[0] << 8) | (u32)mac[1]);
-	l34_field_set(w, L2UC_STATIC_LSP,  L2UC_STATIC_W,  1);
-	l34_field_set(w, L2UC_SPA_LSP,     L2UC_SPA_W,     port);
-	l34_field_set(w, L2UC_AGE_LSP,     L2UC_AGE_W,     1);
-	l34_field_set(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W, 1);
-	l34_field_set(w, L2UC_VALID_LSP,   L2UC_VALID_W,   1);
+	l34_l2uc_encode(w, mac, port);	/* key + flags (flowcore) */
 
 	ret = l2_busy_wait(l);
 	if (ret)
@@ -311,10 +277,10 @@ static int l2uc_add_static(struct rtl9602c_l34 *l, const u8 *mac, u8 port)
 	ret = l2_busy_wait(l);
 	if (ret)
 		return ret;
-	sts = l34_rd(l, L2_STS);
-	if (!(sts & L2_STS_HIT))
-		return -ENOSPC;
-	return ((sts & L2_STS_CAM) ? (1 << 10) : 0) | (sts & L2_STS_ADDR_MASK);
+	/* the assigned-index decode is l34_l2uc_sts_index() (flowcore); the
+	 * errno stays here -- flowcore includes no errno.h */
+	ret = l34_l2uc_sts_index(l34_rd(l, L2_STS));
+	return ret < 0 ? -ENOSPC : ret;
 }
 
 int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
@@ -345,54 +311,32 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	}
 
 	/* NETIF[idx]: egress source MAC + VLAN/MTU/IP, routing enabled */
-	l34_field_set(netif, L34_NETIF_VALID_LSP,   L34_NETIF_VALID_W,   1);
-	l34_field_set(netif, L34_NETIF_VLANID_LSP,  L34_NETIF_VLANID_W,  vlan);
-	l34_field_set(netif, L34_NETIF_GMAC_LSP, 32,
-		      ((u32)wan_mac[2] << 24) | ((u32)wan_mac[3] << 16) |
-		      ((u32)wan_mac[4] << 8)  |  (u32)wan_mac[5]);
-	l34_field_set(netif, L34_NETIF_GMAC_LSP + 32, 16,
-		      ((u32)wan_mac[0] << 8) | (u32)wan_mac[1]);
-	l34_field_set(netif, L34_NETIF_MACMASK_LSP, L34_NETIF_MACMASK_W, L34_NETIF_DEF_MACMASK);
-	l34_field_set(netif, L34_NETIF_ENRTR_LSP,   L34_NETIF_ENRTR_W,   1);
-	l34_field_set(netif, L34_NETIF_MTU_LSP,     L34_NETIF_MTU_W,     L34_NETIF_DEF_MTU);
-	l34_field_set(netif, L34_NETIF_L34_LSP,     L34_NETIF_L34_W,     1);
-	l34_field_set(netif, L34_NETIF_IP_LSP,      L34_NETIF_IP_W,      wan_ip);
+	l34_netif_encode(netif, wan_mac, wan_ip, vlan);
 	ret = l34_tbl_write(l, L34_TBL_NETIF, idx, netif, L34_WORDS_NETIF);
 	if (ret)
 		goto out;
 
-	/* LOCAL ROUTE[idx]: classify L34-domain ingress on this WAN netif and set the
-	 * US/DS direction the NAPT path keys on (the vendor leaves valid=0 here, which
-	 * is why offload silently fails — we set valid=1). IP/MASK/INT left 0 (WAN). */
-	l34_field_set(rt, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_ARP);
-	l34_field_set(rt, L34_RT_DENTIF_LSP,    L34_RT_DENTIF_W,    idx);
-	l34_field_set(rt, L34_RT_RT2WANINF_LSP, L34_RT_RT2WANINF_W, 1);
-	l34_field_set(rt, L34_RT_VALID_LSP,     L34_RT_VALID_W,     1);
+	/* LOCAL ROUTE[idx]: the why (vendor leaves valid=0, offload silently
+	 * fails) is at l34_rt_wan_encode() in flowcore */
+	l34_rt_wan_encode(rt, idx);
 	ret = l34_tbl_write(l, L34_TBL_L3ROUTE, idx, rt, L34_WORDS_L3ROUTE);
 	if (ret)
 		goto out;
 
 	/* NEXTHOP[idx]: ethernet next-hop via NETIF[idx], dst MAC = L2[l2idx] */
-	l34_field_set(nh, L34_NH_TYPE_LSP,  L34_NH_TYPE_W,  0);	/* ETHER */
-	l34_field_set(nh, L34_NH_IFIDX_LSP, L34_NH_IFIDX_W, idx);
-	l34_field_set(nh, L34_NH_NHIDX_LSP, L34_NH_NHIDX_W, l2idx);
+	l34_nexthop_encode(nh, idx, l2idx);
 	ret = l34_tbl_write(l, L34_TBL_NEXTHOP, idx, nh, L34_WORDS_NEXTHOP);
 	if (ret)
 		goto out;
 
 	/* EXTIP[idx]: the WAN source IP a NAPT rewrite applies, via NEXTHOP[idx] */
-	l34_field_set(extip, L34_EXTIP_EXTIP_LSP, L34_EXTIP_EXTIP_W, wan_ip);
-	l34_field_set(extip, L34_EXTIP_VALID_LSP, L34_EXTIP_VALID_W, 1);
-	l34_field_set(extip, L34_EXTIP_TYPE_LSP,  L34_EXTIP_TYPE_W,  0);	/* NAPT */
-	l34_field_set(extip, L34_EXTIP_NHIDX_LSP, L34_EXTIP_NHIDX_W, idx);
+	l34_extip_encode(extip, wan_ip, idx);
 	ret = l34_tbl_write(l, L34_TBL_EXTIP, idx, extip, L34_WORDS_EXTIP);
 	if (ret)
 		goto out;
 
 	/* ARP entry: gateway IP -> the same L2 entry (placed in the WAN half). */
-	l34_field_set(arp, L34_ARP_IP_LSP,    L34_ARP_IP_W,    gw_ip);
-	l34_field_set(arp, L34_ARP_VALID_LSP, L34_ARP_VALID_W, 1);
-	l34_field_set(arp, L34_ARP_NHIDX_LSP, L34_ARP_NHIDX_W, l2idx);
+	l34_arp_encode(arp, gw_ip, l2idx);
 	ret = l34_tbl_write(l, L34_TBL_ARP, 64 + idx, arp, L34_WORDS_ARP);
 out:
 	mutex_unlock(&l->lock);
@@ -421,43 +365,24 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	if (!l->engine_on)
 		l34_engine_on(l);
 
-	l34_field_set(netif, L34_NETIF_VALID_LSP,   L34_NETIF_VALID_W,   1);
-	l34_field_set(netif, L34_NETIF_VLANID_LSP,  L34_NETIF_VLANID_W,  vlan);
-	l34_field_set(netif, L34_NETIF_GMAC_LSP, 32,
-		      ((u32)lan_mac[2] << 24) | ((u32)lan_mac[3] << 16) |
-		      ((u32)lan_mac[4] << 8)  |  (u32)lan_mac[5]);
-	l34_field_set(netif, L34_NETIF_GMAC_LSP + 32, 16,
-		      ((u32)lan_mac[0] << 8) | (u32)lan_mac[1]);
-	l34_field_set(netif, L34_NETIF_MACMASK_LSP, L34_NETIF_MACMASK_W, L34_NETIF_DEF_MACMASK);
-	l34_field_set(netif, L34_NETIF_ENRTR_LSP,   L34_NETIF_ENRTR_W,   1);
-	l34_field_set(netif, L34_NETIF_MTU_LSP,     L34_NETIF_MTU_W,     L34_NETIF_DEF_MTU);
-	l34_field_set(netif, L34_NETIF_L34_LSP,     L34_NETIF_L34_W,     1);
-	l34_field_set(netif, L34_NETIF_IP_LSP,      L34_NETIF_IP_W,      lan_ip);
+	/* NETIF[idx]: same encode as the WAN side -- it was spelled here a
+	 * second time, verbatim, before the hoist */
+	l34_netif_encode(netif, lan_mac, lan_ip, vlan);
 	ret = l34_tbl_write(l, L34_TBL_NETIF, idx, netif, L34_WORDS_NETIF);
 	if (ret)
 		goto out;
 
-	l34_field_set(rt, L34_RT_IP_LSP,      L34_RT_IP_W,      lan_net);
-	l34_field_set(rt, L34_RT_MASK_LSP,    L34_RT_MASK_W,    prefix - 1);
-	l34_field_set(rt, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W, L34_RT_PROCESS_ARP);
-	l34_field_set(rt, L34_RT_INT_LSP,     L34_RT_INT_W,     1);	/* LAN */
-	l34_field_set(rt, L34_RT_DENTIF_LSP,  L34_RT_DENTIF_W,  idx);
-	l34_field_set(rt, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
+	/* LAN subnet route (mask = prefix code: the off-by-one fact is pinned
+	 * at l34_rt_lan_encode() in flowcore) */
+	l34_rt_lan_encode(rt, lan_net, prefix, idx);
 	ret = l34_tbl_write(l, L34_TBL_L3ROUTE, idx, rt, L34_WORDS_L3ROUTE);
 	if (ret)
 		goto out;
 
-	/* A more-specific /32 CPU route for the interface's OWN IP, so traffic
-	 * addressed to the ONU itself (management) terminates locally instead of
-	 * being ARP-routed by the LAN subnet route above (which black-holes the
-	 * mgmt path once the LAN netif is in the L34 domain). */
+	/* The more-specific /32 CPU self-route (the why -- management would
+	 * black-hole without it -- is at l34_rt_cpu_encode() in flowcore). */
 	memset(rt, 0, sizeof(rt));
-	l34_field_set(rt, L34_RT_IP_LSP,      L34_RT_IP_W,      lan_ip);
-	l34_field_set(rt, L34_RT_MASK_LSP,    L34_RT_MASK_W,    31);	/* /32 */
-	l34_field_set(rt, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W, L34_RT_PROCESS_CPU);
-	l34_field_set(rt, L34_RT_INT_LSP,     L34_RT_INT_W,     1);
-	l34_field_set(rt, L34_RT_DENTIF_LSP,  L34_RT_DENTIF_W,  idx);
-	l34_field_set(rt, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
+	l34_rt_cpu_encode(rt, lan_ip, idx);
 	ret = l34_tbl_write(l, L34_TBL_L3ROUTE, idx + 8, rt, L34_WORDS_L3ROUTE);
 out:
 	mutex_unlock(&l->lock);

@@ -70,121 +70,16 @@ enum l34_tbl {
 #define L34_NAPT_WAYS		4		/* 4-way bucket: index = (hash << 2) + way */
 
 /*
- * Entry field layouts: {LSP, W} = LSB bit position within the packed entry and
- * field width in bits. The data bank is significance-ordered (w[i] holds entry
- * bits [32*i+31 : 32*i]); a field's word index is LSP/32. Hardware facts; the
- * naming/expression is original.
+ * Entry field LAYOUTS (L34_NAPT_* / L34_NAPTR_* / L34_EXTIP_* / L34_NETIF_*
+ * / L34_NH_* / L34_ARP_* / L34_RT_* / L2UC_* and the L2_STS decode bits)
+ * moved to rtl9602c_l34_logic.h WITH their encoders (flowcore, 2026-09-02)
+ * -- the TXD3_9602C_* precedent: a layout fact exists ONCE, where the
+ * function that packs it lives, and the host suite drives the shipping
+ * encoders on x86.  This file keeps what is TRANSPORT: registers, table
+ * types, word counts, geometry, and the two shell-facing values below.
  */
-
-/* NAPT_OUT (type 10, 1 word): outbound hash slot. The slot's table index is
- * itself the outbound hash; the word only points at the rewrite entry. */
-#define L34_NAPT_HASHIN_IDX_LSP	0	/* -> NAPTR_IN entry index */
-#define L34_NAPT_HASHIN_IDX_W	12
-#define L34_NAPT_VALID_LSP	12
-#define L34_NAPT_VALID_W	1
-#define L34_NAPT_PRIVALID_LSP	13
-#define L34_NAPT_PRIVALID_W	1
-#define L34_NAPT_PRIORITY_LSP	14
-#define L34_NAPT_PRIORITY_W	3
-
-/* NAPTR_IN (type 9, 3 words): the inbound / rewrite entry. */
-#define L34_NAPTR_INTIP_LSP	0	/* internal (LAN) host IP */
-#define L34_NAPTR_INTIP_W	32
-#define L34_NAPTR_INTPORT_LSP	32	/* internal host L4 port */
-#define L34_NAPTR_INTPORT_W	16
-#define L34_NAPTR_REMHASH_LSP	48	/* remote-peer confirm hash (type 2/3) */
-#define L34_NAPTR_REMHASH_W	16
-#define L34_NAPTR_EXTIPIDX_LSP	64	/* -> EXTIP slot (WAN src IP + next-hop) */
-#define L34_NAPTR_EXTIPIDX_W	3
-#define L34_NAPTR_EXTPORT_LSP	67	/* post-NAT (WAN) L4 port */
-#define L34_NAPTR_EXTPORT_W	16
-#define L34_NAPTR_TCP_LSP	83	/* 1 = TCP, 0 = UDP */
-#define L34_NAPTR_TCP_W		1
-#define L34_NAPTR_VALID_LSP	84	/* 2-bit valid / NAT-type (modes below) */
-#define L34_NAPTR_VALID_W	2
-#define L34_NAPTR_PRIVALID_LSP	86
-#define L34_NAPTR_PRIVALID_W	1
-#define L34_NAPTR_PRIORITY_LSP	87
-#define L34_NAPTR_PRIORITY_W	3
-/* NAPTR VALID/type: 0 invalid; 1 full-cone (remHash ignored); 2 port-restricted
- * (remHash = hash(remIP,remPort)); 3 restricted-cone (remHash = hash(remIP)). */
-#define L34_NAPTR_TYPE_INVALID	0
-#define L34_NAPTR_TYPE_FULLCONE	1
-#define L34_NAPTR_TYPE_IPPORT	2
-#define L34_NAPTR_TYPE_IP	3
-
-/* EXTIP (type 4, 3 words, 8 slots): a NAPTR's EXTIP_IDX points here for the WAN
- * source address + the next-hop the rewritten frame egresses through. */
-#define L34_EXTIP_INTIP_LSP	0
-#define L34_EXTIP_INTIP_W	32
-#define L34_EXTIP_EXTIP_LSP	32	/* WAN external IP */
-#define L34_EXTIP_EXTIP_W	32
-#define L34_EXTIP_VALID_LSP	64
-#define L34_EXTIP_VALID_W	1
-#define L34_EXTIP_TYPE_LSP	65	/* 0 = NAPT */
-#define L34_EXTIP_TYPE_W	2
-#define L34_EXTIP_NHIDX_LSP	67	/* -> NEXTHOP slot */
-#define L34_EXTIP_NHIDX_W	4
-
-/* NETIF (type 3, 4 words, 16 slots): per-interface MAC/VLAN/MTU/IP. */
-#define L34_NETIF_VALID_LSP	0
-#define L34_NETIF_VALID_W	1
-#define L34_NETIF_VLANID_LSP	1
-#define L34_NETIF_VLANID_W	12
-#define L34_NETIF_GMAC_LSP	13	/* 48-bit gateway/source MAC, spans w0..w1 */
-#define L34_NETIF_GMAC_W	48
-#define L34_NETIF_MACMASK_LSP	61
-#define L34_NETIF_MACMASK_W	3
-#define L34_NETIF_ENRTR_LSP	64	/* enable routing */
-#define L34_NETIF_ENRTR_W	1
-#define L34_NETIF_MTU_LSP	65
-#define L34_NETIF_MTU_W		14
-#define L34_NETIF_L34_LSP	82	/* classify this interface into the L34 NAT domain */
-#define L34_NETIF_L34_W		1
-#define L34_NETIF_IP_LSP	83	/* interface IP, spans w2..w3 */
-#define L34_NETIF_IP_W		32
-
 #define L34_EXTIP_SLOTS		8	/* EXTIP/EXTIP_IDX is 3-bit: netif idx must be < 8 */
 #define L34_NETIF_DEF_VLAN	1
-#define L34_NETIF_DEF_MTU	1500
-#define L34_NETIF_DEF_MACMASK	0x7
-
-/* NEXTHOP (type 2, 1 word, 16 slots). nhIdx is an L2-unicast-table index. */
-#define L34_NH_TYPE_LSP		0	/* 0 = ETHER, 1 = PPPOE */
-#define L34_NH_TYPE_W		1
-#define L34_NH_IFIDX_LSP	1	/* -> NETIF slot */
-#define L34_NH_IFIDX_W		4
-#define L34_NH_NHIDX_LSP	8	/* -> L2 unicast entry holding the dst MAC */
-#define L34_NH_NHIDX_W		11
-
-/* ARP_CAM (type 13, 2 words, 128 slots). The MAC lives in the L2 table; this
- * holds the gateway IP and the L2 index where its MAC is resolved. */
-#define L34_ARP_IP_LSP		0
-#define L34_ARP_IP_W		32
-#define L34_ARP_VALID_LSP	32
-#define L34_ARP_VALID_W		1
-#define L34_ARP_NHIDX_LSP	33	/* -> L2 unicast entry */
-#define L34_ARP_NHIDX_W		11
-
-/* L3 ROUTE (type 0, 2 words, 16 slots). The per-netif local route (process=ARP)
- * classifies an ingress frame into the L34 NAT domain and sets US/DS direction;
- * it is what an offloaded NAPT flow needs in order to match. Slot = netif idx. */
-#define L34_RT_IP_LSP		0
-#define L34_RT_IP_W		32
-#define L34_RT_MASK_LSP		32	/* prefix code 0..31 (0 => /1 anchor) */
-#define L34_RT_MASK_W		5
-#define L34_RT_VALID_LSP	37
-#define L34_RT_VALID_W		1
-#define L34_RT_PROCESS_LSP	38	/* 0=CPU 1=DROP 2=ARP(local) 3=NH(global) */
-#define L34_RT_PROCESS_W	2
-#define L34_RT_INT_LSP		40	/* 1 = LAN, 0 = WAN */
-#define L34_RT_INT_W		1
-#define L34_RT_DENTIF_LSP	41	/* netif index (local-route view of [44:41]) */
-#define L34_RT_DENTIF_W		4
-#define L34_RT_RT2WANINF_LSP	45	/* route to WAN interface */
-#define L34_RT_RT2WANINF_W	1
-#define L34_RT_PROCESS_CPU	0	/* terminate locally (to the CPU) */
-#define L34_RT_PROCESS_ARP	2
 
 /*
  * L2 unicast table (the gateway/peer destination MAC). Reached through a
@@ -197,27 +92,13 @@ enum l34_tbl {
 #define  L2_CMD_WR		BIT(3)	/* 0 = read, 1 = write */
 #define  L2_CMD_METHOD_SH	4	/* [6:4] 0 = MAC-hash, 1 = direct address */
 #define L2_STS			0x12004
-#define  L2_STS_ADDR_MASK	0x3ff	/* [9:0] hardware-assigned entry address */
-#define  L2_STS_CAM		BIT(10)	/* hash(0)/CAM(1): index = (cam << 10) | addr */
-#define  L2_STS_HIT		BIT(12)
+/* the ADDR/CAM/HIT decode bits moved to rtl9602c_l34_logic.h with
+ * l34_l2uc_sts_index(); BUSY stays here with the poll that owns it */
 #define  L2_STS_BUSY		BIT(13)
 #define L2_WDATA		0x12008	/* word0..2 @ +4 */
 #define L2_RDATA		0x1201c	/* word0..2 @ +4 */
 #define L34_WORDS_L2UC		3
 #define L2_METHOD_MAC		0
-
-/* L2_UC entry (3 words). The 48-bit MAC is packed octet[0] at the field MSB. */
-#define L2UC_MAC_LSP		0
-#define L2UC_STATIC_LSP		62	/* no-source-learn => static (not aged out) */
-#define L2UC_STATIC_W		1
-#define L2UC_SPA_LSP		65	/* [66:65] egress port */
-#define L2UC_SPA_W		2
-#define L2UC_AGE_LSP		67	/* static forces this non-zero */
-#define L2UC_AGE_W		3
-#define L2UC_ARPUSED_LSP	73
-#define L2UC_ARPUSED_W		1
-#define L2UC_VALID_LSP		77
-#define L2UC_VALID_W		1
 
 /* Per-flow programming request, filled by the flow-offload glue (endian-safe:
  * addresses/ports are kept in host order here and packed with explicit math). */

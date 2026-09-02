@@ -239,3 +239,96 @@ u32 pi_packed_extract(u32 word, const struct pi_packed_slot *slot)
 {
 	return (word >> slot->shift) & slot->mask;
 }
+
+/* ===== round 2 (2026-09-02): module identity + sample selection =========
+ * Same rule as everything above: the shell samples (I2C strobes, latches,
+ * settle sleeps) and stores the flags/prints; these decide. */
+#include <linux/string.h>
+
+/*
+ * ★★★ THE MODULE'S OWN NAME DECIDES -- IT WAS READ AND NOT USED.
+ *
+ * This test used to be `ident > 0 && ident < 0x30 && extid >= 0`, i.e. "an
+ * SFF-8472 identity exists" -> "therefore NOT an RTL8290B", while the vendor
+ * string was read, formatted into the warning, and never consulted. An
+ * RTL8290 that ships an SFF-8472 EEPROM -- and this one does -- was
+ * classified as a foreign module and had EVERY register write refused with
+ * -ENODEV, the RX enable among them.
+ *
+ * ⚠ MEASURED 2026-08-30 on the LANLY G24W, tier 1, over the board's own I2C:
+ * slave 0x50 bytes 20..35 read `REALTEK` and bytes 40..55 read `RTL8290`, in
+ * plain ASCII, while slave 0x54 (the control bank) answered 0xff to every
+ * address -- which is what a bank nobody may write looks like. The board sat
+ * at O1 with sdet=0 on a fibre stock had reached Online through hours earlier.
+ *
+ * ★ THE STRING IS EVIDENCE, THE IDENT BYTE IS NOT. A vendor's identity page
+ * says WHAT the module is; the presence of that page says only that it HAS
+ * one. Deciding on the second while holding the first is the
+ * text-vs-structure family this tree keeps paying for, inverted: the
+ * structure was there and the weaker signal was believed.
+ *
+ * ★ THREE OUTCOMES ARE KEPT, and the middle one is still ours: named as ours
+ * -> the path stays enabled; a plausible SFF-8024 identifier (0x01..0x2x)
+ * alongside a foreign name -> POSITIVE identification of a different module,
+ * refuse the writes, which is what this guard is FOR; unreadable -> "could
+ * not tell", never "it is not one". The ORDER of the first two tests is
+ * load-bearing: a module both named ours AND carrying a plausible ident byte
+ * (the G24W's exactly) must classify as ours.
+ */
+enum bosa_module_verdict bosa_module_classify(int ident, int extid,
+					      const char *vend, const char *part)
+{
+	if (strstr(vend, "REALTEK") || strstr(part, "RTL8290"))
+		return BOSA_MODULE_NAMED_OURS;
+	if (ident > 0 && ident < 0x30 && extid >= 0)
+		return BOSA_MODULE_FOREIGN;
+	return BOSA_MODULE_COULD_NOT_TELL;
+}
+
+/* One SFF-8472 string field, sanitized for the log: printable ASCII kept, any
+ * other byte -- including a failed (negative) I2C read -- rendered '.', then
+ * NUL-terminated. Was spelled inline three times in the shell (two probe
+ * fields + the 9607C DDM scan). */
+void bosa_sff_text(char *dst, const int *raw, unsigned int n)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++)
+		dst[i] = (raw[i] >= 0x20 && raw[i] < 0x7f) ? (char)raw[i] : '.';
+	dst[n] = 0;
+}
+
+/* Which of up to n samples is THE reading: insertion-sort ascending in place,
+ * return the upper median v[n/2] (n=1 -> the sample, n=2 -> the higher, n=3
+ * -> the middle). Shared by the DDM 16-bit word read (median of the samples
+ * that did not NACK) and the RX code chain (BOSA_RX_CODE_NA == 0 sorts to the
+ * bottom, so a single glitched/dark sample is discarded and only 2-of-3 NA
+ * makes the verdict NA -- equal to the old sum-minus-extremes median-of-3 for
+ * every u32 triple, wraparound included). n must be >= 1; the shell keeps its
+ * "every sample failed" sentinel. */
+u32 bosa_median_u32(u32 *v, unsigned int n)
+{
+	unsigned int i, j;
+
+	for (i = 1; i < n; i++) {
+		u32 key = v[i];
+
+		for (j = i; j > 0 && v[j - 1] > key; j--)
+			v[j] = v[j - 1];
+		v[j] = key;
+	}
+	return v[n / 2];
+}
+
+/* Whether an MPD ADC sample constitutes a measurement, and its ratiometric mV
+ * value if so (europa_drv TX-power chain; the vmpd input of
+ * bosa_tx_sample_contrib). hi == 0 or code at/below the zero tap is the same
+ * taps-agree dead-bus shape bosa_rx_code_calc owns -> INT_MIN, "no reading";
+ * else mV = (hi - zero) * 1200 / (code - zero), 64-bit intermediate. Moved
+ * verbatim from the shell's bosa_vmpd_mv tail. */
+s32 bosa_vmpd_mv_calc(u32 code, s32 hi, s32 zero)
+{
+	if (hi == 0 || (s32)code <= zero)
+		return INT_MIN;
+	return (s32)div_u64((u64)(u32)(hi - zero) * 1200, (u32)((s32)code - zero));
+}

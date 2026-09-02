@@ -61,6 +61,7 @@
 #include "gpon_ploam.h"	/* the core PLOAM FSM + its shell contract */
 #include "gpon_gem_us.h"	/* GPON_GEM_US_RANGE_OK: the core's own bound predicate */
 #include "gpon_rtl9602c_logic.h"	/* hoisted logic */
+#include "hwio.h"	/* flowcore: the ONE canonical field-mask RMW */
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/gfp.h>		/* __get_free_pages / GFP_KERNEL for the US PBO DRAM pool */
@@ -1445,23 +1446,40 @@ static void sw_wr(u32 off, u32 v)
 static inline u32 pi_rd(u32 off) { return ioread32(ponip_base + off); }
 static inline void pi_wr(u32 off, u32 v) { iowrite32(v, ponip_base + off); }
 
+/* The three register blocks as flowcore `struct hwio`, so the field RMW below
+ * uses hwio.h's ONE canonical mask arithmetic instead of three per-block
+ * copies of it (a field one bit too wide reads back correct and behaves
+ * wrong, which is why hwio.h exists). ctx is unused: the block bases are this
+ * file's own statics, reached by the same sw_rd/sw_wr/pi_rd/pi_wr/gpon_rd/
+ * gpon_wr accessors as every non-field access (the 9607C SMI-proxy window in
+ * sw_rd/sw_wr included). */
+static u32  sw_hwio_rd(void *ctx, u32 off)		{ return sw_rd(off); }
+static void sw_hwio_wr(void *ctx, u32 off, u32 v)	{ sw_wr(off, v); }
+static const struct hwio sw_io = { .rd = sw_hwio_rd, .wr = sw_hwio_wr };
+static u32  pi_hwio_rd(void *ctx, u32 off)		{ return pi_rd(off); }
+static void pi_hwio_wr(void *ctx, u32 off, u32 v)	{ pi_wr(off, v); }
+static const struct hwio pi_io = { .rd = pi_hwio_rd, .wr = pi_hwio_wr };
+static u32  gpon_hwio_rd(void *ctx, u32 off)		{ return gpon_rd(off); }
+static void gpon_hwio_wr(void *ctx, u32 off, u32 v)	{ gpon_wr(off, v); }
+static const struct hwio gpon_io = { .rd = gpon_hwio_rd, .wr = gpon_hwio_wr };
+
 /* Read-modify-write the bit-field [msb:lsb] of the SWCORE register at off. */
 static void sw_field(u32 off, unsigned int msb, unsigned int lsb, u32 val)
 {
-	u32 mask = (msb - lsb == 31) ? 0xffffffffu
-				     : (((1u << (msb - lsb + 1)) - 1) << lsb);
-
-	sw_wr(off, (sw_rd(off) & ~mask) | ((val << lsb) & mask));
+	hwio_rmw(&sw_io, off, msb, lsb, val);
 }
 
 /* Read-modify-write the bit-field [msb:lsb] of the PON-IP register at off. */
 static void pi_field(u32 off, unsigned int msb, unsigned int lsb, u32 val)
 {
-	u32 mask = (msb - lsb == 31) ? 0xffffffffu
-				     : (((1u << (msb - lsb + 1)) - 1) << lsb);
-
-	pi_wr(off, (pi_rd(off) & ~mask) | ((val << lsb) & mask));
+	hwio_rmw(&pi_io, off, msb, lsb, val);
 }
+
+/* Packed pi-register array entry write (shared locate: pi_packed_locate in
+ * gpon_rtl9602c_logic.c). Defined below with the SID2QID helpers; forward-
+ * declared so the early scheduler init writes WFQ_TYPE through the SAME
+ * addressing as everything else. */
+static void pi_packed_set(u32 base, unsigned int idx, unsigned int bits, u32 val);
 
 /*
  * Front-panel PON/LOS LEDs. The stock unit lights the green PON LED once it
@@ -1576,13 +1594,11 @@ static void gpon_led_init(void)
 }
 
 
-/* Read-modify-write the bit-field [msb:lsb] of the GPON-block register at off. */
+/* Read-modify-write the bit-field [msb:lsb] of the GPON-block register at off.
+ * Same canonical mask RMW as sw_field/pi_field (flowcore hwio.h). */
 static void gpon_field(u32 off, unsigned int msb, unsigned int lsb, u32 val)
 {
-	u32 mask = (msb - lsb == 31) ? 0xffffffffu
-				     : (((1u << (msb - lsb + 1)) - 1) << lsb);
-
-	gpon_wr(off, (gpon_rd(off) & ~mask) | ((val << lsb) & mask));
+	hwio_rmw(&gpon_io, off, msb, lsb, val);
 }
 
 /* DEV live register poke (uses the driver's own ioremap — no /dev/mem, immune to
@@ -1753,12 +1769,13 @@ static void ddm_probe_9607c(void)
 	pr_info("rtl9602c-gpon: DDM proxy self-test SDS_CFG direct=0x%x proxy=0x%x %s\n",
 		direct, proxy, direct == proxy ? "OK" : "PROXY-BROKEN");
 
-	for (i = 0; i < 16; i++) {
-		int b = bosa_i2c_read8(0x50, 20 + i);
+	{
+		int raw[16];
 
-		vendor[i] = (b >= 0x20 && b < 0x7f) ? (char)b : '.';
+		for (i = 0; i < 16; i++)
+			raw[i] = bosa_i2c_read8(0x50, 20 + i);
+		bosa_sff_text(vendor, raw, 16);	/* sanitize: gpon_rtl9602c_logic.c */
 	}
-	vendor[16] = 0;
 	pr_info("rtl9602c-gpon: DDM A0(0x50) vendor='%s'\n", vendor);
 
 	v0 = bosa_i2c_read8(0x51, 104);
@@ -1867,24 +1884,20 @@ static int bosa_read16(u16 reg_hi)
  */
 static int bosa_read16_median(u16 reg_hi)
 {
-	int v[3], n = 0, i, j;
+	u32 v[3];
+	unsigned int n = 0;
+	int i;
 
 	for (i = 0; i < 3; i++) {
 		int r = bosa_read16(reg_hi);
 
 		if (r >= 0)
-			v[n++] = r;
+			v[n++] = (u32)r;
 	}
 	if (n == 0)
 		return -1;
-	for (i = 1; i < n; i++) {		/* insertion sort the valid samples */
-		int key = v[i];
-
-		for (j = i - 1; j >= 0 && v[j] > key; j--)
-			v[j + 1] = v[j];
-		v[j + 1] = key;
-	}
-	return v[n / 2];			/* median */
+	/* selection rule (sort + upper median): gpon_rtl9602c_logic.c */
+	return (int)bosa_median_u32(v, n);
 }
 
 /* --- ANI-G (ME 263) live optical levels ------------------------------------
@@ -2187,13 +2200,17 @@ static u32 bosa_rx_code(void)
 }
 
 /* Median of 3 RX code reads -- de-noises the read-to-read variation (stock
- * medians 60; 3 is enough for a diagnostic and keeps the /proc read cheap). */
+ * medians 60; 3 is enough for a diagnostic and keeps the /proc read cheap).
+ * Selection rule shared with bosa_read16_median (bosa_median_u32): NA == 0
+ * sorts to the bottom, so one glitched sample is discarded. */
 static u32 bosa_rx_code_median(void)
 {
-	u32 a = bosa_rx_code(), b = bosa_rx_code(), c = bosa_rx_code();
-	u32 lo = min(a, min(b, c)), hi = max(a, max(b, c));
+	u32 v[3];
 
-	return a + b + c - lo - hi;
+	v[0] = bosa_rx_code();
+	v[1] = bosa_rx_code();
+	v[2] = bosa_rx_code();
+	return bosa_median_u32(v, 3);
 }
 
 /* Public on-demand RX optical power in centi-dBm (for /proc + ubus + ANI-G).
@@ -2310,9 +2327,8 @@ static s32 bosa_vmpd_mv(u16 tap_hi)
 	bosa_tx_dbg_code = code;
 	bosa_tx_dbg_hi = hi;
 	bosa_tx_dbg_zero = zero;
-	if (hi == 0 || (s32)code <= zero)
-		return INT_MIN;
-	return (s32)div_u64((u64)(u32)(hi - zero) * 1200, (u32)((s32)code - zero));
+	/* validity (dead-bus shape) + ratiometric mV: gpon_rtl9602c_logic.c */
+	return bosa_vmpd_mv_calc(code, hi, zero);
 }
 
 /* One-time dark (laser-off) MPD calibration. MUST run at BOSA init BEFORE the
@@ -3514,60 +3530,37 @@ static void __init bosa_probe(void)
 		int extid = bosa_i2c_read8(0x50, 1);
 		int conn  = bosa_i2c_read8(0x50, 2);
 		int br    = bosa_i2c_read8(0x50, 12);
+		int raw[16];
 		char vend[17];
 		char part[17];
 		int k;
 
-		for (k = 0; k < 16; k++) {
-			int b = bosa_i2c_read8(0x50, 20 + k);
-
-			vend[k] = (b >= 0x20 && b < 0x7f) ? (char)b : '.';
-		}
-		vend[16] = 0;
-		for (k = 0; k < 16; k++) {
-			int b = bosa_i2c_read8(0x50, 40 + k);
-
-			part[k] = (b >= 0x20 && b < 0x7f) ? (char)b : '.';
-		}
-		part[16] = 0;
-		/*
-		 * ★★★ THE MODULE'S OWN NAME DECIDES -- IT WAS READ AND NOT USED.
-		 *
-		 * This test used to be `ident > 0 && ident < 0x30 && extid >= 0`, i.e.
-		 * "an SFF-8472 identity exists" -> "therefore NOT an RTL8290B", while
-		 * `vend` was read, formatted into the warning, and never consulted.  An
-		 * RTL8290 that ships an SFF-8472 EEPROM -- and this one does -- was
-		 * classified as a foreign module and had EVERY register write refused
-		 * with -ENODEV, the RX enable among them.
-		 *
-		 * ⚠ MEASURED 2026-08-30 on the LANLY G24W, tier 1, over the board's own
-		 * I2C: slave 0x50 bytes 20..35 read `REALTEK` and bytes 40..55 read
-		 * `RTL8290`, in plain ASCII, while slave 0x54 (the control bank) answered
-		 * 0xff to every address -- which is what a bank nobody may write looks
-		 * like.  The board sat at O1 with sdet=0 on a fibre stock had reached
-		 * Online through hours earlier.
-		 *
-		 * ★ THE STRING IS EVIDENCE, THE IDENT BYTE IS NOT.  A vendor's identity
-		 * page says WHAT the module is; the presence of that page says only that
-		 * it HAS one.  Deciding on the second while holding the first is the
-		 * text-vs-structure family this tree keeps paying for, inverted: the
-		 * structure was there and the weaker signal was believed.
-		 *
-		 * ★ THREE OUTCOMES ARE KEPT, and the middle one is still ours: named as
-		 * ours -> the path stays enabled; named as something else -> refuse the
-		 * writes, which is what this guard is FOR; unreadable -> "could not
-		 * tell", never "it is not one".
-		 */
-		if (strstr(vend, "REALTEK") || strstr(part, "RTL8290")) {
+		for (k = 0; k < 16; k++)
+			raw[k] = bosa_i2c_read8(0x50, 20 + k);
+		bosa_sff_text(vend, raw, 16);
+		for (k = 0; k < 16; k++)
+			raw[k] = bosa_i2c_read8(0x50, 40 + k);
+		bosa_sff_text(part, raw, 16);
+		/* Three-outcome identity decision, hoisted: the module's own NAME
+		 * outranks the mere presence of an SFF-8472 page (the inversion that
+		 * cost the G24W days -- measured 2026-08-30, full rationale at
+		 * bosa_module_classify() in gpon_rtl9602c_logic.c). This shell keeps
+		 * only the I2C sampling above, the prints, and the flag store. */
+		switch (bosa_module_classify(ident, extid, vend, part)) {
+		case BOSA_MODULE_NAMED_OURS:
 			pr_info("rtl9602c-gpon: optical module identifies itself as vendor='%s' part='%s' -- RTL8290B register path stays ENABLED (the SFF-8472 page says WHAT it is; merely HAVING one never meant it was foreign)\n",
 				vend, part);
-		} else if (ident > 0 && ident < 0x30 && extid >= 0) {
+			break;
+		case BOSA_MODULE_FOREIGN:
 			bosa_not_8290b = true;
 			pr_warn("rtl9602c-gpon: optical module is NOT an RTL8290B -- SFF-8472 A0 ident=0x%02x extid=0x%02x connector=0x%02x br=%d00MBd vendor='%s'. RTL8290B register writes are now REFUSED; DDM must come from A2 (slave 0x51) bytes 104/105, not the analog banks.\n",
 				ident, extid, conn, br, vend);
-		} else {
+			break;
+		case BOSA_MODULE_COULD_NOT_TELL:
+		default:
 			pr_warn("rtl9602c-gpon: BOSA id 0x%04x is not 0x8290 and SFF-8472 A0 did not identify it either (ident=%d) -- leaving the RTL8290B path enabled; this is 'could not tell', not 'it is an 8290B'\n",
 				bosa_id_num, ident);
+			break;
 		}
 	}
 
@@ -4528,7 +4521,7 @@ void rtl9602c_datapath_tables_init(void)
 	else
 		pi_field(0x02194, 18, 18, pir_drop ? 1 : 0);	/* legacy bit18-only A/B */
 	for (idx = 0; idx < 8; idx++) {
-		pi_field(PI_PON_WFQ_TYPE, idx, idx, 0);		/* WFQ_TYPE = STRICT     */
+		pi_packed_set(PI_PON_WFQ_TYPE, idx, 1, 0);	/* WFQ_TYPE = STRICT (1b packed) */
 		pi_field(0x02198 + idx * 4, 31, 0, 0);	/* QID_CIR_RATE = 0      */
 	}
 	sw_field(PON_TRAP_CFG, 2, 0, 7);			/* PON_TRAP_CFG OMCI_MPCP_PRIORITY=7 -> steer OMCI egress to PON queue 7 */
@@ -7132,7 +7125,7 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 			 (tcont == GPON_OMCC_TCONT_ALT) ? GPON_OMCC_PHYS_QID :
 			 32 * (tcont / 8);
 
-		pi_field(0x023e4 + (tcont / 32) * 4, tcont % 32, tcont % 32, 1); /* PON_TCONT_EN[tcont] */
+		pi_packed_set(0x023e4, tcont, 1, 1);		/* PON_TCONT_EN[tcont] (1b packed) */
 		/*
 		 * Drain out the physical queue BEFORE binding it into the schedule mask.
 		 * This is the half of the stock ponmac queue-add that was previously
@@ -7157,11 +7150,12 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 		pi_wr(0x023a0 + tcont * 4, 0x1);		/* PON_SCH_QMAP[tcont] = logical-q0 */
 		pi_field(0x0229c + qid * 4, 17, 0, 0x3ffff);	/* PON_QID_PIR_RATE[qid] = MAX (1 word/qid) */
 		pi_field(0x02198 + qid * 4, 17, 0, 0);		/* PON_QID_CIR_RATE[qid] = 0 (live-stock; STRICT uses PIR only) */
-		pi_field(PI_PON_WFQ_TYPE + (qid / 32) * 4, qid % 32, qid % 32, 0); /* PON_WFQ_TYPE[qid] = STRICT */
-		/* PON_WFQ_WEIGHT[qid] = 1 (10 bits/entry, 3 entries per 32-bit word):
-		 * stock writes weight 1 even for a STRICT queue ("for safe") — a zero-weight
-		 * queue is skipped by the WFQ round. */
-		pi_field(0x023f8 + (qid / 3) * 4, (qid % 3) * 10 + 9, (qid % 3) * 10, 1);
+		pi_packed_set(PI_PON_WFQ_TYPE, qid, 1, 0);	/* PON_WFQ_TYPE[qid] = STRICT (1b packed) */
+		/* PON_WFQ_WEIGHT[qid] = 1 (10 bits/entry, 3 entries per 32-bit word --
+		 * exactly pi_packed_locate's 32/bits packing, top 2 bits of each word
+		 * unused): stock writes weight 1 even for a STRICT queue ("for safe") — a
+		 * zero-weight queue is skipped by the WFQ round. */
+		pi_packed_set(0x023f8, qid, 10, 1);
 		/* SIDVALID[SID 64] RE-ISSUE — re-write the OMCC classifier's SID-valid bit
 		 * NOW, after the queue is fully armed (drained, T-CONT-enabled, in the
 		 * schedule mask, rated). Stock's ponmac queue_add tail does exactly this:
@@ -7185,7 +7179,7 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 			 * any is missing, a future regression moved SIDVALID before the arm
 			 * again — warn on the console so it is caught on boot #1, not weeks
 			 * later. */
-			u32 en   = (pi_rd(0x023e4 + (tcont / 32) * 4) >> (tcont % 32)) & 1u;
+			u32 en   = pi_packed_get(0x023e4, tcont, 1);	/* PON_TCONT_EN[tcont] */
 			u32 qmap = pi_rd(0x023a0 + tcont * 4) & 0x3u;
 			u32 pir  = pi_rd(0x0229c + qid * 4) & 0x3ffffu;
 

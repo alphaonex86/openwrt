@@ -414,3 +414,83 @@ u32 cn_pppoe_punt_classify(const u8 *f, unsigned int len, u16 exp_sid,
 	}
 	return v;
 }
+
+/*
+ * One MSB-first CRC LFSR step, normal form: (d << 1) ^ (msb ? poly : 0).
+ * Used by the shell's SWO selftest to assert the on-chip engine steps its
+ * polynomial correctly across adjacent key bits; pure arithmetic, so it lives
+ * beside the other flowcore CRC primitives.  The 32-bit and 16-bit variants
+ * differ only in the polynomial and in the MSB position.
+ */
+u32 cn_l3e_poly32_step(u32 d)
+{
+	return (d << 1) ^ ((d & BIT(31)) ? CN_L3E_SWO_POLY32 : 0);
+}
+
+u16 cn_l3e_poly16_step(u16 d)
+{
+	return ((d << 1) ^ ((d & BIT(15)) ? CN_L3E_SWO_POLY16 : 0)) & 0xffff;
+}
+
+/*
+ * The 4-slot TPID table is two 32-bit words, each holding two 16-bit slots:
+ * slot 0 = w[0] low half, slot 1 = w[0] high half, slot 2 = w[1] low, slot 3 =
+ * w[1] high.  This extraction idiom was spelled character-for-character in two
+ * shell functions (the DMA-AFT slot search and the L3FE parser-gate walk); a
+ * single helper makes the packing one fact.  Pure - the shell keeps the two
+ * register reads that produce @w and any warn/claim it does on the result.
+ */
+u16 cn_tpid_slot_at(const u32 w[2], unsigned int i)
+{
+	return (i & 1) ? (u16)(w[i >> 1] >> 16) : (u16)(w[i >> 1] & 0xffff);
+}
+
+int cn_tpid_find(const u32 w[2], u16 tpid)
+{
+	unsigned int i;
+
+	for (i = 0; i < 4; i++)
+		if (cn_tpid_slot_at(w, i) == tpid)
+			return (int)i;
+	return -1;
+}
+
+/*
+ * ★ The under-encapsulation tail of the WAN-VLAN admission policy - the part of
+ * the shell's cn_wan_vlan_programmable() that runs AFTER the forward-path chain
+ * walk, expressed as a pure verdict so its DECLINE ORDER is host-testable and
+ * cannot drift from cn_flow_refuse_vlan_wan()'s arms about which flows are
+ * VLAN-carrying (exactly like cn_pppoe_leg_check()).
+ *
+ * The order is the policy, not an accident:
+ *   1. the walk must have succeeded AND resolved the vid we already wanted -
+ *      otherwise this is not the tagged flow we think it is;
+ *   2. only a 0x8100 outer TPID is registered in the packet editor's slots; a
+ *      QinQ outer would need a different slot and nesting, unestablished here;
+ *   3. a tag under something with no resolvable session id is not RE'd;
+ *   4. and without the access-concentrator MAC there is no LAN-side next hop.
+ * Fail-closed everywhere: any decline returns a non-OK verdict and the shell
+ * refuses the leg to the software fastpath, which is today's behaviour.
+ *
+ * @want_vid    the vid cn_aft_wan_vid() already resolved (never 0 at the call).
+ * @walk_ok     the chain walk completed.
+ * @walk_vid    the vid the walk itself resolved (-1 = none).
+ * @tpid_8021q  the walked outer TPID is exactly ETH_P_8021Q (0x8100).
+ * @sid         the PPPoE session id the walk resolved (<0 or >0xffff = none).
+ * @ac_mac_vld  the access-concentrator MAC was resolved.
+ */
+enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
+						  int walk_vid,
+						  bool tpid_8021q, int sid,
+						  bool ac_mac_vld)
+{
+	if (!walk_ok || walk_vid != (int)want_vid)
+		return CN_WAN_VLAN_WALK_MISMATCH;
+	if (!tpid_8021q)
+		return CN_WAN_VLAN_BAD_TPID;
+	if (sid < 0 || sid > 0xffff)
+		return CN_WAN_VLAN_NO_SID;
+	if (!ac_mac_vld)
+		return CN_WAN_VLAN_NO_MAC;
+	return CN_WAN_VLAN_OK_PPPOE;
+}

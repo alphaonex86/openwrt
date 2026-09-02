@@ -38,6 +38,7 @@
 
 #include <linux/bitfield.h>
 #include "cortina_ni_rx_logic.h"	/* hoisted logic */
+#include "cortina_l3fe_logic.h"	/* l3fe_wan_mac_derive(): the ONE WAN-MAC = LAN-MAC + 1 */
 #include <linux/crc32.h>	/* ★ TEMP DIAG rx_frag_tap - revert with it */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -1002,14 +1003,18 @@ static noinline void cortina_ni_rx_stack_tap(struct cortina_ni *ni,
  */
 static inline struct net_device *cortina_ni_rx_wan_dest(u32 hdra_lo, bool *is_l3)
 {
-	u32 lspid = FIELD_GET(CA_NI_HDRA_W1_LSPID, hdra_lo);
-	bool pon = (lspid == CA_NI_LSPID_PON);
-	bool l3 = (lspid == CA_NI_LSPID_L3_WAN) &&
-		  cortina_ni_hw_l3_fwd_active();
+	enum ca_ni_rx_wan_class cls =
+		cortina_ni_rx_wan_class(FIELD_GET(CA_NI_HDRA_W1_LSPID,
+						  hdra_lo));
 
-	if (!pon && !l3)
+	if (cls == CA_NI_RX_WAN_NONE)
 		return NULL;
-	*is_l3 = l3;
+	/* the L3 class counts only while the HW-L3 path is armed - a LIVE
+	 * read of the offload module's state, applied HERE and not inside
+	 * the classifier so a LAN frame never pays for the call */
+	if (cls == CA_NI_RX_WAN_L3 && !cortina_ni_hw_l3_fwd_active())
+		return NULL;
+	*is_l3 = (cls == CA_NI_RX_WAN_L3);
 	return READ_ONCE(cortina_ni_pon_wan_ndev);
 }
 
@@ -1995,68 +2000,48 @@ static void cortina_ni_rx_ind_read(struct cortina_ni *ni, u32 access_reg, unsign
  * the last-touched entries).  Table protocol = DATA regs, then ACCESS=GO|WR|i.
  * Idempotent (absolute values), so safe from the link-up re-arm path.
  */
-/* Stock L2FE VLAN membership check-id map (aal_l2_vlan.c __g_l2_vlan_port_map):
- * lport -> membership check-id.  NI0-7 -> 0-7, CPU_0 -> 8, CPU_1 -> 9,
- * L3_WAN/L3_LAN (0x18/0x19) -> 15, GEM (0x20+) -> 7.  Programmed into the
- * MMSHP_CHK_ID_MAP so the membership check qualifies LAN<->CPU forwarding. */
-static const u8 ca_ni_vlan_chkid_map[CA_NI_L2FE_LPORT_COUNT] = {
-	 0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0,
-	 8, 9, 0,10,11,12,13,14,15,15, 0, 0, 0, 0, 0, 0,
-	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-};
-
+/* The per-lport VALUES (the vlan check-id table, the ILPB/ELPB words, the
+ * all-but-self MMSHP pair) are derived by the hoisted
+ * cortina_ni_rx_lport_profile(); this function keeps the table PROTOCOL -
+ * the DATA-registers-then-ACCESS ordering and the polls. */
 static void cortina_ni_rx_port_profiles_init(struct cortina_ni *ni)
 {
+	struct ca_ni_lport_profile p;
 	u32 i, d0, d1, d2;
 
 	dev_info(ni->dev, "port-prof: programming IPPB/MMSHP/ILPB/ELPB (64 lports)\n");
 
 	for (i = 0; i < CA_NI_L2FE_LPORT_COUNT; i++) {
+		cortina_ni_rx_lport_profile(i, &p);
+
 		/* IPPB: physical -> logical source-port map, identity */
 		writel(i, ni_base(ni) + CA_NI_L2FE_IPPB_DATA);
 		cortina_ni_rx_ind_store(ni, CA_NI_L2FE_IPPB_ACCESS, i);
 
 		/* MMSHP: allowed-ldpid bitmap = all-but-self (isolation off) */
-		writel(i >= 32 ? ~BIT(i - 32) : ~0u,
-		       ni_base(ni) + CA_NI_L2FE_MMSHP_DATA1);
-		writel(i < 32 ? ~BIT(i) : ~0u,
-		       ni_base(ni) + CA_NI_L2FE_MMSHP_DATA0);
+		writel(p.mmshp_d1, ni_base(ni) + CA_NI_L2FE_MMSHP_DATA1);
+		writel(p.mmshp_d0, ni_base(ni) + CA_NI_L2FE_MMSHP_DATA0);
 		cortina_ni_rx_ind_store(ni, CA_NI_L2FE_MMSHP_ACCESS, i);
 
 		/* MMSHP check-id map: lport -> VLAN membership check-id (stock
 		 * __g_l2_vlan_port_map).  Unprogrammed (our old bug wrote garbage
 		 * into entry 63 only), the membership check qualifies nothing and
 		 * LAN frames never reach the CPU port. */
-		writel(ca_ni_vlan_chkid_map[i],
-		       ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA);
+		writel(p.chkid, ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA);
 		cortina_ni_rx_ind_store(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, i);
 
 		/* ILPB ingress profile: stp_mode=FWD+LEARN + the stock defaults */
-		if (i == CA_NI_LPORT_MC)
-			d2 = CA_NI_L2FE_ILPB_D2_MC;
-		else if (i < CA_NI_LPORT_GEM_FIRST)
-			d2 = CA_NI_L2FE_ILPB_D2_PORT;
-		else
-			d2 = CA_NI_L2FE_ILPB_D2_GEM;
-		d1 = CA_NI_L2FE_ILPB_D1_INIT;
-		if (i <= CA_NI_LPORT_ETH_NI6 ||
-		    (i >= CA_NI_LPORT_CPU_0 && i <= CA_NI_LPORT_CPU_7))
-			d1 |= CA_NI_L2FE_ILPB_D1_STAMOVE;
-		writel(i >= CA_NI_LPORT_GEM_FIRST ? CA_NI_L2FE_ILPB_D4_WAN : 0,
-		       ni_base(ni) + CA_NI_L2FE_ILPB_DATA4);
-		writel(CA_NI_L2FE_ILPB_D3_INIT, ni_base(ni) + CA_NI_L2FE_ILPB_DATA3);
-		writel(d2, ni_base(ni) + CA_NI_L2FE_ILPB_DATA2);
-		writel(d1, ni_base(ni) + CA_NI_L2FE_ILPB_DATA1);
-		writel(CA_NI_L2FE_ILPB_D0_INIT, ni_base(ni) + CA_NI_L2FE_ILPB_DATA0);
+		writel(p.ilpb_d4, ni_base(ni) + CA_NI_L2FE_ILPB_DATA4);
+		writel(p.ilpb_d3, ni_base(ni) + CA_NI_L2FE_ILPB_DATA3);
+		writel(p.ilpb_d2, ni_base(ni) + CA_NI_L2FE_ILPB_DATA2);
+		writel(p.ilpb_d1, ni_base(ni) + CA_NI_L2FE_ILPB_DATA1);
+		writel(p.ilpb_d0, ni_base(ni) + CA_NI_L2FE_ILPB_DATA0);
 		cortina_ni_rx_ind_store(ni, CA_NI_L2FE_ILPB_ACCESS, i);
 
 		/* ELPB egress profile: egr STP forward + vlan-aware (+dest_wan
 		 * on the PON-side dest ports and the L3_LAN dest) */
-		d0 = (i >= CA_NI_LPORT_GEM_FIRST || i == CA_NI_LPORT_L3_LAN) ?
-		     CA_NI_L2FE_ELPB_D0_WAN : CA_NI_L2FE_ELPB_D0_LAN;
 		writel(0, ni_base(ni) + CA_NI_L2FE_ELPB_DATA1);
-		writel(d0, ni_base(ni) + CA_NI_L2FE_ELPB_DATA0);
+		writel(p.elpb_d0, ni_base(ni) + CA_NI_L2FE_ELPB_DATA0);
 		cortina_ni_rx_ind_store(ni, CA_NI_L2FE_ELPB_ACCESS, i);
 	}
 
@@ -2481,6 +2466,7 @@ static int cortina_ni_l2fe_fdb_read_idx(void __iomem *base, u32 d3, u32 d2,
 					u32 d1, u32 *act_out)
 {
 	u32 acc, cr;
+	int idx;
 
 	writel(0, base + CA_NI_L2FE_FDB_CMD_RETURN);
 	writel(d3, base + CA_NI_L2FE_FDB_DATA3);
@@ -2493,11 +2479,12 @@ static int cortina_ni_l2fe_fdb_read_idx(void __iomem *base, u32 d3, u32 d2,
 			       CA_NI_TX_POLL_TIMEOUT_US))
 		return -1;
 	cr = readl(base + CA_NI_L2FE_FDB_CMD_RETURN);
-	if ((cr & 0xf) != CA_NI_L2FE_FDB_STATUS_HIT)
+	idx = cortina_ni_l2fe_fdb_cmd_status_idx(cr);
+	if (idx < 0)
 		return -1;			/* not present */
 	if (act_out)
 		*act_out = readl(base + CA_NI_L2FE_FDB_DATA0);
-	return (int)((cr >> 4) & 0x1fff);	/* ext_status[16:4] = entry index */
+	return idx;
 }
 
 int cortina_ni_l2fe_fdb_add_idx(void __iomem *base, const u8 *mac, u32 ldpid)
@@ -2505,9 +2492,7 @@ int cortina_ni_l2fe_fdb_add_idx(void __iomem *base, const u8 *mac, u32 ldpid)
 	u32 d0, d1, d2, d3, acc;
 
 	cortina_ni_l2fe_fdb_key(mac, &d3, &d2, &d1);
-	d0 = FIELD_PREP(CA_NI_L2FE_FDB_LPID, ldpid) |
-	     CA_NI_L2FE_FDB_VALID | CA_NI_L2FE_FDB_STATIC |
-	     CA_NI_L2FE_FDB_DA_PERMIT | CA_NI_L2FE_FDB_SA_PERMIT;
+	d0 = cortina_ni_l2fe_fdb_action(ldpid);
 
 	writel(0, base + CA_NI_L2FE_FDB_CMD_RETURN);
 	writel(d3, base + CA_NI_L2FE_FDB_DATA3);
@@ -2550,10 +2535,8 @@ int cortina_ni_l2fe_fdb_lookup_idx(void __iomem *base, const u8 *mac,
 	idx = cortina_ni_l2fe_fdb_read_idx(base, d3, d2, d1, &act);
 	if (idx < 0)
 		return -1;
-	if (!(act & CA_NI_L2FE_FDB_VALID) || !(act & CA_NI_L2FE_FDB_DA_PERMIT))
+	if (!cortina_ni_l2fe_fdb_action_da(act, ldpid_out))
 		return -1;		/* present but not forwardable as a DA */
-	if (ldpid_out)
-		*ldpid_out = FIELD_GET(CA_NI_L2FE_FDB_LPID, act);
 	return idx;
 }
 
@@ -2606,17 +2589,15 @@ static void cortina_ni_rx_fdb_add_cpu(struct cortina_ni *ni)
 	 * link-up re-run it here with the gate true). */
 	if (cortina_ni_hw_l3_fwd_active()) {
 		u8 wan_mac[ETH_ALEN];
-		u64 v = ((u64)mac[0] << 40) | ((u64)mac[1] << 32) |
-			((u64)mac[2] << 24) | ((u64)mac[3] << 16) |
-			((u64)mac[4] << 8) | mac[5];
 
-		v++;
-		wan_mac[0] = v >> 40;
-		wan_mac[1] = v >> 32;
-		wan_mac[2] = v >> 24;
-		wan_mac[3] = v >> 16;
-		wan_mac[4] = v >> 8;
-		wan_mac[5] = v;
+		/* REBASED, not re-spelled: flowcore's l3fe_wan_mac_derive()
+		 * (hoisted out of cortina-l3fe.c in round one) is the ONE
+		 * copy of the 48-bit +1-with-carry; this block used to be
+		 * the second spelling.  (With CONFIG_CORTINA_NI_FLOWOFFLOAD
+		 * unset the gate above folds to constant false and the call
+		 * is compiled out, so a CONFIG_CORTINA_NI-only link never
+		 * needs the flowoffload-gated logic object.) */
+		l3fe_wan_mac_derive(mac, wan_mac);
 		cortina_ni_rx_fdb_append(ni, wan_mac, CA_NI_RX_L3WAN_LDPID);
 	}
 }

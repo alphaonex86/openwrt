@@ -39,7 +39,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
-#include "gpon_omci_core.h"	/* omci_put_be16 + the responder */
+#include "gpon_omci_core.h"	/* the responder + omci_set_mic + the AVC emitters */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log */
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
 #include "rtl9602c_gpon_nic.h"
@@ -1258,11 +1258,13 @@ static void rtl9602c_omci_finalize(u8 *msg)
 	 * be right.  omci_mic_parity.py reported it as DISAGREE and said exactly
 	 * that; a wrong MIC is a SILENT DROP at the OLT.
 	 *
-	 * ⚠ AND THE PATH THAT CARRIED THE ODD ONE IS THE AVC.  The other caller
-	 * of rtl9602c_omci_finalize() is rtl9602c_eth_omci_avc(), and the VEIP
-	 * oper-up AVC is what this port's WAN provisioning waits on -- so the one
-	 * message the OLT most needs was the one stamped differently from every
-	 * other message this board sends.
+	 * ⚠ AND THE PATH THAT CARRIED THE ODD ONE WAS THE AVC.  When this was
+	 * written, rtl9602c_omci_finalize()'s other caller was the local AVC
+	 * builder, and the VEIP oper-up AVC is what this port's WAN provisioning
+	 * waits on -- so the one message the OLT most needs was the one stamped
+	 * differently from every other message this board sends.  (The AVC has
+	 * since been rebased onto the core, 2026-09-02; the remaining caller of
+	 * this function is the /proc self-test injector below.)
 	 *
 	 * crc32_be is the right side of that pair and not merely the majority:
 	 * G.984.4 asks for the non-reflected AAL5 CRC-32, gpon_omci_core.c
@@ -1847,7 +1849,8 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
  *       needed to call wrong: at most one can be right.
  *
  *       ⚠ AND THE ODD ONE WAS ON THE AVC PATH.  rtl9602c_omci_finalize()'s
- *       other caller is rtl9602c_eth_omci_avc(), so the VEIP oper-up AVC that
+ *       other caller was the local AVC builder (itself rebased onto the
+ *       core's omci_emit_avc on 2026-09-02), so the VEIP oper-up AVC that
  *       this port's WAN provisioning waits on was the one message stamped
  *       differently from everything else the board sends.
  *
@@ -1947,7 +1950,9 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
 
 /* omci_put_be16() is the CORE's, from gpon_omci_core.h.  The copy that used to
  * sit here was byte-identical to it and existed only because the core's was
- * `static inline` inside its .c, unreachable from any other unit. */
+ * `static inline` inside its .c, unreachable from any other unit.  (Since the
+ * 2026-09-02 AVC rebase this shell no longer calls it at all -- the core
+ * builds every OMCI frame this board sends.) */
 
 /* G.988 ME class IDs of the auto-instantiated hardware MEs we present in the
  * MIB-Upload (in addition to the discovery MEs above). */
@@ -2123,49 +2128,27 @@ static void rtl9602c_eth_omci_input(struct rtl9602c_eth *ep, const u8 *msg,
 }
 
 /*
- * LAYER BOUNDARY: the autonomous AVC.  Common home = omci_emit_avc() and its
- * omci_onu_emit_veip_up_avc() wrapper in gpon-common
- * .../drivers/net/gpon/gpon_omci_core.c — same MT 0x11, same VEIP inst 0x0601
- * / mask 0x4000 / value 0.  It did NOT move: it shares rtl9602c_omci_finalize()
- * with the responder, so it inherits divergence 1 (the MIC) and would change
- * bytes 44..47 of the AVC too.  Measured in the same 82-PDU differential.
- * The value-length clamp also differs (30 here; the common one is bounded by
- * its own value area) — harmless for the 1-byte VEIP report, but it is a
- * behavioural difference for any longer AVC added later.
+ * LAYER BOUNDARY -- RESOLVED 2026-09-02: the autonomous AVC is the CORE's
+ * (omci_emit_avc() / omci_onu_emit_veip_up_avc(), gpon-common
+ * .../drivers/net/gpon/gpon_omci_core.c).  This shell used to build the MT
+ * 0x11 frame itself (rtl9602c_eth_omci_avc); the recorded blocker was
+ * divergence 1 -- the two MIC polynomials -- which died 2026-09-01 when this
+ * file adopted the core's omci_set_mic(), and the comment's remaining claim
+ * (a differing value clamp) was STALE: both sides clamp at 30.  Byte
+ * equality old-vs-core proven on x86 over a class/inst/mask/vlen sweep
+ * (hoist2-luna-eth harness, 2026-09-02).  Declared side effect of the
+ * rebase: the core bumps luna_onu.avc_count and sets avc_veip_up_sent.
+ * The shell keeps the trap_on gate, the xmit and the log line -- the core
+ * returns bytes, the shell transmits (the established boundary).
+ *
+ * WHY the AVC exists at all (kept from the old builder's comment): the OLT
+ * NEVER polls (GETs) the data-plane MEs after creating them (verified live:
+ * it only CREATE/SETs ME266/268/47/45/329/...); its per-class *_avc handlers
+ * wait for the ONU to report the port operational and gate DOWNSTREAM
+ * user-data forwarding on it.  A purely-reactive responder leaves the OLT
+ * filling our downstream with idle GEM and forwarding no data.  TID=0 marks
+ * an autonomous notification (AR=0, AK=0).
  */
-/*
- * Emit an autonomous OMCI Attribute-Value-Change (MT 0x11) for (class,inst): report that
- * the attribute(s) in @mask changed to @val. The OLT NEVER polls (GETs) the data-plane MEs
- * after creating them (verified live: it only CREATE/SETs ME266/268/47/45/329/...); instead
- * its per-class *_avc handlers wait for the ONU to report the port operational, and gate
- * DOWNSTREAM user-data forwarding on it. A purely-reactive responder (no AVC, as before)
- * leaves the OLT filling our downstream with idle GEM and forwarding no data. TID=0 marks an
- * autonomous notification (AR=0, AK=0).
- */
-static void rtl9602c_eth_omci_avc(u16 class_id, u16 inst, u16 mask, const u8 *val,
-				  unsigned int vlen)
-{
-	struct rtl9602c_eth *ep = g_ep;
-	u8 msg[48];
-
-	if (!ep || !ep->omci_trap_on)		/* OMCC SID must be armed to TX OMCI */
-		return;
-	if (vlen > 30)
-		vlen = 30;
-	memset(msg, 0, sizeof(msg));
-	msg[2] = 0x11;				/* MT = Attribute Value Change (17) */
-	msg[3] = 0x0a;				/* DevID baseline */
-	omci_put_be16(msg + 4, class_id);
-	omci_put_be16(msg + 6, inst);
-	omci_put_be16(msg + 8, mask);		/* changed-attribute mask */
-	if (val && vlen)
-		memcpy(msg + 10, val, vlen);
-	rtl9602c_omci_finalize(msg);
-	rtl9602c_eth_omci_xmit(ep, msg, sizeof(msg));
-	netdev_info(ep->ndev, "OMCI AVC: class=%u inst=%#x mask=%04x v0=%02x\n",
-		    class_id, inst, mask, (val && vlen) ? val[0] : 0);
-}
-
 /*
  * Report the HGU's WAN-egress port operational so the OLT un-gates downstream user data.
  * For an HGU the downstream WAN data egresses to the VEIP (ME329); the OLT's
@@ -2207,9 +2190,15 @@ void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)
 
 void rtl9602c_eth_omci_report_oper_up(void)
 {
-	u8 enabled = 0x00;		/* G.988 operational state: 0 = enabled */
+	struct rtl9602c_eth *ep = g_ep;
+	u8 msg[OMCI_LEN];
 
-	rtl9602c_eth_omci_avc(329, 0x0601, 0x4000, &enabled, 1);
+	if (!ep || !ep->omci_trap_on)		/* OMCC SID must be armed to TX OMCI */
+		return;
+	omci_onu_emit_veip_up_avc(&luna_onu, msg);
+	rtl9602c_eth_omci_xmit(ep, msg, sizeof(msg));
+	netdev_info(ep->ndev, "OMCI AVC: class=%u inst=%#x mask=%04x v0=%02x\n",
+		    OMCI_ME_VEIP, 0x0601, 0x4000, 0);
 }
 EXPORT_SYMBOL(rtl9602c_eth_omci_report_oper_up);
 
@@ -2262,8 +2251,11 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 			rtl9602c_eth_omci_input(ep, skb->data + RX_CPU_PREFIX,
 						len - RX_CPU_PREFIX);
 			dev_kfree_skb_any(skb);
-		} else if ((opts1 & (RXD_CRCERR | RXD_RCDF)) ||
-		    len < ETH_ZLEN + RX_CPU_PREFIX || len > RX_BUF_SIZE) {
+		} else if (rtl9602c_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF,
+						 len, RX_CPU_PREFIX,
+						 RX_BUF_SIZE)) {
+			/* bad-frame verdict hoisted to flowcore: completes the
+			 * RX classification trio fuzz_rx.c drives on x86 */
 			ndev->stats.rx_errors++;
 			ep->dbg_err++;
 			dev_kfree_skb_any(skb);

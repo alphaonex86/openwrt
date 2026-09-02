@@ -99,26 +99,17 @@ MODULE_PARM_DESC(force_dest_ldpid, "override direct-TX DEST ldpid for the HW-for
  * Flooding to a LINKED port only: a frame stamped for a dead port sits in that
  * port's egress MAC and consumes the shared L2TM buffer pool.
  */
-enum {
-	CA_NI_LAN_TX_FIXED	= 0,	/* every frame -> CA_NI_TX_PORT (revert) */
-	CA_NI_LAN_TX_FLOOD	= 1,	/* every frame -> every linked port     */
-	CA_NI_LAN_TX_LEARN	= 2,	/* learned port, flood fallback         */
-};
+/* the mode enum (CA_NI_LAN_TX_FIXED/FLOOD/LEARN) moved to
+ * cortina_ni_tx_logic.h with the pick function that decides on it */
 static int lan_tx_mode = CA_NI_LAN_TX_LEARN;
 module_param(lan_tx_mode, int, 0644);
 MODULE_PARM_DESC(lan_tx_mode,
 	"CPU->LAN egress port: 0=fixed CA_NI_TX_PORT (pre-multi-port behaviour), 1=flood every frame to all linked LAN ports (bring-up/bisect only, 4x TX cost), 2=per-DA learned port with flood fallback (default)");
 
-/* one bucket, published atomically: {mac[47:0], port[50:48], valid[51]} */
+/* one bucket, published atomically: {mac[47:0], port[50:48], valid[51]} --
+ * the entry codec and the bucket hash live in cortina_ni_tx_logic.c; only
+ * the table (and hence its size) is the shell's */
 #define CA_NI_LAN_FDB_SIZE	ARRAY_SIZE(((struct cortina_ni_tx *)0)->lan_fdb)
-#define CA_NI_LAN_FDB_MAC	GENMASK_ULL(47, 0)
-#define CA_NI_LAN_FDB_PORT	GENMASK_ULL(50, 48)
-#define CA_NI_LAN_FDB_VALID	BIT_ULL(51)
-
-static unsigned int ca_ni_mac_bucket(const u8 *mac)
-{
-	return (mac[3] ^ mac[4] ^ mac[5]) & (CA_NI_LAN_FDB_SIZE - 1);
-}
 
 /*
  * Bind @sa to the RJ45 it arrived on.  @lspid is HEADER_A.lspid.
@@ -143,9 +134,8 @@ void cortina_ni_lan_tx_learn(struct cortina_ni *ni, const u8 *sa, u32 lspid)
 	if (is_multicast_ether_addr(sa) || is_zero_ether_addr(sa))
 		return;
 
-	ent = FIELD_PREP(CA_NI_LAN_FDB_MAC, ca_ni_mac_key(sa)) |
-	      FIELD_PREP(CA_NI_LAN_FDB_PORT, lspid) | CA_NI_LAN_FDB_VALID;
-	b = ca_ni_mac_bucket(sa);
+	ent = ca_ni_lan_fdb_ent(ca_ni_mac_key(sa), lspid);
+	b = ca_ni_mac_bucket(sa, CA_NI_LAN_FDB_SIZE - 1);
 	if (READ_ONCE(tx->lan_fdb[b]) == ent)
 		return;			/* unchanged - the common case */
 	WRITE_ONCE(tx->lan_fdb[b], ent);
@@ -172,50 +162,29 @@ void cortina_ni_lan_tx_link_set(struct cortina_ni *ni, u32 link)
 	tx->lan_flush++;
 }
 
-static int ca_ni_lan_fdb_lookup(struct cortina_ni_tx *tx, const u8 *da)
-{
-	u64 ent = READ_ONCE(tx->lan_fdb[ca_ni_mac_bucket(da)]);
-
-	if (!(ent & CA_NI_LAN_FDB_VALID) ||
-	    FIELD_GET(CA_NI_LAN_FDB_MAC, ent) != ca_ni_mac_key(da))
-		return -1;
-	return FIELD_GET(CA_NI_LAN_FDB_PORT, ent);
-}
-
-/* The egress port set for one frame, as a port bitmap (never empty). */
+/* The egress port set for one frame, as a port bitmap (never empty).  The
+ * DECISION is cortina_ni_lan_tx_pick() in cortina_ni_tx_logic.c; this shell
+ * wrapper feeds it the live state (module params, link bitmap, the DA's FDB
+ * bucket) and turns its outcome flags into the counters and the WARN. */
 static u32 ca_ni_lan_tx_ports(struct cortina_ni_tx *tx, const u8 *da)
 {
-	u32 link = READ_ONCE(tx->lan_link);
-	int port;
+	struct ca_ni_lan_tx_pick pick;
+	u64 key = ca_ni_mac_key(da);
 
-	/* Diagnostic knob still wins, but RANGE-CHECKED: the port set is a
-	 * bitmap now, and BIT() of an out-of-range value is 0 = "no port",
-	 * which would map an skb and attach it to no descriptor at all (a DMA +
-	 * skb leak, and the frame silently vanishes).  The DEST field is 4 bits
-	 * wide, so anything outside 0..15 could never have been stamped anyway. */
-	if (force_dest_ldpid >= 0) {
-		if (force_dest_ldpid < CA_NI_TX_DEST_LDPID_COUNT)
-			return BIT(force_dest_ldpid);
+	cortina_ni_lan_tx_pick(force_dest_ldpid, lan_tx_mode,
+			       READ_ONCE(tx->lan_link), CA_NI_TX_PORT,
+			       is_multicast_ether_addr(da),
+			       READ_ONCE(tx->lan_fdb[ca_ni_mac_bucket(da,
+						CA_NI_LAN_FDB_SIZE - 1)]),
+			       key, &pick);
+	if (pick.force_oor)
 		WARN_ONCE(1, "force_dest_ldpid=%d out of range 0..%d, ignored\n",
 			  force_dest_ldpid, CA_NI_TX_DEST_LDPID_COUNT - 1);
-	}
-	/* Fail-safe: fall back to the single-port behaviour whenever we have no
-	 * link information at all (the 1 Hz poll has not run yet, or MDIO
-	 * failed).  Never "no port" - that would silence the only IP management
-	 * channel to the board. */
-	if (lan_tx_mode == CA_NI_LAN_TX_FIXED || !link)
-		return BIT(CA_NI_TX_PORT);
-
-	if (lan_tx_mode == CA_NI_LAN_TX_LEARN &&
-	    !is_multicast_ether_addr(da)) {
-		port = ca_ni_lan_fdb_lookup(tx, da);
-		if (port >= 0 && (link & BIT(port))) {
-			tx->lan_hit++;
-			return BIT(port);
-		}
-	}
-	tx->lan_flood++;
-	return link;
+	if (pick.hit)
+		tx->lan_hit++;
+	if (pick.flood)
+		tx->lan_flood++;
+	return pick.ports;
 }
 
 /* fallback MAC when the DT carries none (locally administered) */
@@ -278,8 +247,7 @@ static int cortina_ni_tx_lspid_map_init(struct cortina_ni *ni)
 	u32 val, lspid;
 
 	for (i = 0; i < CA_DMA_LSO_LSPID_MAP_ENTRIES; i++) {
-		lspid = (i >= 1 && i <= 11) ? CA_DMA_LSO_LSPID_CPU0 + i
-					    : CA_DMA_LSO_LSPID_CPU0;
+		lspid = cortina_ni_tx_vp_lspid(i);
 
 		writel(0, dma_base(ni) + CA_DMA_LSO_LSPID_MAP_DATA1);
 		writel(CA_DMA_LSO_LSPID_MAP_VALID |
@@ -578,6 +546,20 @@ static int cortina_ni_arb_map_one(struct cortina_ni *ni, u32 idx, u32 pdpid)
 	return ret;
 }
 
+/* Write ARB entry @idx with the pdpid the vendor map semantics dictate
+ * (cortina_ni_arb_pdpid() in cortina_ni_tx_logic.c is the one home for
+ * those semantics; the two walkers below keep the write ORDER only). */
+static int ca_ni_arb_map_auto(struct cortina_ni *ni, u32 idx)
+{
+	int pdpid = cortina_ni_arb_pdpid(idx);
+
+	/* every idx the walkers visit is inside the classified map; -1 here
+	 * is a walker/classifier disagreement, never a value to write */
+	if (WARN_ON_ONCE(pdpid < 0))
+		return -EINVAL;
+	return cortina_ni_arb_map_one(ni, idx, pdpid);
+}
+
 /* ★ Physical LAN NI ports 0-6: identity ldpid->pdpid so an eth0 direct-TX frame
  * (whose descriptor DEST field is the ldpid) egresses physical port N (vendor
  * aal_port.c global port init).  Left unmapped, the ARB PDPID map reads its reset
@@ -592,19 +574,16 @@ static void cortina_ni_arb_lan_map_init(struct cortina_ni *ni)
 
 	for (my_mac = 0; my_mac <= 1; my_mac++) {
 		for (ldpid = 0; ldpid <= 6; ldpid++) {
-			if (cortina_ni_arb_map_one(ni, (my_mac << 7) | ldpid,
-						   ldpid))
+			if (ca_ni_arb_map_auto(ni,
+					cortina_ni_arb_idx(my_mac, 0, ldpid)))
 				return;
-			if (cortina_ni_arb_map_one(ni,
-						   (my_mac << 7) | BIT(6) | ldpid,
-						   CA_NI_PPORT_QM))
+			if (ca_ni_arb_map_auto(ni,
+					cortina_ni_arb_idx(my_mac, 1, ldpid)))
 				return;
 		}
-		if (cortina_ni_arb_map_one(ni, (my_mac << 7) | 7,
-					   CA_NI_PPORT_BLACKHOLE))
+		if (ca_ni_arb_map_auto(ni, cortina_ni_arb_idx(my_mac, 0, 7)))
 			return;
-		if (cortina_ni_arb_map_one(ni, (my_mac << 7) | BIT(6) | 7,
-					   CA_NI_PPORT_BLACKHOLE))
+		if (ca_ni_arb_map_auto(ni, cortina_ni_arb_idx(my_mac, 1, 7)))
 			return;
 	}
 	dev_info(ni->dev,
@@ -613,16 +592,17 @@ static void cortina_ni_arb_lan_map_init(struct cortina_ni *ni)
 
 static void cortina_ni_arb_oam_map_init(struct cortina_ni *ni)
 {
-	u32 my_mac, dbuf, ldpid, idx;
+	u32 my_mac, dbuf, ldpid;
 
 	for (my_mac = 0; my_mac <= 1; my_mac++) {
 		for (dbuf = 0; dbuf <= 1; dbuf++) {
 			/* 9th-queue (control-frame inject) -> OAM engine */
 			for (ldpid = CA_NI_LDPID_9QUEUE_LO;
 			     ldpid <= CA_NI_LDPID_9QUEUE_HI; ldpid++) {
-				idx = (my_mac << 7) | (dbuf << 6) | ldpid;
-				if (cortina_ni_arb_map_one(ni, idx,
-							   CA_NI_PPORT_OAM))
+				if (ca_ni_arb_map_auto(ni,
+						cortina_ni_arb_idx(my_mac,
+								   dbuf,
+								   ldpid)))
 					return;
 			}
 			/* CPU_MQ / LLID-GEM-index (US PON DATA inject) -> QM
@@ -630,9 +610,10 @@ static void cortina_ni_arb_oam_map_init(struct cortina_ni *ni)
 			 * 0x20..0x3f, both dbuf + my_mac, to PPORT_QM) */
 			for (ldpid = CA_NI_LDPID_CPU_MQ_LO;
 			     ldpid <= CA_NI_LDPID_CPU_MQ_HI; ldpid++) {
-				idx = (my_mac << 7) | (dbuf << 6) | ldpid;
-				if (cortina_ni_arb_map_one(ni, idx,
-							   CA_NI_PPORT_QM))
+				if (ca_ni_arb_map_auto(ni,
+						cortina_ni_arb_idx(my_mac,
+								   dbuf,
+								   ldpid)))
 					return;
 			}
 		}
@@ -779,9 +760,8 @@ static unsigned int cortina_ni_tx_reclaim_q(struct cortina_ni *ni,
 
 static unsigned int cortina_ni_txq_free_desc(struct cortina_ni_txq *q)
 {
-	if (q->wptr >= q->finished)
-		return CA_NI_TX_RING_SIZE - q->wptr - 1 + q->finished;
-	return q->finished - q->wptr - 1;
+	return cortina_ni_ring_free_desc(q->wptr, q->finished,
+					 CA_NI_TX_RING_SIZE);
 }
 
 static void cortina_ni_tx_reclaim_timer(struct timer_list *t)
@@ -948,11 +928,7 @@ static netdev_tx_t cortina_ni_start_xmit(struct sk_buff *skb,
 	 * one is marked `dup`.  A flood therefore costs extra descriptors only -
 	 * no copy, no allocation, and TX stats still count the frame once.
 	 */
-	word1 = CA_NI_TX_DESC1_HP1 | CA_NI_TX_DESC1_HP0 |
-		CA_NI_TX_DESC1_MODE_DIRECT |
-		FIELD_PREP(CA_NI_TX_DESC1_CHK_SEL, CA_NI_TX_CHK_AUTO) |
-		FIELD_PREP(CA_NI_TX_DESC1_LEN, len) |
-		FIELD_PREP(CA_NI_TX_DESC1_COS, CA_NI_TX_COS);
+	word1 = cortina_ni_tx_desc1_direct(len, CA_NI_TX_COS);
 
 	first = q->wptr;
 	for (port = 0; ports; port++) {
@@ -962,7 +938,7 @@ static netdev_tx_t cortina_ni_start_xmit(struct sk_buff *skb,
 			continue;
 		ports &= ~BIT(port);
 		last = !ports;
-		w = word1 | FIELD_PREP(CA_NI_TX_DESC1_DEST, port);
+		w = word1 | cortina_ni_tx_desc1_dest(port);
 
 		desc = q->desc + q->wptr * CA_NI_TX_DESC_WORDS;
 		desc[0] = cpu_to_le32(lower_32_bits(daddr));
@@ -1028,8 +1004,7 @@ int cortina_ni_pon_tx(const u8 *pdu, unsigned int len)
 	struct cortina_ni_txq *q;
 	unsigned int frame_len, slot;
 	dma_addr_t blk_dma;
-	__le32 *desc, *w;
-	u32 lo, hi;
+	__le32 *desc;
 	u8 *blk;
 
 	if (!ni || !ni->tx || !ni->tx->pon_buf)
@@ -1073,34 +1048,20 @@ int cortina_ni_pon_tx(const u8 *pdu, unsigned int len)
 	       CA_NI_PON_HDR_LEN);
 	memcpy(blk + CA_NI_PON_TX_FRAME_OFF + CA_NI_PON_HDR_LEN, pdu, len);
 
-	/* Header block {LSO para0 = 0, LSO para1 = pkt_size, HEADER_A}: plain
-	 * little-endian stores, exactly the stock stores (disasm
-	 * __ca_ni_send_single_pkt: `stp wzr, w<size>, [x4]` then the 64-bit
-	 * HEADER_A at +8).  ★ WORD ORDER (stock-proven): the word at +8 is
-	 * the PKT_INFO half (no_drop/pol_id/cpu_flg, spec bits 32..63) and
-	 * the word at +12 is the cos/ldpid/lspid/pkt_size half (bits 0..31)
-	 * — the pol_id bfi lands in the LOW-address word.  pol_en stays 0
-	 * for OMCI (the G3 branch passes pol=INVALID; only the 0xff/0xf1
-	 * override sets pol_id = (DA[5]&0x3f)*8+7 = 7, without pol_en). */
-	lo = FIELD_PREP(CA_NI_PON_HDRA_LO_COS, CA_NI_PON_COS) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_LDPID, CA_NI_PON_LDPID) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_LSPID, CA_NI_PON_LSPID) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_PKT_SIZE, frame_len) |
-	     CA_NI_PON_HDRA_LO_FE_BYPASS;
-	hi = CA_NI_PON_HDRA_HI_NO_DROP |
-	     FIELD_PREP(CA_NI_PON_HDRA_HI_POL_ID, CA_NI_PON_POL_ID);
-	w = (__le32 *)blk;
-	w[0] = 0;
-	w[1] = cpu_to_le32(frame_len);
-	w[2] = cpu_to_le32(hi);		/* +8:  pkt_info word (stock order) */
-	w[3] = cpu_to_le32(lo);		/* +12: cos/ldpid/pkt_size word */
+	/* Header block {LSO para0 = 0, LSO para1 = pkt_size, HEADER_A}: the
+	 * encoder is cortina_ni_pon_hdr_blk_fill() (one home, shared with the
+	 * WAN-data path below), byte stores matching exactly the stock stores
+	 * (disasm __ca_ni_send_single_pkt: `stp wzr, w<size>, [x4]` then the
+	 * 64-bit HEADER_A at +8).  pol_en stays 0 for OMCI (the G3 branch
+	 * passes pol=INVALID; only the 0xff/0xf1 override sets pol_id =
+	 * (DA[5]&0x3f)*8+7 = 7, without pol_en). */
+	cortina_ni_pon_hdr_blk_fill(blk, frame_len, CA_NI_PON_COS,
+				    CA_NI_PON_LDPID, CA_NI_PON_POL_ID);
 
 	/* descriptor pair: SOF + HP=01 header block, then the EOF frame */
 	desc = q->desc + q->wptr * CA_NI_TX_DESC_WORDS;
 	desc[0] = cpu_to_le32(lower_32_bits(blk_dma));
-	desc[1] = cpu_to_le32(CA_NI_TX_DESC1_SOF | CA_NI_TX_DESC1_HP0 |
-			      FIELD_PREP(CA_NI_TX_DESC1_HDR_LEN,
-					 CA_NI_PON_HDR_BLK_LEN));
+	desc[1] = cpu_to_le32(cortina_ni_tx_desc1_pon_sof());
 	q->slot[q->wptr].skb = NULL;
 	q->slot[q->wptr].addr = 0;
 	q->slot[q->wptr].len = 0;
@@ -1109,8 +1070,7 @@ int cortina_ni_pon_tx(const u8 *pdu, unsigned int len)
 
 	desc = q->desc + q->wptr * CA_NI_TX_DESC_WORDS;
 	desc[0] = cpu_to_le32(lower_32_bits(blk_dma + CA_NI_PON_TX_FRAME_OFF));
-	desc[1] = cpu_to_le32(CA_NI_TX_DESC1_EOF |
-			      FIELD_PREP(CA_NI_TX_DESC1_HDR_LEN, frame_len));
+	desc[1] = cpu_to_le32(cortina_ni_tx_desc1_pon_eof(frame_len));
 	q->slot[q->wptr].skb = NULL;
 	q->slot[q->wptr].addr = 0;
 	q->slot[q->wptr].len = 0;
@@ -1151,8 +1111,7 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 	struct cortina_ni_txq *q;
 	unsigned int len, slot;
 	dma_addr_t blk_dma, daddr;
-	__le32 *desc, *w;
-	u32 lo, hi;
+	__le32 *desc;
 	u8 tcont;
 	u8 *blk;
 
@@ -1203,29 +1162,18 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 	blk_dma = tx->pon_buf_dma + slot * CA_NI_PON_TX_SLOT_SZ;
 
 	/* header block {LSO para0 = 0, LSO para1 = pkt_size, HEADER_A}: the
-	 * same stock word order as the OMCI path (+8 = pkt_info half, +12 =
-	 * cos/ldpid/pkt_size half) */
+	 * same encoder as the OMCI path (+8 = pkt_info half, +12 =
+	 * cos/ldpid/pkt_size half); pol_id = the data VoQ of the live
+	 * T-CONT, no pol_en */
 	tcont = READ_ONCE(ca_ni_pon_data_tcont);
-	lo = FIELD_PREP(CA_NI_PON_HDRA_LO_COS, CA_NI_PON_DATA_COS) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_LDPID, CA_NI_PON_TCONT_LDPID(tcont)) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_LSPID, CA_NI_PON_LSPID) |
-	     FIELD_PREP(CA_NI_PON_HDRA_LO_PKT_SIZE, len) |
-	     CA_NI_PON_HDRA_LO_FE_BYPASS;
-	hi = CA_NI_PON_HDRA_HI_NO_DROP |
-	     FIELD_PREP(CA_NI_PON_HDRA_HI_POL_ID,
-			tcont * 8 + CA_NI_PON_DATA_COS);
-	w = (__le32 *)blk;
-	w[0] = 0;
-	w[1] = cpu_to_le32(len);
-	w[2] = cpu_to_le32(hi);
-	w[3] = cpu_to_le32(lo);
+	cortina_ni_pon_hdr_blk_fill(blk, len, CA_NI_PON_DATA_COS,
+				    CA_NI_PON_TCONT_LDPID(tcont),
+				    tcont * 8 + CA_NI_PON_DATA_COS);
 
 	/* SOF + HP=01 header block (releases scratch slot on reclaim) */
 	desc = q->desc + q->wptr * CA_NI_TX_DESC_WORDS;
 	desc[0] = cpu_to_le32(lower_32_bits(blk_dma));
-	desc[1] = cpu_to_le32(CA_NI_TX_DESC1_SOF | CA_NI_TX_DESC1_HP0 |
-			      FIELD_PREP(CA_NI_TX_DESC1_HDR_LEN,
-					 CA_NI_PON_HDR_BLK_LEN));
+	desc[1] = cpu_to_le32(cortina_ni_tx_desc1_pon_sof());
 	q->slot[q->wptr].skb = NULL;
 	q->slot[q->wptr].addr = 0;
 	q->slot[q->wptr].len = 0;
@@ -1236,8 +1184,7 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 	 * pon=1 with skb set = "WAN data skb", stats counted here not eth0) */
 	desc = q->desc + q->wptr * CA_NI_TX_DESC_WORDS;
 	desc[0] = cpu_to_le32(lower_32_bits(daddr));
-	desc[1] = cpu_to_le32(CA_NI_TX_DESC1_EOF |
-			      FIELD_PREP(CA_NI_TX_DESC1_HDR_LEN, len));
+	desc[1] = cpu_to_le32(cortina_ni_tx_desc1_pon_eof(len));
 	q->slot[q->wptr].skb = skb;
 	q->slot[q->wptr].addr = daddr;
 	q->slot[q->wptr].len = len;

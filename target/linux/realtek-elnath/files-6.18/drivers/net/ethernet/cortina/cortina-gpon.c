@@ -1361,6 +1361,20 @@ static void cg_puc_voq_flush(struct cortina_gpon *cg, u32 tcont)
  * Ethernet datapath).  8Q VoQ mode: VoQID = {HdrA.ldpid[3:0], HdrA.cos[2:0]}.
  * Only T-CONT 0 (the OMCC) has its 8 VoQs enabled; the CPU high-priority OMCI
  * inject additionally uses the "9th queue" VoQ 127 (ldpid 0xf, cos 7).
+ *
+ * ★ gpon_regseq AUDITED AND REFUSED (2026-09-02), on the transaction shape,
+ * not taste: six of these writes are vendor-order RMWs setting SEVERAL
+ * disjoint fields in ONE read+write (PUCCFG 0x40070003, GLOBAL_PLOAM_CFG
+ * 0x803f0000, BPCNTL 0x7fff0011, BTCCFG 0xfa01113f, CTRL 0x44000000, CTRL2
+ * 0x0400001f — the forced-bit masks), while GPON_FLD is one field per
+ * read+write: a table would put N transactions and N-1 intermediate
+ * architected states on the bus where the silicon sees one write today.
+ * What remains expressible is ten literal writes in six islands of <= 3
+ * contiguous ops, split by those RMWs, the two loops and the diagnostic
+ * reads; six 1-3 op tables plus the mandatory four-callback io glue is more
+ * code than the writel lines they would replace.  The refusal is falsifiable
+ * and stands only while BOTH hold: every RMW here is multi-field (no
+ * stream-identical FLD), and no >= 4-op run of literal writes exists.
  */
 static void cg_puc_init(struct cortina_gpon *cg)
 {

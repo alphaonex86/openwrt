@@ -25,6 +25,37 @@ static void _rtl92fe_enable_fw_download(struct ieee80211_hw *hw, bool enable)
 		 * 8051 code-RAM window accepts the FW-FIFO writes that follow. */
 		rtl_write_byte(rtlpriv, REG_MCUFWDL,
 			       rtl_read_byte(rtlpriv, REG_MCUFWDL) | BIT(0));
+
+		/* ★★ DRAIN THE ARM BEFORE THE FIFO IS WRITTEN -- and read this
+		 * note before re-deriving the obvious explanation, because the
+		 * obvious one was MEASURED FALSE.
+		 *
+		 * The write above is POSTED: mdelay() does not make it land, only
+		 * a READ does.  Without a read between them the enable can still
+		 * be in flight while the first FW-FIFO writes arrive, i.e. the
+		 * code-RAM window is written before it is armed.  This is the same
+		 * insight as the one-drain-per-page change below, applied to the
+		 * arm itself.
+		 *
+		 * ⚠ WHAT THIS IS *NOT*: mainline clears REG_MCUFWDL BIT(19) here
+		 * (byte +2 bit 3, "8051 reset") and I first wrote this block
+		 * claiming that was the fix -- the MCU executing out of the memory
+		 * being overwritten.  THE TRACE REFUTES IT: this board reports
+		 * MCUFWDL+2 = 0x60 at this point, so bit 3 was ALREADY 0 and the
+		 * clear changes no bit at all.  The clear is KEPT because mainline
+		 * does it and it costs nothing, but it is not the mechanism and
+		 * must not be recorded as one.
+		 *
+		 * ⚠ AND THE ATTRIBUTION IS STILL ONLY A HYPOTHESIS: the before/
+		 * after evidence is n=1 on each side, and this project has already
+		 * paid for a bisect where the same image gave one PASS and one
+		 * FAIL.  The failure RATE is owed. */
+		tmp = rtl_read_byte(rtlpriv, REG_MCUFWDL + 2);
+		rtl_dbg(rtlpriv, COMP_FW, DBG_LOUD,
+			"8051 run bit before download: MCUFWDL+2=0x%02x (bit3=%u)\n",
+			tmp, !!(tmp & BIT(3)));
+		rtl_write_byte(rtlpriv, REG_MCUFWDL + 2, tmp & ~BIT(3));
+
 		mdelay(1);
 	} else {
 		tmp = rtl_read_byte(rtlpriv, REG_MCUFWDL);
@@ -55,20 +86,45 @@ static void _rtl92fe_fw_page_write_dw(struct ieee80211_hw *hw, u32 page,
 		 (u8)(page & 0x07);
 	rtl_write_byte(rtlpriv, REG_MCUFWDL + 2, value8);
 
-	/* Readback-flush after each write: a low-offset read enforces PCIe
-	 * write-ordering, draining the host posted-write buffer before the next
-	 * write (vs a bare udelay which leaves the write in flight). */
-	for (i = 0; i + 4 <= size; i += 4) {
+	rtl_dbg(rtlpriv, COMP_FW, DBG_LOUD,
+		"FW page %u: %u byte(s) -> FIFO 0x%04x\n",
+		page, size, (unsigned int)FW_DL_FIFO_ADDR);
+
+	/* ★★ ONE READBACK PER PAGE, NOT ONE PER DWORD -- and the difference is
+	 * not a micro-optimisation, it is the difference between a blocking
+	 * access and a posted one.
+	 *
+	 * A PCIe WRITE is posted: the CPU issues it and moves on.  A READ is
+	 * not: the CPU stalls in the load until the completion returns, and if
+	 * the completion never comes there is no timeout to rescue it -- no
+	 * printk, no interrupt, no scheduler.  That is exactly the signature
+	 * this board shows (MEASURED 2026-09-01: total console silence, other
+	 * processes frozen mid-loop, rtl_pci interrupt count still 0).
+	 *
+	 * ⚠ AND THIS FUNCTION ALREADY CARRIED THE WARNING.  Its own comment
+	 * records that the core's byte-loop "locks the SoC host bus partway
+	 * through the first page" -- so accesses to this endpoint during the
+	 * download are ALREADY KNOWN to be able to wedge the host.  Putting a
+	 * blocking read between every pair of writes multiplies the exposure
+	 * by 1024 per page.
+	 *
+	 * The ordering the old comment wanted is still bought, where it is
+	 * actually needed: every dword of this page must land BEFORE the page
+	 * index changes, so ONE read after the page drains the posted-write
+	 * buffer at the only point the order matters.  Ordering BETWEEN dwords
+	 * of the same page is guaranteed by PCIe itself for posted writes to
+	 * the same endpoint; it never needed buying. */
+	for (i = 0; i + 4 <= size; i += 4)
 		rtl_write_dword(rtlpriv, FW_DL_FIFO_ADDR + i,
 				(u32)buffer[i] | ((u32)buffer[i + 1] << 8) |
 				((u32)buffer[i + 2] << 16) |
 				((u32)buffer[i + 3] << 24));
-		(void)rtl_read_byte(rtlpriv, REG_MCUFWDL);
-	}
-	for (; i < size; i++) {
+	for (; i < size; i++)
 		rtl_write_byte(rtlpriv, FW_DL_FIFO_ADDR + i, buffer[i]);
-		(void)rtl_read_byte(rtlpriv, REG_MCUFWDL);
-	}
+
+	(void)rtl_read_byte(rtlpriv, REG_MCUFWDL);	/* drain, once */
+
+	rtl_dbg(rtlpriv, COMP_FW, DBG_LOUD, "FW page %u written\n", page);
 }
 
 static void _rtl92fe_write_fw(struct ieee80211_hw *hw,

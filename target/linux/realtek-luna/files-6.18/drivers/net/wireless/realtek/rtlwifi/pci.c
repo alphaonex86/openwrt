@@ -328,6 +328,46 @@ static void rtl_pci_parse_configuration(struct pci_dev *pdev,
 	pci_write_config_byte(pdev, 0x70f, tmp);
 }
 
+/*
+ * ★★★ TEMPORARY DIAGNOSTIC LADDER, 2026-09-01 -- REMOVE once the X111W wedge
+ * is named.  Declared here so nobody mistakes it for a feature.
+ *
+ * The X111W stops dead -- console AND network at the same instant, no oops, no
+ * reset -- at an unpredictable time (24 s to 247 s measured).  A lockup
+ * detector built in today fired NOTHING across 3/3 deaths with 57-61 s of
+ * window to speak, so the CPU is not taking timer interrupts: a hard stop, not
+ * a spin and not a blocked task.
+ *
+ * The ONE lead that has survived is 27 boots strong: with rtl_pci_probe()
+ * TRUNCATED at any of ten earlier points the board lived 27/27 to 225-232 s,
+ * while the complete probe dies 3/3 at 28-33 s.  Against today's measured
+ * spread that is not chance.  ⇒ the killer is in the TAIL of this function.
+ *
+ *     bootarg:  rtl_pci.probe_stop_at=N
+ *
+ * N == 0 is the shipping behaviour.  N > 0 returns -ENODEV as soon as rung N
+ * has run -- the SAME early-return the 27-boot ladder used, so an arm here is
+ * comparable with those runs rather than with a differently-shaped experiment.
+ *
+ * ★ ONE BUILD, MANY RUNGS. The earlier ladder recompiled per rung; deaths are
+ *   now 3/3 inside a 90 s window, so three boots per rung is a usable arm and
+ *   the build is no longer the cost.
+ */
+static int probe_stop_at;
+module_param(probe_stop_at, int, 0644);
+MODULE_PARM_DESC(probe_stop_at,
+		 "DIAGNOSTIC: abandon rtl_pci_probe after rung N (0 = complete it)");
+
+#define PROBE_RUNG(n, what)						\
+	do {								\
+		if (probe_stop_at && (n) >= probe_stop_at) {		\
+			pr_info("rtl_pci: probe_stop_at=%d -- stopping "	\
+				"after rung %d (%s)\n",			\
+				probe_stop_at, (n), (what));		\
+			return -ENODEV;					\
+		}							\
+	} while (0)
+
 static void rtl_pci_init_aspm(struct ieee80211_hw *hw)
 {
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
@@ -842,8 +882,35 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 
 	irqreturn_t ret = IRQ_HANDLED;
 
+	/* ★★ CLAIMING AN INTERRUPT WE DID NOT SERVICE IS WHAT KILLS THIS BOARD.
+	 *
+	 * This path touches NO endpoint register at all, so whatever asserted
+	 * the line is still asserting it on return.  The Luna INTC drives
+	 * handle_level_irq and its irq_chip implements only .irq_mask /
+	 * .irq_unmask -- there is no .irq_ack and no .irq_eoi, and the PCIe root
+	 * complex performs no bridge-side INTx acknowledge either.  So a level
+	 * that nobody clears is re-entered immediately, forever, in hard-IRQ
+	 * context: the timer never runs, the console never drains, and the board
+	 * stops dead with nothing printed.  That is exactly the X111W signature
+	 * -- serial and Ethernet ceasing together, no oops, no panic, at a
+	 * varying moment.
+	 *
+	 * Returning IRQ_HANDLED also DISARMS the one thing that could have saved
+	 * it: note_interrupt()'s spurious detector, which after 100k unhandled
+	 * interrupts prints "nobody cared" and disables the line.  A driver that
+	 * always says "mine" can never be caught by it.
+	 *
+	 * IRQ_NONE is the truthful answer and the Linux contract: IRQ_HANDLED
+	 * means "this was mine AND I serviced it".  On this board it converts a
+	 * silent whole-system lockup into a printed, recoverable, DIAGNOSABLE
+	 * "nobody cared, disabling IRQ N" -- the radio dies instead of the box.
+	 *
+	 * ⚠ The sibling G24W already MEASURED this storm, where it was re-entered
+	 * in softirq context and so printed "soft lockup ... CPU#0 stuck for 26s!
+	 * [hostapd]" instead of dying silently.  Same defect, two presentations.
+	 */
 	if (rtlpci->irq_enabled == 0)
-		return ret;
+		return IRQ_NONE;
 
 	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
 	rtlpriv->cfg->ops->disable_interrupt(hw);
@@ -851,9 +918,18 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 	/*read ISR: 4/8bytes */
 	rtlpriv->cfg->ops->interrupt_recognized(hw, &intvec);
 
-	/*Shared IRQ or HW disappeared */
-	if (!intvec.inta || intvec.inta == 0xffff)
+	/* Shared IRQ or HW disappeared.  interrupt_recognized() is WRITE-1-TO-
+	 * CLEAR (it reads ISR/HISRE, masks, and writes the value straight back),
+	 * so with inta == 0 there was nothing of ours to clear and writing zero
+	 * cleared nothing: the line is asserted by something that is NOT this
+	 * device, or by a bit outside irq_mask.  Either way we serviced nothing,
+	 * and saying IRQ_HANDLED here is the same lie as above -- it keeps the
+	 * kernel from ever noticing a line that will not go away.
+	 * 0xffff is the bus-abort / device-gone pattern; also not ours. */
+	if (!intvec.inta || intvec.inta == 0xffff) {
+		ret = IRQ_NONE;
 		goto done;
+	}
 
 	/*<1> beacon related */
 	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_TBDOK])
@@ -2191,6 +2267,8 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	/*aspm */
 	rtl_pci_init_aspm(hw);
 
+	PROBE_RUNG(1, "aspm (the 27-boot rung K)");
+
 	/* Init mac80211 sw */
 	err = rtl_init_core(hw);
 	if (err) {
@@ -2198,12 +2276,16 @@ int rtl_pci_probe(struct pci_dev *pdev,
 		goto fail3;
 	}
 
+	PROBE_RUNG(2, "rtl_init_core");
+
 	/* Init PCI sw */
 	err = rtl_pci_init(hw, pdev);
 	if (err) {
 		pr_err("Failed to init PCI\n");
 		goto fail4;
 	}
+
+	PROBE_RUNG(3, "rtl_pci_init");
 
 	err = ieee80211_register_hw(hw);
 	if (err) {
@@ -2216,8 +2298,12 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	/* add for debug */
 	rtl_debug_add_one(hw);
 
+	PROBE_RUNG(4, "ieee80211_register_hw");
+
 	/*init rfkill */
 	rtl_init_rfkill(hw);	/* Init PCI sw */
+
+	PROBE_RUNG(5, "rfkill; NEXT is request_irq");
 
 	rtlpci = rtl_pcidev(pcipriv);
 	err = rtl_pci_intr_mode_decide(hw);
@@ -2228,6 +2314,8 @@ int rtl_pci_probe(struct pci_dev *pdev,
 		goto fail3;
 	}
 	rtlpci->irq_alloc = 1;
+
+	PROBE_RUNG(6, "rtl_pci_intr_mode_decide -- request_irq HAS run");
 
 	set_bit(RTL_STATUS_INTERFACE_START, &rtlpriv->status);
 	return 0;

@@ -56,17 +56,124 @@ static void _rtl92fe_stop_tx_beacon(struct ieee80211_hw *hw)
 	rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 2, tmp);
 }
 
+/* ★★ DIAGNOSTIC KNOB, 2026-09-01 -- arming beacon TX is the last thing this
+ * board does before it wedges, and this makes the question answerable on ONE
+ * image instead of two builds.
+ *
+ * MEASURED: `iw phy phy0 interface add ap0 type __ap` succeeds (rc 0) and the
+ * following `ip link set ap0 up` wedges the whole SoC -- no hostapd, no beacon
+ * template, no beacon ENABLED, and the rtl_pci interrupt count still 0.  So it
+ * is not the beacon CONTENT and not a storm: it is the act of arming beacon
+ * transmission on a queue nothing has ever filled.
+ *
+ * ⚠ AND THE TIMING IS WHAT DIFFERS FROM MAINLINE, not the register set.
+ * rtl8xxxu's set_linktype() writes the MSR and NOTHING else; it arms beacons
+ * only later, from bss_info_changed() on BSS_CHANGED_BEACON_ENABLED -- i.e.
+ * when beaconing is actually turned on.  We arm it here, at interface-up.
+ * regs_touched_vs_mainline.py reported exactly those two registers as
+ * "only ours" and I ERASED THAT by widening the mainline side of the pair to
+ * include start_tx_beacon(): the union then matched, and the SEQUENCE
+ * difference -- the real one -- disappeared with it.  Comparing sets loses
+ * order; that is a limit of the tool and it is now written down.
+ */
+static bool arm_beacon_on_ap = true;
+module_param(arm_beacon_on_ap, bool, 0644);
+MODULE_PARM_DESC(arm_beacon_on_ap,
+		 "arm beacon TX when entering AP mode (default 1). Set 0 to "
+		 "test whether that is what wedges the host bus.");
+
+/* ★★ A BISECT KNOB, NOT A CONFIG KNOB.  Three register writes arm beacon TX,
+ * and one of them wedges the host bus.  Guessing which cost three refuted
+ * hypotheses (the per-dword readback, the 8051 reset, deferring the arm until
+ * after a beacon exists -- the last two MEASURED FALSE).  A bitmask makes it
+ * one build and three boots instead:
+ *
+ *   bit 0  FWHW_TXQ_CTRL+2 |= BIT(6)   -- let the HW own the beacon queue
+ *   bit 1  TBTT_PROHIBIT+1  = 0xff     -- the prohibit window's middle byte
+ *   bit 2  TBTT_PROHIBIT+2 |= BIT(0)   -- the prohibit window's top bit
+ *
+ * ⚠ AND THE VENDOR DRIVER PROGRAMS TBTT_PROHIBIT AS ONE 32-BIT FIELD, with
+ * measured values (0x4004, 0x104, and a field write under mask 0x000FFF00),
+ * where this code follows upstream rtlwifi and pokes byte +1 with 0xff.  That
+ * is a lead, not a conclusion: this knob is what decides whether bits 1-2 are
+ * even involved. */
+static int beacon_arm_steps = 7;
+module_param(beacon_arm_steps, int, 0644);
+MODULE_PARM_DESC(beacon_arm_steps,
+		 "bitmask of the beacon-arming register writes to perform "
+		 "(default 7 = all three); for bisecting which one wedges");
+
+/* ★★★ THE PAIR THE BISECT NAMED, AND THE VALUE THE VENDOR USES.
+ *
+ * MEASURED 2026-09-01, one build and seven boots, with steps=7 as the positive
+ * control:
+ *     steps 1 (FWHW_TXQ_CTRL)      SURVIVED
+ *     steps 2 (TBTT_PROHIBIT+1)    SURVIVED
+ *     steps 4 (TBTT_PROHIBIT+2)    SURVIVED
+ *     steps 3 (both of the above)  WEDGED     <- 0 + 1
+ *     steps 5 (0 + 2)              SURVIVED
+ *     steps 7 (all three)          WEDGED     <- the control
+ * So no single write wedges the host bus; FWHW_TXQ_CTRL's BIT(6) -- which hands
+ * the beacon queue to the HARDWARE -- plus the TBTT_PROHIBIT+1 poke does.  The
+ * prohibit window only matters once the hardware owns the queue, which is
+ * exactly why neither is fatal alone.
+ *
+ * ★ AND THE VALUE IS WRONG BY THE VENDOR'S OWN NUMBER.  This code follows
+ * upstream rtlwifi's 8192ee and pokes 0xff into byte +1 (plus BIT(0) at +2),
+ * leaving field [19:8] = 0x1FF.  The vendor driver that runs THIS part on THIS
+ * board writes the whole 32-bit register instead -- rtl8192cd programs
+ * TBTT_PROHIBIT with 0x4004 / 0x104 / 0x1df04 and does a field write under mask
+ * 0x000FFF00 with 0x138, its own comment calling that 10 ms.  0x1FF is 63%
+ * larger than 0x138.
+ *
+ * -1 keeps the old byte-poke behaviour so the A/B is one image, not two builds.
+ */
+static int tbtt_prohibit_field = -1;
+module_param(tbtt_prohibit_field, int, 0644);
+MODULE_PARM_DESC(tbtt_prohibit_field,
+		 "TBTT_PROHIBIT field [19:8] value (-1 = the legacy 0xff byte "
+		 "poke; 0x138 is what the vendor driver programs)");
+
 static void _rtl92fe_resume_tx_beacon(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	u8 tmp;
 
-	tmp = rtl_read_byte(rtlpriv, REG_FWHW_TXQ_CTRL + 2);
-	rtl_write_byte(rtlpriv, REG_FWHW_TXQ_CTRL + 2, tmp | BIT(6));
-	rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 1, 0xff);
-	tmp = rtl_read_byte(rtlpriv, REG_TBTT_PROHIBIT + 2);
-	tmp |= BIT(0);
-	rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 2, tmp);
+	if (!arm_beacon_on_ap) {
+		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+			"beacon TX arming SKIPPED (arm_beacon_on_ap=0)\n");
+		return;
+	}
+
+	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+		"beacon arm: steps=0x%x\n", beacon_arm_steps);
+	if (beacon_arm_steps & BIT(0)) {
+		tmp = rtl_read_byte(rtlpriv, REG_FWHW_TXQ_CTRL + 2);
+		rtl_write_byte(rtlpriv, REG_FWHW_TXQ_CTRL + 2, tmp | BIT(6));
+		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD, "beacon arm: step0 done\n");
+	}
+	if (beacon_arm_steps & BIT(1)) {
+		if (tbtt_prohibit_field >= 0) {
+			u32 v = rtl_read_dword(rtlpriv, REG_TBTT_PROHIBIT);
+
+			v = (v & ~0x000fff00u) |
+			    (((u32)tbtt_prohibit_field << 8) & 0x000fff00u);
+			rtl_write_dword(rtlpriv, REG_TBTT_PROHIBIT, v);
+			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+				"beacon arm: step1 FIELD write 0x%08x "
+				"([19:8]=0x%03x)\n", v, tbtt_prohibit_field);
+		} else {
+			rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 1, 0xff);
+			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+				"beacon arm: step1 legacy byte poke (0xff)\n");
+		}
+	}
+	if (beacon_arm_steps & BIT(2)) {
+		tmp = rtl_read_byte(rtlpriv, REG_TBTT_PROHIBIT + 2);
+		tmp |= BIT(0);
+		rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 2, tmp);
+		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD, "beacon arm: step2 done\n");
+	}
 }
 
 static void _rtl92fe_enable_bcn_sub_func(struct ieee80211_hw *hw)
@@ -1389,6 +1496,45 @@ static void _rtl92fe_config_trx_mode_ab(struct ieee80211_hw *hw)
 	_rtl92fe_config_rfe(hw);
 }
 
+/*
+ * ★★★ TEMPORARY DIAGNOSTIC LADDER, 2026-09-01 -- REMOVE once the X111W wedge
+ * is named.  Declared here so nobody mistakes it for a feature.
+ *
+ * The X111W stops dead -- console AND network at the same instant, no oops, no
+ * reset -- and it was MEASURED today that the trigger is `ip link set wlan0
+ * up`: with `rdinit=/bin/sh` the board is alive 5/5 past 84 s, a control
+ * (`ip link set lo up`) returns, and the wlan0 command NEVER RETURNS.  That
+ * path is mac80211 -> rtl_op_start -> rtl_pci_start -> HERE.
+ *
+ * The earlier ten-rung PROBE bisect could never enter this function, so it
+ * could only ever prove a negative.  This ladder splits hw_init itself:
+ *
+ *     insmod-time / bootarg:  rtl8192fe.hwinit_stop_at=N
+ *
+ * N == 0 runs the whole thing (the shipping behaviour).  N > 0 returns 0 as
+ * soon as rung N has run, so `ip link set wlan0 up` COMPLETES if the killer is
+ * above N and HANGS if it is at or below N.  One build, and each arm is a boot
+ * plus one command instead of five boots at 4-in-5 odds.
+ *
+ * ⚠ IT RETURNS 0, NOT AN ERROR, ON PURPOSE: an error would fail the ip command
+ * for a reason that is not the fault under test, and "the command returned"
+ * is exactly the witness being measured.
+ */
+static int hwinit_stop_at;
+module_param(hwinit_stop_at, int, 0644);
+MODULE_PARM_DESC(hwinit_stop_at,
+		 "DIAGNOSTIC: return from hw_init after rung N (0 = run it all)");
+
+#define HWINIT_RUNG(n, what)						\
+	do {								\
+		if (hwinit_stop_at && (n) >= hwinit_stop_at) {		\
+			pr_info("rtl8192fe: hwinit_stop_at=%d -- stopping "\
+				"after rung %d (%s)\n",			\
+				hwinit_stop_at, (n), (what));		\
+			return 0;					\
+		}							\
+	} while (0)
+
 int rtl92fe_hw_init(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -1480,6 +1626,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	}
 
 	rtl_write_word(rtlpriv, REG_PCIE_CTRL_REG, 0x8000);
+	HWINIT_RUNG(1, "init_mac + PCIE_CTRL");
 
 	/* Download the 8051 firmware. With the 25 MHz crystal-select + the
 	 * power-on tail in place, the high-offset FW-FIFO writes (0x4000) complete,
@@ -1498,8 +1645,11 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	rtlhal->last_hmeboxnum = 0;
 
 	/* BB/RF bring-up via phy.c (MAC table, BB, RF, then channel). */
+	HWINIT_RUNG(2, "fw download");
 	rtl92fe_phy_mac_config(hw);
+	HWINIT_RUNG(3, "phy_mac_config");
 	rtl92fe_phy_bb_config(hw);
+	HWINIT_RUNG(4, "phy_bb_config");
 	rtl92fe_phy_rf_config(hw);
 
 	rtlphy->rfreg_chnlval[0] = rtl_get_rfreg(hw, RF90_PATH_A,
@@ -1528,19 +1678,23 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	rtl_set_rfreg(hw, RF90_PATH_A, 0xB1, RFREG_OFFSET_MASK, 0x33B8F);
 
 	/* Set hardware (MAC default setting). */
+	HWINIT_RUNG(5, "phy_rf_config + RF/BB writes");
 	_rtl92fe_hw_configure(hw);
 
 	rtlhal->mac_func_enable = true;
 
+	HWINIT_RUNG(6, "_rtl92fe_hw_configure");
 	rtl_cam_reset_all_entry(hw);
 	rtl92fe_enable_hw_security_config(hw);
 
 	ppsc->rfpwr_state = ERFON;
 
 	rtlpriv->cfg->ops->set_hw_reg(hw, HW_VAR_ETHER_ADDR, mac->mac_addr);
+	HWINIT_RUNG(7, "security + ether addr");
 	_rtl92fe_enable_aspm_back_door(hw);
 	rtlpriv->intf_ops->enable_aspm(hw);
 
+	HWINIT_RUNG(8, "aspm back door");
 	rtl92fe_bt_hw_init(hw);
 
 	rtlpriv->rtlhal.being_init_adapter = false;
@@ -1567,6 +1721,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	 * (AB/AB paths, rfe_type 3). Skipping it leaves the path registers
 	 * mis-configured (0x804[3:0], 0xc04, 0x90c, ...).
 	 */
+	HWINIT_RUNG(9, "bt_hw_init");
 	_rtl92fe_config_trx_mode_ab(hw);
 
 	/* RX/TX engine is configured (RCR/CR) via the MAC init + hw_configure
@@ -1603,6 +1758,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 
 	rtl_write_byte(rtlpriv, REG_NAV_UPPER, ((30000 + 127) / 128));
 
+	HWINIT_RUNG(10, "config_trx_mode_ab");
 	rtl92fe_dm_init(hw);
 
 	/* One-line RF bring-up summary (info level so it shows in dmesg without
@@ -1720,6 +1876,15 @@ static int _rtl92fe_set_media_status(struct ieee80211_hw *hw,
 		_rtl92fe_stop_tx_beacon(hw);
 		_rtl92fe_enable_bcn_sub_func(hw);
 	} else if (mode == MSR_ADHOC || mode == MSR_AP) {
+		/* ⚠ THE ARM STAYS HERE FOR NOW, AND THE REASON IS A REFUTATION.
+		 * Deferring it to the BSS_CHANGED_BEACON_ENABLED path -- so that a
+		 * beacon exists before the engine is armed -- was tried on
+		 * 2026-09-01 and the board STILL DIED on a normal boot.  So the
+		 * failure is not about WHEN the arming happens, and moving it
+		 * bought nothing; leaving the move in would be a change with no
+		 * evidence behind it, dressed as a fix.
+		 * Which of the three writes inside actually wedges the bus is
+		 * measured by the beacon_arm_steps bitmask, not guessed. */
 		_rtl92fe_resume_tx_beacon(hw);
 		_rtl92fe_disable_bcn_sub_func(hw);
 	} else {
@@ -1814,9 +1979,34 @@ void rtl92fe_enable_interrupt(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
+	/* ★★ THE FLAG FIRST, THEN THE HARDWARE -- THIS ORDER IS THE BUG.
+	 *
+	 * Arming HIMR/HIMRE before setting @irq_enabled leaves a window in which
+	 * the device can assert INTx while the handler still reads the flag as
+	 * false.  _rtl_pci_interrupt() then returns WITHOUT touching one endpoint
+	 * register, so the ISR is never write-1-to-cleared and DEASSERT_INTx is
+	 * never sent.  On a level line whose irq_chip has no .irq_ack and whose
+	 * root complex does no bridge-side acknowledge, that assertion never goes
+	 * away: the handler is re-entered forever in hard-IRQ context and the CPU
+	 * stalls with nothing printed.
+	 *
+	 * ★ NOT OUR DEDUCTION ALONE -- this exact race is described upstream for
+	 * this driver family, in "rtlwifi: rtl8192x: Enabling and disabling
+	 * hardware interrupts after enabling local irq flags": the line "goes
+	 * high at ASSERT_INTx and goes low only at DEASSERT_INTx", and
+	 * "DEASSERT_INTx cannot be sent when the flag is still false, making CPU
+	 * stall".  Three independent sources agree: that patch, the sibling G24W
+	 * which MEASURED the same storm (there it was re-entered in softirq
+	 * context and printed "soft lockup ... CPU#0 stuck for 26s! [hostapd]"),
+	 * and this board's own signature -- serial and Ethernet ceasing together,
+	 * no oops, at a varying moment.
+	 *
+	 * Setting the flag first cannot produce a spurious claim: with the
+	 * hardware still masked the ISR reads an empty ISR and now returns
+	 * IRQ_NONE. */
+	rtlpci->irq_enabled = true;
 	rtl_write_dword(rtlpriv, REG_HIMR, rtlpci->irq_mask[0] & 0xFFFFFFFF);
 	rtl_write_dword(rtlpriv, REG_HIMRE, rtlpci->irq_mask[1] & 0xFFFFFFFF);
-	rtlpci->irq_enabled = true;
 }
 
 void rtl92fe_disable_interrupt(struct ieee80211_hw *hw)
@@ -1824,8 +2014,19 @@ void rtl92fe_disable_interrupt(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
+	/* ★ AND THE MIRROR ON THE WAY DOWN.  The io accessors installed by
+	 * _rtl_pci_io_handler_init() are the POSTED (async) variants, so these
+	 * two writes may still be in flight when the function returns.  Clearing
+	 * @irq_enabled while the hardware is still armed re-opens exactly the
+	 * window above -- an assertion arrives, the handler sees false, and
+	 * nothing acknowledges it.
+	 *
+	 * The read-back is the flush: a non-posted read of the same block cannot
+	 * complete until the writes ahead of it have, so once it returns the mask
+	 * really is off and the flag may safely follow. */
 	rtl_write_dword(rtlpriv, REG_HIMR, IMR_DISABLED);
 	rtl_write_dword(rtlpriv, REG_HIMRE, IMR_DISABLED);
+	rtl_read_dword(rtlpriv, REG_HIMR);	/* flush the posted writes */
 	rtlpci->irq_enabled = false;
 }
 
@@ -1932,6 +2133,7 @@ void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM - 2, 0x30);
 	rtlpci->reg_bcn_ctrl_val |= BIT(3);
 	rtl_write_byte(rtlpriv, REG_BCN_CTRL, (u8)rtlpci->reg_bcn_ctrl_val);
+
 	/* NB: do NOT set ENSWBCN (REG_CR bit8) here to force a live-TIM SW beacon --
 	 * the rtl8192fe SW-beacon path (BEACON_QUEUE) has no DWBCN commit/beacon-valid
 	 * handshake, so the tasklet-filled beacon misses TBTT on the slow MIPS core

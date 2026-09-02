@@ -54,21 +54,12 @@ u32 bosa_bias_ua_calc(int h, int l);
 u32 bosa_tx_sample_contrib(s32 vmpd, s32 dark, int iavg, int range);
 u32 bosa_tx_word_calc(u64 sum, int n, s32 tx_slope, s32 tx_offset);
 
-/* One packed-array slot: where a `bits`-wide entry lives inside the pi register
- * space. Set and get share this ONE locate result -- before the hoist they
- * could only agree by parallel maintenance, which is how the contiguous-pack
- * SID2QID mis-addressing stayed invisible (the wrong get mirrored the wrong
- * set). */
-struct pi_packed_slot {
-	u32 reg;		/* byte address of the 32-bit word (driver-relative) */
-	unsigned int shift;	/* bit position of the field inside that word */
-	u32 mask;		/* field mask, unshifted */
-};
-
-struct pi_packed_slot pi_packed_locate(u32 base, unsigned int idx,
-				       unsigned int bits);
-u32 pi_packed_insert(u32 word, const struct pi_packed_slot *slot, u32 val);
-u32 pi_packed_extract(u32 word, const struct pi_packed_slot *slot);
+/* pi_packed_locate/insert/extract + struct pi_packed_slot MOVED to
+ * flowcore.h / flowcore_hash.o on 2026-09-02 (round 3): generic packed-slot
+ * math another engine needed, and this object's CONFIG_RTL9602C_GPON gate
+ * made a call from that engine a link error on its board.  The include below
+ * keeps every existing caller of this header compiling unchanged. */
+#include "flowcore.h"
 
 /* ===== round 2 (2026-09-02): module identity + sample selection ========= */
 

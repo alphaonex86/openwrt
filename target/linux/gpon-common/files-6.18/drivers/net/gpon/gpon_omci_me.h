@@ -417,4 +417,43 @@ const char *omci_dgem_name(enum omci_dgem v);
 bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
 			u16 *port_id);
 
+/* ------------------------------------------------------------------------
+ * ★ THE DATA-PATH SNOOP'S OTHER TWO DECISIONS -- core, once (2026-09-02).
+ *
+ * Same shape and same reason as omci_dgem_classify() above: the Elnath shell
+ * answered "does this ME 262 move or detach the data alloc-id?" and "does
+ * this ME 268 Delete name the latched data GEM?" privately in cg_rx_omci
+ * (Stage D), and Luna has NO copy at all since 836b76be01 -- the next board
+ * would have re-derived both from G.988.  The SHADOW is an INPUT (@cur_*):
+ * the core decides, the shell keeps the CAM writes, the shadow stores and
+ * the work-kick that act on the verdict.
+ * ------------------------------------------------------------------------ */
+
+/* What one MIC-verified ME 262 (T-CONT) PDU means for the DATA alloc-id. */
+enum omci_tcont_verdict {
+	OMCI_TCONT_NONE = 0,	/* nothing actionable: not a Create/Set, runt
+				 * body, attr 1 absent from the Set mask,
+				 * alloc 0, or the value already latched */
+	OMCI_TCONT_ALLOC,	/* a NEW data alloc-id -- *@alloc holds it */
+	OMCI_TCONT_DEALLOC,	/* the G.988 0xffff detach of the latched
+				 * instance: the teardown half of the message */
+};
+
+/* Decide from @mt (the raw msg-type octet; masked here) and @body/@blen (the
+ * wire from octet 8).  A Set carries {mask[0:1], alloc[2:3] when the attr-1
+ * bit is set}; a Create's SBC body has the alloc first.  @cur_alloc /
+ * @cur_inst are the caller's latched shadow (0 = none); @inst is the PDU's
+ * ME instance.  Pure: no state, no side effect, safe from any context. */
+enum omci_tcont_verdict omci_tcont_snoop(u8 mt, const u8 *body,
+					 unsigned int blen, u16 inst,
+					 u16 cur_alloc, u16 cur_inst,
+					 u16 *alloc);
+
+/* Does this ME 268 Delete tear down the latched data GEM?  A Delete carries
+ * only the class and the instance, which is exactly why the Create had to
+ * latch @cur_inst: matched here, nothing else can be.  @cur_inst 0 means
+ * "instance never latched" and matches any instance -- the shell's
+ * pre-existing permissive fallback, kept bit-for-bit. */
+bool omci_dgem_delete(u8 mt, u16 inst, u16 cur_gem, u16 cur_inst);
+
 #endif /* GPON_OMCI_ME_H */

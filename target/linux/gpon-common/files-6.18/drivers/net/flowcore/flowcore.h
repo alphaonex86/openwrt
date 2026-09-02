@@ -69,4 +69,37 @@ u32 flowcore_crc32_reflected(const u8 *p, u32 len);
  */
 u16 flowcore_crc16_ccitt_reflected(const u8 *p, u32 len);
 
+/* ------------------------------------------------------------------ */
+/* Packed-array slot math: where a `bits`-wide entry lives inside an   */
+/* array of 32-bit words, plus the insert/extract that share the ONE   */
+/* locate result.                                                      */
+/*                                                                     */
+/* MOVED HERE 2026-09-02 (round 3) from gpon_rtl9602c_logic.{c,h}: it  */
+/* is generic math with no register, offset or engine name in it, but  */
+/* it lived in an object gated on CONFIG_RTL9602C_GPON -- so the       */
+/* Cortina flow engine (CONFIG_CORTINA_NI_FLOWOFFLOAD, a board that    */
+/* never sets the 9602C symbol) could reach it only by writing a       */
+/* second copy.  flowcore_hash.o is obj-y on every board that carries  */
+/* this tree, which is what makes the call legal everywhere            */
+/* (crossconfig_call_guard's defect class).  The pi_ name keeps its    */
+/* origin (the 9602C's pi register space) because the luna shell calls */
+/* it by that name and renaming would touch a shell this move must not.*/
+/* ------------------------------------------------------------------ */
+
+/* One packed-array slot: where a `bits`-wide entry lives inside the pi register
+ * space. Set and get share this ONE locate result -- before the hoist they
+ * could only agree by parallel maintenance, which is how the contiguous-pack
+ * SID2QID mis-addressing stayed invisible (the wrong get mirrored the wrong
+ * set). */
+struct pi_packed_slot {
+	u32 reg;		/* byte address of the 32-bit word (driver-relative) */
+	unsigned int shift;	/* bit position of the field inside that word */
+	u32 mask;		/* field mask, unshifted */
+};
+
+struct pi_packed_slot pi_packed_locate(u32 base, unsigned int idx,
+				       unsigned int bits);
+u32 pi_packed_insert(u32 word, const struct pi_packed_slot *slot, u32 val);
+u32 pi_packed_extract(u32 word, const struct pi_packed_slot *slot);
+
 #endif /* _FLOWCORE_H */

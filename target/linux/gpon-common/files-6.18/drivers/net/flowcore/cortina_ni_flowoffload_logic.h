@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/bits.h>		/* BIT() - the punt verdict bits */
 #include <linux/build_bug.h>	/* static_assert on the packed key */
+#include "flowcore.h"		/* pi_packed_* - the shared packed-slot math */
 
 void cn_l3e_bitrev_key(u32 *w, int n_words);
 u32 cn_l3e_crc32(const u8 *p, size_t len);
@@ -275,5 +276,63 @@ enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
 						  int walk_vid,
 						  bool tpid_8021q, int sid,
 						  bool ac_mac_vld);
+
+/* ===== round 3 (2026-09-02): the packed-slot idioms spelled per site ==== */
+
+/*
+ * The TPID slot table's WRITE half - the mirror of cn_tpid_slot_at above, so
+ * the {lo, hi}-half packing is derived from ONE locate (pi_packed) on both
+ * directions instead of being spelled again at the claim site in
+ * cn_l3fe_tpid_ensure().  @word is the 32-bit word the caller already selected
+ * (w[i >> 1]); only slot i's half is replaced.
+ */
+u32 cn_tpid_slot_store(u32 word, unsigned int i, u16 tpid);
+
+/*
+ * ★ MAIN-HASH age SRAM slot geometry, ONE fact (this die - board-proven
+ * 2026-07-23): a 32-slot age row is 2 DATA words at 2 BITS per slot, 16
+ * slots/word (DATA2/DATA3 read back 0 = absent; the aal-77c *source* shows a
+ * 4-bit/4-word layout, but the shipped silicon is 2-bit/2-word, matching the
+ * shipping ca-ne.ko aal_hash_age_set disasm `bfi #2`).  slot.reg is the
+ * WORD OFFSET within the row (0 = slots 0..15, 4 = slots 16..31); the shell
+ * maps it to its register NAMES (AGE_DATA_LO/HI - which sit at DESCENDING
+ * addresses, so the offset is deliberately not an address).  Insert/extract
+ * are pi_packed_insert/pi_packed_extract on this slot - before the hoist the
+ * shift/RMW math was spelled in cn_l3e_age_set, cn_l3e_age_get AND the
+ * bucket sweep, three parallel spellings of one packing.
+ */
+struct pi_packed_slot cn_age2_slot(u32 idx);
+
+/* geometry + the 2-bit age codes (moved from the shell with the helpers
+ * that encode them; names kept so no call site changed) */
+#define CN_L3E_HASH_WAYS	8	/* hb_size = 1 (stock live) */
+#define CN_L3E_AGE_SLOTS	32	/* slots per age row, fixed */
+/* 2-bit MAIN-HASH age codes (this die): 0=free/invalid, 1..2 = valid+aging (HW
+ * re-arms on hit), 3 = static.  START(2) = go-live / HW-hit re-arm. */
+#define CN_L3E_AGE_FREE		0
+#define CN_L3E_AGE_IDLE		1	/* set by the stats sweep; HW re-arms on hit */
+#define CN_L3E_AGE_START	2
+#define CN_L3E_AGE_STATIC	3
+
+/*
+ * One 16-slot age word of the batch traffic sweep: every slot the HW re-armed
+ * above IDLE (a lookup hit sets it to START) is reported in @rearmed (bit k =
+ * slot k of THIS word) and stepped back down to IDLE so the next sweep sees a
+ * fresh re-arm; STATIC and FREE slots pass through untouched.  Returns the
+ * rewritten word for the shell to commit.  Pure - the latch/commit GO cycle
+ * and the two register reads/writes stay at the register.
+ */
+u32 cn_age2_sweep_word(u32 w, u16 *rearmed);
+
+/*
+ * SW way-pick inside the 8-way hash bucket (stock hb_size = 1): the dup scan,
+ * then the free scan with the entry-0 guard (entry 0 is kept free because its
+ * {crc16, slot} cache tag is all-zero and aliases an empty cache way).
+ * @crc32_tbl is the per-entry install-CRC shadow (0 = free).  Returns 0 with
+ * *idx_out = the chosen free entry; -EEXIST with *idx_out = the entry already
+ * holding @crc32 (a normal dup, not an error); -ENOSPC with *idx_out = the
+ * bucket base (the flow simply stays on the sw path).
+ */
+int cn_hs_way_pick(const u32 *crc32_tbl, u32 crc16, u32 crc32, u32 *idx_out);
 
 #endif /* _CORTINA_NI_FLOWOFFLOAD_LOGIC_H */

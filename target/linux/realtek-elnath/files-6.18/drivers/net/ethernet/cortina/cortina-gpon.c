@@ -3109,38 +3109,39 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 			}
 		}
 
-		/* ME 262 T-CONT: the data alloc-id.  Set carries {mask[8:9],
-		 * alloc[10:11] when attr-1 bit set}; a Create's SBC body has
-		 * alloc first.  The OMCC alloc (= onu-id) never comes here. */
-		if (class_id == 262 && len >= 12) {
-			u32 alloc = 0;
+		/* ME 262 T-CONT: the data alloc-id.  ★ THE PARSE AND THE
+		 * DECISION ARE THE CORE'S (omci_tcont_snoop, beside
+		 * omci_dgem_classify, 2026-09-02): the Set-vs-Create body
+		 * layout, the ★★ 0xffff G.988 deallocate (2026-08-05 -- the
+		 * evidence rides the core comment now) and the
+		 * against-the-shadow change test, exercised on x86 with no
+		 * board.  The ACTIONS -- the shadow writes and the isr_work
+		 * kick that reach the T-CONT CAM -- stay here.  The OMCC
+		 * alloc (= onu-id) never comes here. */
+		if (class_id == 262) {
+			u16 alloc = 0;
 
-			if (m == 8 && (((pdu[8] << 8) | pdu[9]) & 0x8000))
-				alloc = ((u16)pdu[10] << 8) | pdu[11];
-			else if (m == 4)
-				alloc = ((u16)pdu[8] << 8) | pdu[9];
-			/* ★★ 0xffff IS THE G.988 DEALLOCATE, NOT NOISE (2026-08-05).
-			 * The `alloc != 0xffff` filter below used to DROP it, so an
-			 * OLT that detached the T-CONT the standard way left our
-			 * shadow - and therefore the armed HW CAM - still matching an
-			 * alloc-id the OLT is now free to hand to ANOTHER subscriber.
-			 * Only a MIB-Reset cleared it.  Treat it as what it is: the
-			 * teardown half of the same message. */
-			if (alloc == 0xffff && cg->dt_alloc &&
-			    (!cg->dt_inst || inst == cg->dt_inst)) {
+			switch (omci_tcont_snoop(mt, pdu + 8, len - 8, inst,
+						 cg->dt_alloc, cg->dt_inst,
+						 &alloc)) {
+			case OMCI_TCONT_DEALLOC:
 				dev_info(cg->dev,
 					 "OMCI: data T-CONT me-inst 0x%04x DEALLOCATED (alloc-id 0xffff)\n",
 					 inst);
 				WRITE_ONCE(cg->dt_alloc, 0);
 				cg->data_installed = false;
 				schedule_work(&cg->isr_work);
-			} else if (alloc && alloc != 0xffff && alloc != cg->dt_alloc) {
+				break;
+			case OMCI_TCONT_ALLOC:
 				WRITE_ONCE(cg->dt_alloc, alloc);
 				cg->dt_inst = inst;
 				dev_info(cg->dev,
 					 "OMCI: data T-CONT me-inst 0x%04x alloc-id %u\n",
 					 inst, alloc);
 				schedule_work(&cg->isr_work);
+				break;
+			case OMCI_TCONT_NONE:
+				break;
 			}
 		}
 
@@ -3151,18 +3152,19 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 		 * broadcast CTP FIRST (gem 4095, tcont-ptr 0, dir 2) — that
 		 * one is covered by the fixed CG_MCAST_GEM_ID install, so it
 		 * must never claim the data-GEM slot (live-proven ordering). */
-		/* ★★ ME 268 DELETE (m == 6) TEARS THE DATA GEM DOWN (2026-08-05).
-		 * The snoop below is Create-only, so a Delete was merely logged and
-		 * the DS-GEM CAM stayed armed on a port-id the OLT had removed -
-		 * de-encapsulating whatever the next subscriber is given on that
-		 * GEM.  Only a MIB-Reset cleared it.  A Delete carries just the
+		/* ★★ ME 268 DELETE TEARS THE DATA GEM DOWN (2026-08-05).  Before
+		 * that date a Delete was merely logged and the DS-GEM CAM stayed
+		 * armed on a port-id the OLT had removed - de-encapsulating
+		 * whatever the next subscriber is given on that GEM; only a
+		 * MIB-Reset cleared it.  ★ THE MATCH IS THE CORE'S
+		 * (omci_dgem_delete, 2026-09-02): a Delete carries just the
 		 * class and the instance, which is exactly why dg_inst had to be
-		 * latched on the Create: matched here, nothing else can be.
+		 * latched on the Create - matched there, nothing else can be.
 		 * Clearing the shadow and kicking isr_work is the same teardown
 		 * the MIB-Reset path takes, so the stale HW CAM is invalidated in
 		 * process context rather than left to burst. */
-		if (class_id == 268 && m == 6 && cg->dg_gem &&
-		    (!cg->dg_inst || inst == cg->dg_inst)) {
+		if (class_id == 268 &&
+		    omci_dgem_delete(mt, inst, cg->dg_gem, cg->dg_inst)) {
 			dev_info(cg->dev,
 				 "OMCI: data GEM me-inst 0x%04x DELETED (port-id %u)\n",
 				 inst, cg->dg_gem);

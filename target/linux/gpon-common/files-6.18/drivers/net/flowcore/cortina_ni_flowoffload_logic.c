@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <linux/bitrev.h>
 #include <linux/crc32.h>
+#include <linux/errno.h>	/* the way-pick's -EEXIST / -ENOSPC verdicts */
 #include <linux/in.h>		/* IPPROTO_TCP */
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -442,7 +443,9 @@ u16 cn_l3e_poly16_step(u16 d)
  */
 u16 cn_tpid_slot_at(const u32 w[2], unsigned int i)
 {
-	return (i & 1) ? (u16)(w[i >> 1] >> 16) : (u16)(w[i >> 1] & 0xffff);
+	struct pi_packed_slot s = pi_packed_locate(0, i & 1, 16);
+
+	return (u16)pi_packed_extract(w[i >> 1], &s);
 }
 
 int cn_tpid_find(const u32 w[2], u16 tpid)
@@ -493,4 +496,78 @@ enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
 	if (!ac_mac_vld)
 		return CN_WAN_VLAN_NO_MAC;
 	return CN_WAN_VLAN_OK_PPPOE;
+}
+
+/* ===== round 3 (2026-09-02): the packed-slot idioms spelled per site ====
+ * Same hoist rule as everything above (no MMIO, no kernel service, no shell
+ * file-scope state), aimed at the round-2 finding's shape: a packing spelled
+ * character-for-character at more than one site.  The age-SRAM slot math was
+ * spelled THREE times in the shell (age_set, age_get, the bucket sweep); the
+ * TPID half-word packing had its read half here and its write half still
+ * open-coded at the claim site.  Both now derive from pi_packed_locate -- the
+ * SAME shared-locate discipline whose absence let the SID2QID wrong offset
+ * survive three digs (see flowcore.h). */
+
+/* See the header: @word is the caller-selected w[i >> 1]. */
+u32 cn_tpid_slot_store(u32 word, unsigned int i, u16 tpid)
+{
+	struct pi_packed_slot s = pi_packed_locate(0, i & 1, 16);
+
+	return pi_packed_insert(word, &s, tpid);
+}
+
+/* See the header: reg = the word OFFSET within the 2-word age row (0 or 4),
+ * NOT an address -- the two data words sit at DESCENDING register addresses,
+ * so the shell maps the offset to its register names. */
+struct pi_packed_slot cn_age2_slot(u32 idx)
+{
+	return pi_packed_locate(0, idx & (CN_L3E_AGE_SLOTS - 1), 2);
+}
+
+u32 cn_age2_sweep_word(u32 w, u16 *rearmed)
+{
+	u32 n = 0;
+	u16 t = 0;
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		u32 age = (w >> (i * 2)) & 3;
+
+		/* traffic = re-armed above IDLE (a HW hit set it to START(2));
+		 * clear such a slot back to IDLE(1) so the next sweep detects a
+		 * fresh re-arm.  Leave STATIC(3) and FREE(0) untouched. */
+		if (age > CN_L3E_AGE_IDLE && age != CN_L3E_AGE_STATIC) {
+			t |= BIT(i);
+			age = CN_L3E_AGE_IDLE;
+		}
+		n |= age << (i * 2);
+	}
+	*rearmed = t;
+	return n;
+}
+
+/* See the header for the verdicts.  The scans are kept EXACTLY as the shell
+ * spelled them: the dup scan covers way 0 even in bucket 0 (an entry can never
+ * BE there, so it can never match), while the free scan starts at way 1 there
+ * (the entry-0 guard). */
+int cn_hs_way_pick(const u32 *crc32_tbl, u32 crc16, u32 crc32, u32 *idx_out)
+{
+	u32 base = crc16 & ~(u32)(CN_L3E_HASH_WAYS - 1);
+	int way;
+
+	for (way = 0; way < CN_L3E_HASH_WAYS; way++)
+		if (crc32_tbl[base + way] == crc32) {
+			*idx_out = base + way;
+			return -EEXIST;
+		}
+	way = (base == 0) ? 1 : 0;
+	for (; way < CN_L3E_HASH_WAYS; way++)
+		if (!crc32_tbl[base + way])
+			break;
+	if (way == CN_L3E_HASH_WAYS) {
+		*idx_out = base;
+		return -ENOSPC;
+	}
+	*idx_out = base + way;
+	return 0;
 }

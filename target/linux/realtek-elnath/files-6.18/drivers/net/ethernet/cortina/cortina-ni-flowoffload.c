@@ -134,17 +134,14 @@
  * The AGE SRAM has its own FIXED geometry, independent of the hash bucket
  * width: 2048 rows x 32 slots x 2 bits, row = idx >> 5. */
 #define CN_L3E_ENTRIES			65536	/* ht_size = 7 */
-#define CN_L3E_HASH_WAYS		8	/* hb_size = 1 (stock live) */
-#define CN_L3E_AGE_SLOTS		32	/* slots per age row, fixed */
 #define CN_L3E_AGE_ROWS			(CN_L3E_ENTRIES / CN_L3E_AGE_SLOTS)
 #define CN_L3E_FIB_BYTES		32	/* ha_width = 3 (256-bit, normal mode) */
 
-/* 2-bit MAIN-HASH age codes (this die): 0=free/invalid, 1..2 = valid+aging (HW
- * re-arms on hit), 3 = static.  START(2) = go-live / HW-hit re-arm. */
-#define CN_L3E_AGE_FREE			0
-#define CN_L3E_AGE_IDLE			1	/* set by the stats sweep; HW re-arms on hit */
-#define CN_L3E_AGE_START		2
-#define CN_L3E_AGE_STATIC		3
+/* CN_L3E_HASH_WAYS, CN_L3E_AGE_SLOTS and the 2-bit age codes CN_L3E_AGE_*
+ * moved to cortina_ni_flowoffload_logic.h (round 3), beside the pure helpers
+ * that encode them (cn_hs_way_pick, cn_age2_slot, cn_age2_sweep_word) - so
+ * the geometry and the code that depends on it cannot drift apart.  Names
+ * unchanged; every use below still compiles against the core header. */
 
 /* hash profiles, selected by the ingress CLE profile */
 #define CN_L3E_PROFILE_WAN		0
@@ -443,15 +440,17 @@ static int cn_l3e_go(struct cn_l3e *l3e, u32 reg, u32 val, u32 busy_bit)
  * is only 2 DATA words, DATA0=0x3938 slots 0-15, DATA1=0x3934 slots 16-31, at
  * 2 bits/slot; DATA2/DATA3 read back 0 = absent).  A 4-bit accessor (per the
  * aal-77c source) writes to the non-existent DATA2/3 and leaves the real slot 0
- * = INVALID -> the entry never matches.  word = (idx&0x10)?HI:LO, bit =
- * (idx&0xf)*2; age 0..3, START=2, STATIC=3.
+ * = INVALID -> the entry never matches.  The slot geometry (which word, which
+ * bits) is ONE fact now - cn_age2_slot() in the logic core; only the register
+ * NAMES stay here (slot.reg is a word offset because the two data words sit at
+ * DESCENDING addresses).  age 0..3, START=2, STATIC=3.
  */
 static int cn_l3e_age_set(struct cn_l3e *l3e, u32 idx, u32 age)
 {
 	u32 bucket = (idx >> 5) & (CN_L3E_AGE_ROWS - 1);
-	u32 data_reg = (idx & 0x10) ? CN_L3E_HS_AGE_DATA_HI
-				    : CN_L3E_HS_AGE_DATA_LO;
-	u32 shift = (idx & 0xf) * 2;
+	struct pi_packed_slot slot = cn_age2_slot(idx);
+	u32 data_reg = slot.reg ? CN_L3E_HS_AGE_DATA_HI
+				: CN_L3E_HS_AGE_DATA_LO;
 	const char *phase = "latch";
 	unsigned long flags;
 	u32 w;
@@ -464,7 +463,7 @@ static int cn_l3e_age_set(struct cn_l3e *l3e, u32 idx, u32 age)
 		goto out;
 
 	w = readl(l3e->ne_base + data_reg);
-	w = (w & ~(3u << shift)) | ((age & 3) << shift);
+	w = pi_packed_insert(w, &slot, age);
 	writel(w, l3e->ne_base + data_reg);
 
 	phase = "commit";
@@ -488,8 +487,9 @@ out:
 static int __maybe_unused cn_l3e_age_get(struct cn_l3e *l3e, u32 idx, u32 *age)
 {
 	u32 bucket = (idx >> 5) & (CN_L3E_AGE_ROWS - 1);
-	u32 data_reg = (idx & 0x10) ? CN_L3E_HS_AGE_DATA_HI
-				    : CN_L3E_HS_AGE_DATA_LO;
+	struct pi_packed_slot slot = cn_age2_slot(idx);
+	u32 data_reg = slot.reg ? CN_L3E_HS_AGE_DATA_HI
+				: CN_L3E_HS_AGE_DATA_LO;
 	unsigned long flags;
 	int ret;
 
@@ -497,7 +497,7 @@ static int __maybe_unused cn_l3e_age_get(struct cn_l3e *l3e, u32 idx, u32 *age)
 	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (!ret)
-		*age = (readl(l3e->ne_base + data_reg) >> ((idx & 0xf) * 2)) & 3;
+		*age = pi_packed_extract(readl(l3e->ne_base + data_reg), &slot);
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);
 	return ret;
 }
@@ -516,7 +516,7 @@ static int cn_l3e_bucket_sweep(struct cn_l3e *l3e, u32 bucket, u32 *traffic)
 {
 	unsigned long flags;
 	u32 w[2], n[2], trf = 0;
-	int r, i, ret;
+	int r, ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
 	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS, bucket | CN_L3E_GO,
@@ -526,21 +526,13 @@ static int cn_l3e_bucket_sweep(struct cn_l3e *l3e, u32 bucket, u32 *traffic)
 
 	w[0] = readl(l3e->ne_base + CN_L3E_HS_AGE_DATA_LO);  /* slots 0-15  */
 	w[1] = readl(l3e->ne_base + CN_L3E_HS_AGE_DATA_HI);  /* slots 16-31 */
+	/* the read-and-step-down transform is the logic core's (one spelling
+	 * of the 2-bit slot packing, shared with age_set/age_get) */
 	for (r = 0; r < 2; r++) {
-		n[r] = 0;
-		for (i = 0; i < 16; i++) {
-			u32 age = (w[r] >> (i * 2)) & 3;
+		u16 t;
 
-			/* traffic = re-armed above IDLE (a HW hit set it to
-			 * START(2)); clear such a slot back to IDLE(1) so the
-			 * next sweep detects a fresh re-arm.  Leave STATIC(3)
-			 * and FREE(0) untouched. */
-			if (age > CN_L3E_AGE_IDLE && age != CN_L3E_AGE_STATIC) {
-				trf |= BIT(r * 16 + i);
-				age = CN_L3E_AGE_IDLE;
-			}
-			n[r] |= age << (i * 2);
-		}
+		n[r] = cn_age2_sweep_word(w[r], &t);
+		trf |= (u32)t << (r * 16);
 	}
 	writel(n[0], l3e->ne_base + CN_L3E_HS_AGE_DATA_LO);
 	writel(n[1], l3e->ne_base + CN_L3E_HS_AGE_DATA_HI);
@@ -598,31 +590,24 @@ static int cn_l3e_cache_invalidate(struct cn_l3e *l3e, u32 idx, u16 crc16)
 static int cn_l3e_flow_add_rawcrc(struct cn_l3e *l3e, u32 crc32, u16 crc16,
 				  const struct cn_l3e_act *act, u32 *idx_out)
 {
-	u32 base, idx;
-	int way, ret;
+	u32 idx;
+	int ret;
 
-	/* SW way-pick inside the 8-way hash bucket (stock hb_size = 1);
-	 * guard: keep entry 0 free (its {crc16, slot} cache tag is all-zero
-	 * and aliases an empty cache way) */
-	base = crc16 & ~(u32)(CN_L3E_HASH_WAYS - 1);
-	for (way = 0; way < CN_L3E_HASH_WAYS; way++)
-		if (l3e->shadow_crc32[base + way] == crc32) {
-			/* normal dup-key (not an error): flow already installed */
-			pr_debug("cortina-l3fe: flow_add: EEXIST idx=%u crc32=%08x crc16=%04x\n",
-				 base + way, crc32, crc16);
-			return -EEXIST;
-		}
-	way = (base == 0) ? 1 : 0;
-	for (; way < CN_L3E_HASH_WAYS; way++)
-		if (!l3e->shadow_crc32[base + way])
-			break;
-	if (way == CN_L3E_HASH_WAYS) {
+	/* the way-pick (dup scan + free scan + the entry-0 guard) is the logic
+	 * core's cn_hs_way_pick(); only the ledger lines stay here */
+	ret = cn_hs_way_pick(l3e->shadow_crc32, crc16, crc32, &idx);
+	if (ret == -EEXIST) {
+		/* normal dup-key (not an error): flow already installed */
+		pr_debug("cortina-l3fe: flow_add: EEXIST idx=%u crc32=%08x crc16=%04x\n",
+			 idx, crc32, crc16);
+		return -EEXIST;
+	}
+	if (ret == -ENOSPC) {
 		/* bucket full: the flow simply stays on the sw path (not an error) */
 		pr_debug("cortina-l3fe: flow_add: bucket FULL base=%u crc16=%04x\n",
-			 base, crc16);
+			 idx, crc16);
 		return -ENOSPC;
 	}
-	idx = base + way;
 
 	/* 1. action FIB, 2. key word, 3. age = go-live (order matters) */
 	memcpy(l3e->fib_tbl + (size_t)idx * CN_L3E_FIB_BYTES, act,
@@ -2937,7 +2922,8 @@ static int cn_aft_tpid_slot(struct cn_l3e *l3e, u16 tpid)
 	l3e->aft_no_tpid++;
 	dev_warn(l3e->dev,
 		 "DMA-AFT: TPID 0x%04x matches none of the 4 slots (0x%04x 0x%04x 0x%04x 0x%04x) - the hardware would silently drop the VLAN edit, so this flow stays on the software fastpath\n",
-		 tpid, w[0] & 0xffff, w[0] >> 16, w[1] & 0xffff, w[1] >> 16);
+		 tpid, cn_tpid_slot_at(w, 0), cn_tpid_slot_at(w, 1),
+		 cn_tpid_slot_at(w, 2), cn_tpid_slot_at(w, 3));
 	return -ENOENT;
 }
 
@@ -2994,18 +2980,17 @@ static int cn_l3fe_tpid_ensure(struct cn_l3e *l3e, u16 tpid)
 		l3e->aft_no_tpid++;
 		dev_warn(l3e->dev,
 			 "L3FE TPID gate: 0x%04x is not registered and all 4 slots are ENABLED with other values (%04x %04x %04x %04x, top_mask=0x%x) - refusing to repurpose one; tagged flows stay on the software fastpath\n",
-			 tpid, w[0] & 0xffff, w[0] >> 16, w[1] & 0xffff,
-			 w[1] >> 16, mask);
+			 tpid, cn_tpid_slot_at(w, 0), cn_tpid_slot_at(w, 1),
+			 cn_tpid_slot_at(w, 2), cn_tpid_slot_at(w, 3), mask);
 		return -ENOSPC;
 	}
 
 	/* claim the disabled slot: value first, then the enable bit, so the
-	 * parser can never see the bit set against a stale value */
-	if (free_slot & 1)
-		w[free_slot >> 1] = (w[free_slot >> 1] & 0x0000ffff) |
-				    ((u32)tpid << 16);
-	else
-		w[free_slot >> 1] = (w[free_slot >> 1] & 0xffff0000) | tpid;
+	 * parser can never see the bit set against a stale value.  The half-word
+	 * packing is the core's cn_tpid_slot_store() - the write half of the
+	 * same ONE locate cn_tpid_slot_at() reads through. */
+	w[free_slot >> 1] = cn_tpid_slot_store(w[free_slot >> 1], free_slot,
+					       tpid);
 	writel(w[free_slot >> 1], l3e->ne_base +
 	       (free_slot < 2 ? CA_NI_L3FE_PP_TPID01 : CA_NI_L3FE_PP_TPID23));
 	wmb();
@@ -4986,13 +4971,18 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		   l3e->aft_no_tpid, l3e->aft_full, l3e->aft_timeout,
 		   hw_vlan_wan);
 	if (l3e->dma_base) {
-		u32 t01 = readl(l3e->ne_base + CA_NI_L3FE_PP_TPID01);
-		u32 t23 = readl(l3e->ne_base + CA_NI_L3FE_PP_TPID23);
-		u32 tc = readl(l3e->ne_base + CA_NI_L3FE_PP_TPID_CTRL);
-		u32 a01 = readl(l3e->dma_base + CA_DMA_AFT_TPID01);
-		u32 a23 = readl(l3e->dma_base + CA_DMA_AFT_TPID23);
+		u32 tw[2], aw[2], tc;
 		u64 used;
 		int k;
+
+		/* separate statements, not an initializer list: init-list
+		 * expressions are indeterminately sequenced and these are
+		 * MMIO reads whose order must stay exactly as it was */
+		tw[0] = readl(l3e->ne_base + CA_NI_L3FE_PP_TPID01);
+		tw[1] = readl(l3e->ne_base + CA_NI_L3FE_PP_TPID23);
+		tc = readl(l3e->ne_base + CA_NI_L3FE_PP_TPID_CTRL);
+		aw[0] = readl(l3e->dma_base + CA_DMA_AFT_TPID01);
+		aw[1] = readl(l3e->dma_base + CA_DMA_AFT_TPID23);
 
 		/* ★ the fail-closed gate: stock ABORTS action generation when the
 		 * WAN tag's TPID is absent here or its enable bit is clear, so a
@@ -5000,11 +4990,13 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		 * 0x8100 must appear AND its slot bit must be set in top_mask. */
 		seq_printf(m,
 			   "l3fe_pp_tpid: slots{%04x %04x %04x %04x} ctrl=0x%02x top_mask=0x%x inner_mask=0x%x | dma_aft_tpid: slots{%04x %04x %04x %04x} [0x8100 must be present AND enabled or action-gen ABORTS and the flow goes to SW]\n",
-			   t01 & 0xffff, t01 >> 16, t23 & 0xffff, t23 >> 16,
+			   cn_tpid_slot_at(tw, 0), cn_tpid_slot_at(tw, 1),
+			   cn_tpid_slot_at(tw, 2), cn_tpid_slot_at(tw, 3),
 			   tc & 0xff,
 			   (u32)FIELD_GET(CA_NI_L3FE_PP_TPID_TOP_MASK, tc),
 			   (u32)FIELD_GET(CA_NI_L3FE_PP_TPID_INNER_MASK, tc),
-			   a01 & 0xffff, a01 >> 16, a23 & 0xffff, a23 >> 16);
+			   cn_tpid_slot_at(aw, 0), cn_tpid_slot_at(aw, 1),
+			   cn_tpid_slot_at(aw, 2), cn_tpid_slot_at(aw, 3));
 
 		spin_lock_irqsave(&l3e->aft_lock, flags);
 		used = l3e->aft_fib_used;

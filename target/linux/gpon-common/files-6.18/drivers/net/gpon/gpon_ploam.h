@@ -452,7 +452,16 @@ struct gpon_ploam {
 	 * owns the SILICON behind install_omcc/install_tcont/install_data_gem.
 	 * FOLLOW-UP for whoever lands both files: agree one owner, do not let
 	 * both declare them. */
-	bool omcc_installed;		/* OMCC GEM datapath installed (one-shot)    */
+	bool omcc_installed;		/* OMCC GEM datapath installed              */
+	/* ★★ THE GEM THAT WAS INSTALLED, so a REASSIGNMENT is not ignored.
+	 * The install used to be one-shot (`!omcc_installed`), which meant an OLT
+	 * moving the OMCC to a different GEM after O5 was silently dropped: the
+	 * ONU kept binding the old port and management died with nothing to read.
+	 * The Elnath SHELL already rebinds on change and omcc_reassign_test pins
+	 * it there -- but that test drives the shell only, so this FSM carried the
+	 * old shape unwatched. Found by a neighbourhood audit 2026-09-02.
+	 * ⚠ It is 0 when nothing is installed; GEM 0 is not a legal OMCC port. */
+	u16 omcc_gem;
 	/* ★ MOVED UNCHANGED, AND IT IS DEAD: measured 2026-08-05, nothing in
 	 * gpon-rtl9602c.c ever assigns `true` to gpon_tcont_installed. It is
 	 * declared (:967), cleared on all four teardown paths (:6339 :6569

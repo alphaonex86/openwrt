@@ -365,22 +365,14 @@ bool rtl9602c_omci_doorbell(unsigned int omci_tx_ring,
 	return false;
 }
 
-/* R_RxDesNum field packing: RX ring0 size + the flow-control ON/OFF
- * thresholds, in the GMAC's field layout.  Was spelled identically in
- * rtl9602c_hw_program() and the legacy path of rtl9602c_eth_open(). */
-u32 rtl9602c_rxdesnum_pack(unsigned int ring_size, unsigned int th_on,
-			   unsigned int th_off)
-{
-	return ((ring_size - 1) & 0xff) << 24 | (th_on & 0xff) << 16 |
-	       (th_off & 0xff) << 8 | (((ring_size - 1) >> 8) & 0xf) << 4;
-}
-
-/* R_RxCDO field packing (same duplication as rtl9602c_rxdesnum_pack). */
-u32 rtl9602c_rxcdo_pack(unsigned int ring_size)
-{
-	return ((ring_size - 1) & 0xff) << 8 |
-	       (((ring_size - 1) >> 8) & 0xf) << 4;
-}
+/* rtl9602c_rxdesnum_pack / rtl9602c_rxcdo_pack MOVED to luna_gmac_logic.c as
+ * luna_gmac_rxdesnum_pack / luna_gmac_rxcdo_pack (2026-09-02), the day
+ * luna_eth.c was proven to spell the identical expressions: the GMAC ring
+ * packing is the FAMILY's (both shells read R_RxDesNum, RX_RING_SIZE and the
+ * TH_* values from luna_eth_regs.h), and family-shared code may not hide
+ * behind one chip's name.  This TU is gated on CONFIG_RTL9602C_ETH alone, so
+ * the second caller could not link against it -- the new object is gated
+ * under both Ethernet symbols. */
 
 /*
  * The 9602C OMCI/WAN directed-TX steering words (opts2/word2, opts3/word3),

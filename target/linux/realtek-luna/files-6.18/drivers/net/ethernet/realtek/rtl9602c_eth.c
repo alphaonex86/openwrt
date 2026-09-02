@@ -43,6 +43,7 @@
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log */
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
 #include "rtl9602c_gpon_nic.h"
+#include "luna_gmac_logic.h"	/* family GMAC ring packings (flowcore) */
 
 /*
  * US-OMCI TX tuning knobs (see rtl9602c_eth_omci_xmit).
@@ -2715,9 +2716,9 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		iowrite16(0, ep->base + R_TxCDO(k));
 	}
 	ep_wr(ep, R_RxFDP, ep->rx_ring_dma | DMA_BUS_WINDOW);
-	desnum = rtl9602c_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
+	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	ep_wr(ep, R_RxCDO, rtl9602c_rxcdo_pack(RX_RING_SIZE));
+	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(RX_RING_SIZE));
 	for (k = 0; k < 7; k++)		/* every RX class -> ring 0 */
 		ep_wr(ep, R_RRING_ROUTING1 + k * 4, 0);
 
@@ -3089,9 +3090,9 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	}
 	ep_wr(ep, R_RxFDP, ep->rx_ring_dma | DMA_BUS_WINDOW);
 	/* RX ring0 size + flow-control thresholds (GMAC field packing). */
-	desnum = rtl9602c_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
+	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	ep_wr(ep, R_RxCDO, rtl9602c_rxcdo_pack(RX_RING_SIZE));
+	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(RX_RING_SIZE));
 	/* (Reverted: a prior experiment pointed rings 1-5 at ring 0's buffer on the
 	 * theory the OMCI was priority-routed to rings 1-5 — but 6 ring engines sharing
 	 * ring 0's descriptors corrupts it. The OMCI arrives via the PON-NIC internal MII

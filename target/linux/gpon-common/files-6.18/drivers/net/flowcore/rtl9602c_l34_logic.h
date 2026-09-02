@@ -222,9 +222,9 @@ unsigned int rtl9602c_omci_hwring(unsigned int omci_tx_ring);
 bool rtl9602c_omci_doorbell(unsigned int omci_tx_ring,
 			    unsigned int doorbell_ovr,
 			    unsigned int *hwring, u32 *mask);
-u32 rtl9602c_rxdesnum_pack(unsigned int ring_size, unsigned int th_on,
-			   unsigned int th_off);
-u32 rtl9602c_rxcdo_pack(unsigned int ring_size);
+/* rtl9602c_rxdesnum_pack / rtl9602c_rxcdo_pack: moved to luna_gmac_logic.h
+ * (renamed luna_gmac_*) -- family GMAC facts, and this TU's config gate
+ * excludes the second caller.  See the note in rtl9602c_l34_logic.c. */
 u32 rtl9602c_omci_txd_word2(u32 ovr);
 u32 rtl9602c_omci_txd_word3(u32 ovr, unsigned int sid);
 

@@ -315,24 +315,31 @@ enum gpon_ploam_q {
 };
 
 /*
- * Which CRC-32 an OMCI MIC (bytes 44..47) is computed with.
+ * ★ THE OMCI MIC CONVENTION IS SETTLED, AND THE SELECTOR THAT SAT HERE IS GONE.
  *
- * ★ THE TWO TARGETS EMIT DIFFERENT BYTES AND THE EVIDENCE DOES NOT SETTLE IT
- *   (plan D-5, follow-up F3). realtek-elnath computes ~crc32_be(~0, msg, 44) —
- *   the non-reflected I.363.5/AAL5 CRC-32, which is what G.984.4 specifies and
- *   which is LIVE-PROVEN against this lab's OLT. realtek-luna computes
- *   crc32_le(~0, msg, 44) ^ ~0, the reflected zlib CRC-32 — and reaches O5 and
- *   provisions on that SAME OLT, which nothing in the tree explains. The host
- *   oracle computes no MIC at all and therefore cannot arbitrate.
- *   ⇒ Neither variant is chosen here. This selector exists so that when Luna
- *   joins the common responder it keeps emitting the bytes it emits today.
- *   F3 names the measurement that settles it: capture the X111W upstream OMCI
- *   and compare bytes 44..47 against both variants.
+ * There used to be an `enum gpon_mic_variant` here offering AAL5-BE and
+ * zlib-LE, on the grounds that "the two targets emit different bytes and the
+ * evidence does not settle it" -- Elnath computing ~crc32_be and Luna
+ * crc32_le, both reaching O5 on the same OLT.
+ *
+ * That is no longer true, and leaving it would have been worse than useless:
+ * it named a live divergence that does not exist, so a reader would go looking
+ * for a fork in the code and find none.  VERIFIED IN THE CODE, not from this
+ * comment's predecessor: rtl9602c_omci_finalize() calls the core's
+ * omci_set_mic(), and there is no executable crc32_le left in the Luna tree.
+ * Both families stamp and verify through gpon_omci_core.c, which now spells
+ * the convention exactly once (omci_mic_compute).
+ *
+ * The enum had exactly one referent, the `mic` member of struct gpon_chip_cfg,
+ * and NOTHING ever read or wrote that member -- so no code ever consumed the
+ * choice.  (Checking only for the ENUMERATOR names said "zero users" and was
+ * wrong; the TYPE was what to search for.)  That member is gone with it, on
+ * the rule the struct itself states four lines above it: do not add a member
+ * without the code that reads it.
+ * G.984.4 specifies the non-reflected I.363.5/AAL5 CRC-32, and that is what
+ * this lab's OLT accepts, live-proven.  If a future OLT ever wants the other,
+ * the place to add the choice is beside omci_mic_compute(), not here.
  */
-enum gpon_mic_variant {
-	GPON_MIC_CRC32_BE_AAL5,	/* ~crc32_be(~0,m,44)      — G.984.4, elnath */
-	GPON_MIC_CRC32_LE_ZLIB,	/* crc32_le(~0,m,44) ^ ~0  — luna today      */
-};
 
 /*
  * ---------------------------------------------------------------------------
@@ -371,8 +378,13 @@ enum gpon_mic_variant {
  *   expensive recurring defect.
  */
 struct gpon_chip_cfg {
-	/* F3 — the unresolved MIC polynomial. See enum gpon_mic_variant. */
-	enum gpon_mic_variant	mic;
+	/* ⚠ F3's `mic` member was REMOVED here (see the MIC note above): the
+	 * question it parked is settled and nothing read it.  The other two
+	 * members below are ALSO unread today -- each has exactly one site in
+	 * the whole tree, its own declaration, and no gpon_chip_cfg is ever
+	 * instantiated.  They are kept because their follow-ups (F2) are still
+	 * open, unlike F3; but the struct's own rule is aimed at exactly this
+	 * shape, so the next reader should either wire them or retire them. */
 
 	/* F2 — one-past-the-end offset of the GET response value area.
 	 * 36 is conformant (25 octets: G.988 reserves 36-37 optional-attribute

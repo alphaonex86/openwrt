@@ -153,6 +153,10 @@ int omci_onu_input(struct omci_onu *o, const u8 *req, unsigned int len, u8 *resp
 /* Stamp the AAL5-BE MIC into bytes 44..47 of a 48-byte baseline PDU.  The
  * responder uses it on every response; a host test modelling an OLT must use it
  * too, or the RX MIC gate will (correctly) discard the frame. */
+/* The AAL5-BE MIC over bytes 0..43, as a VALUE.  Exposed so a caller that must
+ * SHOW the computed MIC (a downstream convention self-check) does not respell
+ * the convention to get at it -- there is exactly one spelling, here. */
+u32 omci_mic_compute(const u8 *msg);
 void omci_set_mic(u8 *msg);
 
 /* Autonomous VEIP (ME 329) operational-state-up AVC: the OLT never polls the

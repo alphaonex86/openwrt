@@ -569,9 +569,14 @@ struct rtl9602c_eth {
 	u8		omci_sn[8];	/* G.984.3 ONU-SN (4 ASCII ID + 4 serial),
 					 * for the ONU-G Vendor-ID/Serial GET reply */
 	u8		omci_mds;	/* ONU-data (ME 2) MIB-Data-Sync counter */
-	u16		omci_audit_reads;	/* DS OMCI reads since the OLT last PROVISIONED
-					 * anything. See omci_mds_walk(). */
-	u8		omci_mds_tries;		/* how far the adaptive MDS walk has stepped */
+	/* ⚠ omci_audit_reads and omci_mds_tries USED TO BE HERE and were dead.
+	 * The adaptive MIB-Data-Sync walk they served moved into the common
+	 * responder, which carries both under the SAME names with the same
+	 * comments (gpon_omci_me.h) and actually increments and resets them
+	 * (gpon_omci_core.c).  These two were left behind by that move -- never
+	 * written, never read, never published: a counter that always reads 0,
+	 * which is the phantom this tree has been burned by before.  Found by
+	 * unread_member_guard.py, not by anything the compiler can see. */
 	u32		dbg_omci_tx;		/* US OMCI responses queued */
 	u32		dbg_omci_tx_drop;	/* dropped: ring full / alloc / map */
 	u32		dbg_omci_unhandled;	/* requests with no modelled reply */

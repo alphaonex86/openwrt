@@ -42,7 +42,6 @@
 #include "gpon_omci_core.h"	/* omci_put_be16 + the responder */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log */
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
-#include <linux/crc32.h>	/* crc32_le for the optional SW OMCI MIC path */
 #include "rtl9602c_gpon_nic.h"
 
 /*
@@ -463,7 +462,8 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 /* OMCI (OMCC) trap. The GTC de-encapsulates DS OMCI GEM frames and delivers them
  * to the CPU port tagged with rx-reason OMCI from the PON port; CPUTAG1CR[14:8]
  * selects which DS stream-id the GMAC traps to the CPU. */
-#define RTL9602C_OMCI_REASON	246	/* RX cpu-tag reason code = OMCI */
+/* RTL9602C_OMCI_REASON (rx-reason 246 = OMCI) moved to rtl9602c_l34_logic.h
+ * with the DS-OMCI classifier that consumes it (hoisted logic). */
 #define CPUTAG1_OMCI_SID(s)	(((s) & 0x7f) << 8)	/* R_CPUTAG1CR[14:8] */
 #define CPUTAG1_B1		0x2	/* bit1: live 9602C stock reads CPUTAG1CR=0x4002; not present in the 9607C register map */
 /* Stock NIC init writes CPUTAG1CR = (SID<<8) | 0x70 (bits 4/5/6 = the
@@ -659,7 +659,7 @@ static void rtl9602c_tx_align(struct rtl9602c_eth *ep)
 	ep->tx_rot = ioread16(ep->base + R_TxCDO1) % TX_RING_SIZE;
 	ep->otx_rot = 0;
 	if (omci_tx_ring) {
-		unsigned int h = (omci_tx_ring > 5) ? 4 : omci_tx_ring;
+		unsigned int h = rtl9602c_omci_hwring(omci_tx_ring);
 
 		ep->otx_rot = ioread16(ep->base + R_TxCDO(h)) % OTX_RING_SIZE;
 	}
@@ -1098,18 +1098,13 @@ MODULE_PARM_DESC(omci_mds_adapt_reads, "DS OMCI reads with no provisioning befor
  * range 1..255 enumerates all of it before repeating. */
 #define OMCI_MDS_WALK_STEP	37
 
+/* Body hoisted to flowcore (rtl9602c_wan_mac_add): the 48-bit ripple-carry
+ * add is pure byte arithmetic.  The wrapper keeps the name and signature so
+ * every call site is untouched, and supplies the module param (the hoisted
+ * logic reads no shell file-scope state). */
 static void rtl9602c_wan_mac(u8 *out, const u8 *base)
 {
-	unsigned int add = wan_mac_offset;
-	int i;
-
-	ether_addr_copy(out, base);
-	for (i = ETH_ALEN - 1; i >= 0 && add; i--) {
-		unsigned int s = out[i] + (add & 0xff);
-
-		out[i] = s & 0xff;
-		add = (add >> 8) + (s >> 8);
-	}
+	rtl9602c_wan_mac_add(out, base, wan_mac_offset);
 }
 
 /*
@@ -1190,7 +1185,8 @@ static int rtl9602c_eth_refill(struct rtl9602c_eth *ep, unsigned int idx)
  *   word1, word4: left zero (stock leaves them 0 from the initial memset).
  */
 #define TXD0_OMCI_ORG		0x02240000u	/* word0 segment/org control bits */
-#define TXD2_OMCI_CPUTAG	0x80000000u	/* opts2 bit31 cputag */
+/* TXD2_OMCI_CPUTAG / TXD2_OMCI_EFID: moved to rtl9602c_l34_logic.h with
+ * the hoisted steering encode (rtl9602c_omci_txd_word2). */
 #define TXD2_TX_PMASK(p)	(((p) & 0x7FFu) << 16)	/* opts2[26:16] tx_portmask */
 /* word0 descriptor-flag ORs applied by the ring-submit path. */
 #define TXD0_DESC_FLAGS		(0xb8800000u | 0x40000000u)	/* = 0xf8800000 */
@@ -1201,36 +1197,25 @@ static int rtl9602c_eth_refill(struct rtl9602c_eth *ep, unsigned int idx)
 #define TXD3_OMCI_PSEL		0x00100000u	/* opts3 bit20 cputag_psel (port-select egress) */
 #define TXD3_OMCI_L34KEEP	0x00020000u	/* opts3 bit17 l34_keep (no L3/L4 filter) */
 #define TXD3_DST_SID(s)		((s) & 0x7Fu)	/* opts3[6:0] tx_dst_stream_id (plain value) */
-/*
- * ★ 9602C opts3/word3 layout (authoritative: the 9602C TX-descriptor field map)
- * — DIFFERENT from the 9607C layout the earlier code used:
- *   extspa[31:29] | tx_portmask[28:23] | tx_dst_stream_id[22:16] | rsvd | l34_keep[1] | ptp[0]
- * The 9607C put dst_stream_id at [6:0]; writing SID 64 there on 9602C landed it
- * in RESERVED bits (ignored) so the US-NIC never saw SID 64 (rxsid stayed 0 —
- * the whole US-OMCI blocker). The on-chip PON port for the GMAC tx_portmask is
- * 4 (NOT the switch port 2): stock OMCI sets tx_portmask = 1<<4. extspa is left
- * 0 for OMCI (stock does not set it). word3 for OMCI = 0x08400000. */
-/* GROUND TRUTH from a live working stock ref ONU (devmem of its OMCI TX ring 0,
- * 2026-06-11): every OMCI descriptor is word0=0x30000030 (FS|LS|len48, NO CRC,
- * NO org bits), word2=0x80080000, word3=0x02400000. Decoding word3 in the 9602C
- * layout: tx_portmask[28:23] = (1<<2) and tx_dst_stream_id[22:16] = 64. So the
- * PON port for the GMAC tx_portmask is 2, not 4 (the earlier guess). */
-#define GMAC_PON_PORT		2			/* GMAC tx_portmask PON bit (stock = 1<<2 -> word3 0x02400000) */
-#define TXD3_9602C_PMASK(p)	(((p) & 0x3Fu) << 23)	/* opts3[28:23] tx_portmask */
-#define TXD3_9602C_DST_SID(s)	(((s) & 0x7Fu) << 16)	/* opts3[22:16] tx_dst_stream_id (the steering SID) */
-#define TXD3_OMCI_9602C(sid)	(TXD3_9602C_PMASK(1u << GMAC_PON_PORT) | \
-				 TXD3_9602C_DST_SID(sid))	/* = 0x08400000 for SID 64 */
+/* The ★ 9602C opts3/word3 layout (the 9602C-vs-9607C SID-placement trap),
+ * its live-stock GROUND TRUTH (word2=0x80080000 word3=0x02400000, devmem
+ * 2026-06-11), and GMAC_PON_PORT / TXD3_9602C_PMASK / TXD3_9602C_DST_SID /
+ * TXD3_OMCI_9602C all moved to rtl9602c_l34_logic.h, beside the hoisted
+ * rtl9602c_omci_txd_word2/word3() steering encode (flowcore). */
 #define RTL9602C_OMCC_SID	64			/* OMCC US SID (== GPON flow 64) */
 #define RTL8_4_TAG_LEN		8			/* software rtl8_4 0x8899 cpu-tag (also used by the LAN xmit below) */
 
 /*
- * LAYER BOUNDARY (2026-08-05): the MIC and the baseline trailer are G.988
- * message facts, so their common home is omci_set_mic() / omci_finalize() in
- * gpon-common .../drivers/net/gpon/gpon_omci_core.c.  They did NOT move: that
- * one computes crc32_be (AAL5, G.984.4) where this one computes crc32_le
- * (reflected zlib), which changes bytes 44..47 of EVERY OMCI message this ONU
- * emits.  Divergence 1 (follow-up F3) of the nine listed in the responder
- * boundary block further down — search "IT DID NOT MOVE".
+ * LAYER BOUNDARY (2026-08-05, RESOLVED 2026-09-01): the MIC and the baseline
+ * trailer are G.988 message facts, so their common home is omci_set_mic() /
+ * omci_finalize() in gpon-common .../drivers/net/gpon/gpon_omci_core.c.
+ *
+ * ★ THE MIC HAS NOW MOVED.  This block used to say "they did NOT move",
+ * because this file carried its own crc32_le stamper against the core's
+ * crc32_be.  It no longer does: rtl9602c_omci_finalize() calls the core's
+ * omci_set_mic().  Only the baseline TRAILER (40..43) is still stamped here.
+ * Divergence 1 of the nine in the responder boundary block further down —
+ * search "IT DID NOT MOVE" — and that entry now reads RESOLVED.
  */
 /*
  * GUARD: OMCI MIC (bytes 44..47) — MUST be correct or the OLT silently drops
@@ -1244,8 +1229,10 @@ static int rtl9602c_eth_refill(struct rtl9602c_eth *ep, unsigned int idx)
  * stripped frame. If the HW doesn't append the MIC, the OLT receives zeros and
  * drops the frame.
  *
- * The SW MIC path computes crc32_le over bytes 0..43 and stores it big-endian
- * into 44..47. This is GUARANTEED correct regardless of HW behavior. If the HW
+ * The SW MIC path stamps bytes 44..47 via the core's omci_set_mic(), i.e.
+ * crc32_be (non-reflected AAL5, G.984.4) over bytes 0..43 -- NOT the crc32_le
+ * this file used to compute for itself.  It is correct regardless of HW
+ * behavior. If the HW
  * ALSO appends a MIC, the OLT sees a doubled frame — but the first MIC is at
  * 44..47 (where the OLT expects it), so the OLT validates the SW MIC and
  * ignores any trailing bytes.
@@ -1253,20 +1240,6 @@ static int rtl9602c_eth_refill(struct rtl9602c_eth *ep, unsigned int idx)
  * Set to 0 to use SW MIC (safer — works regardless of HW MIC behavior). */
 #define RTL9602C_OMCI_HW_MIC	0
 
-#if !RTL9602C_OMCI_HW_MIC
-/* OMCI MIC = standard CRC-32 (zlib / IEEE-802.3) over bytes 0..43, stored big-
- * endian into 44..47. crc32_le() uses the 0xEDB88320 reflected poly with no
- * internal final XOR, so XOR the ~0 seed out ourselves. */
-static void rtl9602c_omci_set_mic(u8 *msg)
-{
-	u32 c = crc32_le(~0u, msg, 44) ^ ~0u;
-
-	msg[44] = (u8)(c >> 24);
-	msg[45] = (u8)(c >> 16);
-	msg[46] = (u8)(c >> 8);
-	msg[47] = (u8)(c);
-}
-#endif
 
 /* Stamp the baseline trailer (40..43 = 00 00 00 28) + MIC. Call LAST. */
 static void rtl9602c_omci_finalize(u8 *msg)
@@ -1278,7 +1251,25 @@ static void rtl9602c_omci_finalize(u8 *msg)
 #if RTL9602C_OMCI_HW_MIC
 	msg[44] = msg[45] = msg[46] = msg[47] = 0x00;	/* GTC/GEM HW appends MIC */
 #else
-	rtl9602c_omci_set_mic(msg);
+	/* ★★ THE CORE'S STAMPER, NOT A SECOND ONE.  This file used to carry
+	 * rtl9602c_omci_set_mic(), which computed crc32_le (reflected, zlib)
+	 * while gpon_omci_core.c computes crc32_be (AAL5, G.984.4) -- so this
+	 * ONE BOARD emitted OMCI under TWO MIC polynomials, and at most one can
+	 * be right.  omci_mic_parity.py reported it as DISAGREE and said exactly
+	 * that; a wrong MIC is a SILENT DROP at the OLT.
+	 *
+	 * ⚠ AND THE PATH THAT CARRIED THE ODD ONE IS THE AVC.  The other caller
+	 * of rtl9602c_omci_finalize() is rtl9602c_eth_omci_avc(), and the VEIP
+	 * oper-up AVC is what this port's WAN provisioning waits on -- so the one
+	 * message the OLT most needs was the one stamped differently from every
+	 * other message this board sends.
+	 *
+	 * crc32_be is the right side of that pair and not merely the majority:
+	 * G.984.4 asks for the non-reflected AAL5 CRC-32, gpon_omci_core.c
+	 * records it as LIVE-PROVEN on the DS frames from this OLT, and the core
+	 * already stamps every other OMCI message this board sends -- which this
+	 * OLT demonstrably accepts, because the board provisions. */
+	omci_set_mic(msg);
 #endif
 }
 
@@ -1450,19 +1441,14 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
 
-	/* HW cpu-tag descriptor — EXACT stock values (live ref-ONU TX ring):
-	 * word2 = 0x80080000 (cputag bit31 | efid bit19); word3 = 0x02400000
-	 * (tx_portmask [28:23] = 1<<GMAC_PON_PORT(2) | tx_dst_stream_id [22:16] = 64). */
-	ep->tx_ring[i].opts2 = omci_word2_ovr ? omci_word2_ovr :
-			       (TXD2_OMCI_CPUTAG | BIT(19));
-	/* word3 layout per the 9602C stock OMCI-TX core (masks 0xe07fffff /
-	 * the AUTHORITATIVE 9602C layout: tx_portmask [28:23] = 1<<GMAC_PON_PORT,
-	 * tx_dst_stream_id [22:16] = OMCC SID 64, extspa [31:29] = 0. The earlier
-	 * one-hot-at-[28:23] + SID-at-[6:0] encoding was the 9607C layout — on
-	 * 9602C the SID at [6:0] is reserved/ignored, so the US-NIC never saw SID
-	 * 64 (rxsid stayed 0). */
-	ep->tx_ring[i].opts3 = omci_word3_ovr ? omci_word3_ovr :
-			       TXD3_OMCI_9602C(RTL9602C_OMCC_SID);
+	/* HW cpu-tag steering words -- EXACT stock values (live ref-ONU TX
+	 * ring): word2=0x80080000 (cputag|efid), word3=0x02400000 (pmask 1<<2 |
+	 * SID 64).  Encode + override plumbing hoisted to
+	 * rtl9602c_omci_txd_word2/word3() (flowcore), where the 9602C-vs-9607C
+	 * SID-placement layout lives once. */
+	ep->tx_ring[i].opts2 = rtl9602c_omci_txd_word2(omci_word2_ovr);
+	ep->tx_ring[i].opts3 = rtl9602c_omci_txd_word3(omci_word3_ovr,
+						       RTL9602C_OMCC_SID);
 	ep->tx_ring[i].opts4 = 0;
 	if (omci_minimal) {	/* TEST: descriptor IDENTICAL to the draining LAN path (no ORG, no cpu-tag) */
 		word0 = D_FS | D_LS | D_TXCRC | (len & TXD_LEN_MASK);
@@ -1573,8 +1559,8 @@ static netdev_tx_t rtl9602c_eth_wan_xmit(struct sk_buff *skb, struct net_device 
 	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_ORG;
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
-	ep->tx_ring[i].opts2 = TXD2_OMCI_CPUTAG | BIT(19);
-	ep->tx_ring[i].opts3 = TXD3_OMCI_9602C(GPON_DATA_FLOW);	/* steer to the data SID */
+	ep->tx_ring[i].opts2 = rtl9602c_omci_txd_word2(0);	/* stock cputag|efid */
+	ep->tx_ring[i].opts3 = rtl9602c_omci_txd_word3(0, GPON_DATA_FLOW);	/* steer to the data SID */
 	ep->tx_ring[i].opts4 = 0;
 	wmb();				/* descriptor body before ownership */
 	ep->tx_ring[i].opts1 = word0 | D_OWN;
@@ -1631,10 +1617,10 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 {
 	struct sk_buff *skb;
 	unsigned long flags;
-	unsigned int i, hwring, dbit;
+	unsigned int i, hwring;
 	bool kick_iocmd1;
 	dma_addr_t da;
-	u32 word0, word2, word3;
+	u32 word0, word2, word3, dmask;
 
 	if (len < 8 || len > 1500)
 		return -EINVAL;
@@ -1648,13 +1634,8 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 	 * in open(). Derive the doorbell from h so they can never disagree (the prior
 	 * bug: ring armed at h=4/0x1340 but kicked R_IO_CMD bit0 = h=0). Stock kick
 	 * behavior: h<4 -> R_IO_CMD |= 1<<h; h==4 -> R_IO_CMD1 |= 0x100. */
-	hwring = omci_tx_ring;
-	if (hwring > 5)
-		hwring = 4;
-	kick_iocmd1 = (hwring == 4) && (omci_doorbell_bit == 0xff);
-	dbit = (omci_doorbell_bit == 0xff)
-		? (hwring & 0x1f)	/* R_IO_CMD bit number == HW ring (h<4) */
-		: omci_doorbell_bit;
+	kick_iocmd1 = rtl9602c_omci_doorbell(omci_tx_ring, omci_doorbell_bit,
+					     &hwring, &dmask);
 
 	{	/* Pad a runt OMCI PDU up to the min Ethernet frame. The GMAC TX engine
 		 * stalls when fed sub-60B frames (the LAN path never sends runts; the
@@ -1732,7 +1713,7 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 	 * From the stock OMCI-TX core: opts2 = (prev | 0x80080000) & 0xfff8ffff.
 	 * The old TX_PMASK(port) bit18 = switch cpu-tag forwarding => 0 egress on this
 	 * silicon (frame dropped before the US-NIC) — the real reason RX_SID_GOOD stayed 0. */
-	word2 = omci_word2_ovr ? omci_word2_ovr : (TXD2_OMCI_CPUTAG | BIT(19));
+	word2 = rtl9602c_omci_txd_word2(omci_word2_ovr);	/* stock cputag|efid; hoisted encode */
 
 	/* word3 (opts3): stock US-OMCI steering, derived from the stock device's OMCI-TX
 	 * core (the OMCI-TX entry builds the txInfo, then the NIC-TX layer writes opts3):
@@ -1744,8 +1725,8 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 	 * bit0 (classify slot 0 / group[0]) + a garbage ExtSpa — so the US-NIC never
 	 * stamped SID-64 and RX_SID_GOOD[4] stayed 0. omci_sid_idx/omci_pon_port were
 	 * defined+documented but never wired into the descriptor until now. */
-	word3 = omci_word3_ovr ? omci_word3_ovr :
-		TXD3_OMCI_9602C(RTL9602C_OMCC_SID);	/* 9602C: pmask[28:23]|SID[22:16] */
+	word3 = rtl9602c_omci_txd_word3(omci_word3_ovr,
+					RTL9602C_OMCC_SID);	/* 9602C: pmask[28:23]|SID[22:16] */
 
 	if (omci_minimal) {	/* TEST: descriptor IDENTICAL to the draining LAN path */
 		word0 = D_FS | D_LS | D_TXCRC | (len & TXD_LEN_MASK);
@@ -1762,17 +1743,18 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 	wmb();
 	ep->otx_head++;
 	/* Kick the per-ring poll doorbell for THIS HW ring (h). HW ring 4 is special-
-	 * cased to R_IO_CMD1 |= 0x100; rings 0..3 use R_IO_CMD bit h (== dbit). This is
-	 * the same ring whose R_TxFDP(h) we armed in open(), so the engine fetches it. */
+	 * cased to R_IO_CMD1 |= 0x100; rings 0..3 use R_IO_CMD bit h -- register and
+	 * mask both come from rtl9602c_omci_doorbell(), the SAME derivation as the
+	 * R_TxFDP(h) arm in open(), so the engine fetches the ring we filled. */
 	if (kick_iocmd1)
 		/* HW ring 4 (TxFDP5) poll "go" = IO_CMD1 |= TX_POLL5 (bit8 = 0x100),
 		 * EXACTLY as the stock per-ring TX kick. IO_CMD1[21:16] is
 		 * the RX multiring bitmap, NOT a TX-fetch enable, so it is not touched
 		 * here — the TX ring fetches once its TxFDP is armed and the descriptor
 		 * publishes OWN in opts1. */
-		ep_wr(ep, R_IO_CMD1, ep_rd(ep, R_IO_CMD1) | 0x100);
+		ep_wr(ep, R_IO_CMD1, ep_rd(ep, R_IO_CMD1) | dmask);
 	else
-		ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | (1u << dbit));
+		ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | dmask);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
 	if (ep->dbg_omci_tx < 8)	/* first few only, so serial isn't flooded */
@@ -1854,13 +1836,32 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
  *   the autonomous VEIP AVC).  Result: 80 of the 82 responses DIFFER.  The
  *   two that match are the two where both sides correctly emit nothing.
  *
- *   Nine independent causes, each of which ALONE breaks bit-identity:
- *    1. MIC ALGORITHM.  This file computes crc32_le (reflected, zlib) — see
- *       rtl9602c_omci_set_mic() above; the common core computes crc32_be
- *       (AAL5, G.984.4).  Four different bytes at 44..47 on EVERY message,
- *       including every message whose body is identical.  Follow-up F3.
- *       Both firmwares provision against this OLT today and nothing yet
- *       explains that — do not "fix" either side without an on-wire capture.
+ *   Nine independent causes; ONE IS NOW RESOLVED, eight remain, and each of
+ *   the eight ALONE breaks bit-identity:
+ *    1. MIC ALGORITHM — ✔ RESOLVED 2026-09-01, and it is no longer a
+ *       DIFFERENCE because the second implementation is GONE.  This file used
+ *       to compute crc32_le (reflected, zlib) in its own
+ *       rtl9602c_omci_set_mic(), while the common core computes crc32_be
+ *       (AAL5, G.984.4) -- so ONE BOARD emitted OMCI under TWO polynomials,
+ *       which omci_mic_parity.py reports as DISAGREE and which no capture is
+ *       needed to call wrong: at most one can be right.
+ *
+ *       ⚠ AND THE ODD ONE WAS ON THE AVC PATH.  rtl9602c_omci_finalize()'s
+ *       other caller is rtl9602c_eth_omci_avc(), so the VEIP oper-up AVC that
+ *       this port's WAN provisioning waits on was the one message stamped
+ *       differently from everything else the board sends.
+ *
+ *       The local stamper is deleted and the call site uses the CORE's
+ *       omci_set_mic().  crc32_be is the right side and not merely the
+ *       majority: G.984.4 asks for the non-reflected AAL5 CRC-32, the core
+ *       records it LIVE-PROVEN on this OLT's DS frames, and the core already
+ *       stamps every other OMCI message this board sends -- which this OLT
+ *       demonstrably accepts, because the board provisions.
+ *
+ *       The old note here said "do not fix either side without an on-wire
+ *       capture".  That was right while the question was WHICH convention the
+ *       OLT wants; it stopped applying once the question became "why does one
+ *       board use two", which is answerable from the spec and from the code.
  *    2. GET VALUE-AREA END.  rtl9602c_omci_get_fill() below fills [11,40) =
  *       29 octets; the common core fills [11,36) = 25 and uses 36..39 for the
  *       G.988 unsupported- and failed-attribute masks.  Follow-up F2.
@@ -2074,6 +2075,51 @@ static void rtl9602c_eth_omci_input(struct rtl9602c_eth *ep, const u8 *msg,
 	n = omci_onu_input(&luna_onu, msg, len, resp);
 	if (n > 0)
 		rtl9602c_eth_omci_xmit(ep, resp, n);
+
+	/* ★★★ THE ME 268 SNOOP -- RESTORED, AND MOVED INTO THE CORE (2026-09-02).
+	 *
+	 * This shell used to decode the OLT's GEM-CTP Create itself, one line
+	 * inside its own responder:
+	 *
+	 *     if (class_id == 268 && mt == OMCI_MT_CREATE && len >= 10)
+	 *             gpon_omci_note_gem_create(((u16)msg[8] << 8) | msg[9]);
+	 *
+	 * The responder was replaced by the common one (836b76be01) and that
+	 * line went with it.  It was the ONLY setter of gpon_data_gem_solicited
+	 * and of the core's data_gem_solicited -- and BOTH install paths are
+	 * gated on that flag, so the flag's one setter ended up inside the
+	 * function the flag guards.  The WAN data GEM stopped being installed
+	 * from the OLT's Create at all.  Two more consumers were orphaned by the
+	 * same commit; see
+	 * dev/ONU-test-case/FINDING-luna-responder-swap-orphaned-three-consumers.md
+	 *
+	 * ★ IT IS A QUERY, NOT A PARSE, and that is the repair rather than a
+	 *   revert: the responder ALREADY stores every Set-by-Create body, so
+	 *   asking it costs no callback, no new lifecycle, and nothing can be
+	 *   missed while this path is busy.  The DECISION (bidirectional only,
+	 *   never the OMCC's gem, never the broadcast gem, never Port-ID 0)
+	 *   lives once in the core, where both families reach it and where
+	 *   gpon_dgem_test exercises it on x86 with no board.
+	 *
+	 * ⚠ AND IT KEEPS NO EDGE VARIABLE, deliberately -- my first spelling of
+	 *   this did, and it carried the very defect it is here to repair: the
+	 *   core clears its store on an on-wire MIB-Reset WITHOUT this shell
+	 *   being called, so a shell-side "already reported" latch would still
+	 *   hold the old port-id, the edge would never fire again when the OLT
+	 *   re-provisioned the SAME one, and the WAN would be dead until a
+	 *   reboot.  A second shadow of state somebody else owns is how that
+	 *   whole family of bug starts.
+	 * ★ note_gem_create() is idempotent (it re-arms only when the port
+	 *   MOVES) and DS OMCI is management-rate, so the unconditional call is
+	 *   both correct and cheap.
+	 */
+	{
+		u16 gem = 0;
+
+		if (omci_data_gem_port(&luna_onu, gpon_omcc_gem(),
+				       GPON_MCAST_GEM, &gem))
+			gpon_omci_note_gem_create(gem);
+	}
 }
 
 /*
@@ -2127,6 +2173,38 @@ static void rtl9602c_eth_omci_avc(u16 class_id, u16 inst, u16 mask, const u8 *va
  * GPON FSM a few seconds after O5 (config-apply complete). VEIP inst 0x0601 + attr2
  * (operational state) mask 0x4000, value 0 = enabled (G.988).
  */
+/*
+ * ★★★ THE LIVE OPTICAL LEVELS -- RE-CONNECTED (2026-09-02).
+ *
+ * gpon_anig_optical_omci() had been DEFINED, DECLARED, and called from NOWHERE
+ * in the whole tree since 836b76be01: its only caller lived inside this
+ * shell's own OMCI responder and was deleted with it.  So the OLT's ME 263
+ * ANI-G #10/#14 read back the conformant STATIC seed omci_onu_init() writes,
+ * for months, while the board was busy measuring the real fiber every 3 s and
+ * throwing the answer away.  It is the same orphaning as the ME 268 snoop
+ * above and was found in the same audit.
+ *
+ * ★ IT PUBLISHES, IT DOES NOT GET CALLED BACK -- the mechanism Elnath already
+ *   uses (cortina-gpon.c:2857), so the two families feed the core the same way
+ *   and no new seam was invented for the second one.
+ *
+ * ★ CALLED FROM THE DDM WORKQUEUE (process context, ~3 s), never from the GET
+ *   path: the i2c read busy-waits, and a stall in the OMCI softirq risks
+ *   missed US-grant timing and an OLT-side deactivate.  The cache read itself
+ *   is I2C-free, which is why this shim may take the value in any context.
+ *
+ * ★ NO LOCK, and that is a decision rather than an omission: these are two
+ *   independent aligned scalars in the G.988 wire form, written here and read
+ *   one at a time by the ANI-G GET arm.  A torn pair would report an RX from
+ *   one 3-second sample beside a TX from the next -- which is what an optical
+ *   reading IS.  Elnath holds a spinlock because its context has one already;
+ *   inventing one here would buy nothing this datum needs.
+ */
+void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)
+{
+	omci_onu_set_optical(&luna_onu, (u16)rx_level, (u16)tx_level);
+}
+
 void rtl9602c_eth_omci_report_oper_up(void)
 {
 	u8 enabled = 0x00;		/* G.988 operational state: 0 = enabled */
@@ -2163,30 +2241,17 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 		dma_unmap_single(ep->dev, ep->rx_buf_dma[i], RX_BUF_SIZE,
 				 DMA_FROM_DEVICE);
 
-		/* The OMCI path reads `len - RX_CPU_PREFIX` bytes from the RX buffer, so
-		 * `len` must be range-checked on BOTH ends (this guard now covers both
-		 * OMCI branches):
-		 *   - lower (>= RX_CPU_PREFIX + 8): a runt reason==246 descriptor (len < 2)
-		 *     wrapped the unsigned `len - RX_CPU_PREFIX` to ~4 GiB, handed to
-		 *     rtl9602c_eth_omci_input() -> massive OOB read.
-		 *   - upper (<= RX_BUF_SIZE): the descriptor len field is 13 bits
-		 *     (RXD_LEN_MASK -> up to 8191) but the DMA buffer is only RX_BUF_SIZE
-		 *     (2 KB), so an oversized len reads past it too.
-		 * Both remotely triggerable (DoS/info-leak). Found — and the lower-bound-
-		 * only partial fix re-caught — by fuzz/fuzz_rx.c (ASan). */
-		if (ep->omci_trap_on && len >= RX_CPU_PREFIX + 8 && len <= RX_BUF_SIZE &&
-		    ((((ep->rx_ring[i].opts2 >> 21) & 0xff) == RTL9602C_OMCI_REASON &&
-		      ((ep->rx_ring[i].opts3 >> 16) & 0xf) == ep->swm->pon_port) ||
-		     /* DS OMCI actually arrives SWITCH-routed (no reason==246): the de-
-		      * encapsulated baseline OMCI rides the GMAC CPU-port behind the 2-byte
-		      * prefix as raw G.988 -> [TID(2)][MT(1)][DevID(1)=0x0a baseline/0x0b
-		      * extended][class(2)][inst(2)]... Match by DevID + MT destination-bit
-		      * clear. A LAN frame to the CPU has dst-MAC[3] here (board MAC ..:32:..,
-		      * bcast 0xff) never 0x0a, so this does not steal LAN traffic. Verified
-		      * live: OLT sent MT 0x49 (GET) DevID 0x0a class 0x0101. */
-		     ((skb->data[RX_CPU_PREFIX + 3] == 0x0a ||
-		       skb->data[RX_CPU_PREFIX + 3] == 0x0b) &&
-		      !(skb->data[RX_CPU_PREFIX + 2] & 0x80)))) {
+		/* DS-OMCI classifier + BOTH-ends length guard: hoisted to
+		 * rtl9602c_rx_is_ds_omci() (flowcore) -- the guard is the
+		 * fuzz/ASan-found OOB fix and runs before any data byte is
+		 * read; fuzz_rx.c can now drive the exact shipping predicate
+		 * on x86.  The trap-vs-switch-routed match shapes and their
+		 * live evidence are documented at the function. */
+		if (rtl9602c_rx_is_ds_omci(ep->omci_trap_on,
+					   ep->rx_ring[i].opts2,
+					   ep->rx_ring[i].opts3,
+					   skb->data, len, ep->swm->pon_port,
+					   RX_CPU_PREFIX, RX_BUF_SIZE)) {
 			/* DS OMCI on the OMCC. Capture for /proc, then hand the raw G.988
 			 * message (prefix stripped) to the responder. */
 			ep->dbg_omci_rx++;
@@ -2225,20 +2290,19 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 			{
 				const u8 *dst = skb->data + RX_CPU_PREFIX;
 				unsigned int sp = (ep->rx_ring[i].opts3 >> 16) & 0xf;
-				/* WAN downstream DATA drains via the PON-IP NIC and lands here with
-				 * src_port=0 (NOT the PON switch-port 2) AND a fixed PON-IP-NIC-drain
-				 * descriptor signature opts3[31:20]=0x23e (confirmed live 2026-06-15).
-				 * LAN frames arrive switch-forwarded with the real ingress port and a
-				 * different opts3. */
-				bool wan_drain = (ep->rx_ring[i].opts3 >> 20) == 0x23e;
 
 				/* Route drained WAN frames (and any unicast to the gpon0 MAC) to gpon0;
 				 * keep everything else — INCLUDING LAN broadcast/ARP — on eth0 so the LAN
 				 * bridge works. (An earlier is_multicast->gpon0 rule mis-sent LAN ARP to
 				 * the WAN and broke 192.168.1.1 reachability.) */
+				/* The verdict (PON src port, the PON-IP-NIC drain
+				 * signature opts3[31:20]==0x23e -- confirmed live
+				 * 2026-06-15 -- or DA == the WAN MAC) is hoisted to
+				 * rtl9602c_rx_wan_demux() (flowcore). */
 				if (ep->wan_ndev &&
-				    (sp == ep->swm->pon_port || wan_drain ||
-				     ether_addr_equal(dst, ep->wan_ndev->dev_addr)))
+				    rtl9602c_rx_wan_demux(ep->rx_ring[i].opts3, dst,
+							  ep->wan_ndev->dev_addr,
+							  ep->swm->pon_port))
 					rdev = ep->wan_ndev;
 				else
 					ep->host_port = sp;
@@ -2343,13 +2407,17 @@ static void rtl9602c_eth_tx_rekick(struct rtl9602c_eth *ep)
 	}
 	if (omci_tx_ring && ep->otx_head != ep->otx_dirty &&
 	    (ep->otx_ring[otx_slot(ep, ep->otx_dirty)].opts1 & D_OWN)) {
-		unsigned int h = omci_tx_ring > 5 ? 4 : omci_tx_ring;
+		unsigned int h;
+		u32 dmask;
 
 		parked = true;
-		if (h == 4)
-			ep_wr(ep, R_IO_CMD1, ep_rd(ep, R_IO_CMD1) | 0x100);
+		/* 0xff = the stock derivation: the re-kick deliberately keeps
+		 * ignoring the omci_doorbell_bit debug override, exactly as
+		 * before the hoist (only the xmit-time kick honours it). */
+		if (rtl9602c_omci_doorbell(omci_tx_ring, 0xff, &h, &dmask))
+			ep_wr(ep, R_IO_CMD1, ep_rd(ep, R_IO_CMD1) | dmask);
 		else
-			ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | (1u << h));
+			ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | dmask);
 	}
 
 	/*
@@ -2605,7 +2673,7 @@ static void rtl9602c_hw_stop(struct rtl9602c_eth *ep)
 static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 {
 	struct net_device *ndev = ep->ndev;
-	unsigned int k, oring = (omci_tx_ring > 5) ? 4 : omci_tx_ring;
+	unsigned int k, oring = rtl9602c_omci_hwring(omci_tx_ring);
 	u32 desnum, rcr;
 
 	iowrite8(0x0A, ep->base + 0x3B);	/* CMD: RxChkSum|RxJumboSupport */
@@ -2655,11 +2723,9 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		iowrite16(0, ep->base + R_TxCDO(k));
 	}
 	ep_wr(ep, R_RxFDP, ep->rx_ring_dma | DMA_BUS_WINDOW);
-	desnum = ((RX_RING_SIZE - 1) & 0xff) << 24 | (TH_ON_VAL & 0xff) << 16 |
-		 (TH_OFF_VAL & 0xff) << 8 | (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4;
+	desnum = rtl9602c_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	ep_wr(ep, R_RxCDO, ((RX_RING_SIZE - 1) & 0xff) << 8 |
-			   (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4);
+	ep_wr(ep, R_RxCDO, rtl9602c_rxcdo_pack(RX_RING_SIZE));
 	for (k = 0; k < 7; k++)		/* every RX class -> ring 0 */
 		ep_wr(ep, R_RRING_ROUTING1 + k * 4, 0);
 
@@ -2997,7 +3063,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	 * R_TxFDP(0) at ep->otx_ring_dma here would CLOBBER the LAN ring and break
 	 * normal LAN traffic. The OMCI frame rides the LAN ring's own arm. */
 	if (omci_tx_ring != 0) {
-		unsigned int oring = (omci_tx_ring > 5) ? 4 : omci_tx_ring;
+		unsigned int oring = rtl9602c_omci_hwring(omci_tx_ring);
 
 		ep_wr(ep, R_TxFDP(oring), ep->otx_ring_dma | DMA_BUS_WINDOW);
 		/* NOTE: a TX ring needs ONLY its TxFDP armed + per-packet kick + a
@@ -3020,7 +3086,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	 * Stock arms all 5 TxFDP rings for exactly this. Dummy descriptors are OWN=0
 	 * so the engine fetches nothing. Skip HW ring 0 (LAN) and the OMCI ring. */
 	{
-		unsigned int k, oring = (omci_tx_ring > 5) ? 4 : omci_tx_ring;
+		unsigned int k, oring = rtl9602c_omci_hwring(omci_tx_ring);
 
 		for (k = 1; k <= 4; k++) {
 			if (k == oring)
@@ -3031,11 +3097,9 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	}
 	ep_wr(ep, R_RxFDP, ep->rx_ring_dma | DMA_BUS_WINDOW);
 	/* RX ring0 size + flow-control thresholds (GMAC field packing). */
-	desnum = ((RX_RING_SIZE - 1) & 0xff) << 24 | (TH_ON_VAL & 0xff) << 16 |
-		 (TH_OFF_VAL & 0xff) << 8 | (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4;
+	desnum = rtl9602c_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	ep_wr(ep, R_RxCDO, ((RX_RING_SIZE - 1) & 0xff) << 8 |
-			   (((RX_RING_SIZE - 1) >> 8) & 0xf) << 4);
+	ep_wr(ep, R_RxCDO, rtl9602c_rxcdo_pack(RX_RING_SIZE));
 	/* (Reverted: a prior experiment pointed rings 1-5 at ring 0's buffer on the
 	 * theory the OMCI was priority-routed to rings 1-5 — but 6 ring engines sharing
 	 * ring 0's descriptors corrupts it. The OMCI arrives via the PON-NIC internal MII
@@ -3440,7 +3504,12 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 	seq_printf(m, "omci_rx_drop: bad_mic=%u runt=%u\n",
 		   luna_onu.rx_bad_mic, luna_onu.rx_runt);
 	{
-		unsigned int oring = (omci_tx_ring > 5) ? 4 : omci_tx_ring;
+		unsigned int oring;
+		u32 dmask;
+		/* Same flowcore derivation as the xmit kick, so the diag can
+		 * never disagree with the doorbell actually used. */
+		bool dk1 = rtl9602c_omci_doorbell(omci_tx_ring, omci_doorbell_bit,
+						  &oring, &dmask);
 
 		if (omci_tx_ring == 0) {
 			/* Shared-ring-0 OMCI test path: the OMCI frame rides the LAN
@@ -3469,9 +3538,6 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 			 * is reclaim/steering); OWN still set => the HW is NOT fetching
 			 * (FDP-arm/doorbell/enable mismatch). */
 			int own_hm1 = -1, own_d = -1;
-			/* Doorbell this ring would use, derived from the SAME HW ring as the
-			 * FDP arm (h==4 -> R_IO_CMD1|0x100; else R_IO_CMD bit h). */
-			bool dk1 = (oring == 4) && (omci_doorbell_bit == 0xff);
 			/* IO_CMD1 bit(16+h) is the RX multiring bitmap (NOT a TX-fetch
 			 * enable); reported only as an info bit, it does not gate TX. */
 			unsigned int en_mask = 1u << (16 + oring);

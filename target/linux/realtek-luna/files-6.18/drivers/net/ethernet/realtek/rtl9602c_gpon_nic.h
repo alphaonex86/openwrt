@@ -87,6 +87,38 @@ int gpon_install_data_gem(void);
  * is refused here. */
 void gpon_omci_note_gem_create(u16 port_id);
 
+/* The OMCC GEM Port-ID currently installed (0 = none yet).  An INPUT to the
+ * core's data-GEM decision: the geometry is the shell's, the decision is not. */
+u16 gpon_omcc_gem(void);
+
+/* Publish the cached live DDM optical levels into ME 263 ANI-G #10/#14.
+ * Called from the GPON driver's 3 s optical workqueue.
+ *
+ * ⚠ THE CALLER AND THE CALLEE ARE BUILT UNDER DIFFERENT CONFIG SYMBOLS, and
+ *   that broke a board. gpon-luna.c compiles under CONFIG_RTL9602C_GPON, which
+ *   both Luna boards set; this function is DEFINED in rtl9602c_eth.c, which
+ *   compiles under CONFIG_RTL9602C_ETH -- and the G24W (interaptiv) sets
+ *   `# CONFIG_RTL9602C_ETH is not set` because it has its own NIC. Declaring it
+ *   unconditionally therefore linked on the X111W and failed on the G24W with
+ *   `undefined reference to rtl9602c_eth_omci_set_optical`, MEASURED 2026-09-02.
+ *
+ * ★ THE STUB IS A NO-OP BECAUSE THERE IS NOTHING TO PUBLISH INTO: the OMCI ME
+ *   store this writes lives in that same Ethernet driver, so a board that does
+ *   not build it has no ANI-G instance to update -- not a value we are
+ *   choosing to drop.
+ *   ⇒ WHEN THAT BOARD GAINS ITS OWN OMCI RESPONDER, THIS STUB BECOMES A SILENT
+ *     HOLE and must be replaced by a call into it. It is deliberately not a
+ *     `weak` symbol: a link error is how this was found, and a stub that hides
+ *     the next one would be worse than the bug.
+ */
+#if IS_ENABLED(CONFIG_RTL9602C_ETH)
+void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level);
+#else
+static inline void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)
+{
+}
+#endif
+
 /* Emit an OMCI Attribute-Value-Change reporting the HGU WAN-egress (VEIP ME329) operational,
  * so the OLT un-gates downstream user-data forwarding. The OLT never polls the data MEs after
  * creating them; it waits for this AVC. Defined in rtl9602c_eth.c; called from the GPON FSM a

@@ -15,6 +15,14 @@
  *
  * Canonical tier rule, the file map and the guard name live in ONE place:
  * see "THE THREE TIERS" in gpon-common/files-6.18/drivers/net/gpon/gpon_common.h.
+ * ⚠ PROVENANCE POINTERS BELOW NAME gpon-luna.c, WHICH WAS CALLED
+ *   gpon-rtl9602c.c / gpon-rtl960x.c UNTIL THE 2026-08-29 RENAME.  The
+ *   LINE NUMBERS ARE AS THEY WERE WHEN THE MOVE WAS RECORDED -- later
+ *   edits moved them, and they are kept because a provenance note is a
+ *   dated fact about where code CAME FROM, not a pointer to today.
+ *   Renaming without saying so would turn a dated record into a claim
+ *   about the current file, which is the 'wrong in a new way' that
+ *   citation_guard warns a bare sed produces.
  */
 /*
  * luna_ponmac.c - clean-room RTL960x family GPON PON-MAC / SerDes bring-up.
@@ -78,7 +86,7 @@
  * the pipe; it never reads what flows through it.
  *
  * Luna's implementation of gpon_shell_ops lives where those ops actually are,
- * which is gpon-rtl960x.c, plus rtl9602c_eth.c for the OMCI transmit. That
+ * which is gpon-luna.c, plus rtl9602c_eth.c for the OMCI transmit. That
  * is the file the Luna op-table instance belongs in - NOT this one. The
  * implementing functions, each verified present at the line given
  * (2026-08-05):
@@ -103,7 +111,7 @@
  *
  * TIER RELATIONSHIP, stated once so it is not re-derived:
  *     gpon_*        protocol core - decides, no MMIO, runs on x86 too
- *     gpon-rtl960x.c / cortina-gpon.c   the two SHELLS - they implement
+ *     gpon-luna.c / cortina-gpon.c   the two SHELLS - they implement
  *                                        gpon_shell_ops and do the I/O
  *     luna_ponmac.c (this file) / the Cortina NE bring-up
  *                                        a tier BELOW both shells: silicon
@@ -112,7 +120,7 @@
  * and nothing is promoted out of it. The two silicons share no register.
  *
  * ! DO NOT ADD a struct gpon_shell_ops instance to this file. It could only
- *   be a table of pointers into gpon-rtl960x.c's statics, which needs either
+ *   be a table of pointers into gpon-luna.c's statics, which needs either
  *   12 symbols un-static'd or a runtime registration - a redesign, not code
  *   motion - and it would have no caller here. A shared-looking file with no
  *   consumer is exactly what gpon_proto.c became (dead since 2026-06-18,
@@ -132,7 +140,7 @@
  *   N2. That CDR reset is NOT the analog_relock op, despite the similar name.
  *       Different registers, different purpose: CDR reset pulses
  *       SDS_ANA_COM_REG12 bit15, while analog_relock is
- *       gpon-rtl960x.c:6053 gpon_txpll_relock(), which toggles
+ *       gpon-luna.c:6053 gpon_txpll_relock(), which toggles
  *       SDS_ANA_COM_REG27 bit10 (CMU enable 1->0->1) and re-syncs the SerDes
  *       word-FIFO pointer via WSDS_DIG_1D bit14. Wiring analog_relock to the
  *       CDR reset would silently replace the cold-start TX-CMU relock this
@@ -934,7 +942,7 @@ static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
 /* ------------------------------------------------------------------ *
  *  RTL9602C GPON PON-MAC / SerDes bring-up - clean-room op-table form.
  *  HW-TESTED on the realtek-luna board: this is a faithful translation of
- *  the in-tree gpon-rtl960x.c SerDes-init / PBO-ponmac steps
+ *  the in-tree gpon-luna.c SerDes-init / PBO-ponmac steps
  *  into this file's op-table primitives, so the family-lib path behaves
  *  identically to that in-tree sibling driver.
  *
@@ -987,107 +995,188 @@ static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
 #define   C2_SDS_ANALOG_READY	13u		/* FIB_EXT_REG21 ready bit      */
 #define C2_SDS_LOCK_POLL_MAX	1000u		/* x200us = up to 200 ms        */
 
+/* Named PON-MAC / PON-IP config registers used by c2_ponmac_init (register
+ * names from this chip's own register map; the C3_/C7_ sections use the same
+ * names for the same roles at their own offsets).  NEW names - nothing in the
+ * tree named these four addresses before. */
+#define C2_DYNGASP_CTRL		0x1B0001ECu	/* [0] DYNGASP_CMP_INV          */
+#define C2_PON_BW_THRES		0x1BF02150u	/* upstream BW request thresholds */
+#define C2_PON_SCH_CTRL		0x1BF02194u	/* [18] PON_GEN_PIR_DROP        */
+#define C2_PON_TRAP_CFG		0x1B0111F8u	/* [2:0] OMCI_MPCP_PRIORITY     */
+
+/* Register-PAGE address macros for the golden analog table below, so every
+ * entry names its register instead of a bare address.  Page bases, strides
+ * and names are this chip's own register-map facts, the same naming the
+ * single-register defines above already follow: C2_SDS_ANA_COM_REG(8) is
+ * C2_SDS_ANA_COM_REG08, C2_WSDS_DIG(0x02) is C2_WSDS_DIG_02.  The WSDS_DIG
+ * page numbers its registers in HEX (DIG_0E follows DIG_0D); the four
+ * line-rate pages (SPD / 1P25G / GPON / EPON) share one numbering that
+ * starts at REG32 at each page base. */
+#define C2_WSDS_ANA(n)		(0x1B022000u + (n) * 4u)	/* WSDS_ANA_nn      */
+#define C2_WSDS_DIG(n)		(0x1B022030u + (n) * 4u)	/* WSDS_DIG_nn (hex) */
+#define C2_SDS_ANA_COM_REG(n)	(0x1B022580u + (n) * 4u)	/* SDS_ANA_COM_REGnn */
+#define C2_SDS_ANA_SPD_REG(n)	(0x1B022600u + ((n) - 32u) * 4u) /* REG32..  */
+#define C2_SDS_ANA_1P25G_REG(n)	(0x1B022680u + ((n) - 32u) * 4u) /* REG32..  */
+#define C2_SDS_ANA_GPON_REG(n)	(0x1B022700u + ((n) - 32u) * 4u) /* REG32..  */
+#define C2_SDS_ANA_EPON_REG(n)	(0x1B022780u + ((n) - 32u) * 4u) /* REG32..  */
+#define C2_FIB_REG(bank, n)	(0x1B022C00u + (bank) * 0x80u + (n) * 4u)
+
 /* FIB_REG0 bank bases (absolute); FP_CFG_FIB_PDOWN bit11 cleared = fiber on. */
 #define C2_FIB_REG0_PDOWN	BIT(11)
 static const u32 c2_fib_reg0_banks[] = {
-	0x1B022C00u, 0x1B022C80u, 0x1B022D00u, 0x1B022D80u,
+	C2_FIB_REG(0, 0), C2_FIB_REG(1, 0), C2_FIB_REG(2, 0), C2_FIB_REG(3, 0),
 };
 
 /*
  * Full SerDes analog + WSDS configuration golden table - the operating point
  * the ONU runs at O5 (CMU, CDR, RX front-end incl. optical signal-detect/LOS,
  * TX driver, GPON-rate banks, and the 4 FIB optical front-end banks). Each
- * entry is an ABSOLUTE swcore address (0x1B000000 + the chip offset) and its
- * operational value - register facts of this silicon. Status/monitor regs and
+ * entry names its register through the page macros above (all resolve to
+ * ABSOLUTE swcore addresses, 0x1B000000 + the chip offset) and carries its
+ * operational value - register facts of this silicon.  Initializer order IS
+ * write order; c2_program_analog() walks it front to back. Status/monitor regs and
  * the digital reset-B/clock bank (DIG_00/18/1D) are deliberately excluded;
  * those are driven by the ordered sequence below. FIB_REG0 power-down (bit11)
  * is cleared separately, after each write, to turn fiber power on.
  */
 static const struct { u32 off; u32 val; } c2_analog[] = {
-	/* WSDS analog front + digital RX-path config */
-	{ 0x1B022000u, 0x00000805 }, { 0x1B022008u, 0x0000ffff }, { 0x1B02201cu, 0x0000ffff },
-	{ 0x1B022020u, 0x0000ffff }, { 0x1B022038u, 0x00000900 }, { 0x1B022048u, 0x000000ff },
-	{ 0x1B022050u, 0x00022300 }, { 0x1B022054u, 0x00022310 }, { 0x1B022058u, 0x083d0100 },
-	{ 0x1B022060u, 0x00000fff }, { 0x1B022064u, 0x0000cf45 }, { 0x1B022068u, 0x00000f45 },
-	/* SDS_ANA_MISC (RX-enable force, speed-select, force-SD) */
-	{ 0x1B022500u, 0x00000030 }, { 0x1B022504u, 0x00000030 }, { 0x1B022508u, 0x00003000 },
-	/* SDS_ANA_COM (CMU, RX CDR front-end, filters, bias) */
-	{ 0x1B022580u, 0x00003400 }, { 0x1B022584u, 0x000073a4 }, { 0x1B022588u, 0x00006df8 },
-	{ 0x1B02258cu, 0x00008941 }, { 0x1B022590u, 0x00008884 }, { 0x1B022594u, 0x0000413f },
-	{ 0x1B022598u, 0x00004fc0 }, { 0x1B02259cu, 0x00005682 }, { 0x1B0225a0u, 0x00000713 },
-	{ 0x1B0225a4u, 0x000002f5 }, { 0x1B0225a8u, 0x00002793 }, { 0x1B0225acu, 0x0000b000 },
-	{ 0x1B0225b0u, 0x00004848 }, { 0x1B0225b4u, 0x000000c8 }, { 0x1B0225bcu, 0x000008f2 },
-	{ 0x1B0225c0u, 0x00001042 }, { 0x1B0225c4u, 0x0000c391 }, { 0x1B0225c8u, 0x00006a00 },
-	{ 0x1B0225ccu, 0x00006600 }, { 0x1B0225d0u, 0x0000c000 },
-	/* 0x225d8 (COM_REG22 TX_AMP/EMP) is set later, in the TX section, to the
+	/* WSDS analog front (WSDS_ANA page) + digital RX-path config (WSDS_DIG
+	 * page, hex-numbered).  C2_WSDS_DIG(0x02) is the same register as
+	 * C2_WSDS_DIG_02 above. */
+	{ C2_WSDS_ANA(0),             0x00000805 }, { C2_WSDS_ANA(2),             0x0000ffff },
+	{ C2_WSDS_ANA(7),             0x0000ffff }, { C2_WSDS_ANA(8),             0x0000ffff },
+	{ C2_WSDS_DIG(0x02),          0x00000900 }, { C2_WSDS_DIG(0x06),          0x000000ff },
+	{ C2_WSDS_DIG(0x08),          0x00022300 }, { C2_WSDS_DIG(0x09),          0x00022310 },
+	{ C2_WSDS_DIG(0x0A),          0x083d0100 }, { C2_WSDS_DIG(0x0C),          0x00000fff },
+	{ C2_WSDS_DIG(0x0D),          0x0000cf45 }, { C2_WSDS_DIG(0x0E),          0x00000f45 },
+
+	/* SDS_ANA_MISC: RX-enable force, speed-select, BER-notify force (REG02
+	 * [13:12] is FRC_BER_NOTIFY, NOT signal-detect -- see the rename note at
+	 * C2_SDS_ANA_MISC_REG02 above). */
+	{ C2_SDS_ANA_MISC_REG00,      0x00000030 }, { C2_SDS_ANA_MISC_REG01,      0x00000030 },
+	{ C2_SDS_ANA_MISC_REG02,      0x00003000 },
+
+	/* SDS_ANA_COM: CMU, RX CDR front-end, filters, bias.  REG14 (0x225b8) is
+	 * not part of the golden set and is never written. */
+	{ C2_SDS_ANA_COM_REG(0),      0x00003400 }, { C2_SDS_ANA_COM_REG(1),      0x000073a4 },
+	{ C2_SDS_ANA_COM_REG(2),      0x00006df8 }, { C2_SDS_ANA_COM_REG(3),      0x00008941 },
+	{ C2_SDS_ANA_COM_REG(4),      0x00008884 }, { C2_SDS_ANA_COM_REG(5),      0x0000413f },
+	{ C2_SDS_ANA_COM_REG(6),      0x00004fc0 }, { C2_SDS_ANA_COM_REG(7),      0x00005682 },
+	{ C2_SDS_ANA_COM_REG(8),      0x00000713 }, { C2_SDS_ANA_COM_REG(9),      0x000002f5 },
+	{ C2_SDS_ANA_COM_REG(10),     0x00002793 }, { C2_SDS_ANA_COM_REG(11),     0x0000b000 },
+	{ C2_SDS_ANA_COM_REG(12),     0x00004848 }, { C2_SDS_ANA_COM_REG(13),     0x000000c8 },
+	{ C2_SDS_ANA_COM_REG(15),     0x000008f2 }, { C2_SDS_ANA_COM_REG(16),     0x00001042 },
+	{ C2_SDS_ANA_COM_REG(17),     0x0000c391 }, { C2_SDS_ANA_COM_REG(18),     0x00006a00 },
+	{ C2_SDS_ANA_COM_REG(19),     0x00006600 }, { C2_SDS_ANA_COM_REG(20),     0x0000c000 },
+
+	/* REG22 (COM_REG22, TX_AMP/EMP) is set later, in the TX section, to the
 	 * rev-A value 0x29 (TX_AMP=0x5, TX_EMP=0x1) via field-writes - NOT a full
 	 * word here, so the upper bits keep their reset state. */
-	{ 0x1B0225dcu, 0x00000418 }, { 0x1B0225e0u, 0x00008001 }, { 0x1B0225e4u, 0x0000001f },
-	{ 0x1B0225e8u, 0x000011e4 }, { 0x1B0225ecu, 0x00009422 }, { 0x1B0225f0u, 0x00008502 },
-	{ 0x1B0225f4u, 0x00000ff0 }, { 0x1B0225f8u, 0x0000000a },
-	/* SDS_ANA_GPON (GPON-rate CDR/PLL/PCM config) */
-	{ 0x1B022708u, 0x00000f00 }, { 0x1B02270cu, 0x0000b8c6 }, { 0x1B022710u, 0x0000a112 },
-	{ 0x1B022714u, 0x00004280 }, { 0x1B022718u, 0x0000f53f }, { 0x1B02271cu, 0x00004fdf },
-	{ 0x1B022720u, 0x00000001 }, { 0x1B022724u, 0x0000309b }, { 0x1B022728u, 0x0000225c },
-	{ 0x1B02272cu, 0x00001061 }, { 0x1B022730u, 0x0000110d }, { 0x1B022734u, 0x00004854 },
-	{ 0x1B022738u, 0x000080c5 }, { 0x1B02273cu, 0x0000121e }, { 0x1B022740u, 0x0000307b },
-	{ 0x1B022744u, 0x00000271 }, { 0x1B022748u, 0x00000271 }, { 0x1B02274cu, 0x00001012 },
-	{ 0x1B022750u, 0x0000f162 }, { 0x1B022754u, 0x00003026 }, { 0x1B022758u, 0x0000a780 },
-	{ 0x1B02275cu, 0x0000f000 },
-	/* SDS_ANA_GPON additional per-rate/lane banks (the RX path selects among
-	 * these; leaving them at reset starves the active RX/SD analog). */
-	{ 0x1B022608u, 0x00000f00 }, { 0x1B02260cu, 0x0000b8c6 }, { 0x1B022610u, 0x0000a112 },
-	{ 0x1B022614u, 0x00004280 }, { 0x1B022618u, 0x0000f53f }, { 0x1B02261cu, 0x00004fdf },
-	{ 0x1B022620u, 0x00000001 }, { 0x1B022624u, 0x0000309b }, { 0x1B022628u, 0x0000225c },
-	{ 0x1B02262cu, 0x00001061 }, { 0x1B022630u, 0x0000110d }, { 0x1B022634u, 0x00004854 },
-	{ 0x1B022638u, 0x000080c5 }, { 0x1B02263cu, 0x0000121e }, { 0x1B022640u, 0x0000307b },
-	{ 0x1B022644u, 0x00000271 }, { 0x1B022648u, 0x00000271 }, { 0x1B02264cu, 0x00001012 },
-	{ 0x1B022650u, 0x0000f162 }, { 0x1B022654u, 0x00003026 }, { 0x1B022658u, 0x0000a780 },
-	{ 0x1B02265cu, 0x0000f000 },
-	{ 0x1B022688u, 0x00000f00 }, { 0x1B02268cu, 0x0000b8c6 }, { 0x1B022690u, 0x0000a112 },
-	{ 0x1B022694u, 0x00004280 }, { 0x1B022698u, 0x0000f53f }, { 0x1B02269cu, 0x00004fdf },
-	{ 0x1B0226a0u, 0x00000001 }, { 0x1B0226a4u, 0x0000309b }, { 0x1B0226a8u, 0x0000225c },
-	{ 0x1B0226acu, 0x00001062 }, { 0x1B0226b0u, 0x00002000 }, { 0x1B0226b4u, 0x00001050 },
-	{ 0x1B0226b8u, 0x000080c1 }, { 0x1B0226bcu, 0x0000121e }, { 0x1B0226c0u, 0x0000107b },
-	{ 0x1B0226c4u, 0x00000280 }, { 0x1B0226c8u, 0x00000280 }, { 0x1B0226ccu, 0x00001012 },
-	{ 0x1B0226d0u, 0x0000f862 }, { 0x1B0226d4u, 0x00003938 }, { 0x1B0226d8u, 0x00003100 },
-	{ 0x1B0226dcu, 0x0000f000 },
-	{ 0x1B022788u, 0x00000f00 }, { 0x1B02278cu, 0x0000b8c6 }, { 0x1B022790u, 0x0000a112 },
-	{ 0x1B022794u, 0x00004280 }, { 0x1B022798u, 0x0000f53f }, { 0x1B02279cu, 0x00004fdf },
-	{ 0x1B0227a0u, 0x00000001 }, { 0x1B0227a4u, 0x0000309b }, { 0x1B0227a8u, 0x0000225c },
-	{ 0x1B0227acu, 0x00001062 }, { 0x1B0227b0u, 0x00002000 }, { 0x1B0227b4u, 0x00004850 },
-	{ 0x1B0227b8u, 0x000080c5 }, { 0x1B0227bcu, 0x0000121e }, { 0x1B0227c0u, 0x0000103e },
-	{ 0x1B0227c4u, 0x00000280 }, { 0x1B0227c8u, 0x00000280 }, { 0x1B0227ccu, 0x00001012 },
-	{ 0x1B0227d0u, 0x0000f862 }, { 0x1B0227d4u, 0x00003938 }, { 0x1B0227d8u, 0x0000b100 },
-	{ 0x1B0227dcu, 0x0000f000 },
+	{ C2_SDS_ANA_COM_REG(23),     0x00000418 }, { C2_SDS_ANA_COM_REG(24),     0x00008001 },
+	{ C2_SDS_ANA_COM_REG(25),     0x0000001f }, { C2_SDS_ANA_COM_REG(26),     0x000011e4 },
+	{ C2_SDS_ANA_COM_REG(27),     0x00009422 }, { C2_SDS_ANA_COM_REG(28),     0x00008502 },
+	{ C2_SDS_ANA_COM_REG(29),     0x00000ff0 }, { C2_SDS_ANA_COM_REG(30),     0x0000000a },
+
+	/* SDS_ANA_GPON page (REG34..REG55): the GPON line-rate CDR/PLL/PCM
+	 * operating point - the page the lane uses in GPON mode. */
+	{ C2_SDS_ANA_GPON_REG(34),    0x00000f00 }, { C2_SDS_ANA_GPON_REG(35),    0x0000b8c6 },
+	{ C2_SDS_ANA_GPON_REG(36),    0x0000a112 }, { C2_SDS_ANA_GPON_REG(37),    0x00004280 },
+	{ C2_SDS_ANA_GPON_REG(38),    0x0000f53f }, { C2_SDS_ANA_GPON_REG(39),    0x00004fdf },
+	{ C2_SDS_ANA_GPON_REG(40),    0x00000001 }, { C2_SDS_ANA_GPON_REG(41),    0x0000309b },
+	{ C2_SDS_ANA_GPON_REG(42),    0x0000225c }, { C2_SDS_ANA_GPON_REG(43),    0x00001061 },
+	{ C2_SDS_ANA_GPON_REG(44),    0x0000110d }, { C2_SDS_ANA_GPON_REG(45),    0x00004854 },
+	{ C2_SDS_ANA_GPON_REG(46),    0x000080c5 }, { C2_SDS_ANA_GPON_REG(47),    0x0000121e },
+	{ C2_SDS_ANA_GPON_REG(48),    0x0000307b }, { C2_SDS_ANA_GPON_REG(49),    0x00000271 },
+	{ C2_SDS_ANA_GPON_REG(50),    0x00000271 }, { C2_SDS_ANA_GPON_REG(51),    0x00001012 },
+	{ C2_SDS_ANA_GPON_REG(52),    0x0000f162 }, { C2_SDS_ANA_GPON_REG(53),    0x00003026 },
+	{ C2_SDS_ANA_GPON_REG(54),    0x0000a780 }, { C2_SDS_ANA_GPON_REG(55),    0x0000f000 },
+
+	/* The other three line-rate pages - SDS_ANA_SPD, SDS_ANA_1P25G and
+	 * SDS_ANA_EPON, same REG34..REG55 layout (the chip's own register map
+	 * names all four pages; registers number from 32 at each page base).
+	 * Historical rationale for writing them: the RX path selects among the
+	 * rate pages, and leaving them at reset starves the active RX/SD analog.
+	 * Measured counter-view: stock's GPON bring-up never writes them - see
+	 * luna_c2_minimal_analog, which skips them via c2_off_overconfig(). */
+	{ C2_SDS_ANA_SPD_REG(34),     0x00000f00 }, { C2_SDS_ANA_SPD_REG(35),     0x0000b8c6 },
+	{ C2_SDS_ANA_SPD_REG(36),     0x0000a112 }, { C2_SDS_ANA_SPD_REG(37),     0x00004280 },
+	{ C2_SDS_ANA_SPD_REG(38),     0x0000f53f }, { C2_SDS_ANA_SPD_REG(39),     0x00004fdf },
+	{ C2_SDS_ANA_SPD_REG(40),     0x00000001 }, { C2_SDS_ANA_SPD_REG(41),     0x0000309b },
+	{ C2_SDS_ANA_SPD_REG(42),     0x0000225c }, { C2_SDS_ANA_SPD_REG(43),     0x00001061 },
+	{ C2_SDS_ANA_SPD_REG(44),     0x0000110d }, { C2_SDS_ANA_SPD_REG(45),     0x00004854 },
+	{ C2_SDS_ANA_SPD_REG(46),     0x000080c5 }, { C2_SDS_ANA_SPD_REG(47),     0x0000121e },
+	{ C2_SDS_ANA_SPD_REG(48),     0x0000307b }, { C2_SDS_ANA_SPD_REG(49),     0x00000271 },
+	{ C2_SDS_ANA_SPD_REG(50),     0x00000271 }, { C2_SDS_ANA_SPD_REG(51),     0x00001012 },
+	{ C2_SDS_ANA_SPD_REG(52),     0x0000f162 }, { C2_SDS_ANA_SPD_REG(53),     0x00003026 },
+	{ C2_SDS_ANA_SPD_REG(54),     0x0000a780 }, { C2_SDS_ANA_SPD_REG(55),     0x0000f000 },
+
+	{ C2_SDS_ANA_1P25G_REG(34),   0x00000f00 }, { C2_SDS_ANA_1P25G_REG(35),   0x0000b8c6 },
+	{ C2_SDS_ANA_1P25G_REG(36),   0x0000a112 }, { C2_SDS_ANA_1P25G_REG(37),   0x00004280 },
+	{ C2_SDS_ANA_1P25G_REG(38),   0x0000f53f }, { C2_SDS_ANA_1P25G_REG(39),   0x00004fdf },
+	{ C2_SDS_ANA_1P25G_REG(40),   0x00000001 }, { C2_SDS_ANA_1P25G_REG(41),   0x0000309b },
+	{ C2_SDS_ANA_1P25G_REG(42),   0x0000225c }, { C2_SDS_ANA_1P25G_REG(43),   0x00001062 },
+	{ C2_SDS_ANA_1P25G_REG(44),   0x00002000 }, { C2_SDS_ANA_1P25G_REG(45),   0x00001050 },
+	{ C2_SDS_ANA_1P25G_REG(46),   0x000080c1 }, { C2_SDS_ANA_1P25G_REG(47),   0x0000121e },
+	{ C2_SDS_ANA_1P25G_REG(48),   0x0000107b }, { C2_SDS_ANA_1P25G_REG(49),   0x00000280 },
+	{ C2_SDS_ANA_1P25G_REG(50),   0x00000280 }, { C2_SDS_ANA_1P25G_REG(51),   0x00001012 },
+	{ C2_SDS_ANA_1P25G_REG(52),   0x0000f862 }, { C2_SDS_ANA_1P25G_REG(53),   0x00003938 },
+	{ C2_SDS_ANA_1P25G_REG(54),   0x00003100 }, { C2_SDS_ANA_1P25G_REG(55),   0x0000f000 },
+
+	{ C2_SDS_ANA_EPON_REG(34),    0x00000f00 }, { C2_SDS_ANA_EPON_REG(35),    0x0000b8c6 },
+	{ C2_SDS_ANA_EPON_REG(36),    0x0000a112 }, { C2_SDS_ANA_EPON_REG(37),    0x00004280 },
+	{ C2_SDS_ANA_EPON_REG(38),    0x0000f53f }, { C2_SDS_ANA_EPON_REG(39),    0x00004fdf },
+	{ C2_SDS_ANA_EPON_REG(40),    0x00000001 }, { C2_SDS_ANA_EPON_REG(41),    0x0000309b },
+	{ C2_SDS_ANA_EPON_REG(42),    0x0000225c }, { C2_SDS_ANA_EPON_REG(43),    0x00001062 },
+	{ C2_SDS_ANA_EPON_REG(44),    0x00002000 }, { C2_SDS_ANA_EPON_REG(45),    0x00004850 },
+	{ C2_SDS_ANA_EPON_REG(46),    0x000080c5 }, { C2_SDS_ANA_EPON_REG(47),    0x0000121e },
+	{ C2_SDS_ANA_EPON_REG(48),    0x0000103e }, { C2_SDS_ANA_EPON_REG(49),    0x00000280 },
+	{ C2_SDS_ANA_EPON_REG(50),    0x00000280 }, { C2_SDS_ANA_EPON_REG(51),    0x00001012 },
+	{ C2_SDS_ANA_EPON_REG(52),    0x0000f862 }, { C2_SDS_ANA_EPON_REG(53),    0x00003938 },
+	{ C2_SDS_ANA_EPON_REG(54),    0x0000b100 }, { C2_SDS_ANA_EPON_REG(55),    0x0000f000 },
+
 	/* FIB (fiber optical front-end) config - 4 identical banks. This block
 	 * powers and configures the optical RX/SD path; FIB_REG0 (bank base)
 	 * carries FP_CFG_FIB_PDOWN at bit11, cleared separately below to turn
 	 * fiber power on. */
-	{ 0x1B022c00u, 0x00001940 }, { 0x1B022c04u, 0x00006109 }, { 0x1B022c08u, 0x0000e001 },
-	{ 0x1B022c0cu, 0x00003290 }, { 0x1B022c10u, 0x000001a0 }, { 0x1B022c1cu, 0x00000004 },
-	{ 0x1B022c3cu, 0x00008000 }, { 0x1B022c40u, 0x00000083 }, { 0x1B022c48u, 0x00005000 },
-	{ 0x1B022c58u, 0x00000001 }, { 0x1B022c5cu, 0x00004001 }, { 0x1B022c60u, 0x00000004 },
-	{ 0x1B022c64u, 0x0000326a }, { 0x1B022c6cu, 0x0000115d }, { 0x1B022c70u, 0x000033fa },
-	{ 0x1B022c74u, 0x0000e46a }, { 0x1B022c78u, 0x0000071e },
-	{ 0x1B022c80u, 0x00001940 }, { 0x1B022c84u, 0x00006109 }, { 0x1B022c88u, 0x0000e001 },
-	{ 0x1B022c8cu, 0x00003290 }, { 0x1B022c90u, 0x000001a0 }, { 0x1B022c9cu, 0x00000004 },
-	{ 0x1B022cbcu, 0x00008000 }, { 0x1B022cc0u, 0x00000083 }, { 0x1B022cc8u, 0x00005000 },
-	{ 0x1B022cd8u, 0x00000001 }, { 0x1B022cdcu, 0x00004001 }, { 0x1B022ce0u, 0x00000004 },
-	{ 0x1B022ce4u, 0x0000326a }, { 0x1B022cecu, 0x0000115d }, { 0x1B022cf0u, 0x000033fa },
-	{ 0x1B022cf4u, 0x0000e46a }, { 0x1B022cf8u, 0x0000071e },
-	{ 0x1B022d00u, 0x00001940 }, { 0x1B022d04u, 0x00006109 }, { 0x1B022d08u, 0x0000e001 },
-	{ 0x1B022d0cu, 0x00003290 }, { 0x1B022d10u, 0x000001a0 }, { 0x1B022d1cu, 0x00000004 },
-	{ 0x1B022d3cu, 0x00008000 }, { 0x1B022d40u, 0x00000083 }, { 0x1B022d48u, 0x00005000 },
-	{ 0x1B022d58u, 0x00000001 }, { 0x1B022d5cu, 0x00004001 }, { 0x1B022d60u, 0x00000004 },
-	{ 0x1B022d64u, 0x0000326a }, { 0x1B022d6cu, 0x0000115d }, { 0x1B022d70u, 0x000033fa },
-	{ 0x1B022d74u, 0x0000e46a }, { 0x1B022d78u, 0x0000071e },
-	{ 0x1B022d80u, 0x00001940 }, { 0x1B022d84u, 0x00006109 }, { 0x1B022d88u, 0x0000e001 },
-	{ 0x1B022d8cu, 0x00003290 }, { 0x1B022d90u, 0x000001a0 }, { 0x1B022d9cu, 0x00000004 },
-	{ 0x1B022dbcu, 0x00008000 }, { 0x1B022dc0u, 0x00000083 }, { 0x1B022dc8u, 0x00005000 },
-	{ 0x1B022dd8u, 0x00000001 }, { 0x1B022ddcu, 0x00004001 }, { 0x1B022de0u, 0x00000004 },
-	{ 0x1B022de4u, 0x0000326a }, { 0x1B022decu, 0x0000115d }, { 0x1B022df0u, 0x000033fa },
-	{ 0x1B022df4u, 0x0000e46a }, { 0x1B022df8u, 0x0000071e },
+	{ C2_FIB_REG(0, 0),           0x00001940 }, { C2_FIB_REG(0, 1),           0x00006109 },
+	{ C2_FIB_REG(0, 2),           0x0000e001 }, { C2_FIB_REG(0, 3),           0x00003290 },
+	{ C2_FIB_REG(0, 4),           0x000001a0 }, { C2_FIB_REG(0, 7),           0x00000004 },
+	{ C2_FIB_REG(0, 15),          0x00008000 }, { C2_FIB_REG(0, 16),          0x00000083 },
+	{ C2_FIB_REG(0, 18),          0x00005000 }, { C2_FIB_REG(0, 22),          0x00000001 },
+	{ C2_FIB_REG(0, 23),          0x00004001 }, { C2_FIB_REG(0, 24),          0x00000004 },
+	{ C2_FIB_REG(0, 25),          0x0000326a }, { C2_FIB_REG(0, 27),          0x0000115d },
+	{ C2_FIB_REG(0, 28),          0x000033fa }, { C2_FIB_REG(0, 29),          0x0000e46a },
+	{ C2_FIB_REG(0, 30),          0x0000071e },
+
+	{ C2_FIB_REG(1, 0),           0x00001940 }, { C2_FIB_REG(1, 1),           0x00006109 },
+	{ C2_FIB_REG(1, 2),           0x0000e001 }, { C2_FIB_REG(1, 3),           0x00003290 },
+	{ C2_FIB_REG(1, 4),           0x000001a0 }, { C2_FIB_REG(1, 7),           0x00000004 },
+	{ C2_FIB_REG(1, 15),          0x00008000 }, { C2_FIB_REG(1, 16),          0x00000083 },
+	{ C2_FIB_REG(1, 18),          0x00005000 }, { C2_FIB_REG(1, 22),          0x00000001 },
+	{ C2_FIB_REG(1, 23),          0x00004001 }, { C2_FIB_REG(1, 24),          0x00000004 },
+	{ C2_FIB_REG(1, 25),          0x0000326a }, { C2_FIB_REG(1, 27),          0x0000115d },
+	{ C2_FIB_REG(1, 28),          0x000033fa }, { C2_FIB_REG(1, 29),          0x0000e46a },
+	{ C2_FIB_REG(1, 30),          0x0000071e },
+
+	{ C2_FIB_REG(2, 0),           0x00001940 }, { C2_FIB_REG(2, 1),           0x00006109 },
+	{ C2_FIB_REG(2, 2),           0x0000e001 }, { C2_FIB_REG(2, 3),           0x00003290 },
+	{ C2_FIB_REG(2, 4),           0x000001a0 }, { C2_FIB_REG(2, 7),           0x00000004 },
+	{ C2_FIB_REG(2, 15),          0x00008000 }, { C2_FIB_REG(2, 16),          0x00000083 },
+	{ C2_FIB_REG(2, 18),          0x00005000 }, { C2_FIB_REG(2, 22),          0x00000001 },
+	{ C2_FIB_REG(2, 23),          0x00004001 }, { C2_FIB_REG(2, 24),          0x00000004 },
+	{ C2_FIB_REG(2, 25),          0x0000326a }, { C2_FIB_REG(2, 27),          0x0000115d },
+	{ C2_FIB_REG(2, 28),          0x000033fa }, { C2_FIB_REG(2, 29),          0x0000e46a },
+	{ C2_FIB_REG(2, 30),          0x0000071e },
+
+	{ C2_FIB_REG(3, 0),           0x00001940 }, { C2_FIB_REG(3, 1),           0x00006109 },
+	{ C2_FIB_REG(3, 2),           0x0000e001 }, { C2_FIB_REG(3, 3),           0x00003290 },
+	{ C2_FIB_REG(3, 4),           0x000001a0 }, { C2_FIB_REG(3, 7),           0x00000004 },
+	{ C2_FIB_REG(3, 15),          0x00008000 }, { C2_FIB_REG(3, 16),          0x00000083 },
+	{ C2_FIB_REG(3, 18),          0x00005000 }, { C2_FIB_REG(3, 22),          0x00000001 },
+	{ C2_FIB_REG(3, 23),          0x00004001 }, { C2_FIB_REG(3, 24),          0x00000004 },
+	{ C2_FIB_REG(3, 25),          0x0000326a }, { C2_FIB_REG(3, 27),          0x0000115d },
+	{ C2_FIB_REG(3, 28),          0x000033fa }, { C2_FIB_REG(3, 29),          0x0000e46a },
+	{ C2_FIB_REG(3, 30),          0x0000071e },
 };
 
 /*
@@ -1102,12 +1191,12 @@ static const struct r960_op c2_ponmac_init[] = {
 	 * stock-good post-reset value is 0x73a4 (CMU bit14=1, BEN_TTL_OUT bit0=0), which
 	 * the golden-before-reset write cannot achieve (the SDS reset wipes bit14 and the
 	 * old BEN_TTL write set bit0). See luna_c2_stock_analog. */
-	FLD(0x1B0001ECu,  0,  0, 1),	/* DYNGASP_CMP_INV = 1                  */
-	FLD(0x1BF02150u, 29, 16, 5),	/* PON_BW_THRES last-grant              */
-	FLD(0x1BF02150u, 13,  0, 5),	/* PON_BW_THRES runt-grant             */
-	FLD(0x1BF02194u, 18, 18, 1),	/* PON_GEN_PIR_DROP = 1                 */
-	FLD(0x1B0111F8u,  2,  0, 7),	/* PON_TRAP_CFG OMCI_MPCP_PRIORITY = 7  */
-	FLD(0x1BF02194u, 18, 18, 0),	/* rev-A: clear PON_GEN_PIR_DROP        */
+	FLD(C2_DYNGASP_CTRL,  0,  0, 1),	/* DYNGASP_CMP_INV = 1              */
+	FLD(C2_PON_BW_THRES, 29, 16, 5),	/* last-grant threshold             */
+	FLD(C2_PON_BW_THRES, 13,  0, 5),	/* runt-grant threshold             */
+	FLD(C2_PON_SCH_CTRL, 18, 18, 1),	/* PON_GEN_PIR_DROP = 1             */
+	FLD(C2_PON_TRAP_CFG,  2,  0, 7),	/* OMCI_MPCP_PRIORITY = 7           */
+	FLD(C2_PON_SCH_CTRL, 18, 18, 0),	/* rev-A: clear PON_GEN_PIR_DROP    */
 };
 
 /* A/B knob (gpon.serdes_stock_analog). Default 1 = drive REG01/REG11 to the live-stock
@@ -1141,11 +1230,11 @@ static int rtl9602c_ponmac_init(const struct luna_ops *o)
 	if (ret)
 		return ret;
 	if (luna_c2_stock_analog) {
-		luna_rfwr(o, 0x1B022584u, 14, 14, 1);	/* REG01 CMU bit14 = 1 (stock) */
-		luna_rfwr(o, 0x1B022584u,  0,  0, 0);	/* REG01 BEN_TTL_OUT = 0 (stock) */
-		luna_rfwr(o, 0x1B0225ACu,  7,  0, 0);	/* REG11 RX_FILT_CONFIG = 0 (stock) */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),  14, 14, 1); /* CMU bit14 = 1 (stock) */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),   0,  0, 0); /* BEN_TTL_OUT = 0 (stock) */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(11),  7,  0, 0); /* RX_FILT_CONFIG = 0 (stock) */
 	} else {
-		luna_rfwr(o, 0x1B022584u,  0,  0, 1);	/* legacy REG_BEN_TTL_OUT = 1 */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),   0,  0, 1); /* legacy REG_BEN_TTL_OUT = 1 */
 	}
 	return 0;
 }
@@ -1316,11 +1405,13 @@ static const struct r960_op c2_sds_txresync[] = {
 };
 
 /* A/B knob (gpon.serdes_minimal_analog): skip the golden-table writes that the stock rev-A
- * GPON bring-up does NOT do (verified against stock) — the 3 DUPLICATE GPON
- * per-rate banks and the 4 FIB-bank bodies (~134 of ~145 writes). Stock leaves these at HW
- * state; they are redundant and lengthen the bring-up with ~134 extra bus transactions before
- * the CMU/serializer phase latches. The active GPON bank (0x22708) + the FIB PDOWN-clear are
- * kept. Cold-start determinism fix candidate (makes the bring-up timing stock-minimal). */
+ * GPON bring-up does NOT do (verified against stock) — the 3 OTHER line-rate pages
+ * (SDS_ANA_SPD / SDS_ANA_1P25G / SDS_ANA_EPON; mislabelled "duplicate GPON banks" until
+ * 2026-09-02) and the 4 FIB-bank bodies (134 of the table's 199 writes). Stock leaves these
+ * at HW state; they are redundant and lengthen the bring-up with 134 extra bus transactions
+ * before the CMU/serializer phase latches. The SDS_ANA_GPON page (the rate actually in use)
+ * + the FIB PDOWN-clear are kept. Cold-start determinism fix candidate (makes the bring-up
+ * timing stock-minimal). */
 int luna_c2_minimal_analog;
 
 /* Registers the c7 SerDes/fiber DIAGNOSTIC reads.  They were declared inside
@@ -1449,9 +1540,9 @@ static int rtl9602c_ponmac_mode_set(const struct luna_ops *o,
 	 * ~50% US-TX "Laser out"); bit14 is in the shared CMU block. Gated by
 	 * luna_c2_stock_analog (default 1 = fix). */
 	if (luna_c2_stock_analog) {
-		luna_rfwr(o, 0x1B022584u, 14, 14, 1);	/* REG01 CMU bit14 = 1 (stock) */
-		luna_rfwr(o, 0x1B022584u,  0,  0, 0);	/* REG01 BEN_TTL_OUT = 0 (stock) */
-		luna_rfwr(o, 0x1B0225ACu,  7,  0, 0);	/* REG11 RX_FILT_CONFIG = 0 (stock) */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),  14, 14, 1); /* CMU bit14 = 1 (stock) */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),   0,  0, 0); /* BEN_TTL_OUT = 0 (stock) */
+		luna_rfwr(o, C2_SDS_ANA_COM_REG(11),  7,  0, 0); /* RX_FILT_CONFIG = 0 (stock) */
 	}
 
 	/* Step 7a + 7b: force-SD + commit GPON mode. */

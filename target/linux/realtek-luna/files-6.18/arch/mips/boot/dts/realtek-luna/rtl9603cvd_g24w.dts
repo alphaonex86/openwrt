@@ -2,9 +2,23 @@
 /*
  * LANLY G24W GPON ONU -- Realtek RTL9603CVD.
  *
- * Bring-up scaffold (M1): serial console + initramfs, run from RAM. No
- * Ethernet, no WiFi, no GPON, no LEDs and no flash are claimed yet -- see
- * the "DELIBERATELY ABSENT" block in rtl9603cvd.dtsi for why each is out.
+ * Bring-up scaffold: serial console + initramfs, run from RAM.
+ *
+ * WHAT IS CLAIMED, as of 2026-09-02 -- this paragraph said "no Ethernet, no
+ * WiFi, no GPON" and had been wrong for a week, which is worse than saying
+ * nothing: a reader trusts it and stops looking.
+ *   - Ethernet: WORKS. The board answers on its declared LAN address.
+ *   - GPON: WIRED, and NOT working. gpon-luna.c selects this chip's own
+ *     register map (`gpon_swc_9603cvd`, added 2026-08-26) and /proc/gpon
+ *     exists, but activation stops at O1 and the far end reports the ONU
+ *     offline. Measured both firmwares 2026-09-02: the vendor image reaches
+ *     O5 and is Online, so the hardware ranges and the fault is ours. The
+ *     GTC register window reads one constant value at 143 of 152 distinct
+ *     addresses, so every witness above it is a phantom -- see
+ *     dev/FINDING-g24w-gtc-window-returns-a-constant.md before touching an
+ *     offset here.
+ *   - WiFi, LEDs, flash: still not claimed. See the "DELIBERATELY ABSENT"
+ *     block in rtl9603cvd.dtsi for why each is out.
  *
  * Clean-room: board description from observed hardware only.
  *

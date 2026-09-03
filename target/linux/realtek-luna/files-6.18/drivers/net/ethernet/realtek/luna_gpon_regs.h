@@ -443,7 +443,7 @@
  *
  * Offsets are WITHIN the GTC block (base 0x1b700000 belongs to the shell's
  * gpon_io), exactly as gpon_rd/gpon_wr already address it. */
-static const struct gpon_chip rtl9602c_gpon_chip = {
+static const struct gpon_chip luna_gpon_chip = {
 	.name = "RTL9602C",
 	.gtc = {
 		.ds_omci_pti		= 0x1204,	/* = GPON_GTC_DS_OMCI_PTI; chipdef 0x701204 */

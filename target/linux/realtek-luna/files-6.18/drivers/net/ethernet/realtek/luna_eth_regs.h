@@ -81,6 +81,14 @@
 #define D_LS			BIT(28)	/* last segment */
 #define D_TXCRC			BIT(23)	/* TX: append FCS */
 #define RXD_CRCERR		BIT(27)	/* RX: CRC error */
+#define RXD_RCDF		BIT(24)	/* RX: DMA error.  RCDF is the SILICON's own
+					 * name (the vendor NIC driver's rx_info
+					 * opts1 bitfield, `rcdf:1;//24`, same in
+					 * the 4.4 and 5.10 SDK drops).  This one
+					 * bit carried TWO shell names, RXD_DMAERR
+					 * (luna_eth.c, invented -- in no vendor
+					 * source) and RXD_RCDF (rtl9602c_eth.c),
+					 * until 2026-09-03. */
 #define RXD_LEN_MASK		0x1fff	/* RX length, low bits of opts1 */
 #define TXD_LEN_MASK		0x1ffff	/* TX length */
 

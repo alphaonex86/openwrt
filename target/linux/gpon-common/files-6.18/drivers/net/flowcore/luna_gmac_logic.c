@@ -35,12 +35,13 @@ u32 luna_gmac_rxcdo_pack(unsigned int ring_size)
 
 /*
  * Bad-frame verdict, SPLIT from luna_eth.c eth_rx(): is a returned RX
- * descriptor discarded?  @err_mask is the shell's RXD_CRCERR | RXD_DMAERR --
- * passed, not re-spelled, exactly as rtl9602c_rx_frame_bad takes its
- * RXD_CRCERR | RXD_RCDF (⚠ those two masks are the SAME VALUE, BIT(27)|BIT(24):
- * RXD_DMAERR and RXD_RCDF are two shell names for one family bit, compared by
- * value 2026-09-02 -- OWED: one name in luna_eth_regs.h beside RXD_CRCERR;
- * recorded HERE only, because that header sits outside this pass's file set).  @hdr_floor is the shell's (u32)rx_prefix + ETH_HLEN, and
+ * descriptor discarded?  @err_mask is the shell's RXD_CRCERR | RXD_RCDF --
+ * passed, not re-spelled, exactly the mask rtl9602c_rx_frame_bad takes.
+ * (DONE 2026-09-03: BIT(24) had carried two shell names, RXD_DMAERR and
+ * RXD_RCDF; the surviving name is RXD_RCDF, in luna_eth_regs.h beside
+ * RXD_CRCERR, because RCDF is the silicon's own name in the vendor NIC
+ * driver while DMAERR appears in no vendor source.)
+ * @hdr_floor is the shell's (u32)rx_prefix + ETH_HLEN, and
  * `<=` is the shell's own spelling, kept verbatim.
  *
  * ★ DELIBERATELY NOT MERGED with rtl9602c_rx_frame_bad, and the difference is

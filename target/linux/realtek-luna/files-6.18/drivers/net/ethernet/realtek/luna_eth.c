@@ -301,9 +301,6 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
 #define CPUTAG1CR_INIT	0x00004000	/* CPU-tag SID base (64 << 8)		*/
 #define ABLTY_CPU_FORCE	0xBFFF		/* CPU-port forced-ability mode (keep)	*/
 
-/* descriptor flags (word0 / opts1, both rings) */
-#define RXD_DMAERR	BIT(24)
-
 
 /* ---- switch core (SWCORE), phys 0x1b000000 ---------------------------------
  * ★ THE BASE IS THE SAME ON BOTH CHIPS AND THAT IS ESTABLISHED, NOT ASSUMED.
@@ -1505,7 +1502,7 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		 * (flowcore): the error mask and the header floor are passed,
 		 * not re-spelled; the deliberately-lax floor (vs the 9602C
 		 * shell's min-Ethernet-frame bound) is documented there. */
-		if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_DMAERR, len,
+		if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF, len,
 					   (u32)rx_prefix + ETH_HLEN,
 					   RX_BUF_SIZE)) {
 			ndev->stats.rx_errors++;

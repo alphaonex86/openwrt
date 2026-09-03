@@ -4798,7 +4798,13 @@ void gpon_pbo_init(void)
 	 * ERR/MISS all 0). The working firmware writes the FULL triple before the GMII
 	 * edge: it sets PON_OMCI_CFG @ 0x1bf02154 [6:0] = 64, THEN does the
 	 * NIC-bringup GMII edge. Complete the triple here so all three latch together. */
-	pi_field(0x2154, 6, 0, 64);	/* PON_OMCI_CFG[6:0] = OMCC SID 64 */
+	/* ★ THE NAME, NOT THE LITERAL: PI_PON_OMCI_CFG is PI_X(0x02154), and on
+	 *   the RTL9603CVD that register MOVED to 0x021a4 (chipdef-derived, see
+	 *   luna_pi_moves_9603cvd). The bare literal wrote the 9602C address on
+	 *   9603CVD silicon, so the OMCC SID never reached PON_OMCI_CFG there.
+	 *   pi_x() is identity on every chip that declares no moves, so this is
+	 *   unchanged on the RTL9602C and the RTL9607C. */
+	pi_field(PI_PON_OMCI_CFG, 6, 0, 64);	/* [6:0] = OMCC SID 64 */
 
 	/* Pre-arm the WAN DATA flow (SID 1) classify here too, alongside the SID-64
 	 * pre-arm, so this boot/ifup GMII edge (the final pi_wr(0x90101070) below) ALSO
@@ -4816,7 +4822,8 @@ void gpon_pbo_init(void)
 	 * SIDVALID[1] -> base 0x213c word0 bit1 (1-bit packing is contiguous). */
 	if (!usnic_strip) {
 		pi_field(PI_PON_SID2QID, 13, 7, data_tcont ? 32 : 64);	/* SID2QID[1] = data qid 32 (T-CONT 8) or legacy OMCC qid 64 */
-		pi_field(0x213c, 1, 1, 1);	/* SIDVALID[1] = 1 */
+		/* the NAME: PI_PON_SIDVALID moved to 0x0218c on the RTL9603CVD */
+		pi_field(PI_PON_SIDVALID, 1, 1, 1);	/* SIDVALID[1] = 1 */
 	}
 
 	/* MOCIR force-mode (stock QoS init): PON-IP 0x2170 MOCIR_FRC_MD=0x1FFFF,
@@ -7291,7 +7298,7 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 			int n;
 
 			pi_wr(PI_DRN_CMD, (1u << 2) | ((qid & 0x7f) << 3) | (1u << 1));
-			for (n = 0; n < 10000 && (pi_rd(0x020e4) & 1u); n++)
+			for (n = 0; n < 10000 && (pi_rd(PI_DRN_CMD) & 1u); n++)
 				udelay(1);
 			if (n >= 10000)
 				pr_warn("rtl9602c-gpon: qid %u drain-out timeout\n", qid);

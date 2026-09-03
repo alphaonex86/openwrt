@@ -391,10 +391,14 @@
 #define PLM_US_QUEUE_URG		0x1	/* US_PLOAM_IND[10:8] urgent queue (ACKs) */
 #define PLM_US_QUEUE_NOMSG		0x7	/* US_PLOAM_IND[10:8] HW auto-No_message slot */
 
-#define GPON_GTC_DS_PORT_IND	0x1100		/* CAM op: OP_MODE[9:8] OP_IDX[6:0] */
-#define   DS_PORT_OP_REQ	BIT(15)
-#define   DS_PORT_OP_COMPL	BIT(14)
-#define   DS_PORT_OP_WRITE	BIT(8)		/* OP_MODE = WRITE(1) */
+#define GPON_GTC_DS_PORT_IND	0x1100		/* CAM op: OP_MODE[9:8] OP_IDX[6:0].
+						 * The WRITE-op bits (OP_MODE=WRITE BIT(8),
+						 * REQ BIT(15), COMPL BIT(14)) are spelled ONCE,
+						 * as GPON_GTC_CAM_OP_* in flowcore/regtable.h --
+						 * the DS_PORT_OP_* defines that lived here died
+						 * with their four call sites on 2026-09-03 (the
+						 * read/clean ops below still spell OP_MODE 2/3
+						 * as raw literals, as they always did). */
 #define GPON_GTC_DS_PORT_WR	0x1104		/* [11:0] gemPortId */
 #define GPON_GTC_DS_TRAFFIC_CFG	0x1400		/* array: base 0x1400, STRIDE 4 bytes, idx
 						 * 0..127, [4:0] traffic-type. The register map's
@@ -452,6 +456,19 @@ static const struct gpon_chip luna_gpon_chip = {
 		.gem_ds_mc_cfg		= 0x4080,	/* = GPON_GEM_DS_MC_CFG; chipdef 0x704080 */
 		.ds_traffic_cfg		= 0x1400,	/* = GPON_GTC_DS_TRAFFIC_CFG; chipdef 0x701400 */
 		.ds_traffic_stride	= 4,		/* = DS_TRAFFIC_CFG_STRIDE; chipdef array-offset 32 bits */
+		/* The two indirect CAMs (gpon_gtc_cam_write, 2026-09-03).
+		 * Addresses AND bit layout verified IDENTICAL in both vendor
+		 * chipdefs (RTL9602C and RTL9603CVD), so the family-invariant
+		 * claim of this table holds for them too.  The idx masks are
+		 * each CAM's OP_IDX field width from those same chipdefs
+		 * (PORTID_OP_IDX len 7, ALLOCID_OP_IDX len 5) -- per-CAM
+		 * FACTS, not tuning. */
+		.ds_port_ind		= 0x1100,	/* = GPON_GTC_DS_PORT_IND; chipdef 0x701100 */
+		.ds_port_wr		= 0x1104,	/* = GPON_GTC_DS_PORT_WR; chipdef 0x701104 */
+		.ds_port_idx_mask	= 0x7f,		/* 128 flows -- OP_IDX[6:0]; == GEM_US_PORT_MAP_IDX_MAX */
+		.ds_alloc_ind		= 0x10c0,	/* = GPON_GTC_DS_ALLOC_IND; chipdef 0x7010C0 */
+		.ds_alloc_wr		= 0x10c4,	/* = GPON_GTC_DS_ALLOC_WR; chipdef 0x7010C4 */
+		.ds_alloc_idx_mask	= 0x1f,		/* 32 T-CONTs -- OP_IDX[4:0] */
 	},
 };
 

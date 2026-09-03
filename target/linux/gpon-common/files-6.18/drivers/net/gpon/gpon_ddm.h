@@ -29,4 +29,18 @@
  */
 s32 gpon_ddm_uw10_to_cdbm(u32 raw);
 
+/**
+ * gpon_ddm_cdbm_to_anig() - centi-dBm to the G.988 ANI-G (ME 263) wire unit
+ * @cdbm: power in centi-dBm.
+ *
+ * ANI-G #10/#14 report in 0.002 dB steps referred to 1 mW, two's complement --
+ * so five counts per centi-dBm.  The factor was written as a bare `* 5` in both
+ * families; it is named here so the unit is stated once instead of twice.
+ *
+ * Clamped to the s16 the attribute ships in.  The CALLER keeps its own outer
+ * policy (each family bounds the dBm range differently before calling), which
+ * is inert over the range this converter can produce and is not unified.
+ */
+s16 gpon_ddm_cdbm_to_anig(s32 cdbm);
+
 #endif /* _GPON_DDM_H */

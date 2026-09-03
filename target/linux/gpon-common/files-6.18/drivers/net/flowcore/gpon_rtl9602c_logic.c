@@ -34,12 +34,7 @@ s32 ddm_word_to_level(int raw)
 
 	if (raw <= 0 || raw >= 0xffff)
 		return INT_MIN;
-	/* ANI-G (ME 263) reports in 0.002 dB steps, i.e. 5 per centi-dBm. */
-	level = gpon_ddm_uw10_to_cdbm((u32)raw) * 5;
-	if (level > 32767)
-		level = 32767;
-	else if (level < -32768)
-		level = -32768;
+	level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm((u32)raw));
 	return level;
 }
 

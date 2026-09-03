@@ -73,3 +73,17 @@ s32 gpon_ddm_uw10_to_cdbm(u32 raw)
 
 	return milli - 4000;		/* 0.1 uW = -40.00 dBm is the origin */
 }
+
+/* ANI-G counts per centi-dBm: the attribute's step is 0.002 dB, ours is 0.01. */
+#define GPON_ANIG_PER_CDBM	5
+
+s16 gpon_ddm_cdbm_to_anig(s32 cdbm)
+{
+	s32 level = cdbm * GPON_ANIG_PER_CDBM;
+
+	if (level > 32767)
+		return 32767;
+	if (level < -32768)
+		return -32768;
+	return (s16)level;
+}

@@ -197,11 +197,18 @@
 #define L3FE_FDB_DATA2			0x1ca8
 #define L3FE_FDB_DATA1			0x1cac
 #define L3FE_FDB_DATA0			0x1cb0
-#define L3FE_FDB_LPID			GENMASK(5, 0)
-#define L3FE_FDB_VALID			BIT(9)
-#define L3FE_FDB_STATIC			BIT(19)
-#define L3FE_FDB_DA_PERMIT		BIT(20)
-#define L3FE_FDB_SA_PERMIT		BIT(21)
+/* ★ THE FIVE FDB FIELD BITS ARE GONE FROM HERE (2026-09-03), and they were
+ * already DEAD: LPID GENMASK(5,0), VALID BIT(9), STATIC BIT(19), DA_PERMIT
+ * BIT(20), SA_PERMIT BIT(21) each appeared EXACTLY ONCE in the whole tree --
+ * at their own #define. l3fe_fdb_static_add() has called the common layer's
+ * cortina_ni_l2fe_fdb_action()/_fdb_key() since the round that verified the
+ * two vocabularies value-by-value, so these were a second, unused copy of a
+ * hardware format whose only live spelling is in
+ * drivers/net/flowcore/cortina_ni_rx_logic.c. An unused copy is not
+ * harmless: it is where a future repair lands on one side only, and nothing
+ * compiles or links differently when the two disagree.
+ * The ADDRESS defines above stay -- this file owns its own register base and
+ * does its own writes; only the value computation is common. */
 
 /* ------------------------------------------------------------------ *
  *  Transit-frame INGRESS ADMISSION registers (Divergence C).           *

@@ -6777,10 +6777,10 @@ static int gpon_install_omcc(u16 gem)
 	 * to the shared gpon_gtc_us_gem_stamp() (flowcore/regtable.h), fed by
 	 * luna_gpon_chip -- this chip's offsets as DATA (luna_gpon_regs.h).
 	 * Same address, same value, proven by the x86 write-stream differential
-	 * (dev/rtl9607c-test/gpon_regtable_diff_test); the data-gem site below
-	 * still spells the macro form because gpon_data_bind_policy_test pins
-	 * that body's GPON_GTC_GEM_US_PORT_MAP token -- convert the two
-	 * together. */
+	 * (dev/rtl9607c-test/gpon_regtable_diff_test).  The data-gem site in
+	 * gpon_install_data_gem() went through the same conversion on 2026-09-02,
+	 * together with the gpon_data_bind_policy_test C3 retarget that had
+	 * pinned its macro token. */
 	if (!gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc,
 				   GPON_OMCC_FLOW, gpon_gem_us_port_id(gem)))
 		pr_err("rtl9602c-gpon: gpon_chip table declares no US port map -- OMCC gem %u not stamped\n",
@@ -6974,9 +6974,18 @@ int gpon_install_data_gem(void)
 	gpon_wr(GPON_GTC_DS_TRAFFIC_CFG + GPON_DATA_FLOW * DS_TRAFFIC_CFG_STRIDE, 0x2);
 
 	/* US GEM-port map: flow 1 -> the OLT's gem (the gem-id stamped on US data frames).
-	 * Same stride-4 indexing the OMCC flow-64 write uses (flow 1 -> 0x6400 + 1*4 = 0x6404). */
-	gpon_wr(GPON_GTC_GEM_US_PORT_MAP + GPON_DATA_FLOW * GEM_US_PORT_MAP_STRIDE,
-		gpon_data_gem_port & 0xfff);
+	 * Same slot arithmetic as the OMCC flow-64 stamp above (flow 1 -> 0x6400 +
+	 * 1*4 = 0x6404), through the SAME shared gpon_gtc_us_gem_stamp() reading
+	 * luna_gpon_chip -- converted 2026-09-02 together with the C3 retarget in
+	 * gpon_data_bind_policy_test (that pin anchored on this body's
+	 * GPON_GTC_GEM_US_PORT_MAP token; it now anchors on this call).  The
+	 * 12-bit wire mask is gpon_gem_us_port_id(), the one spelling; same
+	 * address, same value, proven by the x86 write-stream differential
+	 * (dev/rtl9607c-test/gpon_regtable_diff_test, data-flow spotlight). */
+	if (!gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, GPON_DATA_FLOW,
+				   gpon_gem_us_port_id(gpon_data_gem_port)))
+		pr_err("rtl9602c-gpon: gpon_chip table declares no US port map -- data gem %u not stamped\n",
+		       gpon_data_gem_port);
 
 	/* PON-IP classify: SID2QID[1]=OMCC qid 64 (ride T-CONT 16 grants — the OMCC and data
 	 * SHARE the OLT's single Alloc-ID 256, confirmed live: T-CONT 16 <- alloc 0x100), SIDVALID[1]=1,

@@ -5786,8 +5786,14 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		/* Read-back the DS-engine enables (a later reset may have cleared them):
 		 * ctl_ds expect 0x81 (CFG_PBUF_EN bit0 + bit7), io0_ds expect 0x90081070
 		 * (GMII_RX_EN bit5 + GMII_TX_EN bit4 must be set). */
+		/* ⚠ THE ADDRESSES IN THESE LABELS ARE THE RTL9602C's, which is the
+	 *   canonical spelling this file uses everywhere. The VALUES are read
+	 *   through the per-chip names, so they are right on every chip -- but
+	 *   on the RTL9603CVD the register genuinely lives elsewhere
+	 *   (luna_pi_moves_9603cvd: 0xa0ac -> 0xa0c0, ...). Read a label as
+	 *   WHICH register, never as WHERE it is on this board. */
 		seq_printf(s, "ds_en: ctl_ds(0xa0ac)=0x%08x io0_ds(0xd434)=0x%08x io1_ds(0xd438)=0x%08x\n",
-			   pi_rd(0xa0ac), pi_rd(PI_IO_CMD_0_DS), pi_rd(PI_IO_CMD_1_DS));
+			   pi_rd(PI_PONIP_CTL_DS), pi_rd(PI_IO_CMD_0_DS), pi_rd(PI_IO_CMD_1_DS));
 		seq_printf(s, "ds_nic: cfg_ds(0xc04c)=0x%08x[RX_SID=%u] rxcfg_ds(0xc044)=0x%08x media_ds(0xc058)=0x%08x rxfdp_ds(0xd3f0)=0x%08x\n",
 			   pi_rd(PI_CFG_DS), pi_rd(PI_CFG_DS) & 0x7f, pi_rd(PI_RX_CFG_DS),
 			   pi_rd(PI_MEDIA_STS_DS), pi_rd(0xd3f0));
@@ -5823,7 +5829,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		seq_printf(s, "us_arm: media_us(0x4058)=0x%08x io0_us(0x5434)=0x%08x gemus_map64(0x6500)=0x%08x sidvld(0x2144)=0x%08x s2q(0x2138/0x2130)=0x%08x/0x%08x s2q64=%lu omcicfg(0x2154)=0x%08x\n",
 			   pi_rd(PI_MEDIA_STS_US), pi_rd(PI_IO_CMD_0_US), gpon_rd(0x6500 /* GEM_US_PORT_MAP[flow 64] = 0x6400+64*4; macros defined later in file */),
 			   pi_rd(0x2144), pi_rd(0x2138), pi_rd(0x2130),
-			   pi_rd(0x2138) & 0x7fUL, pi_rd(0x2154));
+			   pi_rd(0x2138) & 0x7fUL, pi_rd(PI_PON_OMCI_CFG));
 		/* sched64: US queue-64 (OMCI T-CONT 16) drain-side witnesses on one line.
 		 *   total_pg   = PONIP_TOTAL_PAGE_CNT_US[12:0] (0x2560) = US pages staged in
 		 *                on-chip SRAM. This IS the raw occupancy the DBRu reports to
@@ -5874,8 +5880,8 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * ponipctl(0x20d8) bit0=CFG_PBUF_EN (US packet-buffer 'go'). */
 		seq_printf(s, "usdram: usage(0x20ec)=0x%08x[pipe_vld=%u] mstbase(0x20e8)=0x%08x dsccfg(0x215c)=0x%08x runout(0x20e0)=0x%08x ponipctl(0x20d8)=0x%08x[pbuf_en=%u]\n",
 			   pi_rd(PI_PON_DSC_USAGE_US), (pi_rd(PI_PON_DSC_USAGE_US) >> 31) & 1u,
-			   pi_rd(PI_IP_MSTBASE_US), pi_rd(0x215c), pi_rd(0x20e0),
-			   pi_rd(0x20d8), pi_rd(0x20d8) & 1u);
+			   pi_rd(PI_IP_MSTBASE_US), pi_rd(PI_PON_DSC_CFG_US), pi_rd(PI_DSCRUNOUT_US),
+			   pi_rd(PI_PONIP_CTL_US), pi_rd(PI_PONIP_CTL_US) & 1u);
 		/* usintr: the GPON interrupt latch state — Fable-5 discriminator for "HW-event-latched
 		 * FSM state a write-diff can't see". Stock's RESTING GPON_INTR_MASK(0x0040)=0x22
 		 * (GTC_DS|GTC_US enabled) and its US events fire as GPON_INTR_STS(0x0044) bit5=GTC_US_INTR;
@@ -6049,7 +6055,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * wfqwt bits[19:10]=1, drn bit0=0 (idle). */
 		seq_printf(s, "us_sched: pir64(0x239c)=0x%08x cir64(0x2298)=0x%08x tcont_en(0x23e4)=0x%08x qmap16(0x23e0)=0x%08x wfqtype(0x23f0)=0x%08x wfqwt(0x244c)=0x%08x drn(0x20e4)=0x%08x sch_ctrl(0x2194)=0x%08x[PIR_DROP=%lu]\n",
 			   pi_rd(0x239c), pi_rd(0x2298), pi_rd(0x23e4), pi_rd(0x23e0),
-			   pi_rd(0x23f0), pi_rd(0x244c), pi_rd(0x20e4),
+			   pi_rd(0x23f0), pi_rd(0x244c), pi_rd(PI_DRN_CMD),
 			   pi_rd(0x2194), (pi_rd(0x2194) >> 18) & 1UL);
 		/* ★ SID-64 page-occupancy probe (OLT-INDEPENDENT verify of the descriptor-
 		 * sideband OMCI fix): MAX_PAGE_CNT high-water for SID 64 is NON-ZERO iff an
@@ -6088,7 +6094,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		{
 			u32 n1, pc1;
 			u32 s2q1 = (pi_rd(PI_PON_SID2QID) >> ((GPON_DATA_FLOW % 4) * 7)) & 0x7fu;
-			u32 svl1 = (pi_rd(0x213c) >> GPON_DATA_FLOW) & 1u;
+			u32 svl1 = (pi_rd(PI_PON_SIDVALID) >> GPON_DATA_FLOW) & 1u;
 
 			pi_wr(0x255c, 0x00086000u | (GPON_DATA_FLOW & 0x7fu) | (1u << 7));
 			for (n1 = 0; n1 < 2000 && (pi_rd(0x255c) & (1u << 9)); n1++)

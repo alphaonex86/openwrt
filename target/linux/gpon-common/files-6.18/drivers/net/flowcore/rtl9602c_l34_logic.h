@@ -201,6 +201,23 @@ int l34_l2uc_sts_index(u32 sts);
  * Decoding word3 in the 9602C layout: tx_portmask[28:23] = (1<<2) and
  * tx_dst_stream_id[22:16] = 64.  So the PON port for the GMAC tx_portmask is
  * 2, not 4 (the earlier guess).
+ *
+ * SDK CROSS-CHECK (2026-09-03), so the devmem no longer stands alone: the
+ * vendor 9602C-generation tx_info (rtl86900/romeDriver/re8686_sim.h; the
+ * struct is identical in every SDK copy on this bench) agrees field for
+ * field -- opts2 cputag:31 + efid:19 (stock word2 0x80080000 = cputag|efid);
+ * opts3 extspa[31:29] | tx_portmask[28:23] | tx_dst_stream_id[22:16] |
+ * l34_keep[1] | ptp[0].  keep(25), dislrn(21) and cputag_psel(18) live in
+ * OPTS1 on this generation: stock's OMCI word0 OR of 0x02240000 is exactly
+ * keep|dislrn|cputag_psel (the value the shell long carried as an invented
+ * "segment/org control" -- now TXD0_OMCI_KEEP_DISLRN_PSEL in rtl9602c_eth.c).
+ * The RTL9607C generation (rtl86900/nicDriver/re8686_rtl9607c.h) moved those
+ * fields into opts3 (keep:23, dislrn:21, cputag_psel:20, l34_keep:17,
+ * tx_dst_stream_id[6:0]) and the portmask into opts2[26:16]; rtl9602c_eth.c
+ * carried those SIBLING placements as three separate dead #define blocks
+ * (TXD2_*, TXD3_*, TXD_*) until 2026-09-03 -- deleted, this note is their
+ * record, and the 9607C's own driver is where those values belong if one is
+ * ever written.
  */
 #define GMAC_PON_PORT		2	/* GMAC tx_portmask PON bit (stock = 1<<2 -> word3 0x02400000) */
 #define TXD2_OMCI_CPUTAG	0x80000000u	/* opts2 bit31 cputag */

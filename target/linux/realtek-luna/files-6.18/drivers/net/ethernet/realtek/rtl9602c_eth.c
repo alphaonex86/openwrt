@@ -114,7 +114,7 @@ static unsigned int omci_word2_ovr;
 module_param(omci_word2_ovr, uint, 0644);
 static unsigned int omci_word3_ovr;
 module_param(omci_word3_ovr, uint, 0644);
-static unsigned int omci_minimal;	/* TEST: 1 = LAN-identical desc (no ORG, opts2/3=0) to isolate the GMAC TX halt-after-~3 */
+static unsigned int omci_minimal;	/* TEST: 1 = LAN-identical desc (no word0 keep/dislrn/psel, opts2/3=0) to isolate the GMAC TX halt-after-~3 */
 module_param(omci_minimal, uint, 0644);
 
 /* HW ring for the US-OMCI descriptor ring. This indexes R_TxFDP(h) AND derives
@@ -124,8 +124,9 @@ module_param(omci_minimal, uint, 0644);
  * SPECIAL CASE omci_tx_ring==0: instead of a dedicated ring, enqueue the OMCI
  * frame onto the SAME LAN ring 0 (ep->tx_ring) the normal TX path uses — which
  * is PROVEN to fetch (the host's SSH/LAN traffic flows through it). This ISOLATES
- * whether the corrected OMCI descriptor STEERING alone (word0 org bits, word3
- * one-hot PON_SID + ExtSpa) routes the frame to the PON US-NIC, independent of
+ * whether the corrected OMCI descriptor STEERING alone (word0 keep/dislrn/psel
+ * bits + the rtl9602c_omci_txd_word2/word3() encode) routes the frame to the
+ * PON US-NIC, independent of
  * the unresolved "HW ring 4 won't fetch" problem. The LAN TX path is shared
  * (same ring + same ep->tx_lock + same R_IO_CMD bit0 kick + same LAN reclaim),
  * so normal LAN traffic is undisturbed; if the ring is full the OMCI frame is
@@ -335,22 +336,21 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 #define D_IPCS		BIT(27)	/* TX: insert IPv4 csum */
 
 /*
- * TX descriptor CPU-tag fields (the GMAC tx_info layout, selected by the GMAC
- * CPUtagCR = 0x901eff04). The GMAC reads these descriptor bits and INSERTS the
- * on-wire cpu-tag itself; we send a plain frame. Directed egress requires a
- * NON-ZERO tx_portmask — a zero CPU-netdev mask makes the switch fall back to
- * an empty L2 DA lookup and drop the frame (the "HW emits portmask 0" symptom).
+ * TX cpu-tag DESCRIPTOR path: UNUSED -- we send plain frames (opts2.cputag=0)
+ * and build the on-wire rtl8_4 tag in software (see rtl9602c_eth_xmit).  The
+ * TXD2_/TXD3_ defines that sat here (and two more spellings of the same bits
+ * further down, all three deleted 2026-09-03) were the RTL9607C GENERATION's
+ * tx_info placements (vendor nicDriver/re8686_rtl9607c.h), not this chip's;
+ * the 9602C layout lives ONCE, devmem- and SDK-proven, in rtl9602c_l34_logic.h
+ * (TXD2_OMCI_*, TXD3_9602C_* -- full decode and the cross-chip trap there).
+ * That layout is also consistent with the measured "HW emits portmask 0"
+ * symptom that forced the software tag: opts2[26:16] is vlan/pppoe/efid
+ * fields on this generation, not a portmask.
  */
-#define TXD2_CPUTAG	BIT(31)		/* opts2: descriptor carries cpu-tag fields */
-#define TXD2_PMASK_SHIFT 16		/* opts2: tx_portmask occupies bits 26..16 */
-#define TXD3_KEEP	BIT(23)		/* opts3: switch must not modify the frame */
-#define TXD3_DISLRN	BIT(21)		/* opts3: do not learn the CPU SA */
-#define TXD3_L34_KEEP	BIT(17)		/* opts3: do not L3/L4-filter the injected frame */
-/* Egress port bitmask for CPU->LAN. RTL9602C port map: port 0 = FE LAN (100M),
- * port 1 = GE LAN (1000M), port 2 = PON/fiber, port 3 = CPU. Egress to the two
- * LAN jacks (0,1) only — NOT port 2 (PON, would go to the OLT) and NOT port 3
- * (CPU). The earlier 0x2f targeted PON + a nonexistent port 5. */
-#define TXD_EGRESS_PMASK 0x3
+/* RTL9602C switch port map: port 0 = FE LAN (100M), port 1 = GE LAN (1000M),
+ * port 2 = PON/fiber, port 3 = CPU. CPU->LAN egress must exclude port 2 (PON,
+ * would go to the OLT) and port 3 (CPU). An earlier 0x2f egress mask targeted
+ * PON + a nonexistent port 5. */
 
 /* SoC NIC-DMA bus window: the bootloader ORs 0x20000000 into ring/desc addrs
  * (an artifact of its 1:1 map). Observed to be a NO-OP for TX egress and to
@@ -1158,50 +1158,55 @@ static int rtl9602c_eth_refill(struct rtl9602c_eth *ep, unsigned int idx)
  * builds a zeroed 5-word txInfo on the stack and OR-patches three
  * words, then the NIC-TX layer copies the OMCI PDU into an skb and submits the
  * txInfo, where the ring engine OR-s the descriptor control flags
- * into word0, sets OWN in word2, publishes the ring slot and kicks the per-ring
- * poll doorbell. The descriptor is 5 u32 words at offsets 0/4/8/12/16 = opts1 /
- * addr / opts2 / opts3 / opts4. CONFIRMED from the stock submit path: OWN = bit31 of
- * the word at OFFSET 8 = opts2/word2 (read word at 8, OR in 0x80000000, store back);
- * word0/opts1 (offset 0) carries the org/desc-flag control and is the LAST
- * word copied to the live ring after a sync barrier (a sync, then the store of
- * word0). So OWN lives in opts2 and is set LAST in our build, after the body.
+ * into word0, OR-s 0x80000000 into word2, publishes the ring slot and kicks
+ * the per-ring poll doorbell. The descriptor is 5 u32 words at offsets
+ * 0/4/8/12/16 = opts1 / addr / opts2 / opts3 / opts4. The stock submit path's
+ * OR of 0x80000000 into the word at OFFSET 8 was long read here as "OWN lives
+ * in opts2"; the vendor tx_info decode (opts2 bit31 = cputag) and our own
+ * ring-4 fix agree it sets the CPUTAG bit -- ownership is opts1 bit31 on
+ * EVERY TX ring (see the OWN note at the dedicated-ring submit further down).
+ * word0/opts1 (offset 0) carries the descriptor-flag control and is the LAST
+ * word copied to the live ring after a sync barrier (a sync, then the store
+ * of word0) -- so ownership publishes last, which our build matches.
  * Word layout (32-bit words; word0 published last):
  *
- *   word0 (opts1): segment/org control. Stock OR-s 0x02240000 (bits 25/21/18) on
+ *   word0 (opts1): control flags. Stock OR-s 0x02240000 = keep|dislrn|
+ *                  cputag_psel (bits 25/21/18) on
  *                  top of the FS/LS/len that the submit path fills; the submit
  *                  path additionally OR-s the descriptor flags 0xb8800000 |
  *                  0x40000000 and re-OR-s (word0 & 0x077e0000).
  *   word2/word3 = the stock GMAC tx_info (opts2->word2, opts3->word3, copied
- *   VERBATIM onto the ring; the GMAC tx_info bitfields). Stock
- *   OMCI-TX directs the OMCI PDU CPU->PON like this:
- *     word2 (opts2): cputag(bit31) | tx_portmask[26:16] = (1 << ponPort).
- *     word3 (opts3): keep(23) | dislrn(21) | cputag_psel(20) | l34_keep(17) |
- *                    tx_dst_stream_id[6:0] = OMCC SID (=64, a PLAIN 7-bit value,
- *                    NOT one-hot). cputag_psel = PORT-SELECT egress: the switch
- *                    egresses DIRECTLY to the masked port with NO L2 DA lookup,
- *                    bypassing VLAN/PISO/flooding. keep/l34_keep/dislrn stop the
- *                    switch modifying / L3-L4-filtering / SA-learning the frame.
- *                    extspa is NOT set for OMCI.
- *   ⛔ The OLD encoding was FABRICATED and never reached the US-NIC: word2
- *   0x80080000 set bit19, which lands in tx_portmask[26:16] as value 8 = the CPU
- *   port (3) -> the switch bounced the OMCI back to the CPU and flooded it to LAN
- *   (the LAN wedge); word3 used a PON_SID one-hot + ExtSpa with cputag_psel=0 and
- *   stream_id=0, so no port-select and wrong SID. rxsid=0, ustx=0, no egress.
+ *   VERBATIM onto the ring; the GMAC tx_info bitfields). Ground truth (devmem
+ *   2026-06-11) and the 9602C encode live in rtl9602c_l34_logic.h
+ *   (rtl9602c_omci_txd_word2/word3): word2 = 0x80080000 = cputag(31)|efid(19);
+ *   word3 = 0x02400000 = tx_portmask[28:23] = (1 << PON port 2) |
+ *   tx_dst_stream_id[22:16] = OMCC SID 64 (a PLAIN value, NOT one-hot).
+ *   Field semantics (family-true, both generations' headers agree):
+ *   cputag_psel = PORT-SELECT egress, the switch egresses DIRECTLY to the
+ *   masked port with NO L2 DA lookup, bypassing VLAN/PISO/flooding; keep /
+ *   dislrn stop the switch modifying / SA-learning the frame; l34_keep skips
+ *   the L3/L4 filter. extspa is NOT set for OMCI.
+ *   ⛔ A paragraph here used to read stock's words through the RTL9607C
+ *   generation's placements (tx_portmask in word2[26:16]; keep/dislrn/psel/
+ *   l34_keep at word3 bits 23/21/20/17; SID at word3[6:0]) and called stock's
+ *   own word2 0x80080000 a fabrication that bounced OMCI to the CPU. The
+ *   vendor 9602C tx_info (romeDriver/re8686_sim.h) refutes the DECODE, not
+ *   the value: word2 bit19 is efid here. The real old-encoding defect stands
+ *   and is recorded at the flowcore home: SID written at word3[6:0] lands in
+ *   reserved bits, so rxsid stayed 0, ustx=0, no US egress.
  *   word1, word4: left zero (stock leaves them 0 from the initial memset).
  */
-#define TXD0_OMCI_ORG		0x02240000u	/* word0 segment/org control bits */
+/* word0/opts1: keep(25) | dislrn(21) | cputag_psel(18) -- stock's OMCI word0
+ * OR, decoded by the vendor 9602C tx_info opts1 (romeDriver/re8686_sim.h).
+ * On this generation those three fields live in OPTS1, not word3; this value
+ * carried the invented name TXD0_OMCI_ORG ("segment/org control bits") until
+ * the decode (2026-09-03). */
+#define TXD0_OMCI_KEEP_DISLRN_PSEL 0x02240000u
 /* TXD2_OMCI_CPUTAG / TXD2_OMCI_EFID: moved to rtl9602c_l34_logic.h with
  * the hoisted steering encode (rtl9602c_omci_txd_word2). */
-#define TXD2_TX_PMASK(p)	(((p) & 0x7FFu) << 16)	/* opts2[26:16] tx_portmask */
-/* word0 descriptor-flag ORs applied by the ring-submit path. */
+/* word0 descriptor-flag ORs applied by the ring-submit path (it also re-ORs
+ * word0 & 0x077e0000, see above). */
 #define TXD0_DESC_FLAGS		(0xb8800000u | 0x40000000u)	/* = 0xf8800000 */
-#define TXD0_DESC_KEEP_MASK	0x077e0000u	/* word0 bits re-OR'd by submit */
-/* word3 (opts3) stock OMCI directed-egress fields. */
-#define TXD3_OMCI_KEEP		0x00800000u	/* opts3 bit23 keep (don't modify frame) */
-#define TXD3_OMCI_DISLRN	0x00200000u	/* opts3 bit21 dislrn (don't learn CPU SA) */
-#define TXD3_OMCI_PSEL		0x00100000u	/* opts3 bit20 cputag_psel (port-select egress) */
-#define TXD3_OMCI_L34KEEP	0x00020000u	/* opts3 bit17 l34_keep (no L3/L4 filter) */
-#define TXD3_DST_SID(s)		((s) & 0x7Fu)	/* opts3[6:0] tx_dst_stream_id (plain value) */
 /* The ★ 9602C opts3/word3 layout (the 9602C-vs-9607C SID-placement trap),
  * its live-stock GROUND TRUTH (word2=0x80080000 word3=0x02400000, devmem
  * 2026-06-11), and GMAC_PON_PORT / TXD3_9602C_PMASK / TXD3_9602C_DST_SID /
@@ -1281,7 +1286,8 @@ static void rtl9602c_omci_finalize(u8 *msg)
 }
 
 /* Reclaim completed descriptors on the dedicated US-OMCI ring. Called under
- * tx_lock. The ring engine clears OWN (word2 bit31) once it has consumed the
+ * tx_lock. The ring engine clears OWN (opts1 bit31 -- ownership is opts1 on
+ * every TX ring, see the ring-4 OWN note) once it has consumed the
  * descriptor; until then the slot is HW-owned and must not be reused. */
 static void rtl9602c_eth_omci_reclaim(struct rtl9602c_eth *ep)
 {
@@ -1327,16 +1333,17 @@ static void rtl9602c_eth_tx_fetch(struct rtl9602c_eth *ep)
  * Shared-ring-0 US-OMCI transmit (omci_tx_ring==0 test path).
  *
  * Enqueue the OMCI frame onto the SAME LAN ring 0 (ep->tx_ring) the normal TX
- * path uses, but with the OMCI descriptor STEERING (word0 org bits + word3
- * one-hot PON_SID / ExtSpa) instead of a plain LAN descriptor. HW ring 0 is the
+ * path uses, but with the OMCI descriptor STEERING (word0 keep/dislrn/psel
+ * bits + the word2/word3 encode from rtl9602c_omci_txd_word2/word3()) instead
+ * of a plain LAN descriptor. HW ring 0 is the
  * proven-fetching ring (the host's SSH/LAN traffic flows through it), so this
  * isolates whether the corrected OMCI steering alone routes the frame to the PON
  * US-NIC — independent of the unresolved "HW ring 4 won't fetch" problem.
  *
  * Shares the LAN ring + ep->tx_lock + the bit0 doorbell + the LAN tx_reclaim, so
- * normal LAN traffic is undisturbed. The descriptor matches the LAN-ring layout
- * (OWN lives in opts1/word0 on this ring and is published LAST, exactly like
- * rtl9602c_eth_xmit) — NOT the dedicated-ring layout (OWN in opts2). If the ring
+ * normal LAN traffic is undisturbed. The descriptor publishes OWN in
+ * opts1/word0 LAST, exactly like rtl9602c_eth_xmit (and, per the ring-4 OWN
+ * note, like every TX ring on this GMAC). If the ring
  * is full the OMCI frame is DROPPED (never blocks LAN traffic). Returns 0 on
  * success. Runs in poll-timer softirq context -> GFP_ATOMIC.
  */
@@ -1425,7 +1432,7 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 
 	/*
 	 * word0 (opts1) = FS|LS|len|0x02240000 (keep|dislrn|cputag_psel), OWN
-	 * added at publish. The 0x02240000 org-control bits — especially
+	 * added at publish. The 0x02240000 keep/dislrn/psel bits — especially
 	 * cputag_psel (port-SELECT egress / direct-TX) — are what make the GMAC
 	 * direct-transmit the cpu-tagged frame to the US-NIC, BYPASSING the L2
 	 * switch fabric (verified: stock's switch port-2 TX MIB stays 0 while
@@ -1438,13 +1445,13 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 	 * UNCONDITIONALLY OR's 0xb8800000 into opts1 for EVERY frame, OMCI included, so
 	 * the stock OMCI submit word0 = 0xbaa40030 — the GMAC GENERATES + APPENDS the
 	 * Ethernet FCS. The old "stock omits TxCRC" belief was a MISREAD of the
-	 * post-consume readback (0x30000030 has crc/ipcs/own/org already cleared by the
+	 * post-consume readback (0x30000030 has crc/ipcs/own and keep/dislrn/psel already cleared by the
 	 * GMAC), mistaken for the submit value. Without D_TXCRC the 48B OMCI PDU goes out
 	 * with NO valid FCS and the US-NIC/fabric MAC silently drops it pre-MAC
 	 * (RX_OK=ERR=MISS=0, rxsid[4]=0 — the exact US-OMCI symptom). The LAN TX path
 	 * sets D_TXCRC and works; only this OMCI path omitted it.
 	 */
-	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_ORG;
+	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_KEEP_DISLRN_PSEL;
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
 
@@ -1457,7 +1464,7 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 	ep->tx_ring[i].opts3 = rtl9602c_omci_txd_word3(omci_word3_ovr,
 						       RTL9602C_OMCC_SID);
 	ep->tx_ring[i].opts4 = 0;
-	if (omci_minimal) {	/* TEST: descriptor IDENTICAL to the draining LAN path (no ORG, no cpu-tag) */
+	if (omci_minimal) {	/* TEST: descriptor IDENTICAL to the draining LAN path (no keep/dislrn/psel, no cpu-tag) */
 		word0 = D_FS | D_LS | D_TXCRC | (len & TXD_LEN_MASK);
 		if (i == tx_eor_slot(ep))
 			word0 |= D_EOR;
@@ -1476,10 +1483,10 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 
 	if (ep->dbg_omci_tx < 30) {	/* first few only, so serial isn't flooded */
 		/* PRIME PROBE: did the GMAC INSERT the cpu-tag on the GMAC->switch wire?
-		 * The GMAC CONSUMES the word0 org bits (0x02240000 keep/dislrn/psel) while
+		 * The GMAC CONSUMES the word0 keep/dislrn/psel bits (0x02240000) while
 		 * inserting the cpu-tag, so the post-TX descriptor reads back with them
-		 * CLEARED: submit 0xb2240030 -> post-TX 0x30000030 (OWN+org cleared) = cpu-tag
-		 * INSERTED. If it reads 0x32240030 (OWN cleared but org 0x02240000 REMAINS),
+		 * CLEARED: submit 0xb2240030 -> post-TX 0x30000030 (OWN + keep/dislrn/psel cleared) = cpu-tag
+		 * INSERTED. If it reads 0x32240030 (OWN cleared but 0x02240000 REMAINS),
 		 * the GMAC did NOT process the cpu-tag -> the switch sees a plain frame ->
 		 * L2 lookup -> TRAP2CPU (our measured p2-tx=0 / frame-trapped symptom). */
 		u32 post_w0;
@@ -1563,7 +1570,7 @@ static netdev_tx_t rtl9602c_eth_wan_xmit(struct sk_buff *skb, struct net_device 
 	ep->tx_buf_dma[i] = da;
 	ep->tx_buf_len[i] = len;
 	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
-	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_ORG;
+	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_KEEP_DISLRN_PSEL;
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
 	ep->tx_ring[i].opts2 = rtl9602c_omci_txd_word2(0);	/* stock cputag|efid */
@@ -1698,7 +1705,7 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 	 * the FCS; omitting it dropped the OMCI pre-MAC (rxsid=0). See the ring-0 path.
 	 */
 	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK);
-	word0 |= TXD0_OMCI_ORG;
+	word0 |= TXD0_OMCI_KEEP_DISLRN_PSEL;
 	/* Same fix as the ring-0 path: DO NOT OR TXD0_DESC_FLAGS (0xf8800000) — it sets
 	 * D_EOR (bit30) on EVERY descriptor, so the GMAC treats each as end-of-ring and
 	 * never drains the ring (OWN stuck, dirty stalls). D_EOR belongs ONLY on the wrap
@@ -2553,7 +2560,7 @@ static int rtl9602c_eth_alloc_rings(struct rtl9602c_eth *ep)
 		ep->tx_skb[i] = NULL;
 	}
 	for (i = 0; i < OTX_RING_SIZE; i++) {
-		/* EOR (wrap) in word0 on the last slot; OWN (word2 bit31) clear so
+		/* EOR (wrap) in word0 on the last slot; OWN (opts1 bit31) clear so
 		 * the slot starts CPU-owned (idle) until the first OMCI submit. */
 		ep->otx_ring[i].opts1 = (i == OTX_RING_SIZE - 1) ? D_EOR : 0;
 		ep->otx_ring[i].opts2 = 0;
@@ -3273,23 +3280,19 @@ static int rtl9602c_eth_stop(struct net_device *ndev)
 	return 0;
 }
 
-/* CPU-directed TX (GMAC tx_info): opts2 cputag[31] | tx_portmask[26:16];
- * opts3 keep[23] | dislrn[21] | l34_keep[17]. Directs CPU-originated frames out
- * the physical LAN ports (keep/l34_keep stop the switch filtering them). */
-#define TXD_CPUTAG	BIT(31)
-#define TXD_PORTMASK(m)	(((m) & 0x7ff) << 16)
-#define TXD_KEEP	BIT(23)
-#define TXD_DISLRN	BIT(21)
-#define TXD_L34_KEEP	BIT(17)
-/* GMAC tx_portmask: user/LAN ports are 0..6; CPU ports are 7,9,10. 0x2f =
- * ports 0,1,2,3,5 = an "all user ports except CPU" broadcast-fallback mask.
- * Egressing to all user ports is harmless for ports without a linked PHY. */
-#define TX_LAN_PORTS	0x2f
+/* CPU-directed TX: the cpu-tag DESCRIPTOR route is unused, and the third
+ * spelling of its bits that sat here (TXD_CPUTAG/TXD_PORTMASK/TXD_KEEP/
+ * TXD_DISLRN/TXD_L34_KEEP, plus a "user ports 0..6, CPU 7,9,10" port-numbering
+ * note) was the RTL9607C generation's, not this chip's -- see the TXD block
+ * near the top of this file and rtl9602c_l34_logic.h. What runs is the
+ * software tag below. */
 /* Software DSA-style cpu-tag (mainline net/dsa/tag_rtl8_4.c "rtl8_4" 0x8899
  * format, 8 bytes). The GMAC's HARDWARE cpu-tag insertion emits a ZERO egress
  * portmask on this 9602C silicon (observed: tag word[3]=0 regardless of
- * opts2.tx_portmask), so we BUILD the tag in software and send a plain frame
- * (opts2.cputag=0). The switch's TAG_AWARE parser then reads OUR portmask.
+ * opts2.tx_portmask -- consistent with the vendor 9602C tx_info, where
+ * opts2[26:16] is not a portmask at all), so we BUILD the tag in software and
+ * send a plain frame (opts2.cputag=0). The switch's TAG_AWARE parser then
+ * reads OUR portmask.
  * Layout: word0=0x8899 word1=proto(0x04)|reason(0) word2=LEARN_DIS
  * word3=forwarding port mask (RX field, GENMASK 10:0). */
 /* RTL8_4_TAG_LEN moved earlier (near the OMCI defines) so the OMCI ring-0 path can use it. */

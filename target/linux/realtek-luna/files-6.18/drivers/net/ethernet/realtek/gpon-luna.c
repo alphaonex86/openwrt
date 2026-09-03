@@ -1468,6 +1468,15 @@ static u32  gpon_hwio_rd(void *ctx, u32 off)		{ return gpon_rd(off); }
 static void gpon_hwio_wr(void *ctx, u32 off, u32 v)	{ gpon_wr(off, v); }
 static const struct hwio gpon_io = { .rd = gpon_hwio_rd, .wr = gpon_hwio_wr };
 
+/* The shell's sleep for the shared indirect-CAM helper (regtable.h) -- the
+ * r960_delay_us idiom from luna_ponmac.c: the flowcore tier cannot call
+ * udelay() itself, time is an explicit input there so the same function runs
+ * on x86 under the write-stream differential. */
+static void gpon_cam_delay_us(unsigned int us)
+{
+	udelay(us);
+}
+
 /* Read-modify-write the bit-field [msb:lsb] of the SWCORE register at off. */
 static void sw_field(u32 off, unsigned int msb, unsigned int lsb, u32 val)
 {
@@ -5434,6 +5443,16 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 		}
 	}
 
+	/* ★ THE TIMEOUT USED TO BE SWALLOWED HERE, and it is the same shape as
+	 * the multicast DS-CAM defect repaired on 2026-09-02: the poll ran and
+	 * NOTHING looked at whether it completed, so a CAM that never accepted
+	 * the park left a stale entry able to burst into a reassigned grant slot
+	 * -- the churn-lock this whole function exists to prevent -- and said
+	 * nothing.  Counted and reported ONCE, not per T-CONT: a fully wedged
+	 * CAM would otherwise emit 31 lines and bury the boot log, which this
+	 * tree has already paid for. */
+	unsigned int stuck = 0, first_stuck = 0;
+
 	for (t = 0; t < 32; t++) {
 		int i;
 
@@ -5444,7 +5463,15 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 		gpon_wr(GPON_GTC_DS_ALLOC_IND, (1u << 8) | (t & 0x1f) | BIT(15));	/* REQ=1 -> trigger */
 		for (i = 0; i < 1000 && !(gpon_rd(GPON_GTC_DS_ALLOC_IND) & BIT(14)); i++)
 			udelay(1);				/* poll OP_COMPL */
+		if (i == 1000) {
+			if (!stuck)
+				first_stuck = t;
+			stuck++;
+		}
 	}
+	if (stuck)
+		pr_err("rtl9602c-gpon: alloc-CAM park did NOT complete on %u of 31 T-CONT(s) (first t=%u) -- stale entries may still match a reassigned Alloc-ID\n",
+		       stuck, first_stuck);
 }
 
 /* DS-PIPELINE STAGE-A: per-flow de-encapsulated GEM frame count (indirect):
@@ -6706,26 +6733,24 @@ u16 gpon_omcc_gem(void)
 
 static int gpon_install_omcc(u16 gem)
 {
-	int i;
+	int rc;
 
 	gpon_omcc_gem_port = gem & 0xfff;
 
 	/* Wipe stale/garbage CAM entries first so none shadow the OMCC gem at lookup. */
 	gpon_ds_cam_clear_all();
 
-	/* DS GEM-port CAM: map gem -> flow 64, mark isOMCI. */
-	gpon_wr(GPON_GTC_DS_PORT_IND, DS_PORT_OP_WRITE | (GPON_OMCC_FLOW & 0x7f));
-	gpon_wr(GPON_GTC_DS_PORT_WR, gem & 0xfff);
-	gpon_wr(GPON_GTC_DS_PORT_IND,
-		DS_PORT_OP_WRITE | (GPON_OMCC_FLOW & 0x7f) | DS_PORT_OP_REQ);
-	for (i = 0; i < 1000; i++) {		/* bounded; timeout != success */
-		if (gpon_rd(GPON_GTC_DS_PORT_IND) & DS_PORT_OP_COMPL)
-			break;
-		udelay(1);
-	}
-	if (i == 1000) {
+	/* DS GEM-port CAM: map gem -> flow 64, mark isOMCI.  One indirect-CAM
+	 * transaction via the shared gpon_gtc_ds_port_write() reading
+	 * luna_gpon_chip (regtable.h) -- converted 2026-09-03 with the data,
+	 * mcast and T-CONT binds below; same addresses, values, write and
+	 * read counts as the hand-spelled form, proven by the x86
+	 * write-stream differential (dev/rtl9607c-test/gpon_regtable_diff_test). */
+	rc = gpon_gtc_ds_port_write(&gpon_io, &luna_gpon_chip.gtc,
+				    GPON_OMCC_FLOW, gem, gpon_cam_delay_us);
+	if (rc < 0) {
 		pr_err("rtl9602c-gpon: OMCC DS GEM install timeout\n");
-		return -ETIMEDOUT;
+		return rc;
 	}
 	gpon_wr(GPON_GTC_DS_TRAFFIC_CFG + GPON_OMCC_FLOW * DS_TRAFFIC_CFG_STRIDE,
 		DS_TRAFFIC_IS_OMCI);
@@ -6879,7 +6904,7 @@ static int gpon_install_omcc(u16 gem)
 	}
 
 	pr_info("rtl9602c-gpon: OMCC installed gem=%u flow=%u (compl %d)\n",
-		gem, GPON_OMCC_FLOW, i);
+		gem, GPON_OMCC_FLOW, rc);
 	return 0;
 }
 
@@ -6942,26 +6967,22 @@ void gpon_omci_note_gem_create(u16 port_id)
 
 int gpon_install_data_gem(void)
 {
-	int i;
+	int rc;
 
 	if (gpon_data_installed)
 		return 0;
 	if (!gpon_omcc_installed)	/* need the OMCC GEM cfg (0x59 pass, qid 64) up first */
 		return -EAGAIN;
 
-	/* DS GEM-port CAM: the OLT's gem -> flow 1 (same indirect op as the OMCC CAM). */
-	gpon_wr(GPON_GTC_DS_PORT_IND, DS_PORT_OP_WRITE | (GPON_DATA_FLOW & 0x7f));
-	gpon_wr(GPON_GTC_DS_PORT_WR, gpon_data_gem_port & 0xfff);
-	gpon_wr(GPON_GTC_DS_PORT_IND,
-		DS_PORT_OP_WRITE | (GPON_DATA_FLOW & 0x7f) | DS_PORT_OP_REQ);
-	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(GPON_GTC_DS_PORT_IND) & DS_PORT_OP_COMPL)
-			break;
-		udelay(1);
-	}
-	if (i == 1000) {
+	/* DS GEM-port CAM: the OLT's gem -> flow 1 (same indirect op as the
+	 * OMCC CAM, and since 2026-09-03 the same shared gpon_gtc_ds_port_write
+	 * reading luna_gpon_chip). */
+	rc = gpon_gtc_ds_port_write(&gpon_io, &luna_gpon_chip.gtc,
+				    GPON_DATA_FLOW, gpon_data_gem_port,
+				    gpon_cam_delay_us);
+	if (rc < 0) {
 		pr_err("rtl9602c-gpon: DATA GEM DS install timeout\n");
-		return -ETIMEDOUT;
+		return rc;
 	}
 	/* DATA flow DS routing = 0x2 (BIT1). ★ORACLE-CONFIRMED 2026-06-15: a live working stock
 	 * RTL9602C (ttyUSB3) has DS_TRAFFIC_CFG[data flows] = 0x2 and 0x3, NOT 0; flow64(OMCI)=0x4.
@@ -6999,26 +7020,21 @@ int gpon_install_data_gem(void)
 
 	/* Multicast/broadcast GEM (4095) -> flow 2, BRIDGED, DS-only. Broadcast DS (e.g. the
 	 * DHCP OFFER) may ride this GEM rather than the unicast data GEM; without a CAM entry
-	 * the GTC drops it. de-encap -> switch port-2 -> CPU -> gpon0 (same demux as flow 1). */
-	gpon_wr(GPON_GTC_DS_PORT_IND, DS_PORT_OP_WRITE | (GPON_MCAST_FLOW & 0x7f));
-	gpon_wr(GPON_GTC_DS_PORT_WR, GPON_MCAST_GEM & 0xfff);
-	gpon_wr(GPON_GTC_DS_PORT_IND,
-		DS_PORT_OP_WRITE | (GPON_MCAST_FLOW & 0x7f) | DS_PORT_OP_REQ);
-	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(GPON_GTC_DS_PORT_IND) & DS_PORT_OP_COMPL)
-			break;
-		udelay(1);
-	}
-	/* Same posture as the unicast CAM write above, and it was MISSING here:
-	 * this poll had no completion check at all, so a timed-out mcast CAM fell
-	 * straight through to gpon_data_installed = true.  The comment above says
-	 * what that costs -- without the entry the GTC DROPS the broadcast DS, so
-	 * the DHCP OFFER never arrives -- and the install reported success while
-	 * it happened.  Identical to the unicast branch, so the working path is
-	 * unchanged; only a real timeout now says so. */
-	if (i == 1000) {
+	 * the GTC drops it. de-encap -> switch port-2 -> CPU -> gpon0 (same demux as flow 1).
+	 *
+	 * ⚠ THIS copy is why the four CAM writes now share ONE helper: until
+	 * 2026-09-03 it had NO completion check at all, so a timed-out mcast
+	 * CAM fell straight through to gpon_data_installed = true while the
+	 * GTC dropped the broadcast DS -- the DHCP OFFER -- and the install
+	 * reported success.  The check was first patched in by hand; the
+	 * shared gpon_gtc_ds_port_write() is what stops the divergence
+	 * recurring: a timeout is not success, at every site, by construction. */
+	rc = gpon_gtc_ds_port_write(&gpon_io, &luna_gpon_chip.gtc,
+				    GPON_MCAST_FLOW, GPON_MCAST_GEM,
+				    gpon_cam_delay_us);
+	if (rc < 0) {
 		pr_err("rtl9602c-gpon: MCAST GEM DS install timeout\n");
-		return -ETIMEDOUT;
+		return rc;
 	}
 	/* MCAST/broadcast flow DS routing = 0x3 (BIT1|BIT0) — oracle's other data flow value;
 	 * BIT0 = broadcast/flood variant so DHCP-broadcast + ARP DS also drain to the NIC. */
@@ -7117,20 +7133,17 @@ int gpon_install_data_gem(void)
  */
 static int gpon_install_tcont(u8 tcont, u16 alloc)
 {
-	int i;
+	int rc;
 
-	gpon_wr(GPON_GTC_DS_ALLOC_IND, DS_PORT_OP_WRITE | (tcont & 0x1f));
-	gpon_wr(GPON_GTC_DS_ALLOC_WR, alloc & 0xfff);
-	gpon_wr(GPON_GTC_DS_ALLOC_IND,
-		DS_PORT_OP_WRITE | (tcont & 0x1f) | DS_PORT_OP_REQ);
-	for (i = 0; i < 1000; i++) {		/* bounded; timeout != success */
-		if (gpon_rd(GPON_GTC_DS_ALLOC_IND) & DS_PORT_OP_COMPL)
-			break;
-		udelay(1);
-	}
-	if (i == 1000) {
+	/* The alloc CAM's OWN registers and 5-bit index mask come from
+	 * luna_gpon_chip; the transaction is the same shared helper as the
+	 * three DS GEM-port binds (rc = the poll iteration COMPL was seen at,
+	 * logged below as before). */
+	rc = gpon_gtc_ds_alloc_write(&gpon_io, &luna_gpon_chip.gtc, tcont,
+				     alloc, gpon_cam_delay_us);
+	if (rc < 0) {
 		pr_err("rtl9602c-gpon: T-CONT alloc bind timeout\n");
-		return -ETIMEDOUT;
+		return rc;
 	}
 
 	/* PON-MAC US scheduler activation — the half of the working firmware's scheduler queue-add our
@@ -7253,7 +7266,7 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 	 * init → ONU-ID → EQD → Configure_Port-ID (GEM map) → re-latch. */
 
 	pr_info("rtl9602c-gpon: T-CONT %u <- alloc 0x%x bound (compl %d)\n",
-		tcont, alloc, i);
+		tcont, alloc, rc);
 	return 0;
 }
 

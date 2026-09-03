@@ -214,7 +214,9 @@ static inline u16 cg_ddm_cdbm_to_omci(s32 cdbm)
 		cdbm = CG_DDM_CDBM_MIN;
 	else if (cdbm > CG_DDM_CDBM_MAX)
 		cdbm = CG_DDM_CDBM_MAX;
-	return (u16)(s16)(cdbm * 5);
+	/* the +-60 dBm clamp above is THIS family's reporting policy; the unit
+	 * conversion is everyone's, so it is named in the core. */
+	return (u16)gpon_ddm_cdbm_to_anig(cdbm);
 }
 
 /* Human-readable reason a sample is unusable.  Never returns NULL. */

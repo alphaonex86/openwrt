@@ -166,7 +166,8 @@
 #define   SDS_MODE_GPON		0x08u
 #define   SDS_FIB_SDS_SDET	BIT(17)		/* SDS-level optical sig-detect */
 
-#define I2C_CONFIG0		0x23004		/* bus0; stride 0x20 per bus   */
+#define I2C_CONFIG0		0x23004		/* bus0, +I2C_BUS_STRIDE/bus   */
+#define   I2C_BUS_STRIDE	0x20u		/* CONFIG/IND block, per bus   */
 #define   I2C_CFG_DEV_ID_LSB	14
 #define   I2C_CFG_AW_LSB	12
 #define   I2C_CFG_DW_LSB	10

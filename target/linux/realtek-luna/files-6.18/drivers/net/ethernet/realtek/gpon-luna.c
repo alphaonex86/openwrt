@@ -1807,25 +1807,30 @@ static void ddm_probe_9607c(void)
 /* Read one byte from (bus, slave, reg); *cmd_out = raw I2C_IND_CMD (NACK bit3). */
 static int i2c_rd_bus(int bus, u8 slave, u8 reg, u32 *cmd_out)
 {
-	/* Per-bus stride off the chip's OWN indirect block. These were the four
-	 * 9607C literals repeated a third time; the table is the single place
-	 * that knows the +4, so this scanner cannot disagree with the read and
-	 * write paths above. */
-	u32 cfg_off = I2C_CONFIG0 + bus * 0x20u;
-	u32 ind_adr = I2C_IND_ADR + bus * 0x20u;
-	u32 ind_cmd = I2C_IND_CMD + bus * 0x20u;
-	u32 ind_rd  = I2C_IND_RD  + bus * 0x20u;
+	/* Per-bus stride off the chip's OWN indirect block. Every constant here
+	 * is the header's, not a second spelling of it: this scanner and the
+	 * read/write paths above cannot drift apart. The pad-mux comes from the
+	 * chip table rather than the 9607C literal -- identical on this chip
+	 * (io_mode_en 0x23014, i2c_en_bus0 13), but correct by construction
+	 * instead of correct because the only call site happens to be guarded. */
+	u32 cfg_off = I2C_CONFIG0 + bus * I2C_BUS_STRIDE;
+	u32 ind_adr = I2C_IND_ADR + bus * I2C_BUS_STRIDE;
+	u32 ind_cmd = I2C_IND_CMD + bus * I2C_BUS_STRIDE;
+	u32 ind_rd  = I2C_IND_RD  + bus * I2C_BUS_STRIDE;
 	int i, ret = -ETIMEDOUT;
 	u32 cfg, cmd = 0;
 
-	sw_field(SW_IO_MODE_EN_9607C, 13 + bus, 13 + bus, 1);	/* I2C_EN[13+bus] */
+	sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0 + bus, IO_I2C_EN_BUS0 + bus, 1);
 	cfg = sw_rd(cfg_off);
-	cfg &= ~((0x7fu << 14) | (0x3u << 12) | (0x3u << 10) | 0x3ffu);
-	cfg |= ((u32)(slave & 0x7f) << 14) | 0x270u;		/* slave + ~100kHz */
+	cfg &= ~((((1u << 7) - 1) << I2C_CFG_DEV_ID_LSB) |
+		 (0x3u << I2C_CFG_AW_LSB) | (0x3u << I2C_CFG_DW_LSB) |
+		 (0x3ffu << I2C_CFG_CLKDIV_LSB));
+	cfg |= ((u32)(slave & 0x7f) << I2C_CFG_DEV_ID_LSB) |
+	       (I2C_CLKDIV_100K << I2C_CFG_CLKDIV_LSB);
 	sw_wr(cfg_off, cfg);
 	sw_wr(ind_adr, reg);
 	sw_wr(ind_cmd, I2C_CMD_EN);				/* read */
-	for (i = 0; i < 1000; i++) {
+	for (i = 0; i < I2C_BUSY_POLL_MAX; i++) {
 		cmd = sw_rd(ind_cmd);
 		if (!(cmd & I2C_CMD_BUSY)) {
 			ret = (cmd & I2C_CMD_NACK) ? -EIO :

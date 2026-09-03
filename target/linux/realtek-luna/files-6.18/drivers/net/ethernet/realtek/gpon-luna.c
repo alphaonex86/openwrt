@@ -2487,11 +2487,11 @@ MODULE_PARM_DESC(bosa_rx_seq,
 static void __init bosa_rx_init_seq(void)
 {
 	/* analog front end: LDO, output polarity/swing, offset cancel */
-	bosa_set_field(0x229, 0x30, 2);
+	bosa_set_field(BOSA_REG_W41, 0x30, 2);
 	bosa_set_bit(0x22a, 3, 0);
 	bosa_set_field(0x22a, 0x07, 4);
-	bosa_set_field(0x229, 0xc0, 0);
-	bosa_set_bit(0x229, 3, 0);
+	bosa_set_field(BOSA_REG_W41, 0xc0, 0);
+	bosa_set_bit(BOSA_REG_W41, 3, 0);
 	bosa_set_bit(0x27b, 2, 0);
 	bosa_set_bit(0x22b, 7, 0);
 
@@ -2507,9 +2507,9 @@ static void __init bosa_rx_init_seq(void)
 						 * snapshot carries 0x27 */
 	bosa_set_field(0x228, 0xc0, 0);		/* rxlosChopperFreq */
 	bosa_set_field(0x228, 0x30, 0);		/* rxlosSampleSel   */
-	bosa_set_bit(0x229, 0, 0);		/* rxlosChopperEn   */
-	bosa_set_bit(0x229, 2, 0);		/* rxlosLaMagComp   */
-	bosa_set_bit(0x229, 1, 0);		/* rxlosBufAutozero */
+	bosa_set_bit(BOSA_REG_W41, 0, 0);		/* rxlosChopperEn   */
+	bosa_set_bit(BOSA_REG_W41, 2, 0);		/* rxlosLaMagComp   */
+	bosa_set_bit(BOSA_REG_W41, 1, 0);		/* rxlosBufAutozero */
 	bosa_set_bit(0x231, 1, 0);		/* rxlosTestMode    */
 	bosa_set_bit(0x231, 0, 0);		/* rxlosAssertSel   */
 	bosa_set_field(0x257, 0xc0, 0);		/* rxlosDebounceSel */
@@ -2521,11 +2521,11 @@ static void __init bosa_rx_init_seq(void)
 	/* 0x256 txsdFaultTimer is skipped on purpose -- see the note above */
 
 	/* pin control: SD out on, LOS pin off */
-	bosa_set_bit(0x254, 7, 1);		/* txSdPinEn  */
+	bosa_set_bit(BOSA_REG_CONTROL2, 7, 1);		/* txSdPinEn  */
 	bosa_set_bit(0x3c1, 7, 1);
 	bosa_set_bit(0x3c1, 5, 1);
-	bosa_set_field(0x254, 0x03, 0);		/* txdisCtrl  */
-	bosa_set_bit(0x254, 6, 0);		/* rxlosPinEn */
+	bosa_set_field(BOSA_REG_CONTROL2, 0x03, 0);		/* txdisCtrl  */
+	bosa_set_bit(BOSA_REG_CONTROL2, 6, 0);		/* rxlosPinEn */
 	bosa_set_bit(0x281, 0, 1);
 	bosa_set_bit(0x257, 0, 0);
 	bosa_set_bit(0x27b, 4, 1);
@@ -2957,12 +2957,12 @@ static u32 bosa_stat_ticks;		/* heartbeat counter for the live status log */
  */
 static void bosa_fault_rearm(void)
 {
-	bosa_set_bit(0x254, 2, 1);		/* CONTROL2 TX_POW_CTL: re-enable TX drv */
-	bosa_set_bit(0x254, 3, 1);		/* CONTROL2 ENLD_L: re-enable laser-diode */
+	bosa_set_bit(BOSA_REG_CONTROL2, 2, 1);		/* CONTROL2 TX_POW_CTL: re-enable TX drv */
+	bosa_set_bit(BOSA_REG_CONTROL2, 3, 1);		/* CONTROL2 ENLD_L: re-enable laser-diode */
 	bosa_set_bit(0x255, 1, 1);		/* CONTROL3 release strobe: assert */
 	udelay(500);				/* 500us release-strobe settle */
 	bosa_set_bit(0x255, 1, 0);		/* de-assert: 1->500us->0 clears latch */
-	bosa_set_field(0x254, 0x80, 0x00);	/* clear soft TX-disable (bit7) -> emit */
+	bosa_set_field(BOSA_REG_CONTROL2, 0x80, 0x00);	/* clear soft TX-disable (bit7) -> emit */
 }
 
 /*
@@ -3193,14 +3193,14 @@ static void __init bosa_apc_calibrate(void)
 		bosa_read_reg(0x383) & 0xff, bosa_read_reg(0x31e) & 0xff);
 
 	bosa_set_bit(0x23c, 0, 1);			/* idx7 */
-	bosa_set_bit(0x254, 3, 1);			/* CONTROL2 bit3 = 1 */
+	bosa_set_bit(BOSA_REG_CONTROL2, 3, 1);			/* CONTROL2 bit3 = 1 */
 	mdelay(5);
 
 	/* HYPOTHESIS TEST: disable the laser TX (CONTROL2/0x254 bit7=1) during the
 	 * offset-K calibration so the ADC zero-offset is measured with no emission and
 	 * the TX path can't trip TX_FAULT while the analog block is mid-cal. The
 	 * txEnableFlow below re-enables TX (0x254 bit7=0). */
-	bosa_set_bit(0x254, 7, 1);
+	bosa_set_bit(BOSA_REG_CONTROL2, 7, 1);
 
 	/* RTL8290B FSU (Field Setup Unit) offset/gain auto-cal + DCL convergence — the
 	 * RTL8290B offset cal. (A plain offset-K that polls R30 b7 OFFK_DONE never
@@ -3240,7 +3240,7 @@ static void __init bosa_apc_calibrate(void)
 	 * which CORRUPTED the converged MCU command state and tipped the BOSA into
 	 * DEBUG_MODE (every reg 0x20) once TX was enabled. Those W77 writes are removed;
 	 * the FSU/DCL above already owns W77. */
-	bosa_set_field(0x254, 0xff, 0x8d);
+	bosa_set_field(BOSA_REG_CONTROL2, 0xff, 0x8d);
 
 	/* idx2 laser bias/mod LUT — the PER-BOARD calibrated operating point. The
 	 * optical calibration holds a 151-entry {bias,mod} table indexed by
@@ -3283,12 +3283,12 @@ static void __init bosa_apc_calibrate(void)
 	 * monitor photodiode reads 0 -> the APC servo, seeing no optical feedback,
 	 * collapses the bias DAC to 0 and the laser stays dark. Sequence: CONTROL2 bit6
 	 * LOS_PIN_TRI low, assert EN_L, ~200ms laser-bias settle, CONTROL2 bit6 high. */
-	bosa_set_field(0x254, 0x40, 0x00);		/* CONTROL2 bit6 LOS_PIN_TRI = 0 */
-	bosa_set_bit(0x204, 4, 1);			/* W4 EN_L = 1: laser booster ON */
+	bosa_set_field(BOSA_REG_CONTROL2, 0x40, 0x00);		/* CONTROL2 bit6 LOS_PIN_TRI = 0 */
+	bosa_set_bit(BOSA_REG_W4, 4, 1);			/* W4 EN_L = 1: laser booster ON */
 	mdelay(200);					/* 200ms laser-bias settle */
-	bosa_set_field(0x254, 0x40, 0x40);		/* CONTROL2 bit6 LOS_PIN_TRI = 1 */
+	bosa_set_field(BOSA_REG_CONTROL2, 0x40, 0x40);		/* CONTROL2 bit6 LOS_PIN_TRI = 1 */
 
-	bosa_set_field(0x254, 0x80, 0x00);		/* idx8 CONTROL2 bit7 = 0 */
+	bosa_set_field(BOSA_REG_CONTROL2, 0x80, 0x00);		/* idx8 CONTROL2 bit7 = 0 */
 	/* idx7 W53/0x235 fault-detect enables. The device default arms ALL (0xff), but
 	 * on this board the MPD high/low APC fault-detect (bits[1:0] APC_ENFD_MPD_HIGH/LOW)
 	 * trips a (false) MPD_VHIGH the instant TX is enabled and latches the laser
@@ -3329,7 +3329,7 @@ static void __init bosa_apc_calibrate(void)
 	 * is the real gap (R30 OFFK_DONE still 0) — the readback below makes that
 	 * visible.
 	 */
-	bosa_set_bit(0x204, 4, 0);			/* EN_L = 0: burst-gate (0x8e) */
+	bosa_set_bit(BOSA_REG_W4, 4, 0);			/* EN_L = 0: burst-gate (0x8e) */
 	mdelay(5);
 	pr_info("rtl9602c-gpon: burst-gate EN_L=0 -> 0x204=0x%02x R33=0x%02x R30=0x%02x 0x383=0x%02x\n",
 		bosa_read_reg(0x204) & 0xff, bosa_read_reg(0x321) & 0xff,
@@ -5774,21 +5774,21 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * FWD>0 & C_sram flat => PON-IP rejects (descriptor base or DS-GMII down). */
 		seq_printf(s, "ds_fwd: FWD(f64)=%u FWD(f0)=%u | media_sts=0x%08x (bit18 link=%u) gmii_en=%u\n",
 			   gpon_gem_ds_fwd_cnt(64), gpon_gem_ds_fwd_cnt(0),
-			   pi_rd(0xc058), (pi_rd(0xc058) >> 18) & 1,
-			   (pi_rd(0xd434) >> 5) & 1);
+			   pi_rd(PI_MEDIA_STS_DS), (pi_rd(PI_MEDIA_STS_DS) >> 18) & 1,
+			   (pi_rd(PI_IO_CMD_0_DS) >> 5) & 1);
 		/* Read-back the DS-engine enables (a later reset may have cleared them):
 		 * ctl_ds expect 0x81 (CFG_PBUF_EN bit0 + bit7), io0_ds expect 0x90081070
 		 * (GMII_RX_EN bit5 + GMII_TX_EN bit4 must be set). */
 		seq_printf(s, "ds_en: ctl_ds(0xa0ac)=0x%08x io0_ds(0xd434)=0x%08x io1_ds(0xd438)=0x%08x\n",
-			   pi_rd(0xa0ac), pi_rd(0xd434), pi_rd(0xd438));
+			   pi_rd(0xa0ac), pi_rd(PI_IO_CMD_0_DS), pi_rd(PI_IO_CMD_1_DS));
 		seq_printf(s, "ds_nic: cfg_ds(0xc04c)=0x%08x[RX_SID=%u] rxcfg_ds(0xc044)=0x%08x media_ds(0xc058)=0x%08x rxfdp_ds(0xd3f0)=0x%08x\n",
-			   pi_rd(0xc04c), pi_rd(0xc04c) & 0x7f, pi_rd(0xc044),
-			   pi_rd(0xc058), pi_rd(0xd3f0));
+			   pi_rd(PI_CFG_DS), pi_rd(PI_CFG_DS) & 0x7f, pi_rd(PI_RX_CFG_DS),
+			   pi_rd(PI_MEDIA_STS_DS), pi_rd(0xd3f0));
 		/* US-NIC, compare against live stock: cfg_us=0x24030040 (bit29 set!),
 		 * ctl_us=0, io0_us=0x90101070, io1_us=0x08000000, rxfdp_us=0. */
 		seq_printf(s, "us_nic: cfg_us(0x404c)=0x%08x[RX_SID=%u] ctl_us(0x20ac)=0x%08x io0_us(0x5434)=0x%08x io1_us(0x5438)=0x%08x rxfdp_us(0x53f0)=0x%08x\n",
-			   pi_rd(0x404c), pi_rd(0x404c) & 0x7f, pi_rd(0x20ac),
-			   pi_rd(0x5434), pi_rd(0x5438), pi_rd(0x53f0));
+			   pi_rd(PI_CFG_US), pi_rd(PI_CFG_US) & 0x7f, pi_rd(0x20ac),
+			   pi_rd(PI_IO_CMD_0_US), pi_rd(PI_IO_CMD_1_US), pi_rd(0x53f0));
 		/* US-NIC per-group RX SID counters (from the chip's register map:
 		 * RX_SID_GOOD_CNT_US @ SoC 0xF0203C = PON-IP off 0x203c, 5 groups at
 		 * 4-byte stride; RX_SID_BAD_CNT_US @ 0xF02054 = off 0x2054). good>0
@@ -5814,7 +5814,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * (GPON_OMCC_PHYS_QID). The 0x2130 word (SID 56's slot under this packing) is kept
 		 * alongside as the value the OLD contiguous-packing bug mistakenly wrote/read. */
 		seq_printf(s, "us_arm: media_us(0x4058)=0x%08x io0_us(0x5434)=0x%08x gemus_map64(0x6500)=0x%08x sidvld(0x2144)=0x%08x s2q(0x2138/0x2130)=0x%08x/0x%08x s2q64=%lu omcicfg(0x2154)=0x%08x\n",
-			   pi_rd(0x4058), pi_rd(0x5434), gpon_rd(0x6500 /* GEM_US_PORT_MAP[flow 64] = 0x6400+64*4; macros defined later in file */),
+			   pi_rd(PI_MEDIA_STS_US), pi_rd(PI_IO_CMD_0_US), gpon_rd(0x6500 /* GEM_US_PORT_MAP[flow 64] = 0x6400+64*4; macros defined later in file */),
 			   pi_rd(0x2144), pi_rd(0x2138), pi_rd(0x2130),
 			   pi_rd(0x2138) & 0x7fUL, pi_rd(0x2154));
 		/* sched64: US queue-64 (OMCI T-CONT 16) drain-side witnesses on one line.

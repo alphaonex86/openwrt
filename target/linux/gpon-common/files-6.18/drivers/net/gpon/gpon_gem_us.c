@@ -134,6 +134,34 @@ enum gpon_gem_us_bind gpon_gem_us_tcont_decide(u16 alloc, u16 omcc_alloc,
 	return GPON_GEM_US_BIND_TCONT;
 }
 
+enum gpon_omcc_action gpon_omcc_decide(bool port_en, u16 want_gem,
+				       bool installed, u16 cur_gem)
+{
+	if (!port_en)
+		return GPON_OMCC_IGNORE;
+	if (!installed)
+		return GPON_OMCC_INSTALL;
+	if (want_gem == cur_gem)
+		return GPON_OMCC_UNCHANGED;
+	return GPON_OMCC_REBIND;
+}
+
+const char *gpon_omcc_action_name(enum gpon_omcc_action a)
+{
+	switch (a) {
+	case GPON_OMCC_IGNORE:
+		return "ignore-enable-0";
+	case GPON_OMCC_INSTALL:
+		return "install";
+	case GPON_OMCC_REBIND:
+		return "rebind-transport";
+	case GPON_OMCC_UNCHANGED:
+		return "same-gem";
+	}
+	/* An unnamed verdict must READ as unknown, never as a plausible one. */
+	return "unknown";
+}
+
 const char *gpon_gem_us_bind_name(enum gpon_gem_us_bind v)
 {
 	switch (v) {

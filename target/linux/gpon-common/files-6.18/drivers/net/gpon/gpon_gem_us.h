@@ -290,4 +290,55 @@ enum gpon_gem_us_bind gpon_gem_us_tcont_decide(u16 alloc, u16 omcc_alloc,
 /* One-line name for a verdict, for logs and for test failure messages. */
 const char *gpon_gem_us_bind_name(enum gpon_gem_us_bind v);
 
+/*
+ * ★★★ ONE PROTOCOL RULE THAT WAS WRITTEN THREE TIMES.
+ *
+ * G.984.3 Configure_Port-ID assigns the OMCC GEM port. What to do with it is
+ * PROTOCOL, not silicon -- and on 2026-09-03 it existed in three places, none
+ * of which could call another: inline in the core PLOAM FSM's
+ * PLM_DS_CONFIG_PORT case, again in the Luna native FSM (the copy that
+ * actually SHIPS on that family), and a third time in the Cortina shell.
+ *
+ * ⚠ THE COST IS MEASURED, NOT IMAGINED. As a ONE-SHOT guard -- "we already
+ * installed the OMCC, do nothing" -- an OLT that moves the OMCC to another GEM
+ * after O5 leaves the ONU bound to the old port. Downstream de-encap follows
+ * the MAC's own re-latch, so DS keeps working while our upstream OMCI replies
+ * ride a port the OLT no longer accepts: its audit times out, it DEACTIVATES
+ * us, and a full re-range is the only way back. The Luna copy carried that
+ * defect for weeks AFTER the other two were repaired, because nothing made
+ * them one decision.
+ */
+enum gpon_omcc_action {
+	GPON_OMCC_IGNORE,	/* enable=0: a Configure_Port-ID transient. Write
+				 * NOTHING and keep the link -- the following
+				 * enable=1 re-latch carries the final id */
+	GPON_OMCC_INSTALL,	/* not bound yet -> bind @want_gem */
+	GPON_OMCC_REBIND,	/* bound to a DIFFERENT gem -> move the TRANSPORT
+				 * only. The responder session is NOT re-armed:
+				 * an OMCC port move is a transport event, and
+				 * re-arming resets the MIB under a live OLT */
+	GPON_OMCC_UNCHANGED,	/* the same gem re-sent (PLOAMs come 3x): write
+				 * nothing, so the proven LOS/fiber-pull keep
+				 * path stays byte-identical */
+};
+
+/**
+ * gpon_omcc_decide - what a Configure_Port-ID means for the OMCC transport
+ * @port_en:    d[0] bit0, the OLT's enable
+ * @want_gem:   the GEM the OLT is assigning, (d[1] << 4) | (d[2] >> 4)
+ * @installed:  the caller's shadow -- is the OMCC bound at all?
+ * @cur_gem:    the caller's shadow -- which gem (meaningless if !@installed)
+ *
+ * The caller ACTS and owns its shadow, and must update it ONLY after a
+ * successful write: on failure the OLD gem has to survive, so the next event
+ * retries to convergence instead of latching a half-done rebind.
+ *
+ * Pure: no state, no side effect, safe from any context including softirq.
+ */
+enum gpon_omcc_action gpon_omcc_decide(bool port_en, u16 want_gem,
+				       bool installed, u16 cur_gem);
+
+/* One-line name for a verdict, for logs and for test failure messages. */
+const char *gpon_omcc_action_name(enum gpon_omcc_action a);
+
 #endif /* GPON_GEM_US_H */

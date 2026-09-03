@@ -127,6 +127,9 @@
 
 #include "gpon_sn.h"	/* the one ONU-SN codec */
 #include "gpon_ploam.h"
+#include "gpon_gem_us.h"	/* gpon_omcc_decide: the Configure_Port-ID rule,
+				 * shared with both family shells so the three
+				 * copies of it cannot drift apart again */
 
 /* Cadences and thresholds that were bare literals in the driver. Values
  * unchanged; named so a reader can see what they gate. None is a module_param
@@ -735,8 +738,13 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			 * the ONU keeps binding the old port and management dies
 			 * with nothing to read. The Elnath shell already had this
 			 * shape; this FSM did not, and no test watched it. */
-			if ((d[0] & 0x1) &&
-			    (!o->omcc_installed || gem != o->omcc_gem)) {
+			enum gpon_omcc_action act =
+				gpon_omcc_decide(d[0] & 0x1, gem,
+						 o->omcc_installed,
+						 o->omcc_gem);
+
+			if (act == GPON_OMCC_INSTALL ||
+			    act == GPON_OMCC_REBIND) {
 				if (!o->ops->install_omcc(o->sh, gem)) {
 					o->omcc_installed = true;
 					o->omcc_gem = gem;

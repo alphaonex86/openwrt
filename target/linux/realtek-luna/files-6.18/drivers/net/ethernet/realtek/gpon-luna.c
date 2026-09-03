@@ -8444,8 +8444,13 @@ static void gpon_fsm_handle(const u8 *m)
 			 * FSM is the copy that actually SHIPS on this family
 			 * (core_fsm defaults to 0), so it carried the defect
 			 * into the product after both other copies were repaired. */
-			if ((d[0] & 0x1) &&
-			    (!gpon_omcc_installed || gem != gpon_omcc_installed_gem)) {
+			enum gpon_omcc_action act =
+				gpon_omcc_decide(d[0] & 0x1, gem,
+						 gpon_omcc_installed,
+						 gpon_omcc_installed_gem);
+
+			if (act == GPON_OMCC_INSTALL ||
+			    act == GPON_OMCC_REBIND) {
 				if (!gpon_install_omcc(gem)) {
 					gpon_omcc_installed = true;
 					gpon_omcc_installed_gem = gem;

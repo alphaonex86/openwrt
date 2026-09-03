@@ -2705,9 +2705,22 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 	 *   - new id: REBIND THE TRANSPORT ONLY.  The responder session is NOT
 	 *     re-armed -- an OMCC port move is a transport event, and re-arming
 	 *     would reset the MIB under a live OLT session. */
-	if (cg->omcc_up) {
-		if (cg->omcc_gem == want)
-			return;
+	/* ★ THE RULE ITSELF NOW LIVES IN THE CORE (gpon_omcc_decide): it is
+	 *   G.984.3, not silicon, and it used to be written out here, in the
+	 *   core PLOAM FSM and in the Luna native FSM -- three copies, and the
+	 *   Luna one kept the one-shot defect for weeks after the other two
+	 *   were repaired. What stays HERE is what only this shell can do: the
+	 *   register write, the latch, and the per-path diagnostics.
+	 *   The enable=0 transient already returned above with its own message,
+	 *   so IGNORE cannot be reached here; it is handled anyway rather than
+	 *   left to a default, because an unhandled verdict must not fall
+	 *   through into the install path. */
+	switch (gpon_omcc_decide(!!(omci_port & CG_OMCI_PORT_EN), (u16)want,
+				 cg->omcc_up, (u16)cg->omcc_gem)) {
+	case GPON_OMCC_IGNORE:
+	case GPON_OMCC_UNCHANGED:
+		return;
+	case GPON_OMCC_REBIND:
 		if (cg_omcc_gem_bind(cg, CG_OMCI_PORT_ID(omci_port))) {
 			/* the shadow keeps the OLD id (bind writes it only on
 			 * success), so the next PORTID event retries to
@@ -2721,6 +2734,8 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 			 "OMCC gem re-assigned mid-O5 -> %u (transport rebound; responder session kept)\n",
 			 cg->omcc_gem);
 		return;
+	case GPON_OMCC_INSTALL:
+		break;
 	}
 	/* LATCH ONLY ON SUCCESS.  A failed bind leaves `omcc_up` clear, so the
 	 * next PLOAM/state event runs this again - the retry is the event

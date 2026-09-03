@@ -7814,6 +7814,29 @@ static int luna_op_install_omcc(void *sh, u16 gem)
 static int luna_op_install_tcont(void *sh, u8 tcont, u16 alloc)
 {
 	(void)sh;
+	/* Park the unused CAM entries FIRST, so the entry we are about to write
+	 * is the only one that can match this Alloc-ID.  Before the bind, never
+	 * after: parking afterwards would race a grant arriving in between.
+	 *
+	 * This shim used to call gpon_install_tcont() alone, so under
+	 * core_fsm=1 the park simply did not happen and a stale entry could
+	 * still match -- the churn-lock the step-19f fix exists to prevent.
+	 * Found by ploam_fsm_diff (D1).
+	 *
+	 * ★ IT BELONGS HERE AND NOT IN THE CORE.  Parking an alloc-CAM is a
+	 * Luna hardware workaround, not a G.984.3 decision, so adding a park op
+	 * to struct gpon_ploam_ops would put one silicon's quirk into the
+	 * protocol vocabulary and hand Cortina an op to stub.  The rule is the
+	 * logic in the core, the workarounds per SoC in the family.
+	 *
+	 * ★ ONLY FOR THE OMCC T-CONT, exactly as the native FSM does it:
+	 * gpon_alloc_cam_clear_others() keeps ONE entry and clears the rest, so
+	 * running it on a data T-CONT install would strand the OMCC's own
+	 * binding.  The core calls this op for three different T-CONTs (the
+	 * OMCC's, its alt, and the data one from Assign_Alloc-ID); only the
+	 * first is parked. */
+	if (alloc_cam_park && tcont == GPON_OMCC_TCONT)
+		gpon_alloc_cam_clear_others(GPON_OMCC_TCONT);
 	return gpon_install_tcont(tcont, alloc);
 }
 

@@ -341,18 +341,39 @@ static void apply_boh(struct gpon_ploam *o, bool ranged)
 	u8 guard = o->boh_guard;
 	u8 t3 = ranged ? o->boh_t3ranged : o->boh_t3pre;
 	u8 rep, i, boh_len, size;
+	unsigned int want;
 	u32 cfg_word;
 
 	if (guard > 32)
 		guard = 32;
 	rep = guard / 8;			/* boh_repeat = whole guard bytes */
 
-	/* FOLLOW-UP P4: (rep + t3 + 3) is evaluated as int and truncated here,
-	 * so the clamp below cannot see a value that already wrapped. Moved
-	 * verbatim — unreachable with any t3 a real OLT sends. */
-	boh_len = (u8)(t3 ? (rep + t3 + 3) : GPON_PLOAM_BOH_LEN);
-	if (boh_len > GPON_PLOAM_BOH_MAX_LEN)
-		boh_len = GPON_PLOAM_BOH_MAX_LEN;
+	/* ★ FOLLOW-UP P4, DISCHARGED 2026-09-02.  This read
+	 *	boh_len = (u8)(t3 ? (rep + t3 + 3) : ...);
+	 * so the sum was TRUNCATED into a u8 before the clamp could look at it,
+	 * and a value that had already wrapped clamped to itself.  `t3` comes
+	 * STRAIGHT OFF THE WIRE (Extended_Burst_Length d[1]) with no bound, so
+	 * this is an OLT-supplied value driving a hardware field.
+	 *
+	 * MEASURED by ploam_fsm_diff (t3 = 253): the native driver produced
+	 * BOH_CFG 0x8fc / length 252 and REPORTED the out-of-range value; this
+	 * core copy produced 0x004 -- a 4-byte burst with the delimiter in the
+	 * wrong place -- silently.  The native driver had been repaired at step
+	 * 19g; the core kept the pre-fix form because it was "moved verbatim",
+	 * which is the mirror image of the OMCC rebind that was fixed in the
+	 * core while the native copy kept the defect.
+	 *
+	 * Widen first, report, then clamp -- the same order and the same
+	 * evidence fields as the native driver. */
+	want = t3 ? (unsigned int)rep + t3 + 3 : GPON_PLOAM_BOH_LEN;
+	if (want > GPON_PLOAM_BOH_MAX_LEN) {
+		u8 dmp[2] = { guard, t3 };
+
+		unsup(o, "boh_len", GPON_UNSUP_RANGE, want,
+		      "at-most-252", dmp, sizeof(dmp));
+		want = GPON_PLOAM_BOH_MAX_LEN;
+	}
+	boh_len = (u8)want;
 	/* stored bytes (<= 12); the hardware synthesizes the rest */
 	size = (boh_len > GPON_PLOAM_BOH_LEN) ? GPON_PLOAM_BOH_LEN : boh_len;
 	if (size < 4)				/* need >= 1 fill + 3 delimiter */

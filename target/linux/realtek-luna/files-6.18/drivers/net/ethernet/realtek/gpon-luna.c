@@ -5264,24 +5264,32 @@ static u32 gpon_gem_ds_fwd_cnt(u8 flow)
 	return gpon_rd(0x4050);				/* ETH_PKT_FWD count */
 }
 
-/* Read back the DS GEM-port CAM entry for `flow` (READ op = OP_MODE 2): does the
- * CAM actually hold the OMCC gem at flow 64 at runtime? Returns [11:0]=stored gem,
- * bit16=OP_HIT. Stock de-encaps OMCI on flow 64 (786) while our flow 64 reads 0, so
- * either our CAM entry is wrong/absent or it is not being matched. */
-static u32 gpon_ds_cam_read(u8 flow)
+/* Read back the DS GEM-port CAM entry for `flow` (READ op): does the CAM
+ * actually hold the OMCC gem at flow 64 at runtime? Stock de-encaps OMCI on
+ * flow 64 (786) while our flow 64 reads 0, so either our CAM entry is
+ * wrong/absent or it is not being matched.
+ *
+ * One indirect-CAM transaction via the shared gpon_gtc_ds_port_read()
+ * reading luna_gpon_chip (regtable.h) -- converted 2026-09-03 with the alloc
+ * read and the CLEAN loop below; same addresses, values, write/read/delay
+ * counts as the hand-spelled form on the success path, proven by the x86
+ * differential (dev/rtl9607c-test/gpon_regtable_diff_test).
+ *
+ * Return: >= 0 -- [11:0]=stored gem, BIT(16)=OP_HIT (the layout the callers
+ * always decoded); < 0 -- the READ never completed (-ETIMEDOUT & co).  The
+ * pre-conversion copy read RDATA back after an EXPIRED poll too, returning
+ * whatever the last completed transaction left there: garbage dressed as
+ * data.  A caller must check for < 0 before trusting the entry. */
+static int gpon_ds_cam_read(u8 flow)
 {
-	int i;
-	u32 ind;
+	u16 gem;
+	bool hit;
+	int rc = gpon_gtc_ds_port_read(&gpon_io, &luna_gpon_chip.gtc, flow,
+				       &gem, &hit, gpon_cam_delay_us);
 
-	gpon_wr(GPON_GTC_DS_PORT_IND, (2u << 8) | (flow & 0x7f));		/* DS_PORT_IND OP_MODE=READ, REQ=0 */
-	gpon_wr(GPON_GTC_DS_PORT_IND, (2u << 8) | (flow & 0x7f) | BIT(15));	/* REQ=1 -> trigger */
-	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(GPON_GTC_DS_PORT_IND) & BIT(14))	/* OP_COMPL */
-			break;
-		udelay(1);
-	}
-	ind = gpon_rd(GPON_GTC_DS_PORT_IND);
-	return ((ind & BIT(13)) ? BIT(16) : 0) | (gpon_rd(0x110c) & 0xfff);	/* HIT | RDATA gem */
+	if (rc < 0)
+		return rc;
+	return (hit ? BIT(16) : 0) | gem;
 }
 
 /* Invalidate ALL 128 DS GEM-port CAM entries (CLEAN op = OP_MODE 3). The CAM holds
@@ -5292,21 +5300,40 @@ static u32 gpon_ds_cam_read(u8 flow)
  * installing the OMCC so ONLY flow 64 matches gem 2. */
 static void gpon_ds_cam_clear_all(void)
 {
-	int f, i;
+	unsigned int stuck = 0, first_stuck = 0;
+	int f;
 
 	for (f = 0; f < 128; f++) {
+		int rc;
+
 		if (f == 64)		/* never disturb the OMCC flow (its CAM+TRAFFIC_CFG are
 					 * written right after; the CLEAN op also zeroes the
 					 * entry's TRAFFIC_CFG and races our isOMCI write). */
 			continue;
-		gpon_wr(GPON_GTC_DS_PORT_IND, (3u << 8) | (f & 0x7f));		/* OP_MODE=CLEAN, IDX, REQ=0 */
-		gpon_wr(GPON_GTC_DS_PORT_IND, (3u << 8) | (f & 0x7f) | BIT(15));	/* REQ=1 -> trigger */
-		for (i = 0; i < 1000; i++) {
-			if (gpon_rd(GPON_GTC_DS_PORT_IND) & BIT(14))			/* OP_COMPL */
-				break;
-			udelay(1);
+		/* One indirect-CAM transaction via the shared
+		 * gpon_gtc_ds_port_clean() (regtable.h) -- converted
+		 * 2026-09-03 with the two CAM reads; same write/read/delay
+		 * stream as the hand-spelled OP_MODE=CLEAN form, proven by
+		 * the x86 differential. */
+		rc = gpon_gtc_ds_port_clean(&gpon_io, &luna_gpon_chip.gtc,
+					    (u32)f, gpon_cam_delay_us);
+		/* ★ THE TIMEOUT USED TO BE SWALLOWED HERE TOO -- the third
+		 * copy of the defect repaired in the multicast install
+		 * (2026-09-02) and the alloc-CAM park (2026-09-03): the poll
+		 * ran and NOTHING looked at whether it completed, so an entry
+		 * that never cleared could keep shadowing the OMCC gem -- the
+		 * stolen-DS-OMCI failure this whole function exists to
+		 * prevent -- and said nothing.  Counted and reported ONCE,
+		 * not per flow: 127 lines would bury the boot log. */
+		if (rc < 0) {
+			if (!stuck)
+				first_stuck = (unsigned int)f;
+			stuck++;
 		}
 	}
+	if (stuck)
+		pr_err("rtl9602c-gpon: DS GEM-port CAM clean did NOT complete on %u of 127 flow(s) (first f=%u) -- stale entries may still shadow the OMCC gem\n",
+		       stuck, first_stuck);
 }
 
 /* GTC US MISC PM counter (GPON_GTC_US_MISC_CNTR_IDX 0x5140 [2:0] / STAT 0x5148):
@@ -5345,22 +5372,20 @@ static u32 gpon_gem_ds_misc_cnt(u8 idx)
 /* Read back the GTC alloc CAM entry for a T-CONT (READ op, same indirect protocol
  * as the DS GEM CAM): does T-CONT 16 actually hold alloc 0x400 + HIT? If the BWMAP's
  * alloc-id does not match a valid CAM entry, the GTC ignores the operational grant
- * (bwm_acpt stays 0) and the ONU never transmits operational US. Returns [11:0]=
- * stored allocId, bit16=OP_HIT. ALLOC_IND 0x10c0 / ALLOC_RD 0x10cc. */
-static u32 gpon_alloc_cam_read(u8 tcont)
+ * (bwm_acpt stays 0) and the ONU never transmits operational US.
+ * Shared transaction (gpon_gtc_ds_alloc_read, regtable.h) since 2026-09-03.
+ * Return: >= 0 -- [11:0]=stored allocId, BIT(16)=OP_HIT; < 0 -- the READ never
+ * completed and there IS no value (the old copy returned stale RDATA here). */
+static int gpon_alloc_cam_read(u8 tcont)
 {
-	int i;
-	u32 ind;
+	u16 alloc;
+	bool hit;
+	int rc = gpon_gtc_ds_alloc_read(&gpon_io, &luna_gpon_chip.gtc, tcont,
+					&alloc, &hit, gpon_cam_delay_us);
 
-	gpon_wr(GPON_GTC_DS_ALLOC_IND, (2u << 8) | (tcont & 0x1f));		/* OP_MODE=READ, REQ=0 */
-	gpon_wr(GPON_GTC_DS_ALLOC_IND, (2u << 8) | (tcont & 0x1f) | BIT(15));	/* REQ=1 -> trigger */
-	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(GPON_GTC_DS_ALLOC_IND) & BIT(14))			/* OP_COMPL */
-			break;
-		udelay(1);
-	}
-	ind = gpon_rd(GPON_GTC_DS_ALLOC_IND);
-	return ((ind & BIT(13)) ? BIT(16) : 0) | (gpon_rd(0x10cc) & 0xfff);
+	if (rc < 0)
+		return rc;
+	return (hit ? BIT(16) : 0) | alloc;
 }
 
 /* Set every GTC alloc-CAM entry EXCEPT `keep` to 0xFFF (a reserved Alloc-ID the OLT
@@ -5398,12 +5423,27 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 	 * so that `want` stays a plain literal: the reader parses want= up to
 	 * the first space, and a formatted token is one more thing that can
 	 * grow a character the parser treats as a field.) */
+	unsigned int rd_fail = 0, first_rd_fail = 0;
+	int first_rd_rc = 0;
+
 	for (t = 0; t < 32; t++) {
-		u32 rb;
+		int rb;
 
 		if (t == keep)
 			continue;
 		rb = gpon_alloc_cam_read(t);
+		/* A read that never completed has NO value: filing its rc's
+		 * bit pattern through the stale-entry predicate would either
+		 * invent a finding or hide one.  Counted and reported ONCE,
+		 * like the park timeout below; the park itself still runs. */
+		if (rb < 0) {
+			if (!rd_fail) {
+				first_rd_fail = t;
+				first_rd_rc = rb;
+			}
+			rd_fail++;
+			continue;
+		}
 		/* ⚠ HIT ALONE IS NOT THE VIOLATION -- AND FOR MONTHS THIS REPORTED
 		 * ITS OWN REPAIR.  The invariant stated above is "every entry but
 		 * `keep` is PARKED AT THE RESERVED 0xFFF the OLT never grants", and
@@ -5443,6 +5483,10 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 		}
 	}
 
+	if (rd_fail)
+		pr_warn("rtl9602c-gpon: alloc-CAM pre-park readback failed on %u of 31 T-CONT(s) (first t=%u, rc=%d) -- stale-entry audit incomplete\n",
+			rd_fail, first_rd_fail, first_rd_rc);
+
 	/* ★ THE TIMEOUT USED TO BE SWALLOWED HERE, and it is the same shape as
 	 * the multicast DS-CAM defect repaired on 2026-09-02: the poll ran and
 	 * NOTHING looked at whether it completed, so a CAM that never accepted
@@ -5450,7 +5494,14 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 	 * -- the churn-lock this whole function exists to prevent -- and said
 	 * nothing.  Counted and reported ONCE, not per T-CONT: a fully wedged
 	 * CAM would otherwise emit 31 lines and bury the boot log, which this
-	 * tree has already paid for. */
+	 * tree has already paid for.
+	 *
+	 * ★ WHY THIS LOOP STAYS HAND-SPELLED while every other CAM site went
+	 * through the shared regtable.h helper (2026-09-03): gen_alloc_cam_impl.sh
+	 * extracts THIS FUNCTION VERBATIM and compiles it on x86 against a
+	 * two-register model (dev/rtl9607c-test/gpon_alloc_cam_test) -- calling
+	 * the helper here would drag regtable.h, the hwio and the chip table
+	 * into that harness.  Convert it only together with that generator. */
 	unsigned int stuck = 0, first_stuck = 0;
 
 	for (t = 0; t < 32; t++) {
@@ -5809,9 +5860,12 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		/* Alloc CAM read-back: T-CONT 16 must hold alloc 0x400 (HIT) for the GTC to
 		 * accept the OLT's operational BWMAP grant on that alloc-id. */
 		{
-			u32 a16 = gpon_alloc_cam_read(16);
+			int a16 = gpon_alloc_cam_read(16);
 
-			seq_printf(s, "us_alloc: tc16=alloc0x%x hit%u\n", a16 & 0xfff, !!(a16 & BIT(16)));
+			if (a16 < 0)
+				seq_printf(s, "us_alloc: tc16=READ-FAILED rc=%d\n", a16);
+			else
+				seq_printf(s, "us_alloc: tc16=alloc0x%x hit%u\n", a16 & 0xfff, !!(a16 & BIT(16)));
 		}
 		/* bwmap: what the GTC BWMAP capture engine actually holds — which
 		 * T-CONT the OLT's grants RESOLVE TO, and whether we ever configured it.
@@ -5998,15 +6052,19 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		/* CAM read-back: does the DS GEM CAM actually map gem->flow 64 at runtime?
 		 * e64 should read gem=2 (the OMCC) HIT=1; traffic_cfg[64] should be 0x4. */
 		{
-			u32 c64 = gpon_ds_cam_read(64), c0 = gpon_ds_cam_read(0);
-			u32 c1 = gpon_ds_cam_read(GPON_DATA_FLOW);
+			int c64 = gpon_ds_cam_read(64), c0 = gpon_ds_cam_read(0);
+			int c1 = gpon_ds_cam_read(GPON_DATA_FLOW);
 
-			seq_printf(s, "ds_cam: e64=gem%u hit%u tcfg64=0x%x | e0=gem%u hit%u | e%u(data)=gem%u hit%u tcfg=0x%x\n",
-				   c64 & 0xfff, !!(c64 & BIT(16)),
-				   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + 64 * 4) & 0x1f,
-				   c0 & 0xfff, !!(c0 & BIT(16)),
-				   GPON_DATA_FLOW, c1 & 0xfff, !!(c1 & BIT(16)),
-				   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + GPON_DATA_FLOW * 4) & 0x1f);
+			if (c64 < 0 || c0 < 0 || c1 < 0)
+				seq_printf(s, "ds_cam: READ-FAILED e64=%d e0=%d e%u=%d\n",
+					   c64, c0, GPON_DATA_FLOW, c1);
+			else
+				seq_printf(s, "ds_cam: e64=gem%u hit%u tcfg64=0x%x | e0=gem%u hit%u | e%u(data)=gem%u hit%u tcfg=0x%x\n",
+					   c64 & 0xfff, !!(c64 & BIT(16)),
+					   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + 64 * 4) & 0x1f,
+					   c0 & 0xfff, !!(c0 & BIT(16)),
+					   GPON_DATA_FLOW, c1 & 0xfff, !!(c1 & BIT(16)),
+					   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + GPON_DATA_FLOW * 4) & 0x1f);
 		}
 	}
 	/* Full per-flow de-encap sweep: does ANY flow de-encapsulate a GEM frame?
@@ -8194,10 +8252,17 @@ static void gpon_fsm_handle(const u8 *m)
 				gpon_alloc_cam_clear_others(GPON_OMCC_TCONT);
 			gpon_install_tcont(GPON_OMCC_TCONT, tcont16_alloc);
 			{
-				u32 rb = gpon_alloc_cam_read(GPON_OMCC_TCONT);
+				int rb = gpon_alloc_cam_read(GPON_OMCC_TCONT);
 
-				pr_info("rtl9602c-gpon: CAM[16] readback alloc=0x%x hit=%u (want 0x%x)\n",
-					rb & 0xfff, !!(rb & BIT(16)), tcont16_alloc);
+				/* rb < 0 = the READ never completed: saying so
+				 * beats printing stale RDATA that can MATCH
+				 * `want` and confirm a bind that never landed. */
+				if (rb < 0)
+					pr_err("rtl9602c-gpon: CAM[16] readback FAILED rc=%d (want 0x%x unverified)\n",
+					       rb, tcont16_alloc);
+				else
+					pr_info("rtl9602c-gpon: CAM[16] readback alloc=0x%x hit=%u (want 0x%x)\n",
+						rb & 0xfff, !!(rb & BIT(16)), tcont16_alloc);
 			}
 			/* NON-STOCK double-bind (default OFF, see omcc_alt_bind): binding
 			 * alloc 0x100 ALSO to T-CONT 1 makes the GTC alloc-CAM resolve a BWMAP

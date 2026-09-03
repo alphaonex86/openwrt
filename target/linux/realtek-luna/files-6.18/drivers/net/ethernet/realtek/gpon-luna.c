@@ -7741,7 +7741,25 @@ static void luna_op_install_data_gem(void *sh, u16 gem)
 static void luna_op_cdr_reseat(void *sh)
 {
 	(void)sh;
+	/* BOTH halves, because the re-seat alone does not do the job.  The
+	 * native FSM's own comment at the deactivate branch says it: the
+	 * interface reset-B re-strobe "does not re-lock the serializer CDR;
+	 * this does" -- the 10 ms invert/hold/restore pulse, deferred to
+	 * process context because it cannot run in softirq.
+	 *
+	 * This shim used to call only gpon_cdr_reseat(), so under core_fsm=1
+	 * the CDR was never re-locked and every re-range started from the
+	 * prior marginal lock -- the flapping the pulse exists to cut.  Found
+	 * by ploam_fsm_diff (D2), which drives both FSMs through the same
+	 * deactivate and compares what each asks its shell to do.
+	 *
+	 * The WHEN stays the core's: it applies the same predicate the native
+	 * branch does (cdr_reseat_on_reactivate, and not after a healthy O5),
+	 * so this op is only reached when a re-roll is actually wanted.  It
+	 * covers all three core call sites -- the deactivate and the two poll
+	 * teardowns -- which is why the repair belongs here and not at them. */
 	gpon_cdr_reseat();
+	schedule_work(&gpon_cdr_reset_work);
 }
 
 static void luna_op_aes_arm_switch(void *sh, u32 superframe)

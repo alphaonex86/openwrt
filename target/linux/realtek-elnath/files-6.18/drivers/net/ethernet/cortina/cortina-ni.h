@@ -205,7 +205,6 @@ struct cortina_ni;
 struct cortina_ni_rx_buf {
 	struct sk_buff	*skb;
 	dma_addr_t	addr;		/* mapped PA of skb->data (128B aligned) */
-	s16		hnext;		/* hash chain, -1 = end */
 	u8		eqid;		/* which CPU pool (EQ13/EQ14) this slot feeds */
 };
 
@@ -213,9 +212,6 @@ struct cortina_ni_rx_irqctx {
 	struct cortina_ni	*ni;
 	u8			idx;	/* DT interrupt index 0..7 */
 };
-
-#define CA_NI_RX_HASH_BITS	11	/* 2048 heads for 880 pool slots */
-#define CA_NI_RX_HASH_SIZE	BIT(CA_NI_RX_HASH_BITS)
 
 /*
  * ★★★ A pool buffer's USABLE PAYLOAD WINDOW is not its size.
@@ -306,12 +302,20 @@ struct cortina_ni_rx {
 	 * read-pointer advance.  Mapped WC, so no per-frame map/sync. */
 	void			*cpu_dram;
 	dma_addr_t		cpu_dram_dma;
-	/* legacy CPU-push bookkeeping (unused now the CPU pools are DRAM auto-
-	 * populated; kept so the /proc spy + struct layout stay stable) */
+	/* legacy CPU-push bookkeeping, from before the CPU pools became DRAM
+	 * auto-populated.  `buf` and `nbufs` are still read; the rest is gone.
+	 *
+	 * ⚠ THE REASON THIS BLOCK USED TO GIVE WAS NOT TRUE.  It said the dead
+	 * members were "kept so the /proc spy + struct layout stay stable" --
+	 * but nothing printed them (checked across the whole Cortina tree: each
+	 * appeared once, its own declaration), and nothing takes a sizeof or
+	 * memset over these structs, so no layout depended on them either.
+	 * Removed: the `hash[2048]` head table with its CA_NI_RX_HASH_BITS/SIZE
+	 * macros (whose only user it was), the `hnext` chain link in
+	 * cortina_ni_rx_buf, and `pool_target`.  Found by
+	 * ONU-test-case/unread_member_guard.py. */
 	struct cortina_ni_rx_buf buf[CA_NI_RX_POOL_SIZE];
-	s16			hash[CA_NI_RX_HASH_SIZE];
 	unsigned int		nbufs;		/* buffers live in the HW pool */
-	u16			pool_target;	/* buffers to keep in the pool */
 	bool			qm_up;		/* QM_PHY_PORT_STS.qm_init_done seen */
 	struct cortina_ni_rx_irqctx irqctx[CA_NI_RX_NUM_IRQS];
 	int			irq[CA_NI_RX_NUM_IRQS];	/* <0 = not mapped */

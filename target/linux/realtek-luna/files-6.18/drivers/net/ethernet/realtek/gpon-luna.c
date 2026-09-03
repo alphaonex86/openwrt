@@ -6771,9 +6771,20 @@ static int gpon_install_omcc(u16 gem)
 	 * GEM_US_PORT_MAP[64] = 0x6500 (base 0x6400 + 64*4). STRIDE is 4 (32-bit words), the
 	 * same array stride as DS_TRAFFIC_CFG. A 0x20 stride is the regression that wrote this
 	 * to the 0x6C00 stat counter and left 0x6500 unmapped, so the GEM-US engine had no
-	 * GEM-port for the OMCI flow and never drained qid64 (gemus64=0 / "Laser out"). */
-	gpon_wr(GPON_GTC_GEM_US_PORT_MAP + GPON_OMCC_FLOW * GEM_US_PORT_MAP_STRIDE,
-		gem & 0xfff);
+	 * GEM-port for the OMCI flow and never drained qid64 (gemus64=0 / "Laser out").
+	 *
+	 * ★ FIRST TABLE-DRIVEN WRITE (2026-09-02): the offset arithmetic moved
+	 * to the shared gpon_gtc_us_gem_stamp() (flowcore/regtable.h), fed by
+	 * rtl9602c_gpon_chip -- this chip's offsets as DATA (luna_gpon_regs.h).
+	 * Same address, same value, proven by the x86 write-stream differential
+	 * (dev/rtl9607c-test/gpon_regtable_diff_test); the data-gem site below
+	 * still spells the macro form because gpon_data_bind_policy_test pins
+	 * that body's GPON_GTC_GEM_US_PORT_MAP token -- convert the two
+	 * together. */
+	if (!gpon_gtc_us_gem_stamp(&gpon_io, &rtl9602c_gpon_chip.gtc,
+				   GPON_OMCC_FLOW, gpon_gem_us_port_id(gem)))
+		pr_err("rtl9602c-gpon: gpon_chip table declares no US port map -- OMCC gem %u not stamped\n",
+		       gem);
 
 	/* GUARD: Re-assert PONIP_DBG_CTRL_US on every OMCC (re-)install.
 	 * The initial pbo_init write (0x00086000) sets DBG_IGNORE_TAG=1, but

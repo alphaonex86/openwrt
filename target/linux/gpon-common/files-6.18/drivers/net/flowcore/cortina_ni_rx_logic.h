@@ -83,9 +83,20 @@ enum ca_ni_rx_wan_class cortina_ni_rx_wan_class(u32 lspid);
  *   - the action word a static {mac -> ldpid} entry carries;
  *   - the CMD_RETURN decode (status nibble, 13-bit entry index);
  *   - the "forwardable as a DA" validity gate over a stored action.
- * cortina-l3fe.c still spells the action word (and the key pack) a second
- * time in l3fe_fdb_static_add() -- rewiring it is one call-site change in
- * that shell, left to the coordinator (out of this round's file scope).
+ * ★ BOTH SHELLS NOW CALL THIS, AND THE NOTE THAT SAID OTHERWISE WAS STALE
+ * (corrected 2026-09-03). This paragraph asked the coordinator for "one
+ * call-site change in cortina-l3fe.c" -- and l3fe_fdb_static_add() had
+ * ALREADY been rewired, in the same round that verified the L2FE and L3FE
+ * field vocabularies value-by-value. Live callers today:
+ *   cortina-ni-rx.c:2501,2502,2541   cortina-l3fe.c:1026,1028
+ * and cortina-l3fe.c's own five field macros, dead since that rewiring,
+ * are now deleted -- each had appeared exactly once tree-wide, at its own
+ * #define.
+ * ⚠ WHY THIS CORRECTION IS WORTH ITS LINES: a stale "still owed" costs the
+ * next session the whole job it claims is missing. It sent an agent to
+ * re-do a finished dedup today, and the same shape (an OWED row describing
+ * work already green) had already cost this project a PLOAM pairing that
+ * existed and passed. An owed note is a claim, and it decays.
  */
 u32 cortina_ni_l2fe_fdb_action(u32 ldpid);
 int cortina_ni_l2fe_fdb_cmd_status_idx(u32 cmd_return);

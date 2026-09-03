@@ -28,16 +28,24 @@
  * That is thousands of cases a second against roughly one 200-second boot --
  * and it is why "more abstraction" and "easier testing" are not two goals.
  *
- * ★★ A ZERO IS NOT AN ADDRESS. Every table declares which fields it does not
- * have; a chip that lacks a block leaves it 0 and the logic must ASK rather
- * than write to offset 0 of something. reg_has() is that question, spelled
- * once, because "the register at 0" is a real address on these parts and a
+ * ★★ A ZERO IS NOT AN ADDRESS -- AND IT IS NOT THE ABSENCE MARKER EITHER.
+ * Every table declares which fields it does not have; a chip that lacks a
+ * block sets the field to REG_ABSENT and the logic must ASK rather than
+ * write to offset 0 of something. reg_has() is that question, spelled once.
+ * The sentinel is 0xffffffff and deliberately NOT 0, because "the register
+ * at 0" is a real address on these parts (GPON_INT_DLT is 0x0000) and a
  * silent write there is exactly the class of bug that reads back fine.
+ * (Until 2026-09-02 this paragraph said an absent field "leaves it 0" --
+ * following that would have marked absence as an offset reg_has() calls
+ * PRESENT, and the logic would have written to offset 0. The luna_sw_map
+ * tables' 0-means-untouched convention is THEIRS, not this header's.)
  */
 #ifndef _REGTABLE_H
 #define _REGTABLE_H
 
 #include <linux/types.h>
+
+#include "hwio.h"	/* the injected accessor the logic below writes through */
 
 /** Sentinel for "this chip does not have this register". */
 #define REG_ABSENT	0xffffffffu
@@ -76,5 +84,37 @@ struct gpon_chip {
 	const char		*name;
 	struct gpon_gtc_regs	gtc;
 };
+
+/**
+ * gpon_gtc_us_gem_stamp() - stamp a GEM Port-ID into one US port-map slot.
+ * @io:      how to reach the GTC block (the shell's hwio over that block).
+ * @r:       this chip's GTC offsets.
+ * @flow:    the internal upstream flow/SID index (a slot of the port-map
+ *           array; the caller owns the range check -- Luna pins its two flows
+ *           with static_assert(GPON_GEM_US_RANGE_OK(...)) at compile time).
+ * @port_id: the GEM Port-ID, ALREADY masked to its 12 on-wire bits --
+ *           gpon_gem_us_port_id() (gpon_gem_us.h) is the one spelling of that
+ *           mask, and this function writes exactly what it is handed.
+ *
+ * The FIRST logic(hwio, regs) function of this table -- the write that the
+ * GEM_US_PORT_MAP stride regression (4 -> 0x20) once sent into a statistics
+ * counter, leaving the real slot unmapped and the T-CONT silent ("Laser out").
+ * The offset arithmetic now lives HERE, once, fed by per-chip DATA, and is
+ * proven by a write-stream differential on x86
+ * (dev/rtl9607c-test/gpon_regtable_diff_test) instead of by a boot.
+ *
+ * Return: true when the slot was written; false when this chip's table
+ * declares no US port map (the reg_has() ask this header requires -- the
+ * caller logs, because a chip without the array must never reach here).
+ */
+static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
+					 const struct gpon_gtc_regs *r,
+					 u32 flow, u16 port_id)
+{
+	if (!reg_has(r->gem_us_port_map))
+		return false;
+	hwio_wr(io, r->gem_us_port_map + flow * r->gem_us_port_stride, port_id);
+	return true;
+}
 
 #endif /* _REGTABLE_H */

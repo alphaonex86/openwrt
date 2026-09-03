@@ -39,6 +39,7 @@
 #include <linux/bits.h>	/* BIT */
 #include <linux/delay.h>	/* udelay in the SMI poll */
 #include <linux/io.h>	/* ioread32 / iowrite32 */
+#include "regtable.h"	/* flowcore: struct gpon_chip -- offsets as DATA */
 #define GPON_PHYS_BASE	0x1b700000u
 #define GPON_REG_SIZE	0x00010000u	/* covers GTC DS block at +0x1000 */
 
@@ -425,6 +426,35 @@
 #define   DS_OMCI_PTI_VAL	((1u << 4) | 1u)	/* mask=1 ptn=1 -> 0x11 */
 #define GPON_GEM_DS_MC_CFG	0x4080		/* [6] BROADCAST_PASS [4] NON_MULTICAST_PASS [3] FCS_CHK_EN */
 #define   GEM_DS_MC_CFG_VAL	0x59u		/* stock O5 operating value (read live from an online stock ONU): BROADCAST_PASS(6)|NON_MULTICAST_PASS(4)|FCS_CHK_EN(3)|bit0. The earlier 0x18 (no broadcast/bit0) was a wrong "avoid US stall" guess — stock runs 0x59 stably online with OMCI flowing. */
+
+/* ★ THE RTL9602C's GTC offsets AS DATA -- the first populated `struct
+ * gpon_chip` (flowcore/regtable.h), per that header's own brief: "ADDING A
+ * CHIP IS ADDING ONE INITIALISER BELOW".
+ *
+ * VALUES ARE LITERALS ON PURPOSE, the same idiom as rtl9602c_sw_map in
+ * luna_eth_regs.h: `regtable_vs_sdk.py` parses this initialiser structurally
+ * and confirms every address against the RTL9602C's OWN vendor chipdef
+ * (rtk_rtl9602c_reg_list.c: GTC block 0x70xxxx, array-offset 32 BITS = 4-byte
+ * stride, idx 0..127) -- a macro reference here would blind that oracle.  Each
+ * value is ALSO the value of the named #define above/beside it, and
+ * dev/rtl9607c-test/gpon_regtable_diff_test extracts BOTH spellings from this
+ * tree on every build and fails if they ever disagree, so the two copies
+ * cannot drift silently.
+ *
+ * Offsets are WITHIN the GTC block (base 0x1b700000 belongs to the shell's
+ * gpon_io), exactly as gpon_rd/gpon_wr already address it. */
+static const struct gpon_chip rtl9602c_gpon_chip = {
+	.name = "RTL9602C",
+	.gtc = {
+		.ds_omci_pti		= 0x1204,	/* = GPON_GTC_DS_OMCI_PTI; chipdef 0x701204 */
+		.gem_us_port_map	= 0x6400,	/* = GPON_GTC_GEM_US_PORT_MAP; chipdef 0x706400 */
+		.gem_us_port_stride	= 4,		/* = GEM_US_PORT_MAP_STRIDE (gpon-luna.c); chipdef array-offset 32 bits */
+		.gem_ds_mc_cfg		= 0x4080,	/* = GPON_GEM_DS_MC_CFG; chipdef 0x704080 */
+		.ds_traffic_cfg		= 0x1400,	/* = GPON_GTC_DS_TRAFFIC_CFG; chipdef 0x701400 */
+		.ds_traffic_stride	= 4,		/* = DS_TRAFFIC_CFG_STRIDE; chipdef array-offset 32 bits */
+	},
+};
+
 #define PI_PON_SID2QID		0x020f8		/* packed 7b/SID: physical queue */
 
 /* ★ ADDED 2026-09-01, because bare_offset_chip_audit found these written as RAW

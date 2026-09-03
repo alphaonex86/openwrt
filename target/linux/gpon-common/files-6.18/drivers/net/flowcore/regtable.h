@@ -86,6 +86,23 @@ struct gpon_gtc_regs {
 	u32	ds_alloc_wr;		/* alloc CAM write data: [11:0] allocateId      */
 	u32	ds_alloc_rd;		/* alloc CAM read data: [11:0] RDATA            */
 	u32	ds_alloc_idx_mask;	/* OP_IDX width as a mask (0x1f = 32 T-CONTs)   */
+	/* The three flow-indexed indirect COUNTER muxes (gpon_gtc_cntr_read()
+	 * below).  Each is an index register plus a CLEAR-ON-READ status
+	 * register; the shared handshake facts (the read-ack bit, the RSEL bit,
+	 * the poll budget) live with the transaction, and the index width --
+	 * IDX[6:0] on all three registers on both vendor chipdefs, the same
+	 * 128-flow space as the GEM Port-ID CAM -- rides here as
+	 * cntr_flow_idx_mask.  The MISC counter mux is deliberately NOT here:
+	 * it has no ack (see the counter-transaction comment below) and its
+	 * index width is the one counter field that DIFFERS between the two
+	 * chips ([3:0] vs [2:0]). */
+	u32	gem_ds_rx_cntr_ind;	/* per-flow DS GEM ETH RX: IDX[6:0], ack[15]    */
+	u32	gem_ds_rx_cntr_stat;	/* ETH_PKT_RX[31:0], clear-on-read              */
+	u32	gem_ds_fwd_cntr_ind;	/* per-flow DS GEM forwarded-to-PON-IP          */
+	u32	gem_ds_fwd_cntr_stat;	/* ETH_PKT_FWD[31:0], clear-on-read             */
+	u32	ds_port_cntr_ind;	/* per-flow DS de-encap: IDX[6:0] RSEL[8] ack[15] */
+	u32	ds_port_cntr_stat;	/* GEM_CNTR[31:0], clear-on-read                */
+	u32	cntr_flow_idx_mask;	/* counter IDX width as a mask (0x7f = 128 flows) */
 };
 
 /**
@@ -334,6 +351,128 @@ static inline int gpon_gtc_ds_port_clean(const struct hwio *io,
 	return gpon_gtc_cam_xact(io, r->ds_port_ind, GPON_GTC_CAM_OP_CLEAN,
 				 r->ds_port_idx_mask, flow, REG_ABSENT, 0,
 				 delay_us);
+}
+
+
+/*
+ * The indirect COUNTER-read handshake, shared by the three flow-indexed
+ * GTC/GEM counter muxes and, per the vendor chipdef, identical on the
+ * RTL9602C and the RTL9603CVD (GPON_GEM_DS_RX_CNTR_IND 0x704040 /
+ * GPON_GEM_DS_FWD_CNTR_IND 0x70404C / GPON_GTC_DS_PORT_CNTR_IND 0x701140:
+ * the ack field -- ETH_PKT_RX_R_ACKf / ETH_PKT_FWD_R_ACKf / GEM_CNTR_R_ACKf
+ * -- is lsp 15 len 1 on all three registers on BOTH chips, and the vendor's
+ * own DAL polls every one of them through ONE constant,
+ * GPON_REG_BITS_INDIRECT_ACK = 15).  GEM_CNTR_RSELf (the DS port counter
+ * only) is lsp 8 len 1: 0 = packet count, 1 = byte count.
+ *
+ * ⚠ GPON_GEM_DS_MISC_IND (0x4064) IS NOT THIS TRANSACTION AND MUST NOT BE
+ * ROUTED HERE.  Three independent sources agree it has no ack: both chipdefs
+ * declare only MISC_CNTR_IDX on it ([3:0] on the RTL9602C, [2:0] on the
+ * RTL9603CVD -- the one counter field whose width differs between the two
+ * chips) with bit 15 reserved; the vendor DAL reads it with NO poll at all
+ * (dal_rtl9602c_gpon_dsGemPortMiscCnt_get: write idx, read stat); and a live
+ * stock capture shows bit 15 CLEAR at rest there while all three counters
+ * above latch it SET (G24W gtcponip-stock.json: 0x04064=0x6 against
+ * 0x04040=0x807f, 0x0404c=0x807f, 0x01140=0x8101).  A MISC read through this
+ * helper would return -ETIMEDOUT on every call and never yield a count.
+ * gpon-luna.c keeps its hand-spelled MISC read, with the finding recorded
+ * beside it.
+ */
+#define GPON_GTC_CNTR_R_ACK	(1u << 15)	/* read-ack, all three counter INDs  */
+#define GPON_GTC_CNTR_RSEL_BYTE	(1u << 8)	/* GEM_CNTR_RSEL: 1 = byte count     */
+/* The poll budget of the pre-conversion call sites, verbatim: up to 1000
+ * reads at 1 us apart.  The same numbers as the CAM transaction, spelled
+ * separately because they are separate handshakes and either may move alone. */
+#define GPON_GTC_CNTR_TRIES	1000u
+
+/**
+ * gpon_gtc_cntr_read() - one indirect GTC/GEM counter read.
+ * @io:   how to reach the GTC block.
+ * @ind:  the counter's index register (offset within the block).
+ * @stat: the counter's status register.  ⚠ CLEAR-ON-READ: reading it is not
+ *        an observation, it CONSUMES the count -- which is why the timeout
+ *        path below must never touch it.
+ * @sel:  the FULL index word to write (index bits already masked by the
+ *        named table wrappers below, plus RSEL for the DS port counter).
+ * @cnt:  out -- the 32-bit count.  NOT written on any failure.
+ * @delay_us: the shell's sleep -- time is an EXPLICIT INPUT in this tier, so
+ *        the same function runs on x86 under the write-stream differential.
+ *
+ * The sequence gpon-luna.c spelled by hand at FOUR sites until 2026-09-03:
+ * write the flow/index, poll the SAME register for the read-ack -- bounded --
+ * then read the count.  Three of the four were collapsed here (the MISC read
+ * is refused above), and all three converted copies carried the same defect
+ * the CAM family had just been cured of, one of them doubled: the two GEM
+ * counter reads returned STAT after an EXPIRED poll -- and because STAT is
+ * clear-on-read, a timed-out read did not merely return garbage, it STOLE
+ * the count from the next reader.  The vendor DAL's posture agrees with the
+ * repair: its gpon_indirect_wait() failure path returns an error and never
+ * touches STAT.
+ *
+ * Return: the poll iteration at which the ack was seen (>= 0), -ETIMEDOUT
+ * when the budget expires (STAT deliberately NOT read), -ENODEV when this
+ * chip's table declares no such counter, -EINVAL with no delay op or no out
+ * pointer.  Proven against the pre-conversion forms on address, value, write
+ * count, read count and delay count by
+ * dev/rtl9607c-test/gpon_regtable_diff_test.
+ */
+static inline int gpon_gtc_cntr_read(const struct hwio *io,
+				     u32 ind, u32 stat, u32 sel, u32 *cnt,
+				     void (*delay_us)(unsigned int us))
+{
+	unsigned int i;
+
+	if (!delay_us || !cnt)
+		return -EINVAL;
+	if (!reg_has(ind) || !reg_has(stat))
+		return -ENODEV;
+	hwio_wr(io, ind, sel);
+	for (i = 0; i < GPON_GTC_CNTR_TRIES; i++) {
+		if (hwio_rd(io, ind) & GPON_GTC_CNTR_R_ACK) {
+			*cnt = hwio_rd(io, stat);
+			return (int)i;
+		}
+		delay_us(1);
+	}
+	return -ETIMEDOUT;
+}
+
+/** Read the per-flow DS GEM Ethernet RX packet count (clear-on-read). */
+static inline int gpon_gtc_gem_ds_rx_cnt_read(const struct hwio *io,
+					      const struct gpon_gtc_regs *r,
+					      u32 flow, u32 *cnt,
+					      void (*delay_us)(unsigned int us))
+{
+	return gpon_gtc_cntr_read(io, r->gem_ds_rx_cntr_ind,
+				  r->gem_ds_rx_cntr_stat,
+				  flow & r->cntr_flow_idx_mask, cnt, delay_us);
+}
+
+/** Read the per-flow DS GEM forwarded-to-PON-IP packet count (clear-on-read). */
+static inline int gpon_gtc_gem_ds_fwd_cnt_read(const struct hwio *io,
+					       const struct gpon_gtc_regs *r,
+					       u32 flow, u32 *cnt,
+					       void (*delay_us)(unsigned int us))
+{
+	return gpon_gtc_cntr_read(io, r->gem_ds_fwd_cntr_ind,
+				  r->gem_ds_fwd_cntr_stat,
+				  flow & r->cntr_flow_idx_mask, cnt, delay_us);
+}
+
+/**
+ * Read the per-flow DS de-encapsulated GEM frame count (clear-on-read).
+ * @bytes: false = packet count (RSEL 0), true = byte count (RSEL 1).
+ */
+static inline int gpon_gtc_ds_port_cnt_read(const struct hwio *io,
+					    const struct gpon_gtc_regs *r,
+					    u32 flow, bool bytes, u32 *cnt,
+					    void (*delay_us)(unsigned int us))
+{
+	return gpon_gtc_cntr_read(io, r->ds_port_cntr_ind,
+				  r->ds_port_cntr_stat,
+				  (flow & r->cntr_flow_idx_mask) |
+				  (bytes ? GPON_GTC_CNTR_RSEL_BYTE : 0),
+				  cnt, delay_us);
 }
 
 #endif /* _REGTABLE_H */

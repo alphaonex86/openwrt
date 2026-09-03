@@ -473,6 +473,19 @@ static const struct gpon_chip luna_gpon_chip = {
 		.ds_alloc_wr		= 0x10c4,	/* = GPON_GTC_DS_ALLOC_WR; chipdef 0x7010C4 */
 		.ds_alloc_rd		= 0x10cc,	/* = GPON_GTC_DS_ALLOC_RD; chipdef 0x7010CC */
 		.ds_alloc_idx_mask	= 0x1f,		/* 32 T-CONTs -- OP_IDX[4:0] */
+		/* The three flow-indexed indirect counter muxes
+		 * (gpon_gtc_cntr_read, 2026-09-03).  Addresses AND bit layout
+		 * verified IDENTICAL in both vendor chipdefs, so the
+		 * family-invariant claim of this table holds for them too.
+		 * The MISC mux is deliberately absent: no ack field, and its
+		 * idx width is the one counter fact that differs per chip. */
+		.gem_ds_rx_cntr_ind	= 0x4040,	/* = GPON_GEM_DS_RX_CNTR_IND; chipdef 0x704040 */
+		.gem_ds_rx_cntr_stat	= 0x4044,	/* = GPON_GEM_DS_RX_CNTR_STAT; chipdef 0x704044 */
+		.gem_ds_fwd_cntr_ind	= 0x404c,	/* = GPON_GEM_DS_FWD_CNTR_IND; chipdef 0x70404C */
+		.gem_ds_fwd_cntr_stat	= 0x4050,	/* = GPON_GEM_DS_FWD_CNTR_STAT; chipdef 0x704050 */
+		.ds_port_cntr_ind	= 0x1140,	/* = GPON_GTC_DS_PORT_CNTR_IND; chipdef 0x701140 */
+		.ds_port_cntr_stat	= 0x1144,	/* = GPON_GTC_DS_PORT_CNTR_STAT; chipdef 0x701144 */
+		.cntr_flow_idx_mask	= 0x7f,		/* IDX[6:0] on all three -- the 128-flow space */
 	},
 };
 
@@ -510,6 +523,33 @@ static const struct gpon_chip luna_gpon_chip = {
 #define GPON_GTC_DS_ALLOC_IND	0x10c0		/* T-CONT alloc CAM: OP_IDX[4:0]=tcont */
 #define GPON_GTC_DS_ALLOC_WR	0x10c4		/* [11:0] allocateId */
 #define GPON_GTC_DS_ALLOC_RD	0x10cc		/* [11:0] RDATA: stored allocateId (READ op) */
+
+/*
+ * The three flow-indexed indirect COUNTER muxes + the MISC mux -- names and
+ * addresses are the vendor chipdef's own, IDENTICAL on the RTL9602C and the
+ * RTL9603CVD (GPON_GEM_DS_RX_CNTR_IND 0x704040 / _STAT 0x704044,
+ * GPON_GEM_DS_FWD_CNTR_IND 0x70404C / _STAT 0x704050, GPON_GEM_DS_MISC_IND
+ * 0x704064 / GPON_GEM_DS_MISC_CNTR_STAT 0x704068, GPON_GTC_DS_PORT_CNTR_IND
+ * 0x701140 / _STAT 0x701144).  Until 2026-09-03 the driver reached the first
+ * two pairs through PI_TX_CFG_US / PI_RX_CFG_US / PI_CFG_US -- PON-IP-block
+ * names whose NUMERIC offsets coincide with these GTC-block registers -- and
+ * the last two pairs as bare hex.  A name from the wrong block is a defect:
+ * it reads as "the US NIC config is being polled" while the code is reading
+ * a DS counter.  The STAT registers are all CLEAR-ON-READ.
+ */
+#define GPON_GEM_DS_RX_CNTR_IND		0x4040	/* IDX[6:0]=flow, R_ACK[15] */
+#define GPON_GEM_DS_RX_CNTR_STAT	0x4044	/* [31:0] ETH_PKT_RX */
+#define GPON_GEM_DS_FWD_CNTR_IND	0x404c	/* IDX[6:0]=flow, R_ACK[15] */
+#define GPON_GEM_DS_FWD_CNTR_STAT	0x4050	/* [31:0] ETH_PKT_FWD */
+/* ⚠ MISC has NO R_ACK -- bit 15 is reserved on BOTH chipdefs, the vendor DAL
+ * reads it with no poll, and stock's own resting value shows it clear
+ * (0x04064=0x6) while the three counters above latch theirs set.  Its IDX is
+ * also the ONE counter field whose width differs between the chips: [3:0] on
+ * the RTL9602C, [2:0] on the RTL9603CVD (both cover the 7 declared types). */
+#define GPON_GEM_DS_MISC_IND		0x4064	/* IDX only; NO ack field */
+#define GPON_GEM_DS_MISC_CNTR_STAT	0x4068	/* [31:0] MISC_CNTR */
+#define GPON_GTC_DS_PORT_CNTR_IND	0x1140	/* IDX[6:0]=flow, RSEL[8], R_ACK[15] */
+#define GPON_GTC_DS_PORT_CNTR_STAT	0x1144	/* [31:0] GEM_CNTR */
 
 
 /*

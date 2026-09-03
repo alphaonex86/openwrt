@@ -5226,25 +5226,37 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-/* Per-flow downstream GEM Ethernet RX packet count (indirect read): write the
- * flow index to GEM_DS_RX_CNTR_IND (0x4040), poll R_ACK (bit15), read the count
- * from GEM_DS_RX_CNTR_STAT (0x4044). Diagnoses whether the OLT is sending ANY DS
- * GEM frames on a flow — e.g. OMCI on the OMCC flow 64 (gem port 2). */
+/* Per-flow downstream GEM Ethernet RX packet count (GPON_GEM_DS_RX_CNTR_IND /
+ * _STAT, clear-on-read). Diagnoses whether the OLT is sending ANY DS GEM
+ * frames on a flow — e.g. OMCI on the OMCC flow 64 (gem port 2).
+ *
+ * One indirect counter read via the shared gpon_gtc_gem_ds_rx_cnt_read()
+ * reading luna_gpon_chip (regtable.h) -- converted 2026-09-03 with the FWD
+ * and DS-port counter reads; same addresses, values, write/read/delay counts
+ * as the hand-spelled form on the success path, proven by the x86
+ * differential (dev/rtl9607c-test/gpon_regtable_diff_test).
+ *
+ * ⚠ THE PRE-CONVERSION COPY WAS DOUBLY WRONG.  (1) It reached the register
+ * through PI_TX_CFG_US / PI_RX_CFG_US -- PON-IP-block names whose numeric
+ * offsets coincide with these GTC-block registers -- so the code read as a
+ * poll of the US NIC config.  (2) It returned STAT after an EXPIRED poll:
+ * stale data dressed as a count, and since STAT is CLEAR-ON-READ the
+ * timed-out read also STOLE the count from the next reader.  Now 0xffffffff
+ * = the ack never set (the sentinel gpon_gem_flow_cnt always used), and the
+ * counter is left unconsumed. */
 static u32 gpon_gem_ds_rx_cnt(u8 flow)
 {
-	int i;
+	u32 cnt;
 
-	gpon_wr(PI_TX_CFG_US, flow & 0x7f);
-	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(PI_TX_CFG_US) & BIT(15))		/* ETH_PKT_RX_R_ACK */
-			break;
-		udelay(1);
-	}
-	return gpon_rd(PI_RX_CFG_US);				/* ETH_PKT_RX count */
+	if (gpon_gtc_gem_ds_rx_cnt_read(&gpon_io, &luna_gpon_chip.gtc, flow,
+					&cnt, gpon_cam_delay_us) < 0)
+		return 0xffffffffu;			/* ACK never set */
+	return cnt;
 }
 
-/* Per-flow downstream GEM FORWARDED-to-PON-IP count (GEM_DS_FWD_CNTR, IND 0x404C /
- * STAT 0x4050, field ETH_PKT_FWD) — same indirect protocol as gpon_gem_ds_rx_cnt.
+/* Per-flow downstream GEM FORWARDED-to-PON-IP count (GPON_GEM_DS_FWD_CNTR_IND
+ * / _STAT, field ETH_PKT_FWD, clear-on-read) — same indirect protocol as
+ * gpon_gem_ds_rx_cnt.
  * DECISIVE diagnostic: GEM_NON_IDLE is a GLOBAL de-assembler counter, so its rise
  * only proves the GTC de-encapsulated SOMETHING, not that flow-64/OMCI was forwarded
  * toward the PON-IP. FWD[64] localizes the break: if flow_cnt(64) climbs but FWD=0
@@ -5253,15 +5265,17 @@ static u32 gpon_gem_ds_rx_cnt(u8 flow)
  * or the internal DS-GMII link MEDIA_STS_DS). */
 static u32 gpon_gem_ds_fwd_cnt(u8 flow)
 {
-	int i;
+	u32 cnt;
 
-	gpon_wr(PI_CFG_US, flow & 0x7f);
-	for (i = 0; i < 1000; i++) {
-		if (gpon_rd(PI_CFG_US) & BIT(15))		/* ETH_PKT_FWD_R_ACK */
-			break;
-		udelay(1);
-	}
-	return gpon_rd(0x4050);				/* ETH_PKT_FWD count */
+	/* Shared transaction (gpon_gtc_gem_ds_fwd_cnt_read, regtable.h) since
+	 * 2026-09-03.  The pre-conversion copy spelled the IND register
+	 * PI_CFG_US (a PON-IP-block name, wrong block) and the STAT as bare
+	 * 0x4050, and returned STAT after an expired poll -- the same double
+	 * defect as gpon_gem_ds_rx_cnt above. */
+	if (gpon_gtc_gem_ds_fwd_cnt_read(&gpon_io, &luna_gpon_chip.gtc, flow,
+					 &cnt, gpon_cam_delay_us) < 0)
+		return 0xffffffffu;			/* ACK never set */
+	return cnt;
 }
 
 /* Read back the DS GEM-port CAM entry for `flow` (READ op): does the CAM
@@ -5349,24 +5363,41 @@ static u32 gpon_us_misc_cnt(u8 idx)
 	return gpon_rd(0x5148);
 }
 
-/* GEM DS MISC PM counter (GPON_GEM_DS_MISC_IND 0x4064 [3:0]=idx, R_ACK bit15, STAT
- * 0x4068) — GLOBAL, CAM-INDEPENDENT de-encap-stage counters. idx map (gponv2):
+/* GEM DS MISC PM counter (GPON_GEM_DS_MISC_IND [3:0]=idx, STAT
+ * GPON_GEM_DS_MISC_CNTR_STAT, clear-on-read) — GLOBAL, CAM-INDEPENDENT
+ * de-encap-stage counters. idx map (gponv2):
  * 0=MC_RX 1=UC_RX 2=MC_FWD 3=MC_LEAK 4=ETH_CRC_ERR 5=OVER_INTERLEAV 6=OMCI_RX.
  * Decisive: UC_RX(1) counts every DS unicast GEM the de-assembler accepts regardless
  * of the per-port CAM; OMCI_RX(6) is the authoritative "GTC de-encapsulated an OMCI
  * frame" count. If UC_RX climbs but OMCI_RX stays 0 -> unicast arrives but is not
- * PTI-classified as OMCI; if neither climbs -> no unicast reaches the de-assembler. */
+ * PTI-classified as OMCI; if neither climbs -> no unicast reaches the de-assembler.
+ *
+ * ⚠ NOT the shared gpon_gtc_cntr_read() transaction, DELIBERATELY (2026-09-03,
+ * when its three siblings were converted).  This comment claimed "R_ACK bit15"
+ * for months; three independent sources refute it: both vendor chipdefs
+ * declare NO ack field here (only MISC_CNTR_IDX -- [3:0] on the RTL9602C,
+ * [2:0] on the RTL9603CVD -- with bit 15 reserved), the vendor DAL reads this
+ * counter with no poll at all (dal_rtl9602c_gpon_dsGemPortMiscCnt_get: write
+ * idx, read stat), and stock's own resting value shows bit 15 CLEAR here
+ * (G24W gtcponip-stock.json 0x04064=0x6) while all three real counter INDs
+ * latch theirs SET (0x807f / 0x807f / 0x8101).  So the poll below tests a
+ * reserved bit, always expires, and is in effect a 16x2 us settle -- and the
+ * fall-through STAT read after it is the LOAD-BEARING path, not a swallowed
+ * timeout.  Routing this through the shared helper (timeout = -ETIMEDOUT, no
+ * STAT read) would return "failed" on every call.  The sequence is kept
+ * BYTE-IDENTICAL on the bus pending a tier-1 measurement on stock of whether
+ * the settle is needed at all (the vendor uses none); only the names moved. */
 static u32 gpon_gem_ds_misc_cnt(u8 idx)
 {
 	int i;
 
-	gpon_wr(0x4064, idx & 0xf);
+	gpon_wr(GPON_GEM_DS_MISC_IND, idx & 0xf);
 	for (i = 0; i < 16; i++) {
-		if (gpon_rd(0x4064) & BIT(15))
+		if (gpon_rd(GPON_GEM_DS_MISC_IND) & BIT(15))
 			break;
 		udelay(2);
 	}
-	return gpon_rd(0x4068);
+	return gpon_rd(GPON_GEM_DS_MISC_CNTR_STAT);
 }
 
 /* Read back the GTC alloc CAM entry for a T-CONT (READ op, same indirect protocol
@@ -5525,22 +5556,28 @@ static void gpon_alloc_cam_clear_others(u8 keep)
 		       stuck, first_stuck);
 }
 
-/* DS-PIPELINE STAGE-A: per-flow de-encapsulated GEM frame count (indirect):
- * GPON_GTC_DS_PORT_CNTR_IND(0x1140) IDX[6:0]=flow|RSEL[8]=0(pkt)/1(byte), poll
- * R_ACK(bit15), read GPON_GTC_DS_PORT_CNTR_STAT(0x1144). Unlike gem_ds_rx_cnt
- * (ETH-only 0x4040), this counts ALL de-encapped GEM frames incl. isOMCI flow 64
- * — the reliable "did the GTC de-encapsulate OMCI?" detector. Bounded poll. */
+/* DS-PIPELINE STAGE-A: per-flow de-encapsulated GEM frame count
+ * (GPON_GTC_DS_PORT_CNTR_IND IDX[6:0]=flow | RSEL[8]=0(pkt)/1(byte), STAT
+ * GPON_GTC_DS_PORT_CNTR_STAT, clear-on-read). Unlike gem_ds_rx_cnt (ETH-only
+ * GPON_GEM_DS_RX_CNTR_IND), this counts ALL de-encapped GEM frames incl.
+ * isOMCI flow 64 — the reliable "did the GTC de-encapsulate OMCI?" detector.
+ *
+ * Shared transaction (gpon_gtc_ds_port_cnt_read, regtable.h) since
+ * 2026-09-03; the pre-conversion copy spelled both registers as bare hex.
+ * It was the ONLY one of the four counter sites that already refused its
+ * timeout (the 0xffffffff sentinel below, which its /proc consumers decode
+ * structurally); the sentinel stays because those consumers print counts as
+ * u32, and the shared helper is what now guarantees STAT is not read -- and
+ * therefore not CLEARED -- on the timeout path. */
 static u32 gpon_gem_flow_cnt(u32 idx, int rsel)
 {
-	int t;
+	u32 cnt;
 
-	gpon_wr(0x1140, (idx & 0x7f) | ((rsel & 1) << 8));
-	for (t = 0; t < 1000; t++) {
-		if (gpon_rd(0x1140) & BIT(15))
-			return gpon_rd(0x1144);
-		udelay(1);
-	}
-	return 0xffffffffu;				/* ACK never set */
+	if (gpon_gtc_ds_port_cnt_read(&gpon_io, &luna_gpon_chip.gtc, idx,
+				      (rsel & 1) != 0, &cnt,
+				      gpon_cam_delay_us) < 0)
+		return 0xffffffffu;			/* ACK never set */
+	return cnt;
 }
 
 static int gpon_proc_show(struct seq_file *s, void *v)

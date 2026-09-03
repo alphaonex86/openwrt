@@ -1178,6 +1178,22 @@ void gpon_ploam_set_data_gem_solicited(struct gpon_ploam *o, bool solicited,
 	o->data_gem_solicited = solicited;
 	if (!solicited)
 		return;
+	/* ★★ THE MULTICAST GEM IS NOT THE WAN DATA GEM (G.988). The OLT
+	 * provisions the multicast/broadcast GEM as an ME 268 Create too
+	 * (inst=1, Port-ID GPON_MCAST_GEM_PORT, paired with ME 281). It has its
+	 * own flow and its own downstream routing, so adopting it here would
+	 * point the WAN at the broadcast port.
+	 *
+	 * ⚠ THIS REFUSAL LIVED ONLY IN THE LUNA SHELL until 2026-09-03, while
+	 * the core carried GPON_MCAST_GEM_PORT and USED IT NOWHERE: the core had
+	 * the protocol NAME and the family had the protocol RULE. Today's only
+	 * caller filters before calling, so this was LATENT, not live -- the
+	 * point is that the core must be right for the NEXT caller, and it is
+	 * the half that also runs on x86 and on the other family. */
+	if ((port_id & GPON_GEM_US_PORT_MASK) == GPON_MCAST_GEM_PORT) {
+		o->data_gem_solicited = false;
+		return;
+	}
 	/* A Port-ID that MOVED re-arms the install, so the datapath follows the
 	 * OLT instead of keeping a retired GEM port on the wire. Repeating the
 	 * same one is idempotent: the install pulses the upstream-NIC classify

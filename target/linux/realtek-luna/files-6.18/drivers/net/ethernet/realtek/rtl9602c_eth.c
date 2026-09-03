@@ -333,7 +333,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 
 /* Descriptor opts1 bits (shared TX/RX where noted). */
 #define D_IPCS		BIT(27)	/* TX: insert IPv4 csum */
-#define RXD_RCDF	BIT(24)	/* RX: DMA error */
 
 /*
  * TX descriptor CPU-tag fields (the GMAC tx_info layout, selected by the GMAC

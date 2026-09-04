@@ -112,7 +112,29 @@
 #define SW_STAT_PORT_TX_MIB	0x32000	/* STAT_PORT_TX_MIB, +0x80 per port */
 
 /* Switch core: the VLAN block did NOT move between these two revisions. */
-#define SW_VLAN_ACCEPT		0x13000	/* per-port accept-frame-type (0 = accept all) */
+/* ★ NAMES BOTH CHIPDEFS AGREE ON, for the SWCORE registers
+ * rtl9602c_datapath_tables_init writes (2026-09-04).  It spelled these as
+ * bare hex; `bare_offset_chip_audit.py` resolves each address in the
+ * rtl9602c AND rtl9603cvd chipdefs and only a SAME verdict is written here.
+ * The SW_ prefix is this header's own convention for the SWCORE window.
+ * ⚠ SW_VLAN_PORT_ACCEPT_FRAME_TYPE below is an ABBREVIATION the tree established earlier
+ * (the chipdefs call 0x13000 VLAN_PORT_ACCEPT_FRAME_TYPE); it is left as it
+ * is because renaming a name the tree already uses is a separate question
+ * from naming a number that had none. */
+#define SW_VLAN_INGRESS			0x13004
+#define SW_LUT_CFG			0x17000
+#define SW_LUT_AGEOUT_CTRL		0x17004
+#define SW_LUT_UNMATCHED_SA_CTRL	0x1C000
+#define SW_LUT_UNKN_SA_CTRL		0x1C004
+#define SW_PISO_PORT			0x27000
+/* ⚠ AN ARRAY, NOT FOUR REGISTERS.  Only element 0 carries a chipdef name;
+ * the two maps name DIFFERENT later elements (PISO_EXT at 0x27008 on the
+ * RTL9602C, at 0x2700c on the RTL9603CVD) because the array's extent
+ * differs, not because anything moved.  Treating one element as a
+ * standalone register made the G24W write 0x2700c twice and never write
+ * 0x27008 -- so the BASE is named and the elements are arithmetic. */
+#define SW_PISO_PORT_STRIDE	4u
+#define SW_VLAN_PORT_ACCEPT_FRAME_TYPE		0x13000	/* per-port accept-frame-type (0 = accept all) */
 #define SW_VLAN_CTRL		0x13008
 #define SW_VLAN_PB_VID		0x1300C	/* per-port default VID (PVID), stride 4 */
 

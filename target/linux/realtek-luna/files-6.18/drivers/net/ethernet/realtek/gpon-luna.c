@@ -4450,8 +4450,8 @@ void rtl9602c_datapath_tables_init(void)
 							 * luna_eth_regs.h    */
 	pi_field(0x2190, 7, 0, 0x6e);			/* PON_TB_CTRL tick      */
 	pi_field(0x2190, 15, 8, 0x95);
-	sw_field(0x25000, 7, 0, 43);			/* METER_TB_CTRL tick    */
-	sw_field(0x25000, 15, 8, 189);
+	sw_field(SW_METER_TB_CTRL, 7, 0, 43);			/* METER_TB_CTRL tick    */
+	sw_field(SW_METER_TB_CTRL, 15, 8, 189);
 	sw_field(0x2d89c, 0, 0, 1);			/* SCH_WFQ_TKN_CTRL      */
 	sw_field(0x2d8b8, 18, 0, 0x3ffff);		/* LINE_RATE_2500M       */
 	sw_field(WRAP_GPHY_MISC, 0, 0, 1);			/* PATCH_PHY_DONE        */
@@ -4465,12 +4465,12 @@ void rtl9602c_datapath_tables_init(void)
 	 * region BROKE the DS path (omcirx went 0) — our other config doesn't satisfy
 	 * those actions' assumptions, and STP already reads 0x0f forwarding anyway. Keep
 	 * the working FORWARD(0) defaults; do NOT match those stock LUT actions. */
-	sw_field(0x17000, 22, 22, 1);			/* LUT LINKDOWN_AGEOUT   */
+	sw_field(SW_LUT_CFG, 22, 22, 1);			/* LUT LINKDOWN_AGEOUT   */
 	for (port = 0; port <= 3; port++) {
 		sw_field(LUT_LEARN_OVER_CTRL, port * 2 + 1, port * 2, 0);
-		sw_field(0x17004, port, port, 1);
-		sw_field(0x1c004, port * 2 + 1, port * 2, 0);
-		sw_field(0x1c000, port * 2 + 1, port * 2, 0);
+		sw_field(SW_LUT_AGEOUT_CTRL, port, port, 1);
+		sw_field(SW_LUT_UNKN_SA_CTRL, port * 2 + 1, port * 2, 0);
+		sw_field(SW_LUT_UNMATCHED_SA_CTRL, port * 2 + 1, port * 2, 0);
 		sw_field(UNKN_IP4_MC, port * 2 + 1, port * 2, 0);
 		sw_field(UNKN_L2_MC, port * 2 + 1, port * 2, 0);
 		sw_field(LUT_UNKN_UC_DA_CTRL, port * 2 + 1, port * 2, 0);
@@ -4486,8 +4486,8 @@ void rtl9602c_datapath_tables_init(void)
 	 *    filtering if the member entry actually wrote (else keep VLAN off,
 	 *    our working baseline). Risky table-engine path: gated by table_engine_ok. */
 	for (port = 0; port <= 3; port++) {
-		sw_field(0x13000, port * 2 + 1, port * 2, 0);	/* ACCEPT ALL    */
-		sw_field(0x2a000 + 4 * port, 1, 0, 0);		/* EGRESS ORIG   */
+		sw_field(SW_VLAN_PORT_ACCEPT_FRAME_TYPE, port * 2 + 1, port * 2, 0);	/* ACCEPT ALL    */
+		sw_field(SW_VLAN_EGRESS_TAG + 4 * port, 1, 0, 0);		/* EGRESS ORIG   */
 	}
 	if (table_engine_ok) {
 		tbl_ok = true;				/* retry engine for VLAN  */
@@ -4496,14 +4496,14 @@ void rtl9602c_datapath_tables_init(void)
 		tbl_write(/*VLAN*/ 1, /*vid*/ 1);
 		if (tbl_ok) {
 			for (port = 0; port <= 3; port++)
-				sw_field(0x13004, port, port, 1);	/* VLAN_INGRESS  */
+				sw_field(SW_VLAN_INGRESS, port, port, 1);	/* VLAN_INGRESS  */
 			/* VLAN_FILTER ON for ranging/config (reliable onlining); the FSM auto-clears
 			 * it once stably at O5 to open LAN access (see vlan_lan_open in gpon_fsm_poll).
 			 * lan_keep_open (default) keeps LAN open from boot -> never assert the filter,
 			 * so a bad cold-start (no O5) or a WAN-disconnect can't kill LAN management. */
 			if (!lan_keep_open)
-				sw_field(0x13008, 0, 0, 1);	/* VLAN_FILTER on (config phase) */
-			sw_field(0x13008, 4, 4, 0);
+				sw_field(SW_VLAN_CTRL, 0, 0, 1);	/* VLAN_FILTER on (config phase) */
+			sw_field(SW_VLAN_CTRL, 4, 4, 0);
 		}
 	}
 
@@ -4548,8 +4548,10 @@ void rtl9602c_datapath_tables_init(void)
 	 *
 	 * ⇒ an offset carrying a chipdef NAME is not evidence that it is a
 	 *   standalone register. Written as the array it is. */
-	sw_wr(0x27000, 0x000ff9ffu); sw_wr(0x27004, 0x000ff9ffu);
-	sw_wr(0x27008, 0x000ff9ffu); sw_wr(0x2700c, 0x000ff9ffu);
+	sw_wr(SW_PISO_PORT + 0 * SW_PISO_PORT_STRIDE, 0x000ff9ffu);
+	sw_wr(SW_PISO_PORT + 1 * SW_PISO_PORT_STRIDE, 0x000ff9ffu);
+	sw_wr(SW_PISO_PORT + 2 * SW_PISO_PORT_STRIDE, 0x000ff9ffu);
+	sw_wr(SW_PISO_PORT + 3 * SW_PISO_PORT_STRIDE, 0x000ff9ffu);
 	sw_wr(LUT_BC_FLOOD, 0x00000008u); sw_wr(LUT_UNKN_MC_FLOOD, 0x00000008u); sw_wr(LUT_UNKN_UC_FLOOD, 0x00000008u);
 
 	/* 8) ponmac_init: PON-IP scheduler + OMCI egress steering */
@@ -7648,8 +7650,8 @@ static void gpon_o5_rearm_burst(void)
 		return;
 	gpon_wr_us_protected(0x5188, 0x00504bfa);	/* US_OPTIC_SD_TH */
 	gpon_field(0x526c, 0, 0, 1);			/* US_PWR_SAV_MODE */
-	gpon_wr(0x6024, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG */
-	gpon_wr(0x6260, 0x00000028u);			/* GEM_US_EOB_MERGE */
+	gpon_wr(GPON_GEM_US_PWR_SAV_CFG, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG */
+	gpon_wr(GPON_GEM_US_EOB_MERGE, 0x00000028u);			/* GEM_US_EOB_MERGE */
 	memset(nomsg, 0xaa, sizeof(nomsg));
 	nomsg[0] = 0xff;	/* ONU-ID (HW overrides via ONUID_OVRD) */
 	nomsg[1] = 0x04;	/* GPON_PLOAM_US_NOMESSAGE */
@@ -7661,7 +7663,7 @@ static void gpon_below_o5(void)
 	gpon_rerange_start_j = jiffies ? jiffies : 1;	/* start the outage timer */
 	gpon_o5_entry_tick = 0;
 	if (gpon_vlan_lan_open && !lan_keep_open) {
-		sw_field(0x13008, 0, 0, 1);	/* re-assert VLAN_FILTER for re-config */
+		sw_field(SW_VLAN_CTRL, 0, 0, 1);	/* re-assert VLAN_FILTER for re-config */
 		gpon_vlan_lan_open = false;
 		pr_info("rtl9602c-gpon: re-range -> VLAN_FILTER re-armed (config phase)\n");
 	}
@@ -8991,7 +8993,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * the write is idempotent, costs one MMIO, and undoes any late eth_open re-assert
 	 * within a single tick -> the LAN stays reachable in every state. */
 	if (lan_keep_open) {
-		sw_field(0x13008, 0, 0, 0);		/* VLAN_FILTER off -> LAN open, every state */
+		sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> LAN open, every state */
 		if (!gpon_vlan_lan_open) {
 			gpon_vlan_lan_open = true;
 			pr_info("rtl9602c-gpon: lan_keep_open -> VLAN_FILTER off (LAN access open)\n");
@@ -9000,7 +9002,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		   gpon_o5_entry_tick && (gpon_fsm_ticks - gpon_o5_entry_tick) > vlan_lan_o5_ticks) {
 		/* legacy O5-gated: keep filtering on through ranging/config-apply, then clear
 		 * once the ONU has held O5 for vlan_lan_o5_ticks. Re-armed on any drop below O5. */
-		sw_field(0x13008, 0, 0, 0);		/* VLAN_FILTER off -> open LAN */
+		sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> open LAN */
 		gpon_vlan_lan_open = true;
 		pr_info("rtl9602c-gpon: O5 stable %u ticks -> VLAN_FILTER off (LAN access open)\n",
 			gpon_fsm_ticks - gpon_o5_entry_tick);
@@ -9797,7 +9799,7 @@ skip_bosa_init:
 	 * is 0, so every US GEM frame (incl OMCC OMCI responses) carries PTI=000 even on
 	 * end-of-fragment; some OLTs (e.g. ALU) only accept OMCI with
 	 * NON_END_FRAG=0 and END_FRAG=1. Set it so the upstream GEM/OMCC is well-formed. */
-	gpon_wr(0x6020, force_idle ? 0x80001010u : 0x00001010u);	/* FS_GEM_IDLE(bit31)=force_idle: bisection diag (stock=0) */
+	gpon_wr(GPON_GEM_US_PTI_CFG, force_idle ? 0x80001010u : 0x00001010u);	/* FS_GEM_IDLE(bit31)=force_idle: bisection diag (stock=0) */
 	gpon_wr_us_protected(GPON_GTC_US_LASER, GPON_US_LASER_VAL);
 
 	/*
@@ -9925,8 +9927,8 @@ skip_bosa_init:
 	 * value (0x00504bfa): MISM_THRESH[30:16]=0x50, TOOLONG_THRESH[14:0]=0x4bfa. Oracle-parity. */
 	gpon_wr_us_protected(0x5188, 0x00504bfa);	/* US_OPTIC_SD_TH: live stock = MISM 0x50 | TOOLONG 0x4bfa */
 	gpon_field(0x526c, 0, 0, 1);			/* US_PWR_SAV_MODE.PWR_SAV_MODE = 1 (live stock = 1) */
-	gpon_wr(0x6024, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG = 0x00100100 (live stock) */
-	gpon_wr(0x6260, 0x00000028u);			/* GEM_US_EOB_MERGE = 0x28 (live stock; mine omitted) */
+	gpon_wr(GPON_GEM_US_PWR_SAV_CFG, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG = 0x00100100 (live stock) */
+	gpon_wr(GPON_GEM_US_EOB_MERGE, 0x00000028u);			/* GEM_US_EOB_MERGE = 0x28 (live stock; mine omitted) */
 
 	/*
 	 * Default upstream burst overhead (G.984.3): 0xAA preamble run + the

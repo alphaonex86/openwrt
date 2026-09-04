@@ -871,7 +871,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 		for (to = 0; to < 1000 &&
 			    (ioread32(ep->sw + SW_TBL_STS) & SW_TBL_BUSY); to++)
 			udelay(1);
-		iowrite32(0, ep->sw + SW_VLAN_ACCEPT);	/* accept all frame types */
+		iowrite32(0, ep->sw + SW_VLAN_PORT_ACCEPT_FRAME_TYPE);	/* accept all frame types */
 		for (p = 0; p < 4; p++)
 			iowrite32((ioread32(ep->sw + SW_VLAN_PB_VID + p * 4) & ~0xfffu) |
 					  SW_DEFAULT_VID,

@@ -403,7 +403,7 @@ u32 rtl9602c_omci_txd_word3(u32 ovr, unsigned int sid)
  * RX classification chain on x86, not two-thirds of it.
  *
  * @err_mask is the family's RXD_CRCERR | RXD_RCDF -- those bits are LUNA
- * FAMILY descriptor facts (luna_eth_regs.h / the shell) and passing the mask
+ * FAMILY descriptor facts (both in luna_eth_regs.h) and passing the mask
  * keeps this header from re-spelling them (a second spelling of BIT(27) is
  * the drift this tier exists to remove).  The 60 is ETH_ZLEN re-expressed
  * (if_ether.h is not includable here) -- same declared deviation as

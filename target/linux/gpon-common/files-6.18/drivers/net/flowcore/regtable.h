@@ -58,6 +58,69 @@ static inline bool reg_has(u32 off)
 }
 
 /**
+ * gpon_ind_poll() - bounded wait for an indirect transaction's busy bit.
+ * @off:   the register carrying the busy/GO bit, WITHIN the block.
+ * @busy:  the bit that is SET while the hardware is working.
+ * @tries: the caller's bound. A timeout is not success, so there is always one.
+ * @pause: the shell's per-iteration pause. The core has no clock and no way to
+ *         yield a CPU, so the wait's cost is the SHELL's to define -- the same
+ *         reason gpon_gtc_cam_xact() takes @delay_us.
+ *
+ * Every indirect table in these chips is reached the same way: raise a request,
+ * then watch one bit until the hardware drops it. That idea had SIX
+ * implementations across the tree and they had drifted in the ways copies do --
+ * one spun a core with no pause at all, three spelled one bound under three
+ * names, and only one of the three recorded where the number came from.
+ *
+ * ★ WHY THIS IS CORE AND NOT FAMILY, because I got that wrong once and wrote
+ * the wrong reason into a header (2026-09-04): a bounded busy-wait looks like
+ * it is "about time", which the core forbids. It is not -- the WAITING is the
+ * shell's, injected as @pause, and what is left is pure decision: read a bit,
+ * count, refuse. That is precisely the split gpon_gtc_cam_xact() already used
+ * on this exact problem, one file away, and the tree had the answer before I
+ * claimed there wasn't one.
+ *
+ * Return: the iteration COMPL was seen at (>= 0), -ETIMEDOUT when the bound
+ * expires, -ENODEV when this chip's table has no such register (refused BEFORE
+ * any bus traffic), -EINVAL with no pause op.
+ */
+static inline int gpon_ind_poll(const struct hwio *io, u32 off, u32 busy,
+				unsigned int tries, void (*pause)(void))
+{
+	unsigned int i;
+
+	if (!pause)
+		return -EINVAL;
+	if (!reg_has(off))
+		return -ENODEV;
+	for (i = 0; i < tries; i++) {
+		if (!(hwio_rd(io, off) & busy))
+			return (int)i;
+		pause();
+	}
+	return -ETIMEDOUT;
+}
+
+/**
+ * gpon_ind_go() - write a request word, then wait for its busy bit to clear.
+ *
+ * The write-then-wait spelling of gpon_ind_poll(). Refuses an absent register
+ * BEFORE the write, so a chip whose table lacks the block never emits a
+ * transaction into empty space.
+ */
+static inline int gpon_ind_go(const struct hwio *io, u32 off, u32 val,
+			      u32 busy, unsigned int tries,
+			      void (*pause)(void))
+{
+	if (!pause)
+		return -EINVAL;
+	if (!reg_has(off))
+		return -ENODEV;
+	hwio_wr(io, off, val);
+	return gpon_ind_poll(io, off, busy, tries, pause);
+}
+
+/**
  * struct gpon_gtc_regs - the GTC/OMCI offsets a shared GPON function needs.
  *
  * Offsets are WITHIN the GTC block, never absolute: the base belongs to the

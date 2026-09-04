@@ -36,6 +36,8 @@
 #include <linux/io.h>
 #include <linux/processor.h>
 
+#include "regtable.h"	/* the core's indirect-transaction poll */
+
 /* ---- hash engine: table geometry and the four table base addresses ------- */
 /* hb_size[1:0], ht_size[4:2], ha_width[7:5], def_reg[16], crc_ntfy_en[17] */
 #define L3FE_HS_HASH_INI		0x3834
@@ -73,44 +75,82 @@
  *
  * Every indirect table in this block is reached the same way: write the ACCESS
  * word with its GO bit (plus the write bit, for a write), then poll that bit
- * until the hardware clears it.  The protocol lived in THREE hand-written
- * copies before 2026-09-04 -- l3fe_poll_clear() in cortina-l3fe.c,
- * cl3a_poll_go() in cortina-l3fe-aging.c and cn_l3e_go() in
- * cortina-ni-flowoffload.c -- and the copies had drifted:
+ * until the hardware clears it.  The protocol had FOUR hand-written copies here
+ * before 2026-09-04 and they had drifted -- one spun with no cpu_relax(), and
+ * one bound of 1000 wore three names of which only one cited the vendor's
+ * TABLE_TRY_TIMEOUT.
  *
- *   - two called cpu_relax() in the busy loop and the third did not, so one of
- *     the three spun the core with no pause hint and no preemption point;
- *   - all three used a bound of 1000, under three different names, and only
- *     ONE of the three said where the number comes from.
+ * ★★ THE DECIDING HALF NOW LIVES IN THE CORE, and the first version of this
+ * comment said it could not.  It claimed a bounded busy-wait is "about time and
+ * about yielding a CPU", which the gpon_* core forbids.  That was wrong, and
+ * wrong in the way this project keeps being wrong: the SAME IDEA already had a
+ * core owner under another name.  gpon_gtc_cam_xact() in flowcore/regtable.h
+ * has polled an indirect transaction from the core since 2026-09-03 by taking
+ * the wait as an INJECTED CALLBACK.  The waiting is the shell's; the deciding
+ * -- read a bit, count, refuse -- is not, and that half is shareable.
  *
- * Both are fixed here by there being one of it.  The bound keeps its
- * provenance, and the loop always yields.
+ * So what is left below is genuinely this family's: the iomem accessor, the
+ * pause this block uses, the vendor's bound, and the rc convention its callers
+ * already depend on.
  *
- * ⚠ THIS IS NOT CORE CODE AND MUST NOT MOVE THERE.  It is a bounded busy-wait,
- * so it is about TIME and about yielding a CPU -- exactly the two things the
- * gpon_* core forbids (time is an explicit input there, and the core must keep
- * building on x86 with no kernel).  The family is the right home.
+ * ⚠ THE PAUSE IS cpu_relax(), NOT a microsecond sleep, and that is deliberate:
+ * cn_l3e_cache_invalidate() polls under spin_lock_irqsave(), so turning this
+ * into udelay(1) x 1000 would hold interrupts off for a millisecond.  The GTC
+ * CAM engine next to it in the core DOES sleep between polls because its own
+ * vendor sequence does.  Two waits, two costs, one decider.  Unifying the
+ * TIMING is a separate change and needs a measurement nobody has yet.
  */
 #define L3FE_ACCESS_TRIES	1000	/* == the vendor's TABLE_TRY_TIMEOUT */
 
-/* Wait for @busy to clear at @off.  0, or -ETIMEDOUT after the bound. */
-static inline int l3fe_access_wait(void __iomem *ne, u32 off, u32 busy)
+static inline u32 l3fe_hwio_rd(void *ctx, u32 off)
 {
-	int i;
-
-	for (i = 0; i < L3FE_ACCESS_TRIES; i++) {
-		if (!(readl(ne + off) & busy))
-			return 0;
-		cpu_relax();
-	}
-	return -ETIMEDOUT;
+	return readl((void __iomem *)ctx + off);
 }
 
-/* Write @val to @off, then wait for its @busy bit to clear. */
+static inline void l3fe_hwio_wr(void *ctx, u32 off, u32 val)
+{
+	writel(val, (void __iomem *)ctx + off);
+}
+
+/* This block as a flowcore accessor.  Unlike Luna's, the ctx is USED: the NE
+ * base is a runtime ioremap, not a file static. */
+static inline struct hwio l3fe_io(void __iomem *ne)
+{
+	struct hwio io = { .rd = l3fe_hwio_rd, .wr = l3fe_hwio_wr, .ctx = ne };
+
+	return io;
+}
+
+/* The shell's pause for the core poll -- see the ⚠ above before changing it. */
+static inline void l3fe_access_pause(void)
+{
+	cpu_relax();
+}
+
+/*
+ * ⚠ THE rc IS NORMALISED TO 0 ON SUCCESS, and it must be.  The core returns
+ * the ITERATION the bit cleared at (>= 0), which is useful and which its GTC
+ * siblings print -- but every one of this block's 25 call sites reads the
+ * result as `if (ret) return ret;`, several returning it straight out of a
+ * public function.  Passing the iteration through would turn "cleared on the
+ * third poll" into an error code.  Checked at all 25 before this conversion.
+ */
+static inline int l3fe_access_wait(void __iomem *ne, u32 off, u32 busy)
+{
+	struct hwio io = l3fe_io(ne);
+	int rc = gpon_ind_poll(&io, off, busy, L3FE_ACCESS_TRIES,
+			       l3fe_access_pause);
+
+	return rc < 0 ? rc : 0;
+}
+
 static inline int l3fe_access_go(void __iomem *ne, u32 off, u32 val, u32 busy)
 {
-	writel(val, ne + off);
-	return l3fe_access_wait(ne, off, busy);
+	struct hwio io = l3fe_io(ne);
+	int rc = gpon_ind_go(&io, off, val, busy, L3FE_ACCESS_TRIES,
+			     l3fe_access_pause);
+
+	return rc < 0 ? rc : 0;
 }
 
 #endif /* _CORTINA_L3FE_REGS_H */

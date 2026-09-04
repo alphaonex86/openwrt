@@ -62,6 +62,14 @@
 #define R_CPUTAGCR		0x48	/* CPU-tag insert config */
 #define R_CONFIG		0x4C
 #define R_CPUTAG1CR		0x50
+/* ★ NAMED FROM THIS DRIVER'S OWN REPEATED COMMENTS (2026-09-04).  Each of
+ * the three was written as a literal at two or three sites and commented
+ * with the same name every time; the tree established them, the compiler
+ * just could not see it.  The re8686 NIC window has no chipdef here, so
+ * these are the file's own record and nothing more is claimed. */
+#define R_MAR0			0x08	/* multicast filter [31:0]      */
+#define R_MAR4			0x0C	/* multicast filter [63:32]     */
+#define R_CMD			0x3B	/* 8-bit CMD: RxChkSum|RxJumbo, bit0 = reset */
 #define R_IMR			0x3c	/* 16-bit RX/TX IRQ mask (stock operating = 0xf835) */
 #define R_ISR			0x3e	/* 16-bit RX/TX IRQ status, write-1-to-clear */
 #define R_IMR0			0xd0	/* 32-bit per-ring TX-completion mask (stock = 0x3f) */

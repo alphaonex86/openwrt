@@ -2679,7 +2679,7 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 	unsigned int k, oring = rtl9602c_omci_hwring(omci_tx_ring);
 	u32 desnum, rcr;
 
-	iowrite8(0x0A, ep->base + 0x3B);	/* CMD: RxChkSum|RxJumboSupport */
+	iowrite8(0x0A, ep->base + R_CMD);	/* CMD: RxChkSum|RxJumboSupport */
 	ep_wr(ep, R_TCR, 0x00000C00);		/* TX pad ON (bit0=0) */
 	rcr = 0x0000000E;
 	if (ndev->flags & (IFF_PROMISC | IFF_ALLMULTI))
@@ -2735,8 +2735,8 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 	/* MSR top byte: see the msr_top param note (0xf0 kills sparse TX). */
 	ep_wr(ep, 0x58, (ep_rd(ep, 0x58) & 0x00ffffff) | ((msr_top & 0xffu) << 24));
 	rtl9602c_eth_set_hwaddr(ep, ndev->dev_addr);	/* IDR wiped by the reset */
-	iowrite32(0xffffffff, ep->base + 0x08);		/* MAR0 */
-	iowrite32(0xffffffff, ep->base + 0x0C);		/* MAR4 */
+	iowrite32(0xffffffff, ep->base + R_MAR0);		/* MAR0 */
+	iowrite32(0xffffffff, ep->base + R_MAR4);		/* MAR4 */
 
 	/* The enable edge: IO_CMD1 first, IO_CMD last (stock start order). */
 	ep_wr(ep, R_IO_CMD1, IOCMD1_STOCK);
@@ -2802,8 +2802,8 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 		 * either way (a timeout leaves us no worse than before). */
 		int n;
 
-		iowrite8(0x0A | 0x01, ep->base + 0x3B);
-		for (n = 0; n < 1000 && (ioread8(ep->base + 0x3B) & 1); n++)
+		iowrite8(0x0A | 0x01, ep->base + R_CMD);
+		for (n = 0; n < 1000 && (ioread8(ep->base + R_CMD) & 1); n++)
 			udelay(1);
 	} else {
 		rtl9602c_ipsel_cycle();
@@ -2911,8 +2911,14 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	iowrite32(0,          ep->sw + 0x230c4);	/* SVLAN uplink port */
 	iowrite32(0x003fffff, ep->sw + 0x27000);	/* port isolation */
 	iowrite32(0x003fffff, ep->sw + SW_PISO_PORT + 1 * SW_PISO_PORT_STRIDE);
-	iowrite32(0x00000196, ep->sw + 0x18c);		/* CPU port ability */
-	iowrite32(0x00000fff, ep->sw + 0x1c0);		/* CPU port force mode */
+	/* ★ THE SAME TWO REGISTERS THIS FILE ALREADY REACHES THROUGH THE CHIP
+	 * TABLE (2026-09-04).  rtl9602c_hw_program() writes them as
+	 * SW_FORCE_P_ABLTY(ep, cpu_port) / SW_ABLTY_FORCE_MODE(ep, cpu_port);
+	 * here they were the RTL9602C's literals, 0x180 + 3*4 and 0x1B4 + 3*4.
+	 * Two spellings of one register is how a corrected offset reaches half a
+	 * driver.  The VALUES stay the bootloader's. */
+	iowrite32(0x00000196, ep->sw + SW_FORCE_P_ABLTY(ep, ep->swm->cpu_port));
+	iowrite32(0x00000fff, ep->sw + SW_ABLTY_FORCE_MODE(ep, ep->swm->cpu_port));
 	iowrite32(0x00012bbd, ep->sw + SW_METER_TB_CTRL);	/* meter tick-token */
 	iowrite32(0,          ep->sw + SW_VLAN_CTRL);	/* VLAN function disable */
 	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG);			/* VLAN keep-format p0-3 */
@@ -3136,7 +3142,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	ep_wr(ep, R_RCR, 0x0000000E);
 	ep_wr(ep, R_TCR, 0x00000C00);
 	ep_wr(ep, R_CONFIG, 0x20000000);
-	iowrite8(0x0A, ep->base + 0x3B);	/* CMD = RxChkSum|RxJumboSupport (keep working-RX baseline) */
+	iowrite8(0x0A, ep->base + R_CMD);	/* CMD = RxChkSum|RxJumboSupport (keep working-RX baseline) */
 	/* (RX-ring-size bytes 0x1430/0x1432/0x13f6 select a 16-entry ring; our
 	 * 64-entry ring is sized by R_RxDesNum/R_RxCDO above — don't clobber.) */
 	/* Arm the OMCI cpu-tag (SID 64) here, ONCE, before R_IO_CMD enables the TX
@@ -3198,8 +3204,8 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	iowrite16(IMR_RX_BITS, ep->base + R_IMR);	/* RX IRQ mask: RX_OK + RX-err + RDU (stock 0xf835) */
 	ep_wr(ep, 0x58, (ep_rd(ep, 0x58) & 0x00ffffff) |
 			((msr_top & 0xffu) << 24));	/* MSR top byte: param (0xf0 kills sparse TX, see msr_top) */
-	iowrite32(0xffffffff, ep->base + 0x08);	/* MAR0: accept-all-multicast */
-	iowrite32(0xffffffff, ep->base + 0x0C);	/* MAR4 */
+	iowrite32(0xffffffff, ep->base + R_MAR0);	/* MAR0: accept-all-multicast */
+	iowrite32(0xffffffff, ep->base + R_MAR4);	/* MAR4 */
 	/* IO_CMD1 = the exact stock start value (stock writes IO_CMD1 = 0x323f0001).
 	 * Decoded against the chip's IO_CMD1 field definitions
 	 * (iocmd1_reg construction): 0x323f0001 =
@@ -3638,7 +3644,16 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 		seq_printf(m, "SW vlan_ctrl(13008)=%08x cputag_ctrl(23030)=%08x\n",
 			   ioread32(ep->sw + SW_VLAN_CTRL),
 			   ioread32(ep->sw + SW_MAC_CPU_TAG_CTRL));
-		seq_printf(m, "SW p0_sts(198)=%08x p1_sts(1b8)=%08x p2_sts(1d8)=%08x cpu_sts(1f8)=%08x\n",
+		/* ⚠ THESE FOUR ARE READ, NOT UNDERSTOOD (2026-09-04).  They used to
+		 * be labelled p0_sts/p1_sts/p2_sts/cpu_sts, a per-port array at
+		 * stride 0x20 -- and this tree's own chip table contradicts that:
+		 * on the RTL9602C, which is the ONLY chip that compiles this file,
+		 * the ability arrays are force_ablty@0x180 and ablty_force@0x1B4
+		 * at stride 4.  0x198 and 0x1B8 are the RTL9603CVD's force_ablty
+		 * and p_ablty bases.  So the labels asserted a port mapping the
+		 * table denies; they now claim only the address actually read.
+		 * FINDING-the-port-status-dump-uses-the-other-chips-bases.md */
+		seq_printf(m, "SW sw(198)=%08x sw(1b8)=%08x sw(1d8)=%08x sw(1f8)=%08x\n",
 			   ioread32(ep->sw + 0x198), ioread32(ep->sw + 0x1b8),
 			   ioread32(ep->sw + 0x1d8), ioread32(ep->sw + 0x1f8));
 		/* ⚠ THE RX ADDRESSES BELOW DO NOT FOLLOW THE FORMULA THIS COMMENT

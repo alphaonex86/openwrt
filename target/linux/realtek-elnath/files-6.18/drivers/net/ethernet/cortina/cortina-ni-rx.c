@@ -58,6 +58,7 @@
 #include <linux/unaligned.h>
 #include <net/net_namespace.h>
 
+#include "cortina-ni-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
 
 /* DIAGNOSTIC (temporary): when set, link_up skips ALL port-MAC/GPHY reconfig
@@ -1905,10 +1906,8 @@ static int cortina_ni_rx_poll(struct napi_struct *napi, int budget)
  * through _read() would emit an ACCESS write the hardware never saw. */
 static int cortina_ni_rx_ind_idle(struct cortina_ni *ni, u32 access_reg)
 {
-	void __iomem *acc = ni_base(ni) + access_reg;
 	u32 v;
-	int ret = readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
-				     CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	int ret = ca_ni_access_wait(ni_base(ni) + access_reg, &v);
 
 	if (ret)
 		dev_warn_ratelimited(ni->dev,
@@ -1921,13 +1920,12 @@ static int cortina_ni_rx_ind_idle(struct cortina_ni *ni, u32 access_reg)
  * (stock DO_INDIRCT_OP write path).  Bounded + non-fatal. */
 static int cortina_ni_rx_ind_store(struct cortina_ni *ni, u32 access_reg, unsigned int idx)
 {
-	void __iomem *acc = ni_base(ni) + access_reg;
 	u32 v;
 	int ret;
 
-	writel(CA_NI_IND_ACCESS_GO | CA_NI_IND_ACCESS_WR | idx, acc);
-	ret = readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = ca_ni_access_go(ni_base(ni) + access_reg,
+			      CA_NI_IND_ACCESS_GO | CA_NI_IND_ACCESS_WR | idx,
+			      &v);
 	if (ret)
 		dev_warn(ni->dev, "indirect store @0x%x[%u] GO stuck (0x%08x)\n",
 			 access_reg, idx, v);
@@ -1939,13 +1937,11 @@ static int cortina_ni_rx_ind_store(struct cortina_ni *ni, u32 access_reg, unsign
  * Bounded + non-fatal. */
 static int cortina_ni_rx_ind_read(struct cortina_ni *ni, u32 access_reg, unsigned int idx)
 {
-	void __iomem *acc = ni_base(ni) + access_reg;
 	u32 v;
 	int ret;
 
-	writel(CA_NI_IND_ACCESS_GO | idx, acc);
-	ret = readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = ca_ni_access_go(ni_base(ni) + access_reg,
+			      CA_NI_IND_ACCESS_GO | idx, &v);
 	if (ret)
 		/* RATELIMITED: this runs from /proc show paths, which a soak or a
 		 * benchmark harness polls in a loop - an un-ratelimited warn there
@@ -2540,11 +2536,8 @@ static int cortina_ni_l2fe_fdb_read_idx(void __iomem *base, u32 d3, u32 d2,
 	writel(d3, base + CA_NI_L2FE_FDB_DATA3);
 	writel(d2, base + CA_NI_L2FE_FDB_DATA2);
 	writel(d1, base + CA_NI_L2FE_FDB_DATA1);
-	writel(CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_READ,
-	       base + CA_NI_L2FE_FDB_ACCESS);
-	if (readl_poll_timeout(base + CA_NI_L2FE_FDB_ACCESS, acc,
-			       !(acc & CA_NI_L2FE_FDB_GO), CA_NI_TX_POLL_US,
-			       CA_NI_TX_POLL_TIMEOUT_US))
+	if (ca_ni_access_go(base + CA_NI_L2FE_FDB_ACCESS,
+			    CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_READ, &acc))
 		return -1;
 	cr = readl(base + CA_NI_L2FE_FDB_CMD_RETURN);
 	idx = cortina_ni_l2fe_fdb_cmd_status_idx(cr);
@@ -2567,11 +2560,9 @@ int cortina_ni_l2fe_fdb_add_idx(void __iomem *base, const u8 *mac, u32 ldpid)
 	writel(d2, base + CA_NI_L2FE_FDB_DATA2);
 	writel(d1, base + CA_NI_L2FE_FDB_DATA1);
 	writel(d0, base + CA_NI_L2FE_FDB_DATA0);
-	writel(CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_APPEND,
-	       base + CA_NI_L2FE_FDB_ACCESS);
-	if (readl_poll_timeout(base + CA_NI_L2FE_FDB_ACCESS, acc,
-			       !(acc & CA_NI_L2FE_FDB_GO), CA_NI_TX_POLL_US,
-			       CA_NI_TX_POLL_TIMEOUT_US))
+	if (ca_ni_access_go(base + CA_NI_L2FE_FDB_ACCESS,
+			    CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_APPEND,
+			    &acc))
 		return -1;
 
 	/* READ back the key: CMD_RETURN.status[3:0]=0x5 HIT, ext_status[16:4]=idx */
@@ -2631,10 +2622,10 @@ static void cortina_ni_rx_fdb_add_cpu(struct cortina_ni *ni)
 	 * vendor never reads cmd_return for it - so the earlier cmd_return=0 was NOT
 	 * the failure; the missing INIT was.) */
 	writel(0, ni_base(ni) + CA_NI_L2FE_FDB_CMD_RETURN);
-	writel(CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_INIT,
-	       ni_base(ni) + CA_NI_L2FE_FDB_ACCESS);
-	ret = readl_poll_timeout(ni_base(ni) + CA_NI_L2FE_FDB_ACCESS, acc,
-				 !(acc & CA_NI_L2FE_FDB_GO), 10, 20000);
+	ret = ca_ni_access_go_paced(ni_base(ni) + CA_NI_L2FE_FDB_ACCESS,
+				    CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_INIT,
+				    &acc, CA_NI_FDB_INIT_POLL_US,
+				    CA_NI_FDB_INIT_POLL_TIMEOUT_US);
 	if (ret)
 		dev_warn(ni->dev, "fdb-add: engine INIT GO stuck\n");
 
@@ -3689,11 +3680,11 @@ static int cortina_ni_rx_steer_init(struct cortina_ni *ni)
 		if (!fdb_hash_ready) {
 			u32 acc;
 
-			writel(CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_INIT,
-			       ni_base(ni) + CA_NI_L2FE_FDB_ACCESS);
-			if (readl_poll_timeout(ni_base(ni) + CA_NI_L2FE_FDB_ACCESS,
-					       acc, !(acc & CA_NI_L2FE_FDB_GO),
-					       10, 20000))
+			if (ca_ni_access_go_paced(
+				    ni_base(ni) + CA_NI_L2FE_FDB_ACCESS,
+				    CA_NI_L2FE_FDB_GO | CA_NI_L2FE_FDB_OP_INIT,
+				    &acc, CA_NI_FDB_INIT_POLL_US,
+				    CA_NI_FDB_INIT_POLL_TIMEOUT_US))
 				dev_warn(ni->dev, "fdb hash init timeout (0x%08x)\n",
 					 acc);
 			else
@@ -5607,14 +5598,14 @@ u32 cortina_ni_rx_mib_read(struct cortina_ni *ni, u32 port, u32 cnt_id)
 {
 	u32 val;
 
-	writel(CA_NI_MIB_ACCESS_GO |
-	       FIELD_PREP(CA_NI_MIB_ACCESS_OPCODE, CA_NI_MIB_OP_READ_ONLY) |
-	       FIELD_PREP(CA_NI_MIB_ACCESS_PORT, port) |
-	       FIELD_PREP(CA_NI_MIB_ACCESS_CNTID, cnt_id),
-	       ni_base(ni) + CA_NI_HV_RXMIB_ACCESS);
-	if (readl_poll_timeout(ni_base(ni) + CA_NI_HV_RXMIB_ACCESS, val,
-			       !(val & CA_NI_MIB_ACCESS_GO),
-			       CA_NI_MIB_POLL_US, CA_NI_MIB_POLL_TIMEOUT_US))
+	if (ca_ni_access_go_paced(ni_base(ni) + CA_NI_HV_RXMIB_ACCESS,
+				  CA_NI_MIB_ACCESS_GO |
+				  FIELD_PREP(CA_NI_MIB_ACCESS_OPCODE,
+					     CA_NI_MIB_OP_READ_ONLY) |
+				  FIELD_PREP(CA_NI_MIB_ACCESS_PORT, port) |
+				  FIELD_PREP(CA_NI_MIB_ACCESS_CNTID, cnt_id),
+				  &val, CA_NI_MIB_POLL_US,
+				  CA_NI_MIB_POLL_TIMEOUT_US))
 		return ~0u;
 	return readl(ni_base(ni) + CA_NI_HV_RXMIB_DATA0);
 }

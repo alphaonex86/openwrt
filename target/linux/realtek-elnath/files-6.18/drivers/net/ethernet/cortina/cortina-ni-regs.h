@@ -1957,8 +1957,29 @@ enum cortina_ni_win {
 #define CA_NI_L2FE_PLE_HD_FF_CTL	0x152c
 #define  CA_NI_L2FE_PLE_HD_FF_STOCK	0x00000610u
 #define CA_NI_PLE_DFT_FWD_ACCESS	0x1564
-#define  CA_NI_PLE_ACCESS_GO		BIT(31)
-#define  CA_NI_PLE_ACCESS_WRITE		BIT(30)
+/*
+ * ★★ ONE INDIRECT PROTOCOL, AND IT WORE THREE NAMES (measured 2026-09-04).
+ * Every indirect ACCESS/DATA table in the NI window raises BIT(31) to start a
+ * transaction and sets BIT(30) to make it a write.  PLE, L2FE_REDIR and the
+ * generic IND block each declared those same two bits under their own name.
+ *
+ * That is not cosmetic.  cortina_ni_rx_ind_read() has implemented this exact
+ * transaction, and served 39 call sites with it, all along -- and SIX PLE and
+ * L2FE_REDIR sites spell the write/poll/read out by hand instead, for no
+ * reason except that their constant had a different name.  A shared idea that
+ * nothing labels as shared is exactly what a domain- or shape-based audit
+ * cannot see.
+ *
+ * The per-block spellings are KEPT, because the ACCESS registers really are
+ * different registers and a future part could move a bit -- but they now
+ * DERIVE from one owner, so they cannot drift apart in silence, and anyone
+ * reading them can see they are the same protocol.
+ */
+#define  CA_NI_IND_ACCESS_GO		BIT(31)
+#define  CA_NI_IND_ACCESS_WR		BIT(30)		/* rbw = 1 for a store */
+
+#define  CA_NI_PLE_ACCESS_GO		CA_NI_IND_ACCESS_GO
+#define  CA_NI_PLE_ACCESS_WRITE		CA_NI_IND_ACCESS_WR
 #define CA_NI_PLE_DFT_FWD_DATA		0x1568
 #define  CA_NI_PLE_DFT_MC_GROUP_ID	GENMASK(10, 1)
 #define  CA_NI_PLE_DFT_REDIR_EN		BIT(11)
@@ -2014,8 +2035,8 @@ enum cortina_ni_win {
  * valid-but-wrong reg (no fault, no effect = no delivery). */
 #define CA_NI_L2FE_REDIR_LDPID_ACCESS	0x1624
 #define CA_NI_L2FE_REDIR_LDPID_DATA	0x1628
-#define  CA_NI_L2FE_REDIR_ACCESS_GO	BIT(31)
-#define  CA_NI_L2FE_REDIR_ACCESS_WR	BIT(30)
+#define  CA_NI_L2FE_REDIR_ACCESS_GO	CA_NI_IND_ACCESS_GO
+#define  CA_NI_L2FE_REDIR_ACCESS_WR	CA_NI_IND_ACCESS_WR
 #define  CA_NI_L2FE_REDIR_RDIR_LDPID	GENMASK(9, 4)
 #define  CA_NI_L2FE_REDIR_RDIR_EN	BIT(10)
 
@@ -2275,8 +2296,7 @@ enum cortina_ni_win {
  * as a port bitmap (bit16 = CPU port) or a MC_FIB-entry bitmap (bit16 ->
  * MC_FIB[16] -> ldpid 16).  Indirect writes: DATA regs, then ACCESS=GO|WR|idx,
  * poll GO clear (MC_FIB/ni_mce_indx were readable earlier, unlike REDIR_LDPID). */
-#define  CA_NI_IND_ACCESS_GO		BIT(31)
-#define  CA_NI_IND_ACCESS_WR		BIT(30)		/* rbw = 1 for a store */
+/* (CA_NI_IND_ACCESS_GO / _WR are declared with the protocol note above.) */
 /* ★★ 2026-07-15 CORRECTED (this fact bounced twice - keep it straight): the REAL
  * Elnath MC_FIB ACCESS is 0x1644 (rtl8277c 0x1634 + the same +0x10 table shift as
  * REDIR 0x1614->0x1624); its data words follow at 0x1648..0x1658 (FLOW_DBUF starts

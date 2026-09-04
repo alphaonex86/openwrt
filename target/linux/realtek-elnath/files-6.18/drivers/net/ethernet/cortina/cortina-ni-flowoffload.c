@@ -110,8 +110,6 @@
 
 #define CN_L3E_GO			BIT(31)	/* indirect-access request/busy */
 #define CN_L3E_WRITE			BIT(30)	/* indirect-access direction */
-#define CN_L3E_POLL_TRIES		1000
-
 /* geometry (live-stock HASH_INI = 0x0003007D, devmem-captured 2026-07-18):
  * 64K entries (ht_size = 7) in 8-WAY hash buckets (hb_size = 1 - NOT the
  * 32-way the static RE first suggested; tier-1 wins), 32-byte FIB entries
@@ -403,18 +401,6 @@ static int cn_l3e_key_hash(struct cn_l3e *l3e, const struct cn_l3e_key *key,
 /* indirect-access primitives                                          */
 /* ------------------------------------------------------------------ */
 
-static int cn_l3e_go(struct cn_l3e *l3e, u32 reg, u32 val, u32 busy_bit)
-{
-	int i;
-
-	writel(val, l3e->ne_base + reg);
-	for (i = 0; i < CN_L3E_POLL_TRIES; i++) {
-		if (!(readl(l3e->ne_base + reg) & busy_bit))
-			return 0;
-		cpu_relax();
-	}
-	return -ETIMEDOUT;
-}
 
 /*
  * Age access: ACCESS = bucket | GO (read) -> RMW the 2-bit field in
@@ -442,7 +428,7 @@ static int cn_l3e_age_set(struct cn_l3e *l3e, u32 idx, u32 age)
 	int ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
-	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
+	ret = l3fe_access_go(l3e->ne_base, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (ret)
 		goto out;
@@ -452,7 +438,7 @@ static int cn_l3e_age_set(struct cn_l3e *l3e, u32 idx, u32 age)
 	writel(w, l3e->ne_base + data_reg);
 
 	phase = "commit";
-	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS,
+	ret = l3fe_access_go(l3e->ne_base, L3FE_HS_AGE_ACCESS,
 			bucket | CN_L3E_WRITE | CN_L3E_GO, CN_L3E_GO);
 out:
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);
@@ -479,7 +465,7 @@ static int __maybe_unused cn_l3e_age_get(struct cn_l3e *l3e, u32 idx, u32 *age)
 	int ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
-	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
+	ret = l3fe_access_go(l3e->ne_base, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (!ret)
 		*age = pi_packed_extract(readl(l3e->ne_base + data_reg), &slot);
@@ -504,7 +490,7 @@ static int cn_l3e_bucket_sweep(struct cn_l3e *l3e, u32 bucket, u32 *traffic)
 	int r, ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
-	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
+	ret = l3fe_access_go(l3e->ne_base, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (ret)
 		goto out;
@@ -522,7 +508,7 @@ static int cn_l3e_bucket_sweep(struct cn_l3e *l3e, u32 bucket, u32 *traffic)
 	writel(n[0], l3e->ne_base + L3FE_HS_AGE_DATA_LO);
 	writel(n[1], l3e->ne_base + L3FE_HS_AGE_DATA_HI);
 
-	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS,
+	ret = l3fe_access_go(l3e->ne_base, L3FE_HS_AGE_ACCESS,
 			bucket | CN_L3E_WRITE | CN_L3E_GO, CN_L3E_GO);
 out:
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);
@@ -538,20 +524,19 @@ out:
 static int cn_l3e_cache_invalidate(struct cn_l3e *l3e, u32 idx, u16 crc16)
 {
 	unsigned long flags;
-	int i, ret = -ETIMEDOUT;
+	int ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
 	/* slot = way within the HASH bucket (idx & (bucket_size-1); 8-way) */
 	writel((idx & (CN_L3E_HASH_WAYS - 1)) | ((u32)crc16 << 5) | (1u << 30),
 	       l3e->ne_base + L3FE_HS_CACHE_CTRL);
 
-	for (i = 0; i < CN_L3E_POLL_TRIES; i++) {
-		if (!(readl(l3e->ne_base + L3FE_HS_CACHE_CTRL_REQ) & 1))
-			break;
-		cpu_relax();
-	}
-	if (i < CN_L3E_POLL_TRIES)
-		ret = cn_l3e_go(l3e, L3FE_HS_CACHE_CTRL_REQ,
+	/* the engine must be idle BEFORE the request is raised: this wait is on
+	 * REQ, not on the CTRL word just written -- hence a bare wait and not
+	 * the write-then-wait pair. */
+	ret = l3fe_access_wait(l3e->ne_base, L3FE_HS_CACHE_CTRL_REQ, BIT(0));
+	if (!ret)
+		ret = l3fe_access_go(l3e->ne_base, L3FE_HS_CACHE_CTRL_REQ,
 				readl(l3e->ne_base + L3FE_HS_CACHE_CTRL_REQ) | 1,
 				BIT(0));
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);

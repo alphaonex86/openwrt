@@ -32,6 +32,10 @@
 #ifndef _CORTINA_L3FE_REGS_H
 #define _CORTINA_L3FE_REGS_H
 
+#include <linux/errno.h>
+#include <linux/io.h>
+#include <linux/processor.h>
+
 /* ---- hash engine: table geometry and the four table base addresses ------- */
 /* hb_size[1:0], ht_size[4:2], ha_width[7:5], def_reg[16], crc_ntfy_en[17] */
 #define L3FE_HS_HASH_INI		0x3834
@@ -64,5 +68,49 @@
 #define L3FE_HS_AGE_ACCESS		0x3928
 #define L3FE_HS_AGE_DATA_LO		0x3938	/* slots  0..15, 2 bits of age each */
 #define L3FE_HS_AGE_DATA_HI		0x3934	/* slots 16..31, 2 bits of age each */
+
+/* ---- the indirect-access protocol these registers define ----------------
+ *
+ * Every indirect table in this block is reached the same way: write the ACCESS
+ * word with its GO bit (plus the write bit, for a write), then poll that bit
+ * until the hardware clears it.  The protocol lived in THREE hand-written
+ * copies before 2026-09-04 -- l3fe_poll_clear() in cortina-l3fe.c,
+ * cl3a_poll_go() in cortina-l3fe-aging.c and cn_l3e_go() in
+ * cortina-ni-flowoffload.c -- and the copies had drifted:
+ *
+ *   - two called cpu_relax() in the busy loop and the third did not, so one of
+ *     the three spun the core with no pause hint and no preemption point;
+ *   - all three used a bound of 1000, under three different names, and only
+ *     ONE of the three said where the number comes from.
+ *
+ * Both are fixed here by there being one of it.  The bound keeps its
+ * provenance, and the loop always yields.
+ *
+ * ⚠ THIS IS NOT CORE CODE AND MUST NOT MOVE THERE.  It is a bounded busy-wait,
+ * so it is about TIME and about yielding a CPU -- exactly the two things the
+ * gpon_* core forbids (time is an explicit input there, and the core must keep
+ * building on x86 with no kernel).  The family is the right home.
+ */
+#define L3FE_ACCESS_TRIES	1000	/* == the vendor's TABLE_TRY_TIMEOUT */
+
+/* Wait for @busy to clear at @off.  0, or -ETIMEDOUT after the bound. */
+static inline int l3fe_access_wait(void __iomem *ne, u32 off, u32 busy)
+{
+	int i;
+
+	for (i = 0; i < L3FE_ACCESS_TRIES; i++) {
+		if (!(readl(ne + off) & busy))
+			return 0;
+		cpu_relax();
+	}
+	return -ETIMEDOUT;
+}
+
+/* Write @val to @off, then wait for its @busy bit to clear. */
+static inline int l3fe_access_go(void __iomem *ne, u32 off, u32 val, u32 busy)
+{
+	writel(val, ne + off);
+	return l3fe_access_wait(ne, off, busy);
+}
 
 #endif /* _CORTINA_L3FE_REGS_H */

@@ -68,7 +68,6 @@
 
 #define CL3A_GO				BIT(31)
 #define CL3A_WRITE			BIT(30)
-#define CL3A_POLL_TRIES			1000	/* == vendor TABLE_TRY_TIMEOUT */
 
 /* --- geometry --- */
 #define CL3A_ENTRIES			65536
@@ -103,16 +102,6 @@ static inline void cl3a_wr(struct cl3a_ctx *c, u32 off, u32 val)
 }
 
 /* Poll a self-clearing GO/busy bit; returns 0 on done, -ETIMEDOUT on cap. */
-static int cl3a_poll_go(struct cl3a_ctx *c, u32 off, u32 gobit)
-{
-	int i;
-
-	for (i = 0; i < CL3A_POLL_TRIES; i++) {
-		if (!(cl3a_rd(c, off) & gobit))
-			return 0;
-	}
-	return -ETIMEDOUT;
-}
 
 /* Map a slot to (age data-reg offset, in-word bit shift).  2-bit ages,
  * 16 slots per 32-bit word: word0 = slots 0..15, word1 = slots 16..31. */
@@ -135,7 +124,7 @@ static int __maybe_unused cl3a_age_get(struct cl3a_ctx *c, u32 idx, u8 *age)
 	int ret;
 
 	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO);		/* start read */
-	ret = cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
+	ret = l3fe_access_wait(c->ne, L3FE_HS_AGE_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 
@@ -160,7 +149,7 @@ static int __maybe_unused cl3a_age_set(struct cl3a_ctx *c, u32 idx, u8 age)
 
 	/* 1. read the bucket's age row */
 	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO);
-	ret = cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
+	ret = l3fe_access_wait(c->ne, L3FE_HS_AGE_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 
@@ -171,7 +160,7 @@ static int __maybe_unused cl3a_age_set(struct cl3a_ctx *c, u32 idx, u8 age)
 
 	/* 3. commit = GO-LIVE (bit31 go + bit30 write) */
 	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO | CL3A_WRITE);
-	return cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
+	return l3fe_access_wait(c->ne, L3FE_HS_AGE_ACCESS, CL3A_GO);
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,7 +186,7 @@ static int __maybe_unused cl3a_traffic_status_get(struct cl3a_ctx *c, u32 bucket
 
 	/* read the whole 32-slot age row */
 	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO);
-	ret = cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
+	ret = l3fe_access_wait(c->ne, L3FE_HS_AGE_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 
@@ -219,7 +208,7 @@ static int __maybe_unused cl3a_traffic_status_get(struct cl3a_ctx *c, u32 bucket
 
 	/* commit the cleared row (GO-LIVE write) */
 	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO | CL3A_WRITE);
-	return cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
+	return l3fe_access_wait(c->ne, L3FE_HS_AGE_ACCESS, CL3A_GO);
 }
 
 /* ------------------------------------------------------------------ */
@@ -236,11 +225,11 @@ static int __maybe_unused cl3a_cache_invalidate(struct cl3a_ctx *c, u32 idx, u16
 
 	/* decomp order: write CTRL params, wait REQ idle, pulse REQ GO, wait done */
 	cl3a_wr(c, L3FE_HS_CACHE_CTRL, ctrl);
-	ret = cl3a_poll_go(c, L3FE_HS_CACHE_CTRL_REQ, BIT(0));	/* wait not-busy */
+	ret = l3fe_access_wait(c->ne, L3FE_HS_CACHE_CTRL_REQ, BIT(0));	/* wait not-busy */
 	if (ret)
 		return ret;
 	cl3a_wr(c, L3FE_HS_CACHE_CTRL_REQ, cl3a_rd(c, L3FE_HS_CACHE_CTRL_REQ) | 1);	/* GO */
-	ret = cl3a_poll_go(c, L3FE_HS_CACHE_CTRL_REQ, BIT(0));
+	ret = l3fe_access_wait(c->ne, L3FE_HS_CACHE_CTRL_REQ, BIT(0));
 	if (ret)
 		return ret;
 
@@ -294,7 +283,7 @@ static int __maybe_unused cl3a_aqm_mib_get(struct cl3a_ctx *c, u32 idx, u64 *byt
 
 	cl3a_wr(c, CL3A_CACHE_HASH_ACCESS,
 		(idx & 0x7ff) | CL3A_GO | CL3A_AQM_TBL_SEL);	/* read, table=2 */
-	ret = cl3a_poll_go(c, CL3A_CACHE_HASH_ACCESS, CL3A_GO);
+	ret = l3fe_access_wait(c->ne, CL3A_CACHE_HASH_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 

@@ -3927,20 +3927,52 @@ static void cortina_ni_rx_set_axi_attrib(struct cortina_ni *ni, u32 entry,
  * (ACCESS = GO|entry with RBW=0 => read; poll GO clear; then DATA0 = the stored attr).
  * Proves whether the set_axi_attrib writes actually LATCH (bit22 is invariant across 7
  * attr/address/axi_top builds - either the writes never latch, or bit22 isn't the attr). */
-static u32 cortina_ni_rx_get_axi_attrib(struct cortina_ni *ni, u32 entry)
+/*
+ * ★ IT REFUSES TO ANSWER WHEN IT DID NOT READ (2026-09-04).  This used to fall
+ * out of the poll loop on `break` OR on exhaustion and read DATA0 either way --
+ * so on a stuck GO it returned the PREVIOUS entry's attribute as if it were
+ * this one's.  For a diagnostic whose entire job is answering "do these writes
+ * actually latch?", a stale value is not a degraded answer, it is a wrong one:
+ * every entry would read back plausible and the conclusion would be "they
+ * latch".  Same failure the GTC CAM readback had to be repaired for.
+ *
+ * ⚠ The WAIT is left exactly as it was -- 300 x udelay(1), not the
+ * readl_poll_timeout(1, 10000) the rest of this file uses.  Those are ~300 us
+ * and ~10 ms; swapping them is a 33x change on a hardware path and is owed a
+ * measurement, not a tidy-up.
+ */
+static int cortina_ni_rx_get_axi_attrib(struct cortina_ni *ni, u32 entry,
+					u32 *out)
 {
-	u32 acc = 0;
 	int i;
 
 	writel(CA_NI_QM_AXI_ATTR_GO | FIELD_PREP(CA_NI_QM_AXI_ATTR_ADDR, entry),
 	       ni_base(ni) + CA_NI_QM_AXI_ATTR_ACCESS);
 	for (i = 0; i < CA_NI_QM_AXI_ATTR_POLL_MAX; i++) {
-		acc = readl(ni_base(ni) + CA_NI_QM_AXI_ATTR_ACCESS);
-		if (!(acc & CA_NI_QM_AXI_ATTR_GO))
-			break;
+		if (!(readl(ni_base(ni) + CA_NI_QM_AXI_ATTR_ACCESS) &
+		      CA_NI_QM_AXI_ATTR_GO)) {
+			*out = readl(ni_base(ni) + CA_NI_QM_AXI_ATTR_DATA0);
+			return 0;
+		}
 		udelay(1);
 	}
-	return readl(ni_base(ni) + CA_NI_QM_AXI_ATTR_DATA0);
+	return -ETIMEDOUT;
+}
+
+/* One readback line.  A timeout SAYS SO instead of printing whatever DATA0
+ * happened to hold -- the point of the readback is to be believable. */
+static void rx_show_axi_attrib(struct cortina_ni *ni, const char *what,
+			       unsigned int n, u32 entry)
+{
+	u32 v;
+
+	if (cortina_ni_rx_get_axi_attrib(ni, entry, &v))
+		dev_info(ni->dev,
+			 "axi-attr-readback: %s[%u] idx%u = NOT READ (GO never cleared)\n",
+			 what, n, entry);
+	else
+		dev_info(ni->dev, "axi-attr-readback: %s[%u] idx%u = 0x%08x\n",
+			 what, n, entry, v);
 }
 
 /*
@@ -3986,17 +4018,12 @@ static void cortina_ni_rx_axi_attrib_init(struct cortina_ni *ni)
 	 * (0x6a30-0x6a3c; ours 0x6a3c=0x04 cmd_mode bit2) - stock may set an EPP-writeback
 	 * MASTER-RUN bit here that we miss (would make the writeback never fire). */
 	for (i = 0; i < CA_NI_QM_CPU_PORT_COUNT; i++)
-		dev_info(ni->dev, "axi-attr-readback: cpu_epp[%u] idx%u = 0x%08x\n",
-			 i, CA_NI_QM_AXI_ATTR_CPU_BASE + i,
-			 cortina_ni_rx_get_axi_attrib(ni,
-				CA_NI_QM_AXI_ATTR_CPU_BASE + i));
-	dev_info(ni->dev, "axi-attr-readback: eq13 idx%u=0x%08x  eq14 idx%u=0x%08x\n",
-		 CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID,
-		 cortina_ni_rx_get_axi_attrib(ni,
-			CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID),
-		 CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID2,
-		 cortina_ni_rx_get_axi_attrib(ni,
-			CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID2));
+		rx_show_axi_attrib(ni, "cpu_epp", i,
+				   CA_NI_QM_AXI_ATTR_CPU_BASE + i);
+	rx_show_axi_attrib(ni, "eq", CA_NI_RX_EQ_ID,
+			   CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID);
+	rx_show_axi_attrib(ni, "eq", CA_NI_RX_EQ_ID2,
+			   CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID2);
 	dev_info(ni->dev, "epp-ctrl: 0x6a30=0x%08x 0x6a34=0x%08x 0x6a38=0x%08x 0x6a3c=0x%08x\n",
 		 readl(ni_base(ni) + 0x6a30), readl(ni_base(ni) + 0x6a34),
 		 readl(ni_base(ni) + 0x6a38), readl(ni_base(ni) + 0x6a3c));

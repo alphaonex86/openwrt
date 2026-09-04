@@ -110,6 +110,16 @@
 #define SW_METER_TB_CTRL	0x25000	/* METER_TB_CTRL: meter tick/token config */
 #define SW_VLAN_EGRESS_TAG	0x2A000	/* VLAN_EGRESS_TAG */
 #define SW_STAT_PORT_TX_MIB	0x32000	/* STAT_PORT_TX_MIB, +0x80 per port */
+#define SW_STAT_PORT_MIB_STRIDE	0x80u	/* the per-port step, stated by the
+					 * dump's own comment and confirmed by
+					 * every TX address it reads */
+/* ⚠ THERE IS DELIBERATELY NO SW_STAT_PORT_RX_MIB (2026-09-04).  The /proc
+ * dump's comment says the RX block is at 0x32400, but this chip's OWN
+ * chipdef names 0x32400 STAT_PORT_OAM_MIB, and names 0x32600 -- which the
+ * dump reads as p3's RX -- STAT_ACL_CNT.  Naming a base two sources
+ * disagree about would put the disagreement behind a word that looks
+ * settled.  See FINDING-the-rx-mib-dump-reads-a-base-nobody-confirms.md. */
+
 
 /* Switch core: the VLAN block did NOT move between these two revisions. */
 /* ★ NAMES BOTH CHIPDEFS AGREE ON, for the SWCORE registers
@@ -542,5 +552,19 @@ static inline void luna_ipsel_cycle_gmac0(void)
 #define SOC_SW_ENABLE	((void __iomem *)0xb800063cul)
 #define   SW_EN_BIT	BIT(5)		/* see the disagreement above	*/
 #define   SW_PBO_BIT	BIT(25)		/* required on rev > A		*/
+
+/* ★ THE ARITHMETIC IS PINNED, so replacing eleven literals with expressions is
+ * proven by the BUILD rather than by having read it carefully.  Each line is
+ * one address the /proc dump used to spell as a number. */
+static_assert(SW_STAT_PORT_TX_MIB + 1 * SW_STAT_PORT_MIB_STRIDE == 0x32080u,
+	      "p1 TX MIB moved");
+static_assert(SW_STAT_PORT_TX_MIB + 2 * SW_STAT_PORT_MIB_STRIDE == 0x32100u,
+	      "p2 TX MIB moved");
+static_assert(SW_STAT_PORT_TX_MIB + 3 * SW_STAT_PORT_MIB_STRIDE == 0x32180u,
+	      "p3 TX MIB moved");
+static_assert(SW_VLAN_EGRESS_TAG + 3 * 4 == 0x2a00cu,
+	      "the VLAN egress-tag array moved");
+static_assert(SW_PISO_PORT + 1 * SW_PISO_PORT_STRIDE == 0x27004u,
+	      "the port-isolation array moved");
 
 #endif /* _LUNA_ETH_REGS_H */

@@ -2907,15 +2907,15 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	msleep(500);
 	iowrite32(0,          ep->sw + 0x230c4);	/* SVLAN uplink port */
 	iowrite32(0x003fffff, ep->sw + 0x27000);	/* port isolation */
-	iowrite32(0x003fffff, ep->sw + 0x27004);
+	iowrite32(0x003fffff, ep->sw + SW_PISO_PORT + 1 * SW_PISO_PORT_STRIDE);
 	iowrite32(0x00000196, ep->sw + 0x18c);		/* CPU port ability */
 	iowrite32(0x00000fff, ep->sw + 0x1c0);		/* CPU port force mode */
 	iowrite32(0x00012bbd, ep->sw + SW_METER_TB_CTRL);	/* meter tick-token */
 	iowrite32(0,          ep->sw + SW_VLAN_CTRL);	/* VLAN function disable */
 	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG);			/* VLAN keep-format p0-3 */
-	iowrite32(1, ep->sw + 0x2a004);
-	iowrite32(1, ep->sw + 0x2a008);
-	iowrite32(1, ep->sw + 0x2a00c);
+	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG + 1 * 4);
+	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG + 2 * 4);
+	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG + 3 * 4);
 	iowrite32(0, ep->sw + 0x23030);			/* CPU_TAG_CTRL=0 (re-armed in hw_program) */
 	writel(readl(sysstat) | 1, sysstat);		/* patch done: set 0xB8000044 bit0 */
 }
@@ -3638,6 +3638,18 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 		seq_printf(m, "SW p0_sts(198)=%08x p1_sts(1b8)=%08x p2_sts(1d8)=%08x cpu_sts(1f8)=%08x\n",
 			   ioread32(ep->sw + 0x198), ioread32(ep->sw + 0x1b8),
 			   ioread32(ep->sw + 0x1d8), ioread32(ep->sw + 0x1f8));
+		/* ⚠ THE RX ADDRESSES BELOW DO NOT FOLLOW THE FORMULA THIS COMMENT
+		 * STATES, and they are left as literals so the disagreement stays
+		 * visible (2026-09-04):
+		 *   p2 rx 0x32500 == 0x32400 + 2 * 0x80   -- port 2, as written
+		 *   p3 rx 0x32600 == 0x32400 + 4 * 0x80   -- port FOUR, labelled p3
+		 * while p3's TX (0x32180) is 0x32000 + 3 * 0x80, port three. TX and RX
+		 * index the same port differently, and only one of them can be right.
+		 * The chipdefs do not settle it -- they name 0x32400 STAT_PORT_OAM_MIB
+		 * and 0x32600 STAT_ACL_CNT, neither of which is an RX MIB -- so this is
+		 * an open question, not a typo to fix on a guess. The TX side, whose
+		 * every address DOES match the formula, now says so in code.
+		 * FINDING-the-rx-mib-dump-reads-a-base-nobody-confirms.md */
 		/* Per-port MIB packet counters (TX_MIB@0x32000+port*0x80, RX_MIB@0x32400+
 		 * port*0x80; dump first 3 counters of each block). Localises the DS drain:
 		 * p2(PON) rx>0 => PON-IP frames reach the switch; p3(CPU) tx>0 => switch
@@ -3645,14 +3657,14 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 		/* LAN ports p0(FE)/p1(GE): if the injected US OMCI floods here, the cpu-tag
 		 * steering failed and the frame went to the L2 switch instead of the US-NIC. */
 		seq_printf(m, "MIB p0(LAN) tx=%08x | p1(LAN) tx=%08x\n",
-			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB), ioread32(ep->sw + 0x32080));
+			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB), ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 1 * SW_STAT_PORT_MIB_STRIDE));
 		seq_printf(m, "MIB p2(PON) tx=%08x %08x %08x | rx=%08x %08x %08x\n",
-			   ioread32(ep->sw + 0x32100), ioread32(ep->sw + 0x32104),
-			   ioread32(ep->sw + 0x32108), ioread32(ep->sw + 0x32500),
+			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 2 * SW_STAT_PORT_MIB_STRIDE), ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 2 * SW_STAT_PORT_MIB_STRIDE + 4),
+			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 2 * SW_STAT_PORT_MIB_STRIDE + 8), ioread32(ep->sw + 0x32500),
 			   ioread32(ep->sw + 0x32504), ioread32(ep->sw + 0x32508));
 		seq_printf(m, "MIB p3(CPU) tx=%08x %08x %08x | rx=%08x %08x %08x\n",
-			   ioread32(ep->sw + 0x32180), ioread32(ep->sw + 0x32184),
-			   ioread32(ep->sw + 0x32188), ioread32(ep->sw + 0x32600),
+			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 3 * SW_STAT_PORT_MIB_STRIDE), ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 3 * SW_STAT_PORT_MIB_STRIDE + 4),
+			   ioread32(ep->sw + SW_STAT_PORT_TX_MIB + 3 * SW_STAT_PORT_MIB_STRIDE + 8), ioread32(ep->sw + 0x32600),
 			   ioread32(ep->sw + 0x32604), ioread32(ep->sw + 0x32608));
 	}
 	return 0;

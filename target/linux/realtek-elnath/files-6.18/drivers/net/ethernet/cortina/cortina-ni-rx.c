@@ -4054,9 +4054,16 @@ static void cortina_ni_rx_axi_attrib_init(struct cortina_ni *ni)
 			   CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID);
 	rx_show_axi_attrib(ni, "eq", CA_NI_RX_EQ_ID2,
 			   CA_NI_QM_AXI_ATTR_EQ_BASE + CA_NI_RX_EQ_ID2);
+	/* ⚠ 0x6a30 STAYS BARE ON PURPOSE.  This header calls it
+	 * CA_NI_QM_ES_CTRL2_REAL, and stock_regname_guard records that as one of
+	 * its 24 frozen MISPLACED findings: the vendor table puts QM_QM_ES_CTRL2
+	 * at 0x6ab0 and calls 0x6a30 QM_QM_BURST_BUF_DEBUG_SEG_ID.  Using our
+	 * name here would spread one already recorded as wrong; using the
+	 * vendor's would put two disagreeing names on one offset.  It waits for
+	 * the live read that settles it, like the other 23. */
 	dev_info(ni->dev, "epp-ctrl: 0x6a30=0x%08x 0x6a34=0x%08x 0x6a38=0x%08x 0x6a3c=0x%08x\n",
-		 readl(ni_base(ni) + 0x6a30), readl(ni_base(ni) + 0x6a34),
-		 readl(ni_base(ni) + 0x6a38), readl(ni_base(ni) + 0x6a3c));
+		 readl(ni_base(ni) + 0x6a30), readl(ni_base(ni) + CA_NI_QM_BURST_BUF_SEG_ID_MON),
+		 readl(ni_base(ni) + CA_NI_QM_DEBUG_CFG), readl(ni_base(ni) + CA_NI_QM_EPP));
 }
 
 /*
@@ -4325,14 +4332,18 @@ static void cortina_ni_rx_eqm_readback(struct cortina_ni *ni, const char *label)
 	dev_info(ni->dev,
 		 "eqm-readback(%s): pa_req eq13(0x63bc)=0x%08x eq14(0x63c0)=0x%08x | eq_prof5(0x613c)=0x%08x | fifo_prof4(0x66b4)=0x%08x (want 0xE00040F1) | int_en0(0x6110)=0x%08x en1(0x6114)=0x%08x refill_en(0x611c)=0x%08x REAL_int_src(0x6120)=0x%08x [b22=eqm_cfg_err b21=buf_size b20=cpuepp_fifo] | no_buf(0x6940)=%u rmu_rx(0x6900)=%u tx_cntr(0x690c)=%u epp_wptr(0x7000)=0x%06x\n",
 		 label,
+		 /* 0x63bc/0x63c0: NOT in the vendor NAME->ADDRESS table, so there
+		  * is nothing to name them FROM -- see
+		  * FINDING-the-vendor-table-does-not-cover-the-serdes-windows.md
+		  * for the same shape in another window.  Bare is honest here. */
 		 readl(ni_base(ni) + 0x63bc),
 		 readl(ni_base(ni) + 0x63c0),
 		 readl(ni_base(ni) + CA_NI_QM_EQ_PROFILE(CA_NI_RX_EQ_PROFILE_SEL)),
 		 readl(ni_base(ni) + CA_NI_QM_CPU_EPP_FIFO_PROF(CA_NI_RX_PROFILE_ID)),
 		 readl(ni_base(ni) + CA_NI_QM_EPP64_INT_EN0),
 		 readl(ni_base(ni) + CA_NI_QM_EPP64_INT_EN1),
-		 readl(ni_base(ni) + 0x611c),
-		 readl(ni_base(ni) + 0x6120),
+		 readl(ni_base(ni) + CA_NI_QM_INT_SRC),
+		 readl(ni_base(ni) + CA_NI_QM_INT_SRCE),
 		 readl(ni_base(ni) + CA_NI_QM_RMU_NO_BUF_DROP),
 		 readl(ni_base(ni) + CA_NI_QM_RX_CNTR),
 		 readl(ni_base(ni) + CA_NI_QM_TX_CNTR),
@@ -6284,8 +6295,8 @@ static void rx_dump_hv_init_and_rdy(struct seq_file *m, struct cortina_ni *ni)
 	seq_printf(m,
 		   "gate: ni_init_done(a004)=0x%08x (ni_done=%u) nirx_misc@0xa1bc=0x%08x nirx_misc@0xa1f8=0x%08x (real one holds rdy_en bits9-13 ~0x3e80; bit11=l3felan_rdy)\n",
 		   initd, !!(initd & CA_NI_HV_INIT_DONE_NI),
-		   readl(ni_base(ni) + 0xa1bc),
-		   readl(ni_base(ni) + 0xa1f8));
+		   readl(ni_base(ni) + CA_NI_NI_NIRX_MISC_CFG),
+		   readl(ni_base(ni) + CA_NI_NI_TXFIFO_THR_L3FE_CFG2));
 	if (glb)
 		seq_printf(m,
 			   /* ★ LABELS ANCHORED IN STOCK'S OWN REGISTER TABLE (tier 2),
@@ -7307,7 +7318,7 @@ int cortina_ni_rx_probe(struct cortina_ni *ni)
 	 * by leaving it alone.  With cpu_eq=0 the eqm_cfg_error is no longer re-raised. */
 	writel(BIT(22), ni_base(ni) + 0x611c);
 	dev_info(ni->dev, "eqm_cfg_error W1C: int_src 0x611c=0x%08x en_mask 0x6120=0x%08x (want 0x611c bit22 CLEAR, 0x6120=0xe6d54f85)\n",
-		 readl(ni_base(ni) + 0x611c), readl(ni_base(ni) + 0x6120));
+		 readl(ni_base(ni) + CA_NI_QM_INT_SRC), readl(ni_base(ni) + CA_NI_QM_INT_SRCE));
 
 	/* (FBM pool config+enable+fill+preload already done above, before RMU RX enable -
 	 * the pool must accept pushes (write-enable) before fill, and it uses our own

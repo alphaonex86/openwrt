@@ -568,6 +568,18 @@ enum cortina_ni_win {
  * +0x08 = buffer PA low.  Push = poll outstanding(POOL+0x2c) < depth, poll +0x00
  * bit31 clear, write +0x04/+0x08, then GO cmd (aal_fbm_buf_push/__aal_fbm_buf_access). */
 #define CA_NI_QM_FBM_CPU_DOORBELL(id)	((id) << 5)
+/*
+ * Four QM/NI registers that /proc read as bare addresses.  Named from the
+ * vendor NAME->ADDRESS table (tier 2); the NI window base 0xf4300000 is the
+ * one this whole header already uses, and three of its neighbours resolved to
+ * names this header had ALREADY given them independently, which is what makes
+ * the base trustworthy here.
+ */
+#define CA_NI_QM_INT_SRCE		0x6120	/* vendor QM_QM_INT_SRCE (NOT _SRC at 0x611c) */
+#define CA_NI_QM_BURST_BUF_SEG_ID_MON	0x6a34	/* vendor QM_QM_BURST_BUF_SEG_ID_MONITOR */
+#define CA_NI_QM_DEBUG_CFG		0x6a38	/* vendor QM_QM_DEBUG_CFG */
+#define CA_NI_NI_TXFIFO_THR_L3FE_CFG2	0xa1f8	/* vendor NI_HV_GLB_TXFIFO_THRESHOLD_L3FE_CFG2 */
+
 #define  CA_NI_QM_FBM_CPU_CMD_GO	CA_NI_IND_ACCESS_GO
 #define  CA_NI_QM_FBM_CPU_CMD_PUSH	BIT(30)
 #define CA_NI_QM_FBM_POOL(id)		((id) << 7)	/* POOL window: pool desc base = id*0x80 */

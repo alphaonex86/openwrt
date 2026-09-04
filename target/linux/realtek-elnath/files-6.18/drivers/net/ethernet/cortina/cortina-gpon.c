@@ -1262,18 +1262,64 @@ static void cg_laser_on(struct cortina_gpon *cg)
 	 * the net-level readback in /proc/gpon. */
 }
 
-/* PUC indirect-table op: kick ACCESS (go[31] + rbw[30]=write + index), poll go. */
-static int cg_puc_ind_write(struct cortina_gpon *cg, u32 access_off, u32 index)
+/*
+ * The poll half of the indirect transaction, on its own because a THIRD spelling of it turned up in
+ * cg_puc_voq_flush() (2026-09-04): same BIT(31), same 10000 tries, same
+ * register re-read.  `pace` is the ONE difference between the spellings and it
+ * is kept as a parameter rather than unified: the flush waits 1 us per read and
+ * the table accesses spin, and nothing in this tree -- not the vendor comments,
+ * not the register table -- says which is the requirement and which is habit.
+ * Guessing here would change the timing of 20 hardware transactions on a bench
+ * that cannot cold-boot, so the difference is carried, not resolved.
+ */
+static int cg_go_poll(void __iomem *reg, bool pace)
 {
 	int i;
 
-	writel(CG_TBL_GO | CG_TBL_WR | index, cg->pon + access_off);
 	for (i = 0; i < 10000; i++) {
-		if (!(readl(cg->pon + access_off) & CG_TBL_GO))
+		if (!(readl(reg) & CG_TBL_GO))
 			return 0;
+		if (pace)
+			udelay(1);
 	}
-	dev_warn(cg->dev, "PUC indirect +0x%04x[%u] timed out\n", access_off, index);
 	return -ETIMEDOUT;
+}
+
+/*
+ * ONE indirect table transaction, for every block in this driver: kick ACCESS
+ * with go(bit31) plus whatever the caller composed, then poll go's self-clear.
+ * Bounded at 10000 reads like the vendor __CHECK_INDIRCT_OPERATE_STATE (it
+ * completes in a few bus reads).  Runs only in the single-threaded work
+ * context, so no lock is needed yet.
+ *
+ * ★ THE BLOCK BASE IS A PARAMETER, and that is the whole reason this is one
+ * function (2026-09-04).  cg_tbl_op() below used to be a second copy of this
+ * body -- same CG_TBL_GO/CG_TBL_WR bits, same 10000-iteration bound, same
+ * undelayed poll, same dev_warn -- differing ONLY in which base it added the
+ * offset to: cg->pon here, cg->mac there.  And cg->mac IS cg->pon + 0x6000, so
+ * they were never even two windows.  The previous pass in this file merged
+ * cg_pdc_map_write into this helper and walked past cg_tbl_op's 17 call sites
+ * because it was hunting poll LOOPS and this one had already been found and
+ * not followed up.
+ */
+static int cg_tbl_op_at(struct cortina_gpon *cg, void __iomem *base,
+			u32 access_off, u32 cmd)
+{
+	int rc;
+
+	writel(CG_TBL_GO | cmd, base + access_off);
+	rc = cg_go_poll(base + access_off, false);
+	if (rc)
+		dev_warn(cg->dev,
+			 "indirect access +0x%04x cmd 0x%08x timed out\n",
+			 access_off, cmd);
+	return rc;
+}
+
+/* The PUC/PDC blocks live in the PON window and always WRITE. */
+static int cg_puc_ind_write(struct cortina_gpon *cg, u32 access_off, u32 index)
+{
+	return cg_tbl_op_at(cg, cg->pon, access_off, CG_TBL_WR | index);
 }
 
 /*
@@ -1409,18 +1455,12 @@ static int cg_puc_pvtbl_program(struct cortina_gpon *cg, u32 tcont, bool ena)
 static void cg_puc_voq_flush(struct cortina_gpon *cg, u32 tcont)
 {
 	u32 q, v;
-	int i;
 
 	for (q = 0; q < CG_PUC_QUEUE_PER_TCONT; q++) {
 		v = BIT(31) | BIT(16) | ((tcont & 0x1f) << 8) |
 		    ((tcont * CG_PUC_QUEUE_PER_TCONT + q) & 0xff);
 		writel(v, cg->pon + CG_PUC_VOQFLUSH);
-		for (i = 0; i < 10000; i++) {
-			if (!(readl(cg->pon + CG_PUC_VOQFLUSH) & BIT(31)))
-				break;
-			udelay(1);
-		}
-		if (i == 10000)
+		if (cg_go_poll(cg->pon + CG_PUC_VOQFLUSH, true))
 			dev_warn(cg->dev, "VoQ %u flush timed out\n",
 				 tcont * CG_PUC_QUEUE_PER_TCONT + q);
 	}
@@ -2185,24 +2225,11 @@ static const char *const cg_state_name[8] = {
 	"O5-Operation", "O6-POPUP", "O7-EmergencyStop", "unknown",
 };
 
-/*
- * One indirect table transaction: kick ACCESS with go(bit31) [+ wr(bit30) +
- * index/alloc in cmd], poll go self-clear.  Bounded at 10000 reads like the
- * vendor __CHECK_INDIRCT_OPERATE_STATE (completes in a few bus reads).
- * Runs only in the single-threaded work context, so no lock is needed yet.
- */
+/* The GPON-MAC block's spelling of the same transaction (cg->mac is
+ * cg->pon + CG_GPON_MAC_OFF); the caller composes the write bit. */
 static int cg_tbl_op(struct cortina_gpon *cg, u32 access_reg, u32 cmd)
 {
-	int i;
-
-	writel(CG_TBL_GO | cmd, cg->mac + access_reg);
-	for (i = 0; i < 10000; i++) {
-		if (!(readl(cg->mac + access_reg) & CG_TBL_GO))
-			return 0;
-	}
-	dev_warn(cg->dev, "indirect access +0x%03x cmd 0x%08x timed out\n",
-		 access_reg, cmd);
-	return -ETIMEDOUT;
+	return cg_tbl_op_at(cg, cg->mac, access_reg, cmd);
 }
 
 /*

@@ -409,6 +409,11 @@
 #define CG_DS_GEM_INDEX(x)	(((x) & 0xff) << 3)
 
 #define CG_TBL_GO		BIT(31)
+/* Poll bounds, kept apart because they were measured apart: the table accesses
+ * complete in a few bus reads, the PLM MIB strobe is a slower engine and its
+ * one-shot diagnostic never had more than 1000. */
+#define CG_TBL_TRIES		10000u
+#define CG_MIB_TRIES		1000u
 #define CG_TBL_WR		BIT(30)
 #define CG_TCONT_PLOAM_EN	BIT(0)
 #define CG_TCONT_OMCI_EN	BIT(1)
@@ -1263,22 +1268,37 @@ static void cg_laser_on(struct cortina_gpon *cg)
 }
 
 /*
- * The poll half of the indirect transaction, on its own because a THIRD spelling of it turned up in
- * cg_puc_voq_flush() (2026-09-04): same BIT(31), same 10000 tries, same
- * register re-read.  `pace` is the ONE difference between the spellings and it
- * is kept as a parameter rather than unified: the flush waits 1 us per read and
- * the table accesses spin, and nothing in this tree -- not the vendor comments,
- * not the register table -- says which is the requirement and which is habit.
- * Guessing here would change the timing of 20 hardware transactions on a bench
- * that cannot cold-boot, so the difference is carried, not resolved.
+ * The poll half of the indirect transaction.  FOUR spellings of it were in this
+ * one file (2026-09-04): cg_puc_ind_write, cg_tbl_op, cg_puc_voq_flush and the
+ * /proc PLM-MIB one-shot.  Each re-read the same CG_TBL_GO out of its own
+ * ACCESS register until the block cleared it; what they disagreed on was three
+ * things, all of which are now PARAMETERS rather than resolved by guesswork:
+ *
+ *   `tries`  10000 for the table accesses, 1000 for the MIB one-shot
+ *   `pace`   the flush and the MIB wait 1 us per read; the table ops spin
+ *   the RETURN, which is why this hands back the poll COUNT and not just 0:
+ *            the MIB diagnostic prints "cleared after N polls", and that
+ *            number is the only thing separating a healthy strobe from a slow
+ *            one
+ *
+ * Nothing in this tree -- not the vendor comments, not /etc/reg.txt -- says
+ * which pace or bound is a requirement and which is habit, and picking one
+ * would change the timing of 20+ hardware transactions on a bench that cannot
+ * cold-boot.  So the differences are carried, visibly, instead of unified away.
+ *
+ * ★ This is deliberately gpon_ind_poll()'s contract from the core
+ * (flowcore/regtable.h): same argument order, same "count on success,
+ * -ETIMEDOUT on exhaustion".  It is spelled with readl() only because this
+ * driver has no hwio seam yet; when it gets one this becomes a call, not a
+ * rewrite.
  */
-static int cg_go_poll(void __iomem *reg, bool pace)
+static int cg_go_poll(void __iomem *reg, unsigned int tries, bool pace)
 {
-	int i;
+	unsigned int i;
 
-	for (i = 0; i < 10000; i++) {
+	for (i = 0; i < tries; i++) {
 		if (!(readl(reg) & CG_TBL_GO))
-			return 0;
+			return (int)i;
 		if (pace)
 			udelay(1);
 	}
@@ -1308,12 +1328,14 @@ static int cg_tbl_op_at(struct cortina_gpon *cg, void __iomem *base,
 	int rc;
 
 	writel(CG_TBL_GO | cmd, base + access_off);
-	rc = cg_go_poll(base + access_off, false);
-	if (rc)
+	rc = cg_go_poll(base + access_off, CG_TBL_TRIES, false);
+	if (rc < 0) {
 		dev_warn(cg->dev,
 			 "indirect access +0x%04x cmd 0x%08x timed out\n",
 			 access_off, cmd);
-	return rc;
+		return rc;
+	}
+	return 0;
 }
 
 /* The PUC/PDC blocks live in the PON window and always WRITE. */
@@ -1460,7 +1482,7 @@ static void cg_puc_voq_flush(struct cortina_gpon *cg, u32 tcont)
 		v = BIT(31) | BIT(16) | ((tcont & 0x1f) << 8) |
 		    ((tcont * CG_PUC_QUEUE_PER_TCONT + q) & 0xff);
 		writel(v, cg->pon + CG_PUC_VOQFLUSH);
-		if (cg_go_poll(cg->pon + CG_PUC_VOQFLUSH, true))
+		if (cg_go_poll(cg->pon + CG_PUC_VOQFLUSH, CG_TBL_TRIES, true) < 0)
 			dev_warn(cg->dev, "VoQ %u flush timed out\n",
 				 tcont * CG_PUC_QUEUE_PER_TCONT + q);
 	}
@@ -4097,17 +4119,13 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 		return -EBUSY;
 
 	writel(CG_TBL_GO | (sel & 0x3ff), cg->mac + CG_REG_PLM_MIB_ACCESS);
-	for (i = 0; i < 1000; i++) {
-		acc = readl(cg->mac + CG_REG_PLM_MIB_ACCESS);
-		if (!(acc & CG_TBL_GO))
-			break;
-		udelay(1);
-	}
+	i = cg_go_poll(cg->mac + CG_REG_PLM_MIB_ACCESS, CG_MIB_TRIES, true);
+	acc = readl(cg->mac + CG_REG_PLM_MIB_ACCESS);
 	data = readl(cg->mac + CG_REG_PLM_MIB_DATA);
 	dev_info(cg->dev,
 		 "one-shot PLM MIB sel=0x%03x: access=0x%08x data=0x%08x (go %s after %d polls)\n",
 		 sel, acc, data,
-		 (acc & CG_TBL_GO) ? "STUCK" : "cleared", i);
+		 i < 0 ? "STUCK" : "cleared", i < 0 ? (int)CG_MIB_TRIES : i);
 	return len;
 }
 

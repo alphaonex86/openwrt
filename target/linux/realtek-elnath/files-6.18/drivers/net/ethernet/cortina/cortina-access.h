@@ -40,6 +40,7 @@
 #include <linux/iopoll.h>
 #include <linux/processor.h>
 
+#include "regtable.h"	/* the CORE's indirect-transaction poll */
 #include "cortina-ni-regs.h"
 
 /* The L2FE FDB engine INIT rebuilds the whole hash table, so it was given ten
@@ -121,17 +122,30 @@ static inline void ca_pause_none(void) { }
 static inline void ca_pause_relax(void) { cpu_relax(); }
 static inline void ca_pause_udelay1(void) { udelay(1); }
 
+/* ★ THE LOOP ITSELF LIVES IN THE CORE (2026-09-04).  flowcore/regtable.h's
+ * gpon_ind_poll() is this loop, and cortina-l3fe-regs.h already reached it --
+ * so the driver had TWO owners of one idea, one of them core-resident and one
+ * not.  The hwio ctx is the fully-resolved register and the offset is 0, which
+ * is what lets a caller that already has a pointer use the same engine as one
+ * that has a base and an offset.  Behaviour is unchanged: same bound, same
+ * pause, same "count on success, -ETIMEDOUT on exhaustion". */
+static inline u32 ca_hwio_rd(void *ctx, u32 off)
+{
+	return readl((void __iomem *)ctx + off);
+}
+
+static inline void ca_hwio_wr(void *ctx, u32 off, u32 val)
+{
+	writel(val, (void __iomem *)ctx + off);
+}
+
 static inline int ca_go_spin(void __iomem *reg, unsigned int tries,
 			     void (*pause)(void))
 {
-	unsigned int i;
+	struct hwio io = { .rd = ca_hwio_rd, .wr = ca_hwio_wr,
+			   .ctx = (void *)reg };
 
-	for (i = 0; i < tries; i++) {
-		if (!(readl(reg) & CA_NI_IND_ACCESS_GO))
-			return (int)i;
-		pause();
-	}
-	return -ETIMEDOUT;
+	return gpon_ind_poll(&io, 0, CA_NI_IND_ACCESS_GO, tries, pause);
 }
 
 #endif /* _CORTINA_ACCESS_H */

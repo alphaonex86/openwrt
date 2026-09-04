@@ -47,28 +47,19 @@
 
 #include "cortina-l3fe.h"
 #include "cortina_ni_rx_logic.h"	/* the shared FDB key pack + action word */
+#include "cortina-l3fe-regs.h"	/* the L3FE registers more than one file needs */
 
 /* ------------------------------------------------------------------ *
  *  L3FE HS register map, NE-relative (NI window phys 0xf4300000).      *
  * ------------------------------------------------------------------ */
-#define L3FE_HS_HASH_INI		0x3834	/* hb[1:0] ht[4:2] ha[7:5] def_reg[16] crc_ntfy[17] */
 #define L3FE_HS_BA_MH1			0x3838	/* key table base, phys[39:32] */
-#define L3FE_HS_BA_MH0			0x383c	/* key table base, phys[31:7] in place */
 #define L3FE_HS_BA_MA1			0x3840	/* action FIB base, phys[39:32] */
-#define L3FE_HS_BA_MA0			0x3844	/* action FIB base, phys[31:7] in place */
 #define L3FE_HS_DEFAULT_ACTION(i)	(0x3860 + (i) * 4) /* internal default/miss actions (def_reg=1) */
-#define L3FE_HS_CACHE_INI		0x38a0
 #define L3FE_HS_CACHE_MISC		0x38c4	/* cache replacement policy */
-#define L3FE_HS_MASK_ACCESS		0x3910	/* idx | W[30] | GO[31] | upper-128[6] */
 #define L3FE_HS_MASK_DATA(n)		(0x3920 - (n) * 4) /* MASK0..3 = 0x3920,191c,1918,1914 */
-#define L3FE_HS_AGING_GRANULARITY	0x3924	/* 0 = HW auto-age-countdown OFF */
-#define L3FE_HS_MEM_INI			0x393c	/* bit0 req_sts: engine table self-init */
 #define L3FE_HS_CHK_FAIL_CTRL		0x3940	/* double-check-fail -> punt */
 #define L3FE_HS_RSV0			0x3944	/* HW patch: bit31 crc_offload + bit0 */
 #define L3FE_HS_RSV1			0x3948	/* HW patch: bit0 */
-#define L3FE_HS_SWO_IDX			0x38d8	/* HW-CRC engine pointer */
-#define L3FE_HS_SWO_DAT			0x38dc	/* HW-CRC engine data (auto-inc IDX) */
-#define L3FE_HS_SWO_CTRL		0x38e0	/* bit0 = GO / busy */
 #define L3FE_AQM_TIMER			0x3aa8	/* AQM flow-stat timer cfg */
 #define L3FE_AXIM2_CONFIG		0x3c80	/* AXI outstanding-transaction depth */
 

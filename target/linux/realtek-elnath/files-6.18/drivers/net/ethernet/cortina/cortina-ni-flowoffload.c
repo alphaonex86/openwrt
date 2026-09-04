@@ -66,6 +66,7 @@
 #include "gpon_flow_offload.h"	/* the core TC-offload lifecycle */
 #include "cortina-ni.h"
 #include "cortina-l3fe.h"
+#include "cortina-l3fe-regs.h"	/* the L3FE registers more than one file needs */
 
 /* ------------------------------------------------------------------ */
 /* L3FE main-hash ("HS") engine registers, offsets from the NE iobase  */
@@ -76,42 +77,26 @@
 #define CN_L3E_HS_PROFILE_INI(p)	(0x3700 + (p) * 0x2c)	/* tpl_num[3:0], default_sel_0e[8:4], 0a[13:9], 1e[18:14], 1a[23:19] */
 #define CN_L3E_HS_PROFILE_TUPLE(p, t)	(0x3704 + (p) * 0x2c + (t) * 4) /* maskptr[5:0], pri[10:8], type[12] */
 #define CN_L3E_HS_PROFILE_T0_ACTION(p)	(0x3724 + (p) * 0x2c)	/* a_mask[24:0], fetch_sz[27:25] */
-#define CN_L3E_HS_HASH_INI		0x3834	/* hb_size[1:0], ht_size[4:2], ha_width[7:5], def_reg[16], crc_ntfy_en[17] */
-#define CN_L3E_HS_BA_MH0		0x383c	/* hash-key table base, phys bits[31:7] in place */
-#define CN_L3E_HS_BA_MA0		0x3844	/* main action FIB base */
 #define CN_L3E_HS_OVERFLOW_INI		0x3848	/* oa_width[2:0] */
 #define CN_L3E_HS_BA_OA0		0x3850	/* overflow FIB base */
 #define CN_L3E_HS_DEFAULT_INI		0x3854	/* da_width[2:0] */
 #define CN_L3E_HS_BA_DA0		0x385c	/* default FIB base */
 #define CN_L3E_HS_DEFAULT_ACTION(i)	(0x3860 + (i) * 4) /* fib_addr[24:0] | da_width<<25 */
-#define CN_L3E_HS_CACHE_INI		0x38a0
 #define CN_L3E_HS_BA_CA0		0x38a8	/* cache FIB base */
-#define CN_L3E_HS_CACHE_CTRL		0x38ac	/* slot[4:0], crc16[20:5], loc[24], age[27:26], pri[29:28], cmd[31:30] */
-#define CN_L3E_HS_CACHE_CTRL_REQ	0x38b0	/* bit0 = GO / busy */
-#define CN_L3E_HS_CACHE_CTRL_STS	0x38b4	/* bit1 err_hash, bit2 err_free, bit3 err_nch(benign), bit6 evicted */
 #define CN_L3E_HS_CACHE_AGE10		0x38b8	/* 16-bit cache aging units, ages 0/1 */
 #define CN_L3E_HS_CACHE_AGE32		0x38bc	/* ages 2/3 */
 /* action-cache utilisation count (ut_cnt[11:0]); climbs as the on-chip action
  * cache fills on HW hits.  07f offset = the ca8277b HS_CACHE_CNT (0x3900) minus
  * the live-verified 0x40 cache-block shift on this die = 0x38c0. */
 #define CN_L3E_HS_CACHE_CNT		0x38c0
-#define CN_L3E_HS_SWO_IDX		0x38d8	/* HW-CRC selftest engine (debug) */
-#define CN_L3E_HS_SWO_DAT		0x38dc
-#define CN_L3E_HS_SWO_CTRL		0x38e0	/* bit0 = GO / busy */
 #define CN_L3E_HS_OVERFLOW_ACCESS	0x3904	/* 64-entry overflow key CAM (unused in phase 1) */
-#define CN_L3E_HS_MASK_ACCESS		0x3910	/* mask table: idx | bit30 wr | bit31 GO | bit6 upper-128 beat */
 #define CN_L3E_HS_MASK_DATA(n)		(0x3920 - (n) * 4) /* MASK0..3 = 0x3920,191c,1918,1914 */
-#define CN_L3E_HS_AGING_GRANULARITY	0x3924	/* 30-bit; = age_time_s * core_clk / 0x2000 */
-#define CN_L3E_HS_AGE_ACCESS		0x3928	/* bucket[10:0] | (1<<11 = overflow age) | bit30 wr | bit31 GO */
 /* ★ MAIN-HASH age SRAM on THIS die = 2 DATA words, 16 slots/word, 2 BITS per
  * slot (board-proven 2026-07-23: DATA2/DATA3 at 0x3930/0x392c read back 0 =
  * not present; only DATA0=0x3938 slots 0-15 and DATA1=0x3934 slots 16-31 are
  * writable).  The aal-77c *source* shows a 4-bit/4-word layout, but the shipped
  * silicon here is 2-bit/2-word (matches the shipping ca-ne.ko aal_hash_age_set
  * disasm `bfi #2`).  bit = (idx & 0xf)*2 within the word. */
-#define CN_L3E_HS_AGE_DATA_HI		0x3934	/* slots 16..31, 2 bit each */
-#define CN_L3E_HS_AGE_DATA_LO		0x3938	/* slots  0..15, 2 bit each */
-#define CN_L3E_HS_MEM_INI		0x393c	/* bit0 req_sts: engine SRAM self-init */
 #define CN_L3E_HS_PF_KEY(p)		(0x394c + (p) * 0x14) /* sel[5:0]=0 CRC16, crc32_sel[7:6] */
 /* # of per-profile hash key-selection blocks (the vendor key-selection writer
  * covers 6; TUPLE0/INI exist for 7 profiles).  All must read ZERO or each
@@ -449,15 +434,15 @@ static int cn_l3e_age_set(struct cn_l3e *l3e, u32 idx, u32 age)
 {
 	u32 bucket = (idx >> 5) & (CN_L3E_AGE_ROWS - 1);
 	struct pi_packed_slot slot = cn_age2_slot(idx);
-	u32 data_reg = slot.reg ? CN_L3E_HS_AGE_DATA_HI
-				: CN_L3E_HS_AGE_DATA_LO;
+	u32 data_reg = slot.reg ? L3FE_HS_AGE_DATA_HI
+				: L3FE_HS_AGE_DATA_LO;
 	const char *phase = "latch";
 	unsigned long flags;
 	u32 w;
 	int ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
-	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS, bucket | CN_L3E_GO,
+	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (ret)
 		goto out;
@@ -467,7 +452,7 @@ static int cn_l3e_age_set(struct cn_l3e *l3e, u32 idx, u32 age)
 	writel(w, l3e->ne_base + data_reg);
 
 	phase = "commit";
-	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS,
+	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS,
 			bucket | CN_L3E_WRITE | CN_L3E_GO, CN_L3E_GO);
 out:
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);
@@ -488,13 +473,13 @@ static int __maybe_unused cn_l3e_age_get(struct cn_l3e *l3e, u32 idx, u32 *age)
 {
 	u32 bucket = (idx >> 5) & (CN_L3E_AGE_ROWS - 1);
 	struct pi_packed_slot slot = cn_age2_slot(idx);
-	u32 data_reg = slot.reg ? CN_L3E_HS_AGE_DATA_HI
-				: CN_L3E_HS_AGE_DATA_LO;
+	u32 data_reg = slot.reg ? L3FE_HS_AGE_DATA_HI
+				: L3FE_HS_AGE_DATA_LO;
 	unsigned long flags;
 	int ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
-	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS, bucket | CN_L3E_GO,
+	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (!ret)
 		*age = pi_packed_extract(readl(l3e->ne_base + data_reg), &slot);
@@ -519,13 +504,13 @@ static int cn_l3e_bucket_sweep(struct cn_l3e *l3e, u32 bucket, u32 *traffic)
 	int r, ret;
 
 	spin_lock_irqsave(&l3e->reg_lock, flags);
-	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS, bucket | CN_L3E_GO,
+	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS, bucket | CN_L3E_GO,
 			CN_L3E_GO);
 	if (ret)
 		goto out;
 
-	w[0] = readl(l3e->ne_base + CN_L3E_HS_AGE_DATA_LO);  /* slots 0-15  */
-	w[1] = readl(l3e->ne_base + CN_L3E_HS_AGE_DATA_HI);  /* slots 16-31 */
+	w[0] = readl(l3e->ne_base + L3FE_HS_AGE_DATA_LO);  /* slots 0-15  */
+	w[1] = readl(l3e->ne_base + L3FE_HS_AGE_DATA_HI);  /* slots 16-31 */
 	/* the read-and-step-down transform is the logic core's (one spelling
 	 * of the 2-bit slot packing, shared with age_set/age_get) */
 	for (r = 0; r < 2; r++) {
@@ -534,10 +519,10 @@ static int cn_l3e_bucket_sweep(struct cn_l3e *l3e, u32 bucket, u32 *traffic)
 		n[r] = cn_age2_sweep_word(w[r], &t);
 		trf |= (u32)t << (r * 16);
 	}
-	writel(n[0], l3e->ne_base + CN_L3E_HS_AGE_DATA_LO);
-	writel(n[1], l3e->ne_base + CN_L3E_HS_AGE_DATA_HI);
+	writel(n[0], l3e->ne_base + L3FE_HS_AGE_DATA_LO);
+	writel(n[1], l3e->ne_base + L3FE_HS_AGE_DATA_HI);
 
-	ret = cn_l3e_go(l3e, CN_L3E_HS_AGE_ACCESS,
+	ret = cn_l3e_go(l3e, L3FE_HS_AGE_ACCESS,
 			bucket | CN_L3E_WRITE | CN_L3E_GO, CN_L3E_GO);
 out:
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);
@@ -558,16 +543,16 @@ static int cn_l3e_cache_invalidate(struct cn_l3e *l3e, u32 idx, u16 crc16)
 	spin_lock_irqsave(&l3e->reg_lock, flags);
 	/* slot = way within the HASH bucket (idx & (bucket_size-1); 8-way) */
 	writel((idx & (CN_L3E_HASH_WAYS - 1)) | ((u32)crc16 << 5) | (1u << 30),
-	       l3e->ne_base + CN_L3E_HS_CACHE_CTRL);
+	       l3e->ne_base + L3FE_HS_CACHE_CTRL);
 
 	for (i = 0; i < CN_L3E_POLL_TRIES; i++) {
-		if (!(readl(l3e->ne_base + CN_L3E_HS_CACHE_CTRL_REQ) & 1))
+		if (!(readl(l3e->ne_base + L3FE_HS_CACHE_CTRL_REQ) & 1))
 			break;
 		cpu_relax();
 	}
 	if (i < CN_L3E_POLL_TRIES)
-		ret = cn_l3e_go(l3e, CN_L3E_HS_CACHE_CTRL_REQ,
-				readl(l3e->ne_base + CN_L3E_HS_CACHE_CTRL_REQ) | 1,
+		ret = cn_l3e_go(l3e, L3FE_HS_CACHE_CTRL_REQ,
+				readl(l3e->ne_base + L3FE_HS_CACHE_CTRL_REQ) | 1,
 				BIT(0));
 	spin_unlock_irqrestore(&l3e->reg_lock, flags);
 	if (ret)
@@ -4884,7 +4869,7 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		   atomic_read(&cn_l3e_hw_hits), cache_cnt,
 		   READ_ONCE(l3e->data_gem), READ_ONCE(l3e->data_tcont),
 		   READ_ONCE(l3e->data_pppoe_session),
-		   readl(l3e->ne_base + CN_L3E_HS_AGING_GRANULARITY));
+		   readl(l3e->ne_base + L3FE_HS_AGING_GRANULARITY));
 	/* ★ the REFUSAL ledger: without it, "auto_flows did not go up" cannot be
 	 * told apart from "the kernel never offered a flow".  Cumulative since
 	 * boot; read twice and difference for a rate.  unsupp/full/dup are NORMAL
@@ -5736,8 +5721,8 @@ int cortina_ni_flowoffload_probe(struct cortina_ni *ni)
 	 * U-Boot never touch it; live-verified all-zero pre-init) */
 	dev_info(ni->dev,
 		 "l3fe: pre-arm MH0=%08x MA0=%08x INI=%08x (expect all 0)\n",
-		 readl(ne + CN_L3E_HS_BA_MH0), readl(ne + CN_L3E_HS_BA_MA0),
-		 readl(ne + CN_L3E_HS_HASH_INI));
+		 readl(ne + L3FE_HS_BA_MH0), readl(ne + L3FE_HS_BA_MA0),
+		 readl(ne + L3FE_HS_HASH_INI));
 
 	ret = cn_l3e_init(l3e);
 	if (ret)

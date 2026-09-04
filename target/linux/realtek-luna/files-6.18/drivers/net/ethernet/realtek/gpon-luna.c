@@ -8656,7 +8656,7 @@ static void gpon_fsm_handle(const u8 *m)
 			gpon_send_ack(m);
 			pr_info("rtl9602c-gpon: EVT t=%u KEY_SW(0x13) staged=%d arm@%u hwswt=%u dsrx64=%u pirx=%u omcirx=%u\n",
 				gpon_fsm_ticks, gpon_key_staged, gpon_aes_switch_time,
-				gpon_rd(0x3014) & 0x3fffffff,
+				gpon_rd(GPON_AES_KEY_SWITCH_TIME) & 0x3fffffff,
 				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count());
 		}
 		break;
@@ -8848,11 +8848,11 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * their STS twins). The reads themselves clear the sticky latch; if the fetch FSM was
 	 * back-pressuring on it, the payload framer unstalls and gemus64 begins to climb. */
 	if (us_intr_svc && gpon_fsm_state == 5 && gpon_omcc_installed) {
-		u32 gtcus_dlt = gpon_rd(0x5000);	/* read-to-clear GTC_US delta */
-		u32 gemus_dlt = gpon_rd(0x6000);	/* read-to-clear GEM_US delta */
+		u32 gtcus_dlt = gpon_rd(GPON_GTC_US_INTR_DLT);	/* read-to-clear GTC_US delta */
+		u32 gemus_dlt = gpon_rd(GPON_GEM_US_INTR_DLT);	/* read-to-clear GEM_US delta */
 
-		(void)gpon_rd(0x5008);			/* GTC_US_INTR_STS */
-		(void)gpon_rd(0x6008);			/* GEM_US_INTR_STS */
+		(void)gpon_rd(GPON_GTC_US_INTR_STS);			/* GTC_US_INTR_STS */
+		(void)gpon_rd(GPON_GEM_US_INTR_STS);			/* GEM_US_INTR_STS */
 		if (gtcus_dlt || gemus_dlt)
 			gpon_us_intr_svc_cnt++;
 	}
@@ -9049,7 +9049,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		pr_info("rtl9602c-gpon: USDIAG t=%u ustx=%u pirx=%u usdrop=%u uscrc=%u | rxsid=%u/%u/%u/%u/%u\n",
 			gpon_fsm_ticks, sw_rd(OMCI_TX_PKT_CNT), sw_rd(OMCI_RX_PKT_CNT),
 			sw_rd(OMCI_DROP_PKT_CNT), sw_rd(OMCI_CRC_ERROR_PKT_CNT),
-			(u32)pi_rd(0x203c), (u32)pi_rd(0x2040), (u32)pi_rd(0x2044),
+			(u32)pi_rd(PI_RX_SID_GOOD_CNT_US), (u32)pi_rd(0x2040), (u32)pi_rd(0x2044),
 			(u32)pi_rd(0x2048), (u32)pi_rd(0x204c));
 	}
 	/* DS-PIPELINE STAGE PROBE (gate open + O5): sample ~1/s to localize where a
@@ -9064,10 +9064,10 @@ static void gpon_fsm_poll(struct timer_list *t)
 			 gpon_gem_flow_cnt(64, 0), gpon_gem_flow_cnt(3, 0),
 			 gpon_gem_flow_cnt(2, 0), gpon_gem_flow_cnt(1, 0),
 			 gpon_gem_flow_cnt(0, 0),
-			 gpon_rd(0x11c4), gpon_rd(0x11bc), gpon_rd(0x11b4),
-			 gpon_rd(0x11b8),
+			 gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_NON_IDLE), gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_IDLE), gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_LOS),
+			 gpon_rd(GPON_GTC_DS_MISC_CNTR_HEC_CORRECT),
 			 pi_rd(PI_PON_DSC_USAGE_DS) & 0x1fff, pi_rd(0xa100) & 0x1fff,
-			 pi_rd(0xc010) & 0xffff);
+			 pi_rd(PI_PKT_OK_CNT_DS) & 0xffff);
 	}
 	/* Periodic SerDes-TX re-sync while UN-RANGED. The upstream-burst serializer
 	 * lock is non-deterministic (the OLT decodes our SN burst only intermittently —

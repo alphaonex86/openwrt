@@ -123,8 +123,16 @@
 /*
  * PON-SerDes (PSDS) registers, direct within the PON window.
  *   PSDS_MODE (+0xa02c): SerDes rate/mode.  GPON = 0x408 (sd_s0=1, sds_mode_s0=0x8).
- *   PSDS_RGB8 (+0xa060): SerDes status.  bit10 CKRDY_RX, bit11 CKRDY_TX (TX PLL
+ *   PSDS_RGB8 (+0xa05c): SerDes status.  bit10 CKRDY_RX, bit11 CKRDY_TX (TX PLL
  *     locked off the reference clock; asserts without fiber), bit0 RX_LOS.
+ *     ★ This line said +0xa060 until 2026-09-04 and the offset was wrong: the
+ *     define below, the stock value observed at it (0x19c00), the bit
+ *     semantics used everywhere in this file and the vendor NAME->ADDRESS
+ *     table all say 0xa05c.  0xa060 is PSDS_GBOX_CTRL, declared a few lines
+ *     down -- so the file would otherwise have claimed one address is two
+ *     different registers.  The CODE was right throughout; only this comment
+ *     was wrong, which is the dangerous direction: nothing misbehaves, and the
+ *     next reader trusts the prose.
  */
 #define CG_PSDS_MODE		0xa02c
 #define CG_PSDS_RGB8		0xa05c	/* DS-lock status; locked = (val & 0x9c01)==0x9c00 (stock 0x19c00) */
@@ -141,6 +149,23 @@
  * downstream lock, 0x8c01/0x8c00 the CMU/PLL lock re-waited after the 8/d/7/0
  * strobe.  Merging them would be inventing a fact.
  */
+/*
+ * The four registers beside it, named from the vendor's own NAME->ADDRESS
+ * table shipped in the stock rootfs (tier 2).  They were read by /proc as bare
+ * addresses -- "gbox(a060)", "reg(a064)", "reg(a068)", "reg(a070)" -- so three
+ * of the four were printed with no idea what they were.
+ *
+ * ★ The base arithmetic is corroborated, not fitted: the PON window is
+ * 0x4_f5500000, so pon+0xa05c is 0xf550a05c, and the vendor table calls that
+ * PSDS_RGB8 -- the same name this file had ALREADY given the offset from its
+ * own reverse engineering. Two independent sources agreeing on one address is
+ * what makes the other four in the same block trustworthy.
+ */
+#define CG_PSDS_GBOX_CTRL	0xa060	/* vendor PSDS_GBOX_CTRL (stock 0x454) */
+#define CG_PSDS_PRBS_CTRL	0xa064	/* vendor PSDS_PRBS_CTRL (stock 0) */
+#define CG_PSDS_PRBS_INTR	0xa068	/* vendor PSDS_PRBS_INTR (stock 1) */
+#define CG_PSDS_PRBS_STS	0xa070	/* vendor PSDS_PRBS_STS  (stock 1) */
+
 #define CG_PSDS_DS_LOCK_MASK	0x9c01u
 #define CG_PSDS_DS_LOCK_VAL	0x9c00u
 #define CG_PSDS_CMU_LOCK_MASK	0x8c01u
@@ -361,6 +386,11 @@
  * 1=write) | index/alloc-id, then poll ACCESS bit31 self-clear (<= 10000 reads).
  * Data flows through the DATA register (read entry -> DATA; DATA -> write entry).
  */
+/* The TX-PLOAM MIB indirect pair, vendor GPON_MAC_GPON_PLM_MIB_ACCESS/_DATA
+ * (0xf5506184/_188 = mac+0x184/0x188).  Same ACCESS/DATA handshake as every
+ * other indirect table here: go[31] set, poll it clear, then take DATA. */
+#define CG_REG_PLM_MIB_ACCESS	0x184
+#define CG_REG_PLM_MIB_DATA	0x188
 #define CG_REG_TCONT_ACCESS	0x14c	/* header 0x12c: alloc_id[11:0], sw_plm_en[16], rbw[30], go[31] */
 #define CG_REG_TCONT_DATA	0x150	/* header 0x130: ploam_en[0], omci_en[1], index[6:2] (hw T-CONT 0-31) */
 #define CG_REG_DS_GEM_ACCESS	0x154	/* header 0x134: id[11:0] (GEM port-id), sw_aes[16], rbw[30], go[31] */
@@ -3931,7 +3961,7 @@ static int cg_proc_show(struct seq_file *m, void *v)
 
 	/* serdes/gearbox/laser (PON-window raw offsets, for US-LOS diagnosis) */
 	seq_puts(m, "-- serdes/gbox/laser --\n");
-	seq_printf(m, "rgb8(a05c)     = 0x%08x  (DS-lock: (v&0x9c01)==0x9c00)\n", readl(cg->pon + 0xa05c));
+	seq_printf(m, "rgb8(a05c)     = 0x%08x  (DS-lock: (v&0x9c01)==0x9c00)\n", readl(cg->pon + CG_PSDS_RGB8));
 	/* PSDS internal CMU reg 0x400 (indirect read strobe -> a090; the re-lock
 	 * strobe target).  a08c shown too to disambiguate the read-data register. */
 	writel(CG_PSDS_IND_READ | CG_PSDS_CMU_IDX, cg->pon + CG_PSDS_IND_CMD);
@@ -3939,10 +3969,10 @@ static int cg_proc_show(struct seq_file *m, void *v)
 	seq_printf(m, "cmu[0x400]     = a090=0x%08x a08c=0x%08x  (re-lock strobes [7:4]; coldstart re-rolls=%u episode=%d)\n",
 		   readl(cg->pon + CG_PSDS_IND_RDATA), readl(cg->pon + CG_PSDS_IND_WDATA),
 		   cg->coldstart_rolls, cg->coldstart_tries);
-	seq_printf(m, "gbox(a060)     = 0x%08x  (stock 0x454 rx/tx bit-order)\n", readl(cg->pon + 0xa060));
-	seq_printf(m, "reg(a064)      = 0x%08x  (stock 0)\n", readl(cg->pon + 0xa064));
-	seq_printf(m, "reg(a068)      = 0x%08x  (stock 1)\n", readl(cg->pon + 0xa068));
-	seq_printf(m, "reg(a070)      = 0x%08x  (stock 1)\n", readl(cg->pon + 0xa070));
+	seq_printf(m, "gbox_ctrl(a060)= 0x%08x  (stock 0x454 rx/tx bit-order)\n", readl(cg->pon + CG_PSDS_GBOX_CTRL));
+	seq_printf(m, "prbs_ctrl(a064)= 0x%08x  (stock 0)\n", readl(cg->pon + CG_PSDS_PRBS_CTRL));
+	seq_printf(m, "prbs_intr(a068)= 0x%08x  (stock 1)\n", readl(cg->pon + CG_PSDS_PRBS_INTR));
+	seq_printf(m, "prbs_sts(a070) = 0x%08x  (stock 1)\n", readl(cg->pon + CG_PSDS_PRBS_STS));
 	seq_printf(m, "psds_init(glb) = 0x%08x  (ben_oen bit4, pow_pcix bit5)\n", readl(cg->glb + CG_GLB_PSDS_INIT));
 	seq_printf(m, "laser_route    : glb(0x42c)=0x%08x mux0(0x130)=0x%08x gpio0 cfg(0x300)=0x%08x out(0x304)=0x%08x  (stock 0x01101101 / 0x00001fff / 0xffffe7bf / 0x00000040)\n",
 		   readl(cg->glb + CG_GLB_PINROUTE), readl(cg->glb + CG_GLB_GPIO_MUX0),
@@ -4039,18 +4069,18 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 	if (CG_ONU_STATE(cg_mac_rd(cg, CG_REG_GPON_ONU)) != CG_STATE_OPERATION)
 		return -EBUSY;
 
-	writel(0x80000000u | (sel & 0x3ff), cg->mac + 0x184);
+	writel(CG_TBL_GO | (sel & 0x3ff), cg->mac + CG_REG_PLM_MIB_ACCESS);
 	for (i = 0; i < 1000; i++) {
-		acc = readl(cg->mac + 0x184);
-		if (!(acc & 0x80000000u))
+		acc = readl(cg->mac + CG_REG_PLM_MIB_ACCESS);
+		if (!(acc & CG_TBL_GO))
 			break;
 		udelay(1);
 	}
-	data = readl(cg->mac + 0x188);
+	data = readl(cg->mac + CG_REG_PLM_MIB_DATA);
 	dev_info(cg->dev,
 		 "one-shot PLM MIB sel=0x%03x: access=0x%08x data=0x%08x (go %s after %d polls)\n",
 		 sel, acc, data,
-		 (acc & 0x80000000u) ? "STUCK" : "cleared", i);
+		 (acc & CG_TBL_GO) ? "STUCK" : "cleared", i);
 	return len;
 }
 

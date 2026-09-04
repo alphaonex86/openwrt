@@ -1188,20 +1188,34 @@ static void cg_laser_on(struct cortina_gpon *cg)
 	 * the net-level readback in /proc/gpon. */
 }
 
-/* One PDC map-memory entry write: DATA0/DATA1, then kick ACCESS, poll go. */
-static int cg_pdc_map_write(struct cortina_gpon *cg, u32 idx, u32 d0, u32 d1)
+/* PUC indirect-table op: kick ACCESS (go[31] + rbw[30]=write + index), poll go. */
+static int cg_puc_ind_write(struct cortina_gpon *cg, u32 access_off, u32 index)
 {
 	int i;
 
-	writel(d0, cg->pon + CG_PDC_MAP_DATA0);
-	writel(d1, cg->pon + CG_PDC_MAP_DATA1);
-	writel(CG_TBL_GO | CG_TBL_WR | (idx & 0xff), cg->pon + CG_PDC_MAP_ACCESS);
+	writel(CG_TBL_GO | CG_TBL_WR | index, cg->pon + access_off);
 	for (i = 0; i < 10000; i++) {
-		if (!(readl(cg->pon + CG_PDC_MAP_ACCESS) & CG_TBL_GO))
+		if (!(readl(cg->pon + access_off) & CG_TBL_GO))
 			return 0;
 	}
-	dev_warn(cg->dev, "PDC map[%u] write timed out\n", idx);
+	dev_warn(cg->dev, "PUC indirect +0x%04x[%u] timed out\n", access_off, index);
 	return -ETIMEDOUT;
+}
+
+/*
+ * One PDC map-memory entry write: DATA0/DATA1, then the indirect kick.
+ *
+ * ★ The kick is cg_puc_ind_write() above, not a second copy of it (2026-09-04).
+ * This function used to spell the same three lines out -- same GO/WR bits, same
+ * 10000-iteration bound, same undelayed poll -- while the parameterised helper
+ * sat seventy lines below it.  The index mask stays HERE because it is this
+ * table's geometry: CG_PDC_MAP_ACCESS is address[7:0] over 256 entries.
+ */
+static int cg_pdc_map_write(struct cortina_gpon *cg, u32 idx, u32 d0, u32 d1)
+{
+	writel(d0, cg->pon + CG_PDC_MAP_DATA0);
+	writel(d1, cg->pon + CG_PDC_MAP_DATA1);
+	return cg_puc_ind_write(cg, CG_PDC_MAP_ACCESS, idx & 0xff);
 }
 
 /*
@@ -1258,19 +1272,6 @@ static void cg_pdc_init(struct cortina_gpon *cg)
 			 readl(cg->pon + CG_PDC_CTRL));
 }
 
-/* PUC indirect-table op: kick ACCESS (go[31] + rbw[30]=write + index), poll go. */
-static int cg_puc_ind_write(struct cortina_gpon *cg, u32 access_off, u32 index)
-{
-	int i;
-
-	writel(CG_TBL_GO | CG_TBL_WR | index, cg->pon + access_off);
-	for (i = 0; i < 10000; i++) {
-		if (!(readl(cg->pon + access_off) & CG_TBL_GO))
-			return 0;
-	}
-	dev_warn(cg->dev, "PUC indirect +0x%04x[%u] timed out\n", access_off, index);
-	return -ETIMEDOUT;
-}
 
 /* One PUC per-VoQ valid bit (PUC_valid_voqN, 256-bit mask across 8 regs). */
 static void cg_puc_voq_valid(struct cortina_gpon *cg, u32 voq, bool valid)

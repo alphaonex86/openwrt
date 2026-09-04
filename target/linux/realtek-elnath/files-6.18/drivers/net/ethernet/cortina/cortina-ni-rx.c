@@ -1956,6 +1956,36 @@ static int cortina_ni_rx_ind_read(struct cortina_ni *ni, u32 access_reg, unsigne
 	return ret;
 }
 
+/*
+ * Read ONE word of an indirect table entry: latch it, then take the word.
+ *
+ * ★ IT CANNOT RETURN THE PREVIOUS ENTRY.  Most of this file's latch sites used
+ * to discard the rc and read DATA regardless, so a stuck GO handed back
+ * whatever the LAST transaction left there -- a plausible value from the wrong
+ * entry, which is worse than no value because it reads like a programmed
+ * table.  This returns 0 instead, and cortina_ni_rx_ind_read() has already
+ * emitted a ratelimited warning naming the register and the index, so the 0 is
+ * never silent.
+ *
+ * 0 is not a sentinel and cannot be: a table word may legitimately be 0.  What
+ * the change buys is that a failure can no longer LOOK like data from a
+ * neighbouring entry.
+ *
+ * ⚠ ONE WORD ONLY, and that is a deliberate limit.  Several entries here span
+ * DATA0..DATA3 from a SINGLE latch; converting just the first word of such a
+ * group would leave the rest reading stale on a stuck GO -- a half-fix that is
+ * worse than none because the values would then disagree with each other.
+ * Those sites keep the two-step form (ind_read, check its rc once, then read
+ * every word).
+ */
+static u32 cortina_ni_rx_ind_entry(struct cortina_ni *ni, u32 access_reg,
+				   unsigned int idx, u32 data_reg)
+{
+	if (cortina_ni_rx_ind_read(ni, access_reg, idx))
+		return 0;
+	return readl(ni_base(ni) + data_reg);
+}
+
 /* program one PLE default-forward table entry: redirect a lookup-miss
  * traffic type of <lspid> to CPU port 0 (indirect read-modify-write) */
 static int cortina_ni_rx_ple_dft_fwd(struct cortina_ni *ni, u32 lspid,
@@ -2155,16 +2185,16 @@ static void cortina_ni_rx_flow_dbuf_init(struct cortina_ni *ni)
 	unsigned int i;
 
 	for (i = 0; i < 8; i++) {
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, i);
-		b[i] = readl(ni_base(ni) + CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
+		b[i] = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS,
+						     i, CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
 	}
 	for (i = 0; i < CA_NI_L2FE_ARB_FLOW_DBUF_ENTRIES; i++) {
 		writel(0, ni_base(ni) + CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
 		cortina_ni_rx_ind_store(ni, CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, i);
 	}
 	for (i = 0; i < 8; i++) {
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, i);
-		a[i] = readl(ni_base(ni) + CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
+		a[i] = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS,
+						     i, CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
 	}
 	dev_info(ni->dev,
 		 "flow-dbuf(0x165c/0x1660) before[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x\n",
@@ -5620,8 +5650,8 @@ void cortina_ni_rx_cb_occupancy(struct cortina_ni *ni, u64 *total, u64 *max,
 	for (q = 0; q < CA_NI_RX_CB_VOQ_ENTRIES; q++) {
 		u32 c, pages;
 
-		cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_VOQ_BUFCNT_ACCESS, q);
-		c = readl(ni_base(ni) + CA_NI_L2TM_CB_VOQ_BUFCNT_DATA);
+		c = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_CB_VOQ_BUFCNT_ACCESS,
+						     q, CA_NI_L2TM_CB_VOQ_BUFCNT_DATA);
 		if (!c)
 			continue;
 		pages = c >> CA_NI_RX_CB_VOQ_PAGES_SHIFT;
@@ -6064,8 +6094,8 @@ static void rx_dump_dft_fwd_and_rmu(struct seq_file *m, struct cortina_ni *ni)
 		seq_printf(m, " [%u]=0x%08x", i, d);
 	}
 	/* verify the VLAN check-id map is programmed (the CPU-RX-dead fix) */
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x10);
-	v = readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA);
+	v = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_CHKID_MAP_ACCESS,
+					     0x10, CA_NI_L2FE_CHKID_MAP_DATA);
 	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x19);
 	seq_printf(m, "  chkid[CPU_0]=%u(want 8) chkid[L3_LAN]=%u(want 15)\n",
 		   v, readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA));
@@ -6200,8 +6230,8 @@ static void rx_dump_l2fe_arbitration(struct seq_file *m, struct cortina_ni *ni)
 	u32 arb = readl(ni_base(ni) + CA_NI_L2FE_ARB_CTRL);
 	u32 portdbuf, pd0, pd1, bmhdr;
 
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_ARB_PORT_DBUF_ACCESS, 0);
-	portdbuf = readl(ni_base(ni) + CA_NI_L2FE_ARB_PORT_DBUF_DATA);
+	portdbuf = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_ARB_PORT_DBUF_ACCESS,
+					     0, CA_NI_L2FE_ARB_PORT_DBUF_DATA);
 	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
 			       CA_NI_RX_REDIR_LDPID);
 	pd0 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
@@ -6210,8 +6240,8 @@ static void rx_dump_l2fe_arbitration(struct seq_file *m, struct cortina_ni *ni)
 			       CA_NI_L2FE_PDPID_IDX_DBUF | CA_NI_RX_REDIR_LDPID);
 	pd1 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
 	      CA_NI_L2FE_PDPID_MAP_PDPID;
-	cortina_ni_rx_ind_read(ni, CA_NI_L2TM_BM_PKT_MEM_ACCESS, 0);
-	bmhdr = readl(ni_base(ni) + CA_NI_L2TM_BM_PKT_MEM_DATA7);
+	bmhdr = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_BM_PKT_MEM_ACCESS,
+					     0, CA_NI_L2TM_BM_PKT_MEM_DATA7);
 
 	seq_printf(m,
 		   "arb-deepq: arb_ctrl=0x%08x (dbuf_sel=%u dbuf_dpid=%lu use_hdr_a=%u) port_dbuf[0]=0x%08x pdpid{DeepQ0,dbuf0/1}=0x%x/0x%x bm_word0=0x%08x (deep_q=%u cpu=%u)\n",
@@ -6466,8 +6496,8 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_MMSHP_ACCESS, CA_NI_RX_PORT);
 		mh = readl(ni_base(ni) + CA_NI_L2FE_MMSHP_DATA1);
 		ml = readl(ni_base(ni) + CA_NI_L2FE_MMSHP_DATA0);
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_ELPB_ACCESS, CA_NI_RX_PORT);
-		el = readl(ni_base(ni) + CA_NI_L2FE_ELPB_DATA0);
+		el = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_ELPB_ACCESS,
+						     CA_NI_RX_PORT, CA_NI_L2FE_ELPB_DATA0);
 
 		seq_printf(m,
 			   "port-prof: ilpb[0]={d3=%08x d2=%08x d1=%08x d0=%08x} stp=%lu mmshp[0]=%08x_%08x elpb[0]=0x%02x ple_ctl=0x%08x\n",
@@ -6799,8 +6829,8 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 		for (q = 0; q < 128; q++) {
 			u32 c;
 
-			cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_VOQ_BUFCNT_ACCESS, q);
-			c = readl(ni_base(ni) + CA_NI_L2TM_CB_VOQ_BUFCNT_DATA);
+			c = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_CB_VOQ_BUFCNT_ACCESS,
+							     q, CA_NI_L2TM_CB_VOQ_BUFCNT_DATA);
 			if (c) {
 				seq_printf(m, " q%u=%u", q, c);
 				nz++;
@@ -6815,10 +6845,10 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	{
 		u32 f0, f8;
 
-		cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_PORT_FREECNT_ACCESS, 0);
-		f0 = readl(ni_base(ni) + CA_NI_L2TM_CB_PORT_FREECNT_DATA);
-		cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_PORT_FREECNT_ACCESS, 8);
-		f8 = readl(ni_base(ni) + CA_NI_L2TM_CB_PORT_FREECNT_DATA);
+		f0 = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_CB_PORT_FREECNT_ACCESS,
+						     0, CA_NI_L2TM_CB_PORT_FREECNT_DATA);
+		f8 = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_CB_PORT_FREECNT_ACCESS,
+						     8, CA_NI_L2TM_CB_PORT_FREECNT_DATA);
 		seq_printf(m, "dq-populate: eq12_pa_req(0x63d8)=0x%08x (req=%u want 1) cb_freebuf[p0]=0x%08x [p8]=0x%08x\n",
 			   readl(ni_base(ni) + CA_NI_QM_EQM_PA_REQ(CA_NI_RX_EQ12_ID)),
 			   !!(readl(ni_base(ni) + CA_NI_QM_EQM_PA_REQ(CA_NI_RX_EQ12_ID)) & CA_NI_QM_PA_REQ_READY),

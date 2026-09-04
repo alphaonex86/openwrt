@@ -128,6 +128,23 @@
  */
 #define CG_PSDS_MODE		0xa02c
 #define CG_PSDS_RGB8		0xa05c	/* DS-lock status; locked = (val & 0x9c01)==0x9c00 (stock 0x19c00) */
+/*
+ * The TWO lock predicates this register answers.  Both shapes were already
+ * established in this file -- the DS one in the comment above, the CMU/PLL one
+ * in the prose at the re-lock site -- but each was spelled as a bare mask and
+ * value at every use: the DS predicate six times, the CMU one once.
+ *
+ * ⚠ WHAT EACH BIT MEANS IS NOT ESTABLISHED ANYWHERE IN THIS TREE, so no bit is
+ * named here.  These are the predicates the code already relies on, given the
+ * names the code already uses for them in prose -- nothing more.  They are
+ * kept SEPARATE because they answer different questions: 0x9c01/0x9c00 is the
+ * downstream lock, 0x8c01/0x8c00 the CMU/PLL lock re-waited after the 8/d/7/0
+ * strobe.  Merging them would be inventing a fact.
+ */
+#define CG_PSDS_DS_LOCK_MASK	0x9c01u
+#define CG_PSDS_DS_LOCK_VAL	0x9c00u
+#define CG_PSDS_CMU_LOCK_MASK	0x8c01u
+#define CG_PSDS_CMU_LOCK_VAL	0x8c00u
 #define CG_PSDS_GBOX_CTRL	0xa060	/* rx/tx bit-ordering[7:4]; stock=0x454.  WAS 0xa064 (stock=0) -> our US tx_bit_ordering never took -> OLT saw US LOS (live-diff 2026-07-13) */
 #define CG_PON_EPON_SPARE	0x01c8	/* EPON_GLB_SPARE_CFG (PON window); bit31 for GPON los-rst */
 /*
@@ -857,6 +874,41 @@ static bool cg_do_reset = true;
 module_param_named(reset, cg_do_reset, bool, 0444);
 MODULE_PARM_DESC(reset, "release the GPON MAC from reset/clock-gate at probe (default on)");
 
+/* Is the DOWNSTREAM path locked?  The predicate documented at CG_PSDS_RGB8. */
+static bool cg_psds_ds_locked(u32 rgb8)
+{
+	return (rgb8 & CG_PSDS_DS_LOCK_MASK) == CG_PSDS_DS_LOCK_VAL;
+}
+
+/* Is the CMU/PLL locked?  A DIFFERENT question -- see the note at the defines. */
+static bool cg_psds_cmu_locked(u32 rgb8)
+{
+	return (rgb8 & CG_PSDS_CMU_LOCK_MASK) == CG_PSDS_CMU_LOCK_VAL;
+}
+
+/*
+ * Wait for @locked, reading once per millisecond, bounded at @ms_max.
+ *
+ * Returns the elapsed milliseconds -- which is what every caller prints, and
+ * why this returns a count rather than an rc: a lock at 640 ms and a lock at
+ * 3 ms are both successes and the DIFFERENCE is the interesting number.  A
+ * return equal to @ms_max means it never locked.
+ *
+ * ★ The loop reads BEFORE the first delay, exactly as the four hand-written
+ * copies did: an already-locked SerDes must cost 0 ms, not 1.
+ */
+static int cg_psds_wait_lock(void __iomem *pon, bool (*locked)(u32), int ms_max)
+{
+	int i;
+
+	for (i = 0; i < ms_max; i++) {
+		if (locked(readl(pon + CG_PSDS_RGB8)))
+			break;
+		mdelay(1);
+	}
+	return i;
+}
+
 static bool cg_do_intr = true;
 module_param_named(intr, cg_do_intr, bool, 0444);
 MODULE_PARM_DESC(intr, "enable the GPON MAC interrupt servicing path (default on)");
@@ -962,11 +1014,7 @@ static void cg_psds_init(struct cortina_gpon *cg)
 	 * vendor order is strict: lock FIRST, then los-rst release, THEN the
 	 * gearbox reset release.
 	 */
-	for (i = 0; i < 1001; i++) {
-		if ((readl(pon + CG_PSDS_RGB8) & 0x9c01) == 0x9c00)
-			break;
-		mdelay(1);
-	}
+	i = cg_psds_wait_lock(pon, cg_psds_ds_locked, 1001);
 	dev_info(cg->dev, "psds: __psds_sync RX-lock wait done at %dms, rgb8=0x%08x\n",
 		 i, readl(pon + CG_PSDS_RGB8));
 
@@ -1009,11 +1057,7 @@ static void cg_psds_init(struct cortina_gpon *cg)
 	 * (measured cold boot 2026-07-15: edge at RGB8=0x1c00 (unlocked) still
 	 * left the framer at O1/LOF; lock showed 0x19c00 ~300 ms later).
 	 */
-	for (i = 0; i < 2000; i++) {
-		if ((readl(pon + CG_PSDS_RGB8) & 0x9c01) == 0x9c00)
-			break;
-		mdelay(1);
-	}
+	i = cg_psds_wait_lock(pon, cg_psds_ds_locked, 2000);
 	dev_info(cg->dev, "psds: pre-edge DS-lock wait done at %dms, rgb8=0x%08x\n",
 		 i, readl(pon + CG_PSDS_RGB8));
 	writel(0x0000030e, cg->glb + CG_GLB_PON_CNTL);	/* pon_serdes/psds/ptp + puc/pdc */
@@ -1641,11 +1685,7 @@ static void cg_mac_activate(struct cortina_gpon *cg)
 
 	/* Wait for the downstream to lock (RGB8 bit15 BER_NOTIFY) before enabling
 	 * ranging, so the FSM sees a live downstream at the moment en is asserted. */
-	for (i = 0; i < 8000; i++) {
-		if ((readl(cg->pon + CG_PSDS_RGB8) & 0x9c01) == 0x9c00)
-			break;
-		mdelay(1);
-	}
+	i = cg_psds_wait_lock(cg->pon, cg_psds_ds_locked, 8000);
 	dev_info(cg->dev, "activate: DS-lock wait done at %dms, rgb8=0x%08x\n",
 		 i, readl(cg->pon + CG_PSDS_RGB8));
 
@@ -1885,11 +1925,7 @@ static void cg_psds_relock(struct cortina_gpon *cg)
 	}
 
 	/* re-wait the CMU/PLL lock (bounded ~1000 ms, as the vendor does) */
-	for (i = 0; i < 1001; i++) {
-		if ((readl(pon + CG_PSDS_RGB8) & 0x8c01) == 0x8c00)
-			break;
-		mdelay(1);
-	}
+	i = cg_psds_wait_lock(pon, cg_psds_cmu_locked, 1001);
 	dev_info(cg->dev, "psds re-lock (8/d/7/0): base=0x%08x lock at %dms rgb8=0x%08x\n",
 		 base, i, readl(pon + CG_PSDS_RGB8));
 }
@@ -1971,7 +2007,7 @@ static void cg_coldstart_work(struct work_struct *work)
 	u32 onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
 	u32 rgb8 = readl(cg->pon + CG_PSDS_RGB8);
 	u8 state = CG_ONU_STATE(onu);
-	bool ds_locked = (rgb8 & 0x9c01) == 0x9c00;
+	bool ds_locked = cg_psds_ds_locked(rgb8);
 
 	if (state != 0) {			/* left O1: ranging is progressing */
 		cg->coldstart_tries = 0;	/* fresh episode = fresh fast budget */

@@ -424,19 +424,45 @@ static const struct r960_op c3_sds_post[] = {
  * restore it, and bounce the 16<->20-bit transfer FIFO release-B. Used to
  * re-acquire lock without a full re-bring-up.
  */
+/* the analog CDR / SD-power-on select bit, bit 10 of the analog common word */
+#define LUNA_SDS_ANA_CDR_SEL	BIT(10)
+
+/*
+ * CDR re-seat, ONE owner for every Luna part: pulse the analog CDR-select bit,
+ * let the loop settle, put the word back, then pulse the SerDes transfer-FIFO
+ * reset.  Only the ANALOG register differs per chip (the FIFO register is the
+ * same address on every part) -- so the difference is data, and the sequence is
+ * not written twice.
+ *
+ * ★ This was two functions, c3_ and c7_, with the same steps and the same
+ * delays.  They also spelled the bit toggle two different obfuscated ways --
+ * `(v & ~0x400) | ((~v) & 0x400)` and
+ * `(v & ~0x400) | (!((v & 0x400) >> 10) << 10)` -- which were PROVEN identical
+ * to a plain `v ^ BIT(10)` over every input that differs in the surrounding
+ * bits before they were replaced by it.  Neither spelling said "toggle"; the
+ * XOR does.
+ *
+ * ⚠ This is the GPON cold-start path (the TX-CMU re-lock at O3 entry).  The
+ * two mdelay(10)s are the settle the hardware needs, not padding: do not
+ * shorten them, and do not make this function conditional on anything.
+ */
+static int luna_cdr_reset(const struct luna_ops *o, u32 ana_reg, u32 wsds_reg)
+{
+	u32 v = o->rd(ana_reg);
+
+	o->wr(ana_reg, v ^ LUNA_SDS_ANA_CDR_SEL);
+	mdelay(10);
+	o->wr(ana_reg, v);			/* restore the original word */
+
+	luna_rfwr(o, wsds_reg, 14, 14, 0);	/* transfer FIFO: assert rstb  */
+	mdelay(10);
+	luna_rfwr(o, wsds_reg, 14, 14, 1);	/* transfer FIFO: release rstb */
+	return 0;
+}
+
 static int c3_cdr_reset(const struct luna_ops *o)
 {
-	u32 v = o->rd(C3_SDS_ANA_COM03);
-
-	/* flip the SD power-on select bit (mask 0x400), leave the rest intact */
-	o->wr(C3_SDS_ANA_COM03, (v & ~0x400u) | (((~v) & 0x400u)));
-	mdelay(10);
-	o->wr(C3_SDS_ANA_COM03, v);		/* restore original analog word    */
-
-	luna_rfwr(o, C3_WSDS_DIG_1D, 14, 14, 0); /* transfer FIFO: assert rstb  */
-	mdelay(10);
-	luna_rfwr(o, C3_WSDS_DIG_1D, 14, 14, 1); /* transfer FIFO: release rstb */
-	return 0;
+	return luna_cdr_reset(o, C3_SDS_ANA_COM03, C3_WSDS_DIG_1D);
 }
 
 /* GPON bring-up driver: pre-config tables + flow/OMCI wiring + analog gate. */
@@ -909,17 +935,7 @@ static int c7_gpon_mode_set(const struct luna_ops *o, int rev, int subtype)
  */
 static int c7_cdr_reset(const struct luna_ops *o)
 {
-	u32 v = o->rd(C7_SDS_ANA_COM09);
-
-	o->wr(C7_SDS_ANA_COM09,
-	      (v & ~0x400u) | ((u32)(!((v & 0x400u) >> 10)) << 10));
-	mdelay(10);
-	o->wr(C7_SDS_ANA_COM09, v);			/* restore original word   */
-
-	luna_rfwr(o, C7_WSDS_DIG_1D, 14, 14, 0);	/* transfer FIFO assert rstb */
-	mdelay(10);
-	luna_rfwr(o, C7_WSDS_DIG_1D, 14, 14, 1);	/* transfer FIFO release rstb*/
-	return 0;
+	return luna_cdr_reset(o, C7_SDS_ANA_COM09, C7_WSDS_DIG_1D);
 }
 
 /* RTL9607C top-level entry points (thin wrappers over the c7_* internals). */

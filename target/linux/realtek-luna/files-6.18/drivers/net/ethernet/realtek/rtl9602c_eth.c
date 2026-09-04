@@ -403,7 +403,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 /* MAC_CPU_TAG_CTRL: TAG_AWARE[9] makes the switch parse the CPU-tag on CPU-port
  * ingress and STRIP it before physical egress; TRAP_TAGET_INSERT_EN[8] inserts
  * a CPU-tag on frames trapped to the CPU. */
-#define SW_MAC_CPU_TAG_CTRL	0x23030
 /*
  * ★★ THE THREE "AUX" WORDS ARE FLOW-CONTROL THRESHOLDS, NOT CPU-TAG REGISTERS
  * (tier 3, 2026-08-29: the RTL9602C's OWN chipdef, rtk_rtl9602c_reg_list.c).
@@ -2884,13 +2883,17 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	/* wait for RDY_FOR_PATCH (0xB8000044 bit1) after the IP-block reset */
 	for (to = 0; to < 200000 && !(readl(sysstat) & 0x2); to++)
 		udelay(1);
-	/* GPHY analog patch (0x6485 variant only), switch regs 0x10004/0x0/0x4 */
+	/* GPHY analog patch (0x6485 variant only) through the GPHY indirect pair:
+	 * one DATA word, then the COMMAND words that place it.  The command
+	 * VALUES are left as the bootloader wrote them -- nothing in reach
+	 * establishes their field layout, and decoding them to look tidier would
+	 * be inventing a structure. */
 	iowrite32(0xa0000000, ep->sw + SW_CHIP_INFO);
 	if ((ioread32(ep->sw + SW_CHIP_INFO) & 0xffff) == 0x6485) {
-		iowrite32(0x0000fffb, ep->sw + 0x0);
-		iowrite32(0x0061b844, ep->sw + 0x4);
-		iowrite32(0x0021b906, ep->sw + 0x4);
-		iowrite32(0x0021b906, ep->sw + 0x4);
+		iowrite32(0x0000fffb, ep->sw + SW_GPHY_IND_WD);
+		iowrite32(0x0061b844, ep->sw + SW_GPHY_IND_CMD);
+		iowrite32(0x0021b906, ep->sw + SW_GPHY_IND_CMD);
+		iowrite32(0x0021b906, ep->sw + SW_GPHY_IND_CMD);
 	}
 	iowrite32(0x0, ep->sw + SW_CHIP_INFO);
 	/* the SECOND site of the same register -- from the chip table too, or the
@@ -2899,11 +2902,11 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	if (ep->swm->gphy_misc)
 		iowrite32(1, ep->sw + ep->swm->gphy_misc);	/* PATCH_PHY_DONE */
 	msleep(500);
-	iowrite32(0x00003000, ep->sw + 0x0);	/* GPHY power down */
-	iowrite32(0x0060a400, ep->sw + 0x4);
+	iowrite32(0x00003000, ep->sw + SW_GPHY_IND_WD);	/* GPHY power down */
+	iowrite32(0x0060a400, ep->sw + SW_GPHY_IND_CMD);
 	msleep(500);
-	iowrite32(0x00001140, ep->sw + 0x0);	/* GPHY power up + autoneg */
-	iowrite32(0x0061a400, ep->sw + 0x4);
+	iowrite32(0x00001140, ep->sw + SW_GPHY_IND_WD);	/* GPHY power up + autoneg */
+	iowrite32(0x0061a400, ep->sw + SW_GPHY_IND_CMD);
 	msleep(500);
 	iowrite32(0,          ep->sw + 0x230c4);	/* SVLAN uplink port */
 	iowrite32(0x003fffff, ep->sw + 0x27000);	/* port isolation */
@@ -2916,7 +2919,7 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG + 1 * 4);
 	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG + 2 * 4);
 	iowrite32(1, ep->sw + SW_VLAN_EGRESS_TAG + 3 * 4);
-	iowrite32(0, ep->sw + 0x23030);			/* CPU_TAG_CTRL=0 (re-armed in hw_program) */
+	iowrite32(0, ep->sw + SW_MAC_CPU_TAG_CTRL);			/* CPU_TAG_CTRL=0 (re-armed in hw_program) */
 	writel(readl(sysstat) | 1, sysstat);		/* patch done: set 0xB8000044 bit0 */
 }
 

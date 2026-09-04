@@ -106,6 +106,27 @@
  * family constants rather than table fields.  Cross-read 2026-08-28 from each
  * chip's own reg_list.c; the silicon's own names are kept, because a name that
  * follows the silicon is one a reader can look up. */
+/* ★ THE GPHY INDIRECT PAIR, named from the RTL9602C's own chipdef
+ * (2026-09-04).  rtl9602c_uboot_swcore_bringup() wrote eight values into
+ * `ep->sw + 0x0` and `+ 0x4` with the comment `switch regs 0x10004/0x0/0x4`
+ * -- the author knew they were a pair and had no name for it.  It is the
+ * same shape as every other indirect block here: a DATA word, then a
+ * COMMAND word that says where the data goes.
+ * ⚠ The command VALUES stay as they are.  Their field layout (phy, page,
+ * register, op) is not established by anything in reach, and decoding them
+ * would be inventing a structure to make the code look tidier. */
+#define SW_GPHY_IND_WD		0x00000	/* GPHY_IND_WD: the data word */
+#define SW_GPHY_IND_CMD		0x00004	/* GPHY_IND_CMD: where it goes */
+/* ⚠ 0x198 / 0x1b8 / 0x1d8 / 0x1f8 ARE NOT NAMED HERE, and the attempt is worth
+ * recording (2026-09-04).  The chipdef names three of them P_ABLTY,
+ * BYPS_ABLTY_LOCK and MISCELLANEOUS_BONDING -- three unrelated registers -- but
+ * this driver's own /proc dump labels the four `p0_sts p1_sts p2_sts cpu_sts`,
+ * a PER-PORT array at stride 0x20, and luna_eth.c already reaches the ability
+ * word as SW_P_ABLTY(ep, p) built from the per-chip table.  So the chipdef is
+ * naming ELEMENTS of an array, exactly as it does for the PISO block, and a
+ * flat name for one element would be the same defect that made the G24W write
+ * 0x2700c twice.  The compiler caught this one: SW_P_ABLTY was already taken. */
+#define SW_MAC_CPU_TAG_CTRL	0x23030	/* MAC_CPU_TAG_CTRL */
 #define SW_CHIP_INFO		0x10004	/* CHIP_INFO: low 16 bits = the GPHY variant */
 #define SW_METER_TB_CTRL	0x25000	/* METER_TB_CTRL: meter tick/token config */
 #define SW_VLAN_EGRESS_TAG	0x2A000	/* VLAN_EGRESS_TAG */

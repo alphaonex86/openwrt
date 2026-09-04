@@ -58,7 +58,7 @@
 #include <linux/unaligned.h>
 #include <net/net_namespace.h>
 
-#include "cortina-ni-access.h"	/* the ONE indirect transaction */
+#include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
 
 /* DIAGNOSTIC (temporary): when set, link_up skips ALL port-MAC/GPHY reconfig
@@ -4837,18 +4837,17 @@ static void cortina_ni_rx_fbm_fill(struct cortina_ni *ni)
 			u32 buf = base + i * CA_NI_RX_FBM_POOL_BUFSZ;
 
 			/* gate 1: outstanding < depth (else the push is rejected -1) */
-			for (s = 0; s < 4096; s++) {
+			for (s = 0; s < CA_NI_FBM_GATE_TRIES; s++) {
 				if (readl(p + CA_NI_QM_FBM_POOL_OUTSTND) <
 				    CA_NI_RX_FBM_EXSTACK_DEPTH)
 					break;
 				cpu_relax();
 			}
-			/* gate 2: FBM_CPU cmd not BUSY (bit31 clear) before issuing */
-			for (s = 0; s < 4096; s++) {
-				if (!(readl(db + CA_NI_QM_FBM_CPU_CMD) & CA_NI_QM_FBM_CPU_CMD_GO))
-					break;
-				cpu_relax();
-			}
+			/* gate 2: FBM_CPU cmd not BUSY (bit31 clear) before issuing.
+			 * cpu_relax, not udelay: this runs inside the fill loop
+			 * and the command clears in a handful of reads. */
+			ca_go_spin(db + CA_NI_QM_FBM_CPU_CMD, CA_NI_FBM_GATE_TRIES,
+				   ca_pause_relax);
 			writel(0, db + CA_NI_QM_FBM_CPU_ADDR_HI);
 			writel(buf, db + CA_NI_QM_FBM_CPU_ADDR_LO);
 			writel(CA_NI_QM_FBM_CPU_CMD_GO | CA_NI_QM_FBM_CPU_CMD_PUSH,

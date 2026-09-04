@@ -632,6 +632,9 @@ enum cortina_ni_win {
 #define CA_NI_NI_TXFIFO_THR_L3FE_CFG2	0xa1f8	/* vendor NI_HV_GLB_TXFIFO_THRESHOLD_L3FE_CFG2 */
 
 #define  CA_NI_QM_FBM_CPU_CMD_GO	CA_NI_IND_ACCESS_GO
+/* Both FBM fill gates spin this many reads before giving up; it was written
+ * as a bare 4096 in each of them. */
+#define  CA_NI_FBM_GATE_TRIES		4096u
 #define  CA_NI_QM_FBM_CPU_CMD_PUSH	BIT(30)
 #define CA_NI_QM_FBM_POOL(id)		((id) << 7)	/* POOL window: pool desc base = id*0x80 */
 #define CA_NI_QM_FBM_POOL_OUTSTND	0x2c		/* +0x2c outstanding-count (gate) */

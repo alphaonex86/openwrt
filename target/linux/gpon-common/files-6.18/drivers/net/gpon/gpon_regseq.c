@@ -18,9 +18,7 @@
 void gpon_regseq_fld(const struct gpon_regseq_io *io, u32 addr,
 		     u8 msb, u8 lsb, u32 val)
 {
-	u32 mask = (msb == 31 && lsb == 0)
-		 ? 0xffffffffu
-		 : (((1u << (msb - lsb + 1)) - 1) << lsb);
+	u32 mask = gpon_field_mask(msb, lsb);
 
 	io->wr(addr, (io->rd(addr) & ~mask) | ((val << lsb) & mask));
 }

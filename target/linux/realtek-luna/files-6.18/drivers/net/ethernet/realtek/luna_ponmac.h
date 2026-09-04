@@ -58,12 +58,15 @@ struct luna_ops {
 	void (*wr)(u32 phys, u32 val);
 };
 
+/* The field-mask owner lives in gpon/, which this family already has on its
+ * include path (realtek-luna/Makefile: -I$(srctree)/drivers/net/gpon). */
+#include "gpon_regseq.h"
+
 /* read-modify-write bits [msb:lsb] at absolute phys address */
 static inline void luna_rfwr(const struct luna_ops *o, u32 phys,
 				u8 msb, u8 lsb, u32 val)
 {
-	u32 mask = (msb == 31 && lsb == 0) ? 0xffffffffu
-					   : ((((1u << (msb - lsb + 1)) - 1)) << lsb);
+	u32 mask = gpon_field_mask(msb, lsb);   /* the ONE owner, in gpon/ */
 
 	o->wr(phys, (o->rd(phys) & ~mask) | ((val << lsb) & mask));
 }

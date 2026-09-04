@@ -55,6 +55,39 @@ struct gpon_regseq_op {
  * translating them would invent a second numbering nobody could check against
  * the vendor's tables.
  */
+/**
+ * gpon_field_mask() - the mask for bits [@msb:@lsb]. -> u32
+ *
+ * ★★★ ONE OWNER since 2026-09-04. This arithmetic was written THREE times:
+ * here (gpon_regseq_fld), in flowcore/hwio.h (hwio_rmw) and in
+ * realtek-luna/luna_ponmac.h (luna_rfwr) -- and hwio.h's own comment already
+ * said why that is dangerous: "both families have their own today and a field
+ * written one bit wide too far is the class of bug that reads back correct and
+ * behaves wrong".
+ *
+ * ★ IT LIVES IN gpon/ AND NOT IN flowcore/ FOR A MEASURED REASON. The include
+ * direction is one-way: flowcore/Makefile carries
+ * `-I$(srctree)/drivers/net/gpon` and gpon/Makefile carries nothing toward
+ * flowcore -- verified with the compiler, not read off the Makefiles: a TU
+ * including "gpon_regseq.h" with flowcore+gpon on -I compiles, and one
+ * including "hwio.h" with only gpon on -I is a fatal error. So gpon is the
+ * lower layer, and a helper both need can only live here.
+ *
+ * ⚠ THE FULL-WORD CASE IS SEPARATE ON PURPOSE, and all three copies had it:
+ * `1u << 32` is undefined behaviour, so msb=31,lsb=0 cannot go through the
+ * general formula. msb=31,lsb=0 is the ONLY pair that reaches width 32.
+ *
+ * ★ PROVEN EQUIVALENT before unifying: the three spellings were compiled side
+ * by side and compared over every (msb,lsb) with msb>=lsb -- 528 pairs, 0
+ * disagreements. This replaces them without changing a single computed mask.
+ */
+static inline u32 gpon_field_mask(u8 msb, u8 lsb)
+{
+	return (msb == 31 && lsb == 0)
+	     ? 0xffffffffu
+	     : (((1u << (msb - lsb + 1)) - 1u) << lsb);
+}
+
 struct gpon_regseq_io {
 	u32  (*rd)(u32 addr);
 	void (*wr)(u32 addr, u32 val);

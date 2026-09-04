@@ -43,6 +43,10 @@
 
 #include <linux/types.h>
 
+/* gpon/ is the lower layer: flowcore/Makefile carries -I .../drivers/net/gpon,
+ * and this is where the ONE field-mask owner lives. */
+#include "gpon_regseq.h"
+
 /**
  * struct hwio - how a caller reaches one register block.
  * @rd:  read a 32-bit register at @off within the block.
@@ -86,8 +90,7 @@ static inline void hwio_wr(const struct hwio *io, u32 off, u32 val)
 static inline void hwio_rmw(const struct hwio *io, u32 off, u8 msb, u8 lsb,
 			    u32 val)
 {
-	u32 mask = (msb == 31 && lsb == 0) ? 0xffffffffu
-					   : (((1u << (msb - lsb + 1)) - 1u) << lsb);
+	u32 mask = gpon_field_mask(msb, lsb);   /* the ONE owner, in gpon/ */
 
 	hwio_wr(io, off, (hwio_rd(io, off) & ~mask) | ((val << lsb) & mask));
 }

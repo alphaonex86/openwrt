@@ -42,7 +42,7 @@
 #include <net/arp.h>
 #include <net/net_namespace.h>
 
-#include "cortina-ni-access.h"	/* the ONE indirect transaction */
+#include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
 
 /* Fallback / revert destination for the eth0 LAN TX path, and the port whose

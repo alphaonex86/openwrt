@@ -57,6 +57,7 @@
 #include "cortina-gpon-bosa.h"
 #include "cortina-gpon-ddm.h"	/* SFF-8472 A2h optical decode (functional core) */
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
+#include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"		/* cortina_ni_pon_rx_hook_set + cortina_ni_pon_tx */
 
 /*
@@ -1294,15 +1295,12 @@ static void cg_laser_on(struct cortina_gpon *cg)
  */
 static int cg_go_poll(void __iomem *reg, unsigned int tries, bool pace)
 {
-	unsigned int i;
-
-	for (i = 0; i < tries; i++) {
-		if (!(readl(reg) & CG_TBL_GO))
-			return (int)i;
-		if (pace)
-			udelay(1);
-	}
-	return -ETIMEDOUT;
+	/* ★ THE LOOP IS NOT OURS ANY MORE (2026-09-04).  cortina-access.h owns
+	 * it for the whole driver: CG_TBL_GO and CA_NI_IND_ACCESS_GO are the
+	 * same BIT(31), and cn_aft_go and the FBM gate spelled the same loop
+	 * again.  This stays as the GPON block's NAME for it, because `pace`
+	 * reads better than a function pointer at four call sites. */
+	return ca_go_spin(reg, tries, pace ? ca_pause_udelay1 : ca_pause_none);
 }
 
 /*

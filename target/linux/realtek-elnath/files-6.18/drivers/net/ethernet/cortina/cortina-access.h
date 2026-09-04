@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * ONE owner for the Cortina NI's indirect transaction.
+ * ONE owner for this driver's indirect transaction -- NI *and* GPON blocks.
  *
  * ★ WHY THIS FILE EXISTS (2026-09-04).  Every indirect block in this driver
  * drives the SAME handshake: write a command word into that block's ACCESS
@@ -32,11 +32,13 @@
  * removed first, with the timing byte-for-byte unchanged, and the move to the
  * core stays a separate, measurable step.
  */
-#ifndef _CORTINA_NI_ACCESS_H
-#define _CORTINA_NI_ACCESS_H
+#ifndef _CORTINA_ACCESS_H
+#define _CORTINA_ACCESS_H
 
+#include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/processor.h>
 
 #include "cortina-ni-regs.h"
 
@@ -97,4 +99,39 @@ static inline int ca_ni_access_go(void __iomem *acc, u32 val, u32 *out)
 				     CA_NI_TX_POLL_TIMEOUT_US);
 }
 
-#endif /* _CORTINA_NI_ACCESS_H */
+/*
+ * The OTHER pacing family: a bounded SPIN, counted in reads rather than in
+ * microseconds.  Three sites had written this loop out by hand and they
+ * disagreed only on the pause and the bound:
+ *
+ *     cortina-gpon.c   cg_go_poll        10000 reads, none / udelay(1)
+ *     cortina-ni-flowoffload.c cn_aft_go  1000 reads, udelay(1)
+ *     cortina-ni-rx.c  the FBM CPU gate   4096 reads, cpu_relax()
+ *
+ * ★ THE PAUSE IS A PARAMETER, NOT A CHOICE TO BE MADE HERE.  Nothing in this
+ * tree -- not the vendor comments, not the stock NAME->ADDRESS table -- says
+ * which pause is a requirement and which is habit, and the bench cannot cold
+ * boot, so unifying them would be a guess landed on a hardware path.  Carried
+ * visibly instead.
+ *
+ * Returns the READ COUNT on success (a caller that prints "cleared after N"
+ * needs it) or -ETIMEDOUT.  Same contract as the core's gpon_ind_poll().
+ */
+static inline void ca_pause_none(void) { }
+static inline void ca_pause_relax(void) { cpu_relax(); }
+static inline void ca_pause_udelay1(void) { udelay(1); }
+
+static inline int ca_go_spin(void __iomem *reg, unsigned int tries,
+			     void (*pause)(void))
+{
+	unsigned int i;
+
+	for (i = 0; i < tries; i++) {
+		if (!(readl(reg) & CA_NI_IND_ACCESS_GO))
+			return (int)i;
+		pause();
+	}
+	return -ETIMEDOUT;
+}
+
+#endif /* _CORTINA_ACCESS_H */

@@ -64,6 +64,7 @@
 
 #include "gpon_flow.h"	/* the core's TC->5-tuple decode */
 #include "gpon_flow_offload.h"	/* the core TC-offload lifecycle */
+#include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
 #include "cortina-l3fe.h"
 #include "cortina-l3fe-regs.h"	/* the L3FE registers more than one file needs */
@@ -2843,19 +2844,20 @@ MODULE_PARM_DESC(hw_vlan_wan,
  * look exactly like the bug this change fixes, so it never returns success
  * on a timeout and the caller always unwinds.
  */
+/* The vendor's own bound is 200/100 reads; ours is 1000, stated once here
+ * rather than as a literal inside the loop. */
+#define CN_AFT_GO_TRIES	1000u
+
 static int cn_aft_go(struct cn_l3e *l3e, u32 access_off, u32 val)
 {
-	int i;
 
 	writel(val, l3e->dma_base + access_off);
 	/* stock polls 200 times for the L2FIB and 100 for the map with no
 	 * delay between reads; 1000 with a 1 us gap is far more headroom
 	 * than either, and still bounded. */
-	for (i = 0; i < 1000; i++) {
-		if (!(readl(l3e->dma_base + access_off) & CA_DMA_AFT_ACCESS_GO))
-			return 0;
-		udelay(1);
-	}
+	if (ca_go_spin(l3e->dma_base + access_off, CN_AFT_GO_TRIES,
+		       ca_pause_udelay1) >= 0)
+		return 0;
 	l3e->aft_timeout++;
 	dev_err(l3e->dev,
 		"DMA-AFT: GO never cleared on access reg +0x%03x (wrote 0x%08x) - the VLAN edit is NOT programmed; this flow falls back to software\n",

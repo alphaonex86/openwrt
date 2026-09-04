@@ -1885,12 +1885,82 @@ static int cortina_ni_rx_poll(struct napi_struct *napi, int budget)
 /* RX steer: the full forwarding-engine path (stock golden config)      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The NI window's indirect ACCESS/DATA protocol, in three shapes.  Every
+ * indirect table here is reached the same way -- raise GO (plus the write bit
+ * for a store), then watch GO until the hardware drops it -- and BIT(31)/BIT(30)
+ * are those bits for the PLE, L2FE_REDIR and generic IND blocks alike.
+ *
+ * ★ THEY RETURN AN rc SINCE 2026-09-04, and that is what let six hand-spelled
+ * copies adopt them.  While these were `void` a caller could not tell "the
+ * entry is latched in DATA" from "GO is stuck and DATA still holds the LAST
+ * transaction's contents" -- so the sites that cared spelled the poll out
+ * themselves rather than lose the distinction.  Reading DATA after a failed
+ * poll returns garbage dressed as an entry; the rc is how a caller refuses it.
+ * The 39 existing callers ignore the value and are unchanged by construction.
+ */
+
+/* Wait for an already-issued transaction to finish, WITHOUT issuing one.  The
+ * PLE default-forward path opens with this: a bare idle-wait.  Routing it
+ * through _read() would emit an ACCESS write the hardware never saw. */
+static int cortina_ni_rx_ind_idle(struct cortina_ni *ni, u32 access_reg)
+{
+	void __iomem *acc = ni_base(ni) + access_reg;
+	u32 v;
+	int ret = readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
+				     CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+
+	if (ret)
+		dev_warn_ratelimited(ni->dev,
+				     "indirect idle @0x%x GO stuck (0x%08x)\n",
+				     access_reg, v);
+	return ret;
+}
+
+/* Generic indirect-table store: write ACCESS = GO|WR|idx, poll GO clear
+ * (stock DO_INDIRCT_OP write path).  Bounded + non-fatal. */
+static int cortina_ni_rx_ind_store(struct cortina_ni *ni, u32 access_reg, unsigned int idx)
+{
+	void __iomem *acc = ni_base(ni) + access_reg;
+	u32 v;
+	int ret;
+
+	writel(CA_NI_IND_ACCESS_GO | CA_NI_IND_ACCESS_WR | idx, acc);
+	ret = readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
+				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	if (ret)
+		dev_warn(ni->dev, "indirect store @0x%x[%u] GO stuck (0x%08x)\n",
+			 access_reg, idx, v);
+	return ret;
+}
+
+/* Generic indirect-table read: write ACCESS = GO|idx (rbw=0), poll GO clear;
+ * the entry is then latched in the DATA registers for the caller to read.
+ * Bounded + non-fatal. */
+static int cortina_ni_rx_ind_read(struct cortina_ni *ni, u32 access_reg, unsigned int idx)
+{
+	void __iomem *acc = ni_base(ni) + access_reg;
+	u32 v;
+	int ret;
+
+	writel(CA_NI_IND_ACCESS_GO | idx, acc);
+	ret = readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
+				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	if (ret)
+		/* RATELIMITED: this runs from /proc show paths, which a soak or a
+		 * benchmark harness polls in a loop - an un-ratelimited warn there
+		 * floods the serial console the witnesses are read over. */
+		dev_warn_ratelimited(ni->dev,
+				     "indirect read @0x%x[%u] GO stuck (0x%08x)\n",
+				     access_reg, idx, v);
+	return ret;
+}
+
 /* program one PLE default-forward table entry: redirect a lookup-miss
  * traffic type of <lspid> to CPU port 0 (indirect read-modify-write) */
 static int cortina_ni_rx_ple_dft_fwd(struct cortina_ni *ni, u32 lspid,
 				     u32 type)
 {
-	void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
 	u32 addr = lspid << 2 | type;
 	u32 val;
 	int ret;
@@ -1898,15 +1968,12 @@ static int cortina_ni_rx_ple_dft_fwd(struct cortina_ni *ni, u32 lspid,
 	/* (0x1560/0x156c are NOT a DFT_FWD control block - the old writes here
 	 * corrupted the VLAN check-id map; see cortina-ni-regs.h.  The default-forward
 	 * table itself is programmed via the ACCESS/DATA indirect protocol below.) */
-	ret = readl_poll_timeout(acc, val, !(val & CA_NI_PLE_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = cortina_ni_rx_ind_idle(ni, CA_NI_PLE_DFT_FWD_ACCESS);
 	if (ret)
 		return ret;
 
 	/* latch the entry into DATA */
-	writel(CA_NI_PLE_ACCESS_GO | addr, acc);
-	ret = readl_poll_timeout(acc, val, !(val & CA_NI_PLE_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = cortina_ni_rx_ind_read(ni, CA_NI_PLE_DFT_FWD_ACCESS, addr);
 	if (ret)
 		return ret;
 
@@ -1922,9 +1989,7 @@ static int cortina_ni_rx_ple_dft_fwd(struct cortina_ni *ni, u32 lspid,
 	writel(val, ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
 
 	/* write it back */
-	writel(CA_NI_PLE_ACCESS_GO | CA_NI_PLE_ACCESS_WRITE | addr, acc);
-	ret = readl_poll_timeout(acc, val, !(val & CA_NI_PLE_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = cortina_ni_rx_ind_store(ni, CA_NI_PLE_DFT_FWD_ACCESS, addr);
 	if (ret)
 		return ret;
 
@@ -1934,9 +1999,7 @@ static int cortina_ni_rx_ple_dft_fwd(struct cortina_ni *ni, u32 lspid,
 	 * offset failure this driver has already paid for.  The caller writes a
 	 * LOGICAL port index here (the PON one), so this is exactly where it must
 	 * be proven rather than assumed. */
-	writel(CA_NI_PLE_ACCESS_GO | addr, acc);
-	ret = readl_poll_timeout(acc, val, !(val & CA_NI_PLE_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = cortina_ni_rx_ind_read(ni, CA_NI_PLE_DFT_FWD_ACCESS, addr);
 	if (ret)
 		return ret;
 	val = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
@@ -1959,38 +2022,6 @@ static void cortina_ni_rx_settle(void)
 	mdelay(2);
 }
 
-/* Generic indirect-table store: write ACCESS = GO|WR|idx, poll GO clear
- * (stock DO_INDIRCT_OP write path).  Bounded + non-fatal. */
-static void cortina_ni_rx_ind_store(struct cortina_ni *ni, u32 access_reg, unsigned int idx)
-{
-	void __iomem *acc = ni_base(ni) + access_reg;
-	u32 v;
-
-	writel(CA_NI_IND_ACCESS_GO | CA_NI_IND_ACCESS_WR | idx, acc);
-	if (readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
-			       CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
-		dev_warn(ni->dev, "indirect store @0x%x[%u] GO stuck (0x%08x)\n",
-			 access_reg, idx, v);
-}
-
-/* Generic indirect-table read: write ACCESS = GO|idx (rbw=0), poll GO clear;
- * the entry is then latched in the DATA registers for the caller to read.
- * Bounded + non-fatal. */
-static void cortina_ni_rx_ind_read(struct cortina_ni *ni, u32 access_reg, unsigned int idx)
-{
-	void __iomem *acc = ni_base(ni) + access_reg;
-	u32 v;
-
-	writel(CA_NI_IND_ACCESS_GO | idx, acc);
-	if (readl_poll_timeout(acc, v, !(v & CA_NI_IND_ACCESS_GO),
-			       CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
-		/* RATELIMITED: this runs from /proc show paths, which a soak or a
-		 * benchmark harness polls in a loop - an un-ratelimited warn there
-		 * floods the serial console the witnesses are read over. */
-		dev_warn_ratelimited(ni->dev,
-				     "indirect read @0x%x[%u] GO stuck (0x%08x)\n",
-				     access_reg, idx, v);
-}
 
 /*
  * ★★ ROOT-CAUSE FIX for the constant blackhole (rx_fe ldpid stuck 0x1f):
@@ -2805,20 +2836,16 @@ static void __maybe_unused
 cortina_ni_rx_redir_ldpid_set(struct cortina_ni *ni, u8 idx,
 			      u8 dest_ldpid)
 {
-	void __iomem *acc = ni_base(ni) + CA_NI_L2FE_REDIR_LDPID_ACCESS;
-	u32 val;
 	int ret;
 
 	writel(FIELD_PREP(CA_NI_L2FE_REDIR_RDIR_LDPID, dest_ldpid) |
 	       CA_NI_L2FE_REDIR_RDIR_EN,
 	       ni_base(ni) + CA_NI_L2FE_REDIR_LDPID_DATA);
-	writel(CA_NI_L2FE_REDIR_ACCESS_GO | CA_NI_L2FE_REDIR_ACCESS_WR | idx, acc);
-	ret = readl_poll_timeout(acc, val, !(val & CA_NI_L2FE_REDIR_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = cortina_ni_rx_ind_store(ni, CA_NI_L2FE_REDIR_LDPID_ACCESS, idx);
 	if (ret)
 		dev_warn(ni->dev,
-			 "redir_ldpid[0x%x]->0x%x: ACCESS GO stuck (0x%08x)\n",
-			 idx, dest_ldpid, val);
+			 "redir_ldpid[0x%x]->0x%x: ACCESS GO stuck\n",
+			 idx, dest_ldpid);
 }
 
 /*
@@ -5946,13 +5973,10 @@ void cortina_ni_cpu_fwd_show(struct seq_file *m, struct cortina_ni *ni)
 static void rx_dump_fwd_chain(struct seq_file *m, struct cortina_ni *ni,
 			      u64 l3fe_rx, u64 l3qm_rx)
 {
-	void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
 	u32 addr = CA_NI_RX_PORT << 2;	/* port-0, DLF type 0 */
-	u32 dft = 0, pdpid = 0, p19 = 0, v;
+	u32 dft = 0, pdpid = 0, p19 = 0;
 
-	writel(CA_NI_PLE_ACCESS_GO | addr, acc);
-	if (!readl_poll_timeout(acc, v, !(v & CA_NI_PLE_ACCESS_GO),
-				CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
+	if (!cortina_ni_rx_ind_read(ni, CA_NI_PLE_DFT_FWD_ACCESS, addr))
 		dft = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
 
 	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
@@ -6001,7 +6025,6 @@ static void rx_dump_fwd_chain(struct seq_file *m, struct cortina_ni *ni,
 /* the default-forward table and the RMU0 RX header. */
 static void rx_dump_dft_fwd_and_rmu(struct seq_file *m, struct cortina_ni *ni)
 {
-	void __iomem *acc = ni_base(ni) + CA_NI_PLE_DFT_FWD_ACCESS;
 	unsigned int i;
 	u32 v;
 
@@ -6009,9 +6032,7 @@ static void rx_dump_dft_fwd_and_rmu(struct seq_file *m, struct cortina_ni *ni)
 	for (i = 0; i < 16; i++) {
 		u32 d = 0;
 
-		writel(CA_NI_PLE_ACCESS_GO | (i << 2), acc);
-		if (!readl_poll_timeout(acc, v, !(v & CA_NI_PLE_ACCESS_GO),
-					CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US))
+		if (!cortina_ni_rx_ind_read(ni, CA_NI_PLE_DFT_FWD_ACCESS, i << 2))
 			d = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
 		seq_printf(m, " [%u]=0x%08x", i, d);
 	}

@@ -3443,15 +3443,19 @@ static const struct { u16 idx; u32 w[CA_NI_L3FE_CLS_FIB_WORDS]; } cls_fib_golden
  */
 static void cortina_ni_rx_l3fe_glb_init(struct cortina_ni *ni)
 {
-	/* forwarding control 1/2/3 + ingress-FIFO thresholds (LF_CFG) + ingress-loopback
-	 * VLAN config (ILPB entry0) + the (unnamed-in-SDK but stock-mapped) 0x30cc slot.
-	 * LF_CFG at 0 leaves the L3FE ingress FIFO thresholds zero -> it never accepts a
-	 * frame -> l3fe_rx=0; these were the last L3FE_GLB regs our driver left unset. */
+	/* forwarding control 1/2/3 + the (unnamed-in-SDK but stock-mapped) 0x30cc slot,
+	 * plus two writes that are known INERT and kept only because they are on the
+	 * shipping-proven boot path: 0x30b4 and 0x30bc are the CLS-monitor RETURN and
+	 * the DBG DATA read-data ports (two independent tier-2 derivations agree - see
+	 * cortina-ni-regs.h).  The comment that used to stand here, "LF_CFG at 0 leaves
+	 * the ingress FIFO thresholds zero -> l3fe_rx=0", was a FALSE ATTRIBUTION: those
+	 * registers are not thresholds and writing them changes nothing.  What actually
+	 * unblocked the L3FE ingress is still unidentified.  Do not build on it. */
 	writel(CA_NI_L3FE_GLB_FWD_CTRL_1_VAL, ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_1);
 	writel(CA_NI_L3FE_GLB_FWD_CTRL_2_VAL, ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_2);
 	writel(CA_NI_L3FE_GLB_FWD_CTRL_3_VAL, ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_3);
-	writel(CA_NI_L3FE_GLB_LF_CFG_VAL, ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG);
-	writel(CA_NI_L3FE_GLB_ILPB_00_VAL, ni_base(ni) + CA_NI_L3FE_GLB_ILPB_00);
+	writel(CA_NI_L3FE_CLS_MON_RETURN_VAL, ni_base(ni) + CA_NI_L3FE_CLS_MON_RETURN);
+	writel(CA_NI_L3FE_GLB_DBG_DAT_VAL, ni_base(ni) + CA_NI_L3FE_GLB_DBG_DAT);
 	writel(CA_NI_L3FE_GLB_CFG_30CC_VAL, ni_base(ni) + CA_NI_L3FE_GLB_CFG_30CC);
 
 	/* egress-loopback entry + deep-queue valid-vec + deep-queue vec (the ELPB block
@@ -3475,8 +3479,8 @@ static void cortina_ni_rx_l3fe_glb_init(struct cortina_ni *ni)
 		 "l3fe-glb-init: fwd1(0x30a4)=0x%08x fwd2(0x30a8)=0x%08x lf_cfg(0x30b4)=0x%08x ilpb00(0x30bc)=0x%08x fwd3(0x30ac)=0x%08x 30cc=0x%08x elpb0(0x30e0)=0x%08x dqvld=0x%08x/0x%08x dq=0x%08x/0x%08x l2fe_ldpid(0x30f4)=0x%08x ve(0x30f8)=0x%08x\n",
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_1),
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_2),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ILPB_00),
+		 readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_RETURN),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_DBG_DAT),
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_3),
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_CFG_30CC),
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ELPB0),
@@ -6104,17 +6108,18 @@ static void rx_dump_cls_keys_and_fib(struct seq_file *m, struct cortina_ni *ni)
 	 * surfaced through /proc/cortina_l3fe, which is where the
 	 * flow-offload stage discrimination belongs - duplicating them
 	 * here would just create a second thing to keep in sync.
-	 * ★ Note the naming conflict recorded in cortina-ni-regs.h:
-	 * 0x30b4/0x30bc are ALSO named GLB_LF_CFG / GLB_ILPB_00 and are
-	 * written by cortina_ni_rx_l3fe_glb_init(); per the tier-2
-	 * accessors they are read-data ports, so those writes are inert
-	 * and did NOT unblock the L3FE ingress FIFO.
+	 * ★ The naming conflict recorded in cortina-ni-regs.h is RESOLVED
+	 * (2026-09-04): 0x30b4/0x30bc are the CLS-monitor RETURN and the
+	 * DBG DATA read-data ports, confirmed by the vendor's own
+	 * NAME->ADDRESS table as a second tier.  They are still WRITTEN by
+	 * cortina_ni_rx_l3fe_glb_init(); those writes are inert and did NOT
+	 * unblock the L3FE ingress FIFO.
 	 */
 	seq_printf(m,
-		   "l3fe_glb: cls_mon_ctrl(0x30b0)=0x%08x cls_mon_data(0x30b4)=0x%08x (also written as GLB_LF_CFG=0x%08x - see the conflict note in cortina-ni-regs.h; monitor enable is BIT(8), and the real stage counters live in /proc/cortina_l3fe)\n",
+		   "l3fe_glb: cls_mon_ctrl(0x30b0)=0x%08x cls_mon_return(0x30b4)=0x%08x (also written, inertly, with 0x%08x - see the resolved-conflict note in cortina-ni-regs.h; monitor enable is BIT(8), and the real stage counters live in /proc/cortina_l3fe)\n",
 		   readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_CTRL),
-		   readl(ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG),
-		   CA_NI_L3FE_GLB_LF_CFG_VAL);
+		   readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_RETURN),
+		   CA_NI_L3FE_CLS_MON_RETURN_VAL);
 
 	/* ★ build75: profile-1 (LAN) CPU-trap rows - the LAN classifier searches
 	 * KEY[64..127]; KEY[66] (wildcard) is the LAN bcast/DLF catch-all -> FIB[264]

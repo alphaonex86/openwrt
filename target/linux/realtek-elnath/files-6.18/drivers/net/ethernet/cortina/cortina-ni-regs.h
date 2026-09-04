@@ -2361,10 +2361,10 @@ enum cortina_ni_win {
 #define  CA_NI_L3FE_GLB_FWD_CTRL_1_VAL	0x8001B000u
 #define CA_NI_L3FE_GLB_FWD_CTRL_2	0x30a8
 #define  CA_NI_L3FE_GLB_FWD_CTRL_2_VAL	0x004641F4u
-#define CA_NI_L3FE_GLB_LF_CFG		0x30b4	/* ingress-FIFO hi/low/wr_fifo thresholds (dft 0x004641f4) */
-#define  CA_NI_L3FE_GLB_LF_CFG_VAL	0x4855CFE4u
-#define CA_NI_L3FE_GLB_ILPB_00		0x30bc	/* ingress-loopback VLAN config, entry0 (COUNT=4 stride 8) */
-#define  CA_NI_L3FE_GLB_ILPB_00_VAL	0x4856CF7Cu
+#define CA_NI_L3FE_CLS_MON_RETURN		0x30b4	/* ingress-FIFO hi/low/wr_fifo thresholds (dft 0x004641f4) */
+#define  CA_NI_L3FE_CLS_MON_RETURN_VAL	0x4855CFE4u
+#define CA_NI_L3FE_GLB_DBG_DAT		0x30bc	/* ingress-loopback VLAN config, entry0 (COUNT=4 stride 8) */
+#define  CA_NI_L3FE_GLB_DBG_DAT_VAL	0x4856CF7Cu
 #define CA_NI_L3FE_GLB_FWD_CTRL_3	0x30ac
 #define  CA_NI_L3FE_GLB_FWD_CTRL_3_VAL	0x00000300u
 #define CA_NI_L3FE_GLB_CFG_30CC		0x30cc	/* unnamed in ca8277b but stock-mapped (reads 0xE21) - match stock */
@@ -2411,16 +2411,28 @@ enum cortina_ni_win {
  * explicitly) - gauges, never coherent snapshots.  Use the latch for anything
  * that compares fields of one frame.
  *
- * ★★ CONFLICT TO RESOLVE, recorded not silently "fixed": CA_NI_L3FE_GLB_LF_CFG
- * (0x30b4) and CA_NI_L3FE_GLB_ILPB_00 (0x30bc) above name these same two
- * addresses as the L3FE ingress-FIFO thresholds and the ingress-loopback VLAN
- * config, and cortina_ni_rx_l3fe_glb_init() WRITES both.  Per the tier-2
- * accessors they are read-data ports, so those writes are INERT and the claim
- * that the "LF_CFG thresholds" unblocked the L3FE ingress FIFO is a false
- * attribution.  The writes are left in place (shipping-proven boot path, not
- * this change's business) but must not be trusted as the reason anything works.
- * The offload backend's own copies of these offsets (cortina-ni-flowoffload.c
- * CN_L3E_GLB_DBG_IDX/DAT and CN_L3E_GLB_LATCH_*) only ever READ them.
+ * ★★ CONFLICT RESOLVED 2026-09-04, and the names above now carry the answer.
+ * These two addresses used to be declared here as GLB_LF_CFG "L3FE ingress-FIFO
+ * thresholds" (0x30b4) and GLB_ILPB_00 "ingress-loopback VLAN config" (0x30bc).
+ * Both were wrong, and the tree already said so twice: this note, and the
+ * 2026-07-25 correction in cortina-ni-flowoffload.c, each derived from stock's
+ * own accessor names (aal_l3fe_glb_cls_stg_monitor_get / _dbg_get).  The vendor
+ * NAME->ADDRESS table shipped in the stock rootfs (etc/reg.txt) is a SECOND,
+ * independent tier-2 derivation and agrees exactly: 0x30b4 is
+ * L3FE_GLB_CLS_STG_MONITOR_RETURN and 0x30bc is L3FE_GLB_DBG_DAT.  Two tiers
+ * agreeing is the bar, so the names are corrected rather than merely doubted.
+ * The pair also corroborates itself: 0x30b0 is the CLS monitor CTRL, so 0x30b4
+ * being its RETURN is the ordinary control/data pairing, and 0x30b8/0x30bc are
+ * the matching DBG index/data pair.
+ *
+ * ★ WHAT IS *NOT* RESOLVED: cortina_ni_rx_l3fe_glb_init() still WRITES both, and
+ * a write to a read-data port is INERT -- so the claim that the "LF_CFG
+ * thresholds" unblocked the L3FE ingress FIFO remains a false attribution, and
+ * whatever really unblocked it is still unidentified.  The writes are left in
+ * place deliberately: they are on the shipping-proven boot path and no board can
+ * be booted to test their removal while the bench relay is dead.  Removing them
+ * is owed work, gated on a live read.  The offload backend's own copies of these
+ * offsets (CN_L3E_GLB_DBG_IDX/DAT and CN_L3E_GLB_LATCH_*) only ever READ them.
  */
 #define CA_NI_L3FE_CLS_MON_CTRL		0x30b0
 /* ★ THE ENABLE BIT, WHICH LIVED ONLY IN PROSE.  Two comments in this tree

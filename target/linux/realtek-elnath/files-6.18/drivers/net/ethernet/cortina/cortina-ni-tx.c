@@ -42,6 +42,7 @@
 #include <net/arp.h>
 #include <net/net_namespace.h>
 
+#include "cortina-ni-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
 
 /* Fallback / revert destination for the eth0 LAN TX path, and the port whose
@@ -253,15 +254,12 @@ static int cortina_ni_tx_lspid_map_init(struct cortina_ni *ni)
 		writel(CA_DMA_LSO_LSPID_MAP_VALID |
 		       FIELD_PREP(CA_DMA_LSO_LSPID_MAP_LSPID, lspid),
 		       dma_base(ni) + CA_DMA_LSO_LSPID_MAP_DATA0);
-		writel(CA_DMA_LSO_BD_ACCESS_GO | CA_DMA_LSO_BD_ACCESS_WRITE |
-		       FIELD_PREP(CA_DMA_LSO_LSPID_MAP_IDX, i),
-		       dma_base(ni) + CA_DMA_LSO_LSPID_MAP_ACCESS);
-
-		ret = readl_poll_timeout(dma_base(ni) +
-					 CA_DMA_LSO_LSPID_MAP_ACCESS, val,
-					 !(val & CA_DMA_LSO_BD_ACCESS_GO),
-					 CA_NI_TX_POLL_US,
-					 CA_NI_TX_POLL_TIMEOUT_US);
+		ret = ca_ni_access_go(dma_base(ni) +
+				      CA_DMA_LSO_LSPID_MAP_ACCESS,
+				      CA_DMA_LSO_BD_ACCESS_GO |
+				      CA_DMA_LSO_BD_ACCESS_WRITE |
+				      FIELD_PREP(CA_DMA_LSO_LSPID_MAP_IDX, i),
+				      &val);
 		if (ret) {
 			dev_err(ni->dev, "lspid map[%d] write timed out\n", i);
 			return ret;
@@ -369,13 +367,11 @@ static int cortina_ni_tx_ring_program(struct cortina_ni *ni, u8 vp, u8 txq,
 	/* addr[39:32] = 0: ring sits below 4 GB, and stock writes 0 here
 	 * (its "2" branch is the disabled dma_lso_ace_test path) */
 	writel(0, dma + CA_DMA_LSO_VP_BD_DATA1(vp));
-	writel(CA_DMA_LSO_BD_ACCESS_GO | CA_DMA_LSO_BD_ACCESS_WRITE |
-	       FIELD_PREP(CA_DMA_LSO_BD_ACCESS_TXQ, txq),
-	       dma + CA_DMA_LSO_VP_BD_ACCESS(vp));
-
-	ret = readl_poll_timeout(dma + CA_DMA_LSO_VP_BD_ACCESS(vp), val,
-				 !(val & CA_DMA_LSO_BD_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = ca_ni_access_go(dma + CA_DMA_LSO_VP_BD_ACCESS(vp),
+			      CA_DMA_LSO_BD_ACCESS_GO |
+			      CA_DMA_LSO_BD_ACCESS_WRITE |
+			      FIELD_PREP(CA_DMA_LSO_BD_ACCESS_TXQ, txq),
+			      &val);
 	if (ret)
 		dev_err(ni->dev, "VP%u txq%u ring program timed out\n",
 			vp, txq);
@@ -536,11 +532,9 @@ static int cortina_ni_arb_map_one(struct cortina_ni *ni, u32 idx, u32 pdpid)
 	int ret;
 
 	writel(pdpid, ni_r + CA_NI_L2FE_ARB_PDPID_DATA);
-	writel(CA_DMA_LSO_BD_ACCESS_GO | CA_DMA_LSO_BD_ACCESS_WRITE | idx,
-	       ni_r + CA_NI_L2FE_ARB_PDPID_ACCESS);
-	ret = readl_poll_timeout(ni_r + CA_NI_L2FE_ARB_PDPID_ACCESS, val,
-				 !(val & CA_DMA_LSO_BD_ACCESS_GO),
-				 CA_NI_TX_POLL_US, CA_NI_TX_POLL_TIMEOUT_US);
+	ret = ca_ni_access_go(ni_r + CA_NI_L2FE_ARB_PDPID_ACCESS,
+			      CA_DMA_LSO_BD_ACCESS_GO |
+			      CA_DMA_LSO_BD_ACCESS_WRITE | idx, &val);
 	if (ret)
 		dev_warn(ni->dev, "ARB map[0x%02x] timed out\n", idx);
 	return ret;

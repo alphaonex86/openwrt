@@ -173,8 +173,6 @@
 #define L3FE_GO				BIT(31)
 #define L3FE_WRITE			BIT(30)
 #define L3FE_MASK_UPPER128		BIT(6)
-#define L3FE_POLL_TRIES			1000
-
 /* L2FE FDB engine (direct regs, NE window; same protocol as the fdb path in
  * cortina-ni-rx.c).  Used here for the terminating DS-WAN delivery entry:
  * the Venus-family design keeps L2 MY-MAC detection off and routes MyMAC
@@ -309,17 +307,6 @@
 #define L3FE_RSV1_PATCH			BIT(0)
 
 /* Poll a self-clearing bit, bounded; 0 on clear, -ETIMEDOUT on cap. */
-static int l3fe_poll_clear(void __iomem *ne, u32 off, u32 mask)
-{
-	int i;
-
-	for (i = 0; i < L3FE_POLL_TRIES; i++) {
-		if (!(readl(ne + off) & mask))
-			return 0;
-		cpu_relax();
-	}
-	return -ETIMEDOUT;
-}
 
 int cortina_l3fe_engine_init(void __iomem *ne, const struct cn_l3e_tables *t)
 {
@@ -330,7 +317,7 @@ int cortina_l3fe_engine_init(void __iomem *ne, const struct cn_l3e_tables *t)
 	 *    Kick req_sts (bit0), poll its self-clear.
 	 */
 	writel(1, ne + L3FE_HS_MEM_INI);
-	ret = l3fe_poll_clear(ne, L3FE_HS_MEM_INI, BIT(0));
+	ret = l3fe_access_wait(ne, L3FE_HS_MEM_INI, BIT(0));
 	if (ret)
 		return ret;
 
@@ -630,7 +617,7 @@ int cortina_l3fe_mask_write(void __iomem *ne, u32 idx,
 	for (i = 0; i < 4; i++)
 		writel(lo[i], ne + L3FE_HS_MASK_DATA(i));
 	writel(L3FE_GO | L3FE_WRITE | (idx & 0x3f), ne + L3FE_HS_MASK_ACCESS);
-	ret = l3fe_poll_clear(ne, L3FE_HS_MASK_ACCESS, L3FE_GO);
+	ret = l3fe_access_wait(ne, L3FE_HS_MASK_ACCESS, L3FE_GO);
 	if (ret)
 		return ret;
 
@@ -639,7 +626,7 @@ int cortina_l3fe_mask_write(void __iomem *ne, u32 idx,
 		writel(hi[i], ne + L3FE_HS_MASK_DATA(i));
 	writel(L3FE_GO | L3FE_WRITE | L3FE_MASK_UPPER128 | (idx & 0x3f),
 	       ne + L3FE_HS_MASK_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_HS_MASK_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_HS_MASK_ACCESS, L3FE_GO);
 }
 
 int cortina_l3fe_swo_crc(void __iomem *ne, const u32 *words, int nwords,
@@ -660,11 +647,11 @@ int cortina_l3fe_swo_crc(void __iomem *ne, const u32 *words, int nwords,
 	writel(mask_id, ne + L3FE_HS_SWO_DAT);
 
 	/* run: bit0 = go/busy (dedicated, not the bit31 protocol) */
-	ret = l3fe_poll_clear(ne, L3FE_HS_SWO_CTRL, BIT(0));
+	ret = l3fe_access_wait(ne, L3FE_HS_SWO_CTRL, BIT(0));
 	if (ret)
 		return ret;
 	writel(1, ne + L3FE_HS_SWO_CTRL);
-	ret = l3fe_poll_clear(ne, L3FE_HS_SWO_CTRL, BIT(0));
+	ret = l3fe_access_wait(ne, L3FE_HS_SWO_CTRL, BIT(0));
 	if (ret)
 		return ret;
 
@@ -819,7 +806,7 @@ static int l3fe_cls_fib_write(void __iomem *ne, u16 idx, const u32 w[L3FE_CLS_FI
 	for (i = 0; i < L3FE_CLS_FIB_WORDS; i++)
 		writel(w[i], ne + L3FE_CLS_FIB_DATA0 - i * 4);
 	writel(L3FE_GO | L3FE_WRITE | idx, ne + L3FE_CLS_FIB_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_CLS_FIB_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_CLS_FIB_ACCESS, L3FE_GO);
 }
 
 /* Commit one PP FIELD-CAM MAC-DA entry (proper ACCESS commit - see the
@@ -838,7 +825,7 @@ static int l3fe_mac_da_cam_set(void __iomem *ne, u32 idx, const u8 *mac)
 	writel(0, ne + L3FE_PP_FIELD_CAM_DATA(4));
 	writel(L3FE_GO | L3FE_WRITE | (L3FE_CAM_SEL_MAC_DA << 16) | idx,
 	       ne + L3FE_PP_FIELD_CAM_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_PP_FIELD_CAM_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_PP_FIELD_CAM_ACCESS, L3FE_GO);
 }
 
 /* One CLS-KEY indirect write: 11 words then ACCESS=GO|WR|idx, poll GO clear. */
@@ -851,7 +838,7 @@ static int __maybe_unused l3fe_cls_key_write(void __iomem *ne, u16 idx,
 		writel(w[i], ne + L3FE_CLS_KEY_ACCESS +
 		       (L3FE_CLS_KEY_WORDS - i) * 4);
 	writel(L3FE_GO | L3FE_WRITE | (idx & 0x7ff), ne + L3FE_CLS_KEY_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_CLS_KEY_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_CLS_KEY_ACCESS, L3FE_GO);
 }
 
 /*
@@ -1000,7 +987,7 @@ static int l3fe_pdpid_map_set(void __iomem *ne, u32 idx, u32 pdpid)
 {
 	writel(pdpid & 0xf, ne + L3FE_L2FE_PDPID_MAP_DATA);
 	writel(L3FE_GO | L3FE_WRITE | idx, ne + L3FE_L2FE_PDPID_MAP_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_L2FE_PDPID_MAP_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_L2FE_PDPID_MAP_ACCESS, L3FE_GO);
 }
 
 /* APPEND one static L2FE FDB entry {mac} -> {ldpid, valid, static, DA/SA
@@ -1031,7 +1018,7 @@ static int l3fe_fdb_static_add(void __iomem *ne, const u8 *mac, u32 ldpid)
 	writel(d1, ne + L3FE_FDB_DATA1);
 	writel(d0, ne + L3FE_FDB_DATA0);
 	writel(L3FE_GO | L3FE_FDB_OP_APPEND, ne + L3FE_FDB_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_FDB_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_FDB_ACCESS, L3FE_GO);
 }
 
 int cortina_l3fe_hw_l3_forward_enable(void __iomem *ne, const u8 *router_mac)
@@ -1263,7 +1250,7 @@ static int l3fe_l3if_write(void __iomem *ne, u32 idx, u32 entry)
 	writel(entry, ne + L3FE_L3IF_DATA);
 	writel(L3FE_GO | L3FE_WRITE | (idx & (L3FE_L3IF_ENTRIES - 1)),
 	       ne + L3FE_L3IF_ACCESS);
-	return l3fe_poll_clear(ne, L3FE_L3IF_ACCESS, L3FE_GO);
+	return l3fe_access_wait(ne, L3FE_L3IF_ACCESS, L3FE_GO);
 }
 
 /*

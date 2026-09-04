@@ -561,6 +561,57 @@ enum cortina_ni_win {
  * SEPARATE from the packet buffers.  Leaving POOL+0x04=0 spilled at phys 0 = kernel
  * slab -> the build24 panic.  Place it high in the same 0x09000000 no-map reserve,
  * clear of the CPU pool (0x09400000..0x09600000) and the ring (0x0bc48000). */
+/*
+ * The FBM register offsets, WITHIN their own windows.
+ *
+ * ★ NAMED FROM WHAT THIS TREE ALREADY ESTABLISHED, not from the vendor address
+ * table -- that table has ZERO entries anywhere in 0x9030xxxx, so the FBM
+ * windows are a blind spot for it.  What we do have is cortina-ni-rx.c's own
+ * comments, which record the fields from the vendor FUNCTIONS aal_fbm_init and
+ * aal_fbm_pool_init: "+0x04 mode, +0x70 ECC, +0x00 low byte 0xFF = enable pools
+ * 0-7" and "+0x04 = exstack_phys>>12 in [31:4]; +0x08 = spill depth;
+ * +0x0c = ((count/64)-1)<<6".  The names below are those words; nothing here
+ * asserts a fact the file did not already state.
+ *
+ * ⚠ FBM_AXI +0x00 gets NO name: the tree records the value written (0x200) and
+ * nothing about what the register is.  A name would be the invention.
+ */
+#define CA_NI_QM_FBM_GLB_POOL_EN		0x00	/* low byte 0xFF = pools 0-7 enabled */
+#define CA_NI_QM_FBM_GLB_MODE		0x04
+#define CA_NI_QM_FBM_GLB_ECC		0x70
+/* ⚠ THE `QM_` INFIX IS NOT DECORATION: gen_ni_reg_offsets.sh assigns each name
+ * to an address WINDOW by prefix, and CA_NI_QM_FBM_{CPU,POOL,GLB}_ are separate
+ * windows that all start at offset 0.  Naming these CA_NI_FBM_* put them in the
+ * NI window's bucket, where +0x00 collided three ways -- ni_reg_alias_test said
+ * so immediately.  Follow the existing convention or teach the generator. */
+/* per pool, added to CA_NI_QM_FBM_POOL(id) */
+#define CA_NI_QM_FBM_POOL_CFG0		0x00
+#define CA_NI_QM_FBM_POOL_EXSTACK		0x04	/* exstack_phys >> 12, in [31:4] */
+#define CA_NI_QM_FBM_POOL_DEPTH		0x08	/* spill depth */
+#define CA_NI_QM_FBM_POOL_COUNT		0x0c	/* ((count / 64) - 1) << 6 */
+/* (+0x2c outstanding-count is CA_NI_QM_FBM_POOL_OUTSTND, declared further down
+ *  with the pool base macro -- it existed before this block and ni_reg_alias
+ *  caught the duplicate I had added here.) */
+/* FBM_CPU doorbell, added to CA_NI_QM_FBM_CPU_DOORBELL(id) */
+#define CA_NI_QM_FBM_CPU_CMD		0x00	/* GO | op; bit31 busy while it runs */
+#define CA_NI_QM_FBM_CPU_ADDR_HI		0x04	/* buffer PA high (0 for a 32-bit PA) */
+#define CA_NI_QM_FBM_CPU_ADDR_LO		0x08
+
+/*
+ * The AXI reorder window (CA_NI_WIN_AXI_REO, 0x4_f432d000), named from the
+ * vendor NAME->ADDRESS table -- which DOES cover this one, 25 entries.
+ */
+#define CA_NI_AXI_REO_RD_ORIG_ID	0x000	/* vendor QM_AXI_REO_AXI_REO_RD_ORIG_ID */
+#define CA_NI_AXI_REO_RD_TOP_ADDR_MASK0	0x00c	/* vendor ..._RD_TOP_ADDR_MASK0 */
+#define CA_NI_AXI_REO_RD_NEW_ID0	0x010	/* vendor ..._RD_NEW_ID0 */
+#define CA_NI_AXI_REO_WR_ORIG_ID	0x400	/* vendor ..._WR_ORIG_ID */
+/* +0x480 is not in the vendor table either, but THIS TREE names it --
+ * CA_NI_L3FE_AXI_REO_ORIG_ID, with the whole 7-register channel layout, further
+ * down.  "Not in the oracle" is not the same as "nothing to name it from". */
+
+/* Chip GLB (CA_NI_WIN_GLB, 0x4_f4320000), vendor GLOBAL_BLOCK_RESET. */
+#define CA_NI_GLB_BLOCK_RESET		0xa0
+
 #define CA_NI_RX_FBM_EXSTACK_DEPTH	0x800u		/* spill capacity (>= bufs pushed); *4 = 8KB */
 #define CA_NI_RX_FBM_POOL0_COUNT	512u		/* pool0 buffer count (mult of 64, <=16384) */
 /* FBM_CPU doorbell (window CA_NI_WIN_FBM_CPU), per-pool stride 0x20 (id<<5):

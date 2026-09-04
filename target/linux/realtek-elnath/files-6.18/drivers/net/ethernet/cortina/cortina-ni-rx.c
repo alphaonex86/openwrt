@@ -2795,6 +2795,13 @@ static void cortina_ni_rx_mymac_trap(struct cortina_ni *ni)
 	dev_info(ni->dev,
 		 "l3fe-loopback: ilpb(0x30d8)=0x%08x(stock 0) elpb0(0x30e0)=0x%08x dqvld1(0x30e4)=0x%08x dqvld0(0x30e8)=0x%08x my_mac lo(0x3210)=0x%08x hi=0x%08x\n",
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ILPB_LDPID),
+		 /* ⚠ 0x30e0/0x30e4/0x30e8 DO have names in cortina-ni-regs.h
+		  * (ELPB0, ELPB_DEEPQ_VLD1, ELPB_DEEPQ_VLD0) and all three are in
+		  * stock_regname_guard's 18 frozen CONTRADICTED findings: the
+		  * vendor table calls them LDPID_REMAP_CTRL / _SMAC_PRO /
+		  * _DMAC_PRO.  Using our names here would spread three already
+		  * recorded as wrong, so they stay bare until a live read settles
+		  * which side is right. */
 		 readl(ni_base(ni) + 0x30e0), readl(ni_base(ni) + 0x30e4),
 		 readl(ni_base(ni) + 0x30e8),
 		 readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_LO),
@@ -4757,16 +4764,16 @@ static const struct { u8 id; u32 exstack; u32 buf_base; } cortina_ni_fbm_pools[]
  * Sequence: reset -> GLB/AXI config -> pool geometry+exstack -> (later) doorbell fill. */
 static void cortina_ni_rx_fbm_init(struct cortina_ni *ni)
 {
-	void __iomem *glb    = ni->win[CA_NI_WIN_FBM_GLB];
+	void __iomem *fbm_glb    = ni->win[CA_NI_WIN_FBM_GLB];
 	void __iomem *axi    = ni->win[CA_NI_WIN_FBM_AXI];
 	void __iomem *pool   = ni->win[CA_NI_WIN_FBM_POOL];
 	void __iomem *ni_glb = ni->win[CA_NI_WIN_GLB];
 	unsigned int k;
 
-	if (!glb || !axi || !pool) {
+	if (!fbm_glb || !axi || !pool) {
 		dev_warn(ni->dev,
-			 "fbm: window(s) unmapped (glb=%d axi=%d pool=%d) - RMU cannot alloc\n",
-			 !!glb, !!axi, !!pool);
+			 "fbm: window(s) unmapped (fbm_glb=%d axi=%d pool=%d) - RMU cannot alloc\n",
+			 !!fbm_glb, !!axi, !!pool);
 		return;
 	}
 
@@ -4782,9 +4789,9 @@ static void cortina_ni_rx_fbm_init(struct cortina_ni *ni)
 
 	/* (2) aal_fbm_init GLB config: +0x04 mode, +0x70 ECC, +0x00 low byte 0xFF =
 	 * enable pools 0-7 (★ THE pool enable is this GLB bit, NOT POOL+0x30). */
-	writel(0x00060100, glb + 0x04);
-	writel(0xE0C04025, glb + 0x70);
-	writel(0x010109FF, glb + 0x00);
+	writel(0x00060100, fbm_glb + CA_NI_QM_FBM_GLB_MODE);
+	writel(0xE0C04025, fbm_glb + CA_NI_QM_FBM_GLB_ECC);
+	writel(0x010109FF, fbm_glb + CA_NI_QM_FBM_GLB_POOL_EN);
 
 	writel(0x00000200, axi + 0x00);
 
@@ -4795,19 +4802,19 @@ static void cortina_ni_rx_fbm_init(struct cortina_ni *ni)
 		void __iomem *p = pool + CA_NI_QM_FBM_POOL(cortina_ni_fbm_pools[k].id);
 		u32 exstack = (cortina_ni_fbm_pools[k].exstack >> 12) << 4;
 
-		writel(0xC0400300, p + 0x00);
-		writel(exstack, p + 0x04);
-		writel(CA_NI_RX_FBM_EXSTACK_DEPTH, p + 0x08);
-		writel(((CA_NI_RX_FBM_POOL0_COUNT / 64) - 1) << 6, p + 0x0c);
+		writel(0xC0400300, p + CA_NI_QM_FBM_POOL_CFG0);
+		writel(exstack, p + CA_NI_QM_FBM_POOL_EXSTACK);
+		writel(CA_NI_RX_FBM_EXSTACK_DEPTH, p + CA_NI_QM_FBM_POOL_DEPTH);
+		writel(((CA_NI_RX_FBM_POOL0_COUNT / 64) - 1) << 6, p + CA_NI_QM_FBM_POOL_COUNT);
 
 		dev_info(ni->dev,
 			 "fbm cfg pool%u: cfg0=0x%08x exstack(0x04)=0x%08x depth=0x%08x cnt=0x%08x\n",
 			 cortina_ni_fbm_pools[k].id,
-			 readl(p + 0x00), readl(p + 0x04),
-			 readl(p + 0x08), readl(p + 0x0c));
+			 readl(p + CA_NI_QM_FBM_POOL_CFG0), readl(p + CA_NI_QM_FBM_POOL_EXSTACK),
+			 readl(p + CA_NI_QM_FBM_POOL_DEPTH), readl(p + CA_NI_QM_FBM_POOL_COUNT));
 	}
 	dev_info(ni->dev, "fbm cfg: glb0=0x%08x (%zu pools configured)\n",
-		 readl(glb + 0x00), ARRAY_SIZE(cortina_ni_fbm_pools));
+		 readl(fbm_glb + CA_NI_QM_FBM_GLB_POOL_EN), ARRAY_SIZE(cortina_ni_fbm_pools));
 }
 
 /* ★★ Fill the FBM pool free-list via the FBM_CPU GATED doorbell (stock aal_fbm_buf_push
@@ -4847,14 +4854,14 @@ static void cortina_ni_rx_fbm_fill(struct cortina_ni *ni)
 			}
 			/* gate 2: FBM_CPU cmd not BUSY (bit31 clear) before issuing */
 			for (s = 0; s < 4096; s++) {
-				if (!(readl(db + 0x00) & CA_NI_QM_FBM_CPU_CMD_GO))
+				if (!(readl(db + CA_NI_QM_FBM_CPU_CMD) & CA_NI_QM_FBM_CPU_CMD_GO))
 					break;
 				cpu_relax();
 			}
-			writel(0, db + 0x04);		/* addr high (32-bit PA -> 0) */
-			writel(buf, db + 0x08);		/* addr low */
+			writel(0, db + CA_NI_QM_FBM_CPU_ADDR_HI);
+			writel(buf, db + CA_NI_QM_FBM_CPU_ADDR_LO);
 			writel(CA_NI_QM_FBM_CPU_CMD_GO | CA_NI_QM_FBM_CPU_CMD_PUSH,
-			       db + 0x00);		/* GO | op=push (pool = offset) */
+			       db + CA_NI_QM_FBM_CPU_CMD);	/* GO | op=push (pool = offset) */
 		}
 
 		dev_info(ni->dev,
@@ -4910,8 +4917,11 @@ static void cortina_ni_rx_axi_reo_init(struct cortina_ni *ni)
 	dev_info(ni->dev,
 		 "RX: AXI-reorder init (%zu regs): rd[0x00/0x0c/0x10]=0x%08x/0x%08x/0x%08x wr[0x400]=0x%08x wr2[0x480]=0x%08x\n",
 		 ARRAY_SIZE(cortina_ni_axi_reo_cfg),
-		 readl(reo + 0x000), readl(reo + 0x00c), readl(reo + 0x010),
-		 readl(reo + 0x400), readl(reo + 0x480));
+		 readl(reo + CA_NI_AXI_REO_RD_ORIG_ID),
+		 readl(reo + CA_NI_AXI_REO_RD_TOP_ADDR_MASK0),
+		 readl(reo + CA_NI_AXI_REO_RD_NEW_ID0),
+		 readl(reo + CA_NI_AXI_REO_WR_ORIG_ID),
+		 readl(reo + CA_NI_L3FE_AXI_REO_ORIG_ID));
 }
 
 /* ------------------------------------------------------------------ */
@@ -5385,8 +5395,8 @@ void cortina_ni_rx_link_up(struct cortina_ni *ni)
 		void __iomem *glb = ni->win[CA_NI_WIN_GLB];
 
 		dev_info(ni->dev, "dphy_rst(glb+0xa0) was 0x%08x -> writing 0x10000000\n",
-			 readl(glb + 0xa0));
-		writel(0x10000000, glb + 0xa0);
+			 readl(glb + CA_NI_GLB_BLOCK_RESET));
+		writel(0x10000000, glb + CA_NI_GLB_BLOCK_RESET);
 	}
 
 	/* ★ Load the internal-GPHY SRAM firmware + resume the uC HERE (at link-up),
@@ -7061,25 +7071,27 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 	 * (idx 18/19/21).  glb0 low byte = pool-enable (want 0xFF), pool0+0x10 = refill
 	 * (want 0 = OFF).  Not covered by the NI-core qmblock sweep. */
 	{
-		void __iomem *glb  = ni->win[CA_NI_WIN_FBM_GLB];
+		void __iomem *fbm_glb  = ni->win[CA_NI_WIN_FBM_GLB];
 		void __iomem *axi  = ni->win[CA_NI_WIN_FBM_AXI];
 		void __iomem *pool = ni->win[CA_NI_WIN_FBM_POOL];
 
 		seq_puts(m, "fbm (windows idx18/19/21):\n");
-		if (!glb || !axi || !pool) {
-			seq_printf(m, "  <unmapped glb=%d axi=%d pool=%d>\n",
-				   !!glb, !!axi, !!pool);
+		if (!fbm_glb || !axi || !pool) {
+			seq_printf(m, "  <unmapped fbm_glb=%d axi=%d pool=%d>\n",
+				   !!fbm_glb, !!axi, !!pool);
 		} else {
-			seq_printf(m, "  glb 0x00=0x%08x 0x04=0x%08x 0x0c=0x%08x 0x10=0x%08x 0x70=0x%08x\n",
-				   readl(glb + 0x00), readl(glb + 0x04),
-				   readl(glb + 0x0c), readl(glb + 0x10),
-				   readl(glb + 0x70));
+			seq_printf(m, "  fbm_glb 0x00=0x%08x 0x04=0x%08x 0x0c=0x%08x 0x10=0x%08x 0x70=0x%08x\n",
+				   readl(fbm_glb + CA_NI_QM_FBM_GLB_POOL_EN), readl(fbm_glb + CA_NI_QM_FBM_GLB_MODE),
+				   readl(fbm_glb + 0x0c), readl(fbm_glb + 0x10),
+				   readl(fbm_glb + CA_NI_QM_FBM_GLB_ECC));
 			seq_printf(m, "  axi 0x00=0x%08x (want 0x200)\n",
 				   readl(axi + 0x00));
 			seq_printf(m, "  pool0 cfg0x00=0x%08x exstack0x04=0x%08x depth0x08=0x%08x cnt0x0c=0x%08x outstanding0x2c=0x%08x\n",
-				   readl(pool + 0x00), readl(pool + 0x04),
-				   readl(pool + 0x08), readl(pool + 0x0c),
-				   readl(pool + 0x2c));
+				   readl(pool + CA_NI_QM_FBM_POOL_CFG0),
+				   readl(pool + CA_NI_QM_FBM_POOL_EXSTACK),
+				   readl(pool + CA_NI_QM_FBM_POOL_DEPTH),
+				   readl(pool + CA_NI_QM_FBM_POOL_COUNT),
+				   readl(pool + CA_NI_QM_FBM_POOL_OUTSTND));
 		}
 	}
 	return 0;
@@ -7316,7 +7328,7 @@ int cortina_ni_rx_probe(struct cortina_ni *ni)
 	 * bit22).  Do NOT write 0x6120 - that is the INT_SRCE ENABLE MASK (0xe6d54f85), not a
 	 * status latch; build65 clobbered it to 0x00400000 (disabling most int sources) - fixed
 	 * by leaving it alone.  With cpu_eq=0 the eqm_cfg_error is no longer re-raised. */
-	writel(BIT(22), ni_base(ni) + 0x611c);
+	writel(BIT(22), ni_base(ni) + CA_NI_QM_INT_SRC);
 	dev_info(ni->dev, "eqm_cfg_error W1C: int_src 0x611c=0x%08x en_mask 0x6120=0x%08x (want 0x611c bit22 CLEAR, 0x6120=0xe6d54f85)\n",
 		 readl(ni_base(ni) + CA_NI_QM_INT_SRC), readl(ni_base(ni) + CA_NI_QM_INT_SRCE));
 

@@ -89,7 +89,7 @@
 #define   GPON_OPTIC_LOS_SIG	BIT(8)		/* 1 = no optical signal      */
 #define   GPON_OPTIC_LOS_POLAR	BIT(1)		/* invert optical-LOS input   */
 #define   GPON_OPTIC_LOS_EN	BIT(0)		/* enable optical-LOS monitor */
-#define GPON_GTC_DS_ONU_STATUS	0x1010
+#define GPON_GTC_DS_ONU_ID_STATUS	0x1010
 #define   GPON_ONU_STATE_MASK	0xfu		/* [3:0]  FSM state O1..O7    */
 #define   GPON_ONU_ID_SHIFT	8		/* [15:8] ONU-ID             */
 #define   GPON_ONU_ID_MASK	0xffu
@@ -286,6 +286,54 @@
 #define PONIP_PHYS_BASE		0x1bf00000u
 #define PONIP_REG_SIZE		0x00010000u	/* covers up to IO_CMD_1_DS     */
 
+
+/* ★ NAMES THE TWO CHIPDEFS AGREE ON, for the registers /proc/gpon reads
+ * (2026-09-04).  gpon_proc_show() spelled 76 bare offsets; these 34 are the
+ * ones an ORACLE names -- `bare_offset_chip_audit.py` resolves each address
+ * in the rtl9602c AND rtl9603cvd chipdefs, in the block its accessor implies,
+ * and only a SAME verdict is written here.  The PI_ prefix follows this
+ * header's own convention for the PON-IP window (PI_MEDIA_STS_US is
+ * MEDIA_STS_US in both chipdefs); nothing else about the name is ours.
+ *
+ * ⚠ THE OTHER 41 STAY BARE HEX, ON PURPOSE.  No source in reach names them:
+ * absent from both chipdefs, or named by only one, which is a difference we
+ * cannot adjudicate.  Inventing a plausible name for those would put a
+ * fabrication in the one place a reader would trust it most. */
+#define GPON_GTC_DS_CFG			0x01014
+#define GPON_GTC_DS_SUPERFRAME_CNT	0x01048
+#define GPON_GTC_DS_TOD_SUPERFRAME_CTRL	0x0104c
+#define GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT	0x0119c
+#define GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL	0x011a0
+#define GPON_GTC_DS_MISC_CNTR_BWM_FAIL	0x011a4
+#define GPON_GTC_DS_MISC_CNTR_BWM_INV	0x011a8
+#define GPON_GTC_DS_MISC_CNTR_ACTIVE	0x011ac
+#define GPON_GTC_DS_MISC_CNTR_BWM_ACPT	0x011b0
+#define GPON_GTC_DS_MISC_CNTR_GEM_LOS	0x011b4
+#define GPON_GTC_DS_MISC_CNTR_HEC_CORRECT	0x011b8
+#define GPON_GTC_DS_MISC_CNTR_GEM_IDLE	0x011bc
+#define GPON_GTC_DS_MISC_CNTR_GEM_FAIL	0x011c0
+#define GPON_GTC_DS_MISC_CNTR_GEM_NON_IDLE	0x011c4
+#define GPON_BWMAP_CTRL			0x0200c
+#define GPON_BWMAP_STS			0x02010
+#define PI_RX_SID_GOOD_CNT_US		0x0203c
+#define PI_RX_SID_BAD_CNT_US		0x02054
+#define GPON_BWMAP_DATA			0x02400
+#define GPON_GEM_DS_FRM_TIMEOUT		0x04098
+#define GPON_GTC_US_INTR_DLT		0x05000
+#define GPON_GTC_US_INTR_MASK		0x05004
+#define GPON_GTC_US_INTR_STS		0x05008
+#define GPON_GTC_US_PROC_MODE		0x05200
+#define PI_RXFDP1_US			0x053f0
+#define GPON_GEM_US_INTR_DLT		0x06000
+#define GPON_GEM_US_INTR_MASK		0x06004
+#define GPON_GEM_US_INTR_STS		0x06008
+#define GPON_GEM_US_PTI_CFG		0x06020
+#define GPON_GEM_US_BYTE_STAT		0x06800
+#define PI_PKT_OK_CNT_DS		0x0c010
+#define PI_PKT_ERR_CNT_DS		0x0c014
+#define PI_PKT_MISS_CNT_DS		0x0c018
+#define PI_RXFDP1_DS			0x0d3f0
+
 #define PI_IO_CMD_0_US		0x05434		/* [5] GMII_RX_EN [4] GMII_TX_EN */
 #define PI_IO_CMD_0_DS		0x0d434
 /* Internal-MII force-link for the two PON-IP NICs (symmetric pair, US = DS-0x8000):
@@ -354,7 +402,7 @@
 #define PI_PROBE_SELECT_US	0x05400		/* [1] debug func select         */
 #define PI_PROBE_SELECT_DS	0x0d400		/* stock O5 = 0x40 (DS-NIC drain) */
 #define PI_DS_NIC_CFG_D404	0x0d404		/* stock O5 = 0x11100348          */
-#define PI_DS_NIC_CFG_D42C	0x0d42c		/* stock O5 = 0x40               */
+#define PI_CONFIG_CLK_DS	0x0d42c		/* stock O5 = 0x40               */
 
 #define GPON_GTC_DS_MISC_CNTR_LOM 0x1198	/* [31:16]=PLEND_FAIL [15:0]=SUPERFRAME_LOS(LOM); clear-on-read */
 
@@ -412,7 +460,7 @@
 						 * 0x1400..0x1600 array, into the void.) */
 #define   DS_TRAFFIC_CFG_STRIDE	4u
 #define   DS_TRAFFIC_IS_OMCI	BIT(2)
-#define GPON_GTC_GEM_US_PORT_MAP 0x6400		/* array: base 0x6400, stride 4 (one 32-bit
+#define GPON_GEM_US_PORT_MAP	0x6400		/* array: base 0x6400, stride 4 (one 32-bit
 						 * word/entry), idx 0..127, [11:0] gemPortId.
 						 * Flow 64 (OMCC) = 0x6400 + 64*4 = 0x6500. */
 /* The LAST valid index of that array.  It was carried only in the sentence
@@ -454,7 +502,7 @@ static const struct gpon_chip luna_gpon_chip = {
 	.name = "RTL9602C",
 	.gtc = {
 		.ds_omci_pti		= 0x1204,	/* = GPON_GTC_DS_OMCI_PTI; chipdef 0x701204 */
-		.gem_us_port_map	= 0x6400,	/* = GPON_GTC_GEM_US_PORT_MAP; chipdef 0x706400 */
+		.gem_us_port_map	= 0x6400,	/* = GPON_GEM_US_PORT_MAP; chipdef 0x706400 */
 		.gem_us_port_stride	= 4,		/* = GEM_US_PORT_MAP_STRIDE (gpon-luna.c); chipdef array-offset 32 bits */
 		.gem_ds_mc_cfg		= 0x4080,	/* = GPON_GEM_DS_MC_CFG; chipdef 0x704080 */
 		.ds_traffic_cfg		= 0x1400,	/* = GPON_GTC_DS_TRAFFIC_CFG; chipdef 0x701400 */

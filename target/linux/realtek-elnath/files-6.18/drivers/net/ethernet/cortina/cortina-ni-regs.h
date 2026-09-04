@@ -568,7 +568,7 @@ enum cortina_ni_win {
  * +0x08 = buffer PA low.  Push = poll outstanding(POOL+0x2c) < depth, poll +0x00
  * bit31 clear, write +0x04/+0x08, then GO cmd (aal_fbm_buf_push/__aal_fbm_buf_access). */
 #define CA_NI_QM_FBM_CPU_DOORBELL(id)	((id) << 5)
-#define  CA_NI_QM_FBM_CPU_CMD_GO	BIT(31)
+#define  CA_NI_QM_FBM_CPU_CMD_GO	CA_NI_IND_ACCESS_GO
 #define  CA_NI_QM_FBM_CPU_CMD_PUSH	BIT(30)
 #define CA_NI_QM_FBM_POOL(id)		((id) << 7)	/* POOL window: pool desc base = id*0x80 */
 #define CA_NI_QM_FBM_POOL_OUTSTND	0x2c		/* +0x2c outstanding-count (gate) */
@@ -606,8 +606,8 @@ enum cortina_ni_win {
  * poll GO(bit31) clear with a bounded timeout. */
 #define CA_NI_QM_AXI_ATTR_ACCESS	0x67cc	/* [31]=access/GO [30]=rbw(1=wr) [5:0]=ADDR */
 #define CA_NI_QM_AXI_ATTR_DATA0		0x67d4	/* qos/cache/snoop/bar/domain/prot payload */
-#define  CA_NI_QM_AXI_ATTR_GO		BIT(31)
-#define  CA_NI_QM_AXI_ATTR_RBW		BIT(30)	/* 1 = write the entry */
+#define  CA_NI_QM_AXI_ATTR_GO		CA_NI_IND_ACCESS_GO
+#define  CA_NI_QM_AXI_ATTR_RBW		CA_NI_IND_ACCESS_WR	/* 1 = write the entry */
 #define  CA_NI_QM_AXI_ATTR_ADDR		GENMASK(5, 0)
 #define CA_NI_QM_AXI_ATTR_POLL_MAX	300	/* bounded poll, never spin forever */
 #define CA_NI_QM_AXI_ATTR_EQ_BASE	0	/* entries 0-15 = EQ0-15 */
@@ -653,7 +653,7 @@ enum cortina_ni_win {
  * whether ingress frames even reach the MAC (localizes MAC-admit vs L2FE-drop
  * vs ring-write). */
 #define CA_NI_HV_RXMIB_ACCESS		0xa168
-#define  CA_NI_MIB_ACCESS_GO		BIT(31)		/* self-clears when done */
+#define  CA_NI_MIB_ACCESS_GO		CA_NI_IND_ACCESS_GO		/* self-clears when done */
 #define  CA_NI_MIB_ACCESS_OPCODE	GENMASK(29, 28)
 #define  CA_NI_MIB_ACCESS_PORT		GENMASK(7, 5)
 #define  CA_NI_MIB_ACCESS_CNTID		GENMASK(4, 0)
@@ -983,8 +983,8 @@ enum cortina_ni_win {
 #define CA_DMA_AFT_L2FIB_DATA1		0xf40
 #define CA_DMA_AFT_L2FIB_DATA0		0xf44
 #define  CA_DMA_AFT_ACCESS_IDX		GENMASK(5, 0)
-#define  CA_DMA_AFT_ACCESS_WRITE	BIT(30)
-#define  CA_DMA_AFT_ACCESS_GO		BIT(31)	/* poll until it self-clears */
+#define  CA_DMA_AFT_ACCESS_WRITE	CA_NI_IND_ACCESS_WR
+#define  CA_DMA_AFT_ACCESS_GO		CA_NI_IND_ACCESS_GO	/* poll until it self-clears */
 /* ★★ THE FIELD POSITIONS BELOW ARE THE CORRECTED ONES (2026-08-04).  An
  * earlier map recorded in cortina-ni-flowoffload.c put vlan_vld at DATA2[0],
  * vlan_cnt at DATA2[3:1] and top_tpid_enc at DATA2[7:6].  That is WRONG, and
@@ -1070,8 +1070,8 @@ enum cortina_ni_win {
 #define  CA_DMA_LSO_VP_TXQ_ALL_EN	GENMASK(7, 0)	/* txq0..7 enable */
 #define CA_DMA_LSO_VP_BD_ACCESS(vp)	(0x104 + (vp) * CA_DMA_LSO_VP_STRIDE)
 #define  CA_DMA_LSO_BD_ACCESS_TXQ	GENMASK(2, 0)
-#define  CA_DMA_LSO_BD_ACCESS_WRITE	BIT(30)		/* rbw: 1 = write */
-#define  CA_DMA_LSO_BD_ACCESS_GO	BIT(31)		/* self-clearing */
+#define  CA_DMA_LSO_BD_ACCESS_WRITE	CA_NI_IND_ACCESS_WR		/* rbw: 1 = write */
+#define  CA_DMA_LSO_BD_ACCESS_GO	CA_NI_IND_ACCESS_GO		/* self-clearing */
 /* DATA1 low byte = ring base addr[39:32].  Stock writes 0: the "= 2"
  * branch is the dma_lso_ace_test path (@0x47b8), disabled on the device
  * (scfg CFG_ID_DMA_LSO_ACE_TEST = 0, .bss default 0). */
@@ -1960,8 +1960,20 @@ enum cortina_ni_win {
 /*
  * ★★ ONE INDIRECT PROTOCOL, AND IT WORE THREE NAMES (measured 2026-09-04).
  * Every indirect ACCESS/DATA table in the NI window raises BIT(31) to start a
- * transaction and sets BIT(30) to make it a write.  PLE, L2FE_REDIR and the
- * generic IND block each declared those same two bits under their own name.
+ * transaction and sets BIT(30) to make it a write.  NINE names were declared
+ * for that one start bit and SIX for the write bit, in this one file:
+ *
+ *   GO     IND_ACCESS, PLE_ACCESS, L2FE_REDIR_ACCESS, L2FE_FDB,
+ *          QM_FBM_CPU_CMD, QM_AXI_ATTR, MIB_ACCESS, DMA_AFT_ACCESS,
+ *          DMA_LSO_BD_ACCESS
+ *   WRITE  IND_ACCESS_WR, PLE_ACCESS_WRITE, L2FE_REDIR_ACCESS_WR,
+ *          QM_AXI_ATTR_RBW, DMA_AFT_ACCESS_WRITE, DMA_LSO_BD_ACCESS_WRITE
+ *
+ * Each was found the same way and only that way: by READING what the code does
+ * with the bit -- write it, then poll it until the hardware drops it -- never
+ * by its name.  Not every BIT(31) here belongs: a dozen others are plain
+ * enables (L2TM_EQ1_EN, QM_ES_TX_EN, HDRA_W0_CPU_FLG...) and are deliberately
+ * left alone.  The test is the HANDSHAKE, not the number.
  *
  * That is not cosmetic.  cortina_ni_rx_ind_read() has implemented this exact
  * transaction, and served 39 call sites with it, all along -- and SIX PLE and
@@ -1974,6 +1986,11 @@ enum cortina_ni_win {
  * different registers and a future part could move a bit -- but they now
  * DERIVE from one owner, so they cannot drift apart in silence, and anyone
  * reading them can see they are the same protocol.
+ *
+ * ⚠ VERIFY ANY ADDITION THE SAME WAY: an alias is only correct if the code
+ * WRITES the bit and then POLLS it on the same register.  Aliasing an enable
+ * that merely happens to sit at BIT(31) would be a lie the compiler cannot
+ * catch, because the value would still be right.
  */
 #define  CA_NI_IND_ACCESS_GO		BIT(31)
 #define  CA_NI_IND_ACCESS_WR		BIT(30)		/* rbw = 1 for a store */
@@ -2146,7 +2163,7 @@ enum cortina_ni_win {
  * flood (which blackholed) and the L3FE.  Commit: write DATA0-3, ACCESS=GO|op,
  * poll GO clear, CMD_RETURN.status[3:0]==0x5 = HIT (appended OK). */
 #define CA_NI_L2FE_FDB_ACCESS		0x1ca0
-#define  CA_NI_L2FE_FDB_GO		BIT(31)		/* access / busy */
+#define  CA_NI_L2FE_FDB_GO		CA_NI_IND_ACCESS_GO		/* access / busy */
 #define  CA_NI_L2FE_FDB_OP_INIT		0x00		/* one-time hash-table init */
 #define  CA_NI_L2FE_FDB_OP_READ		0x04		/* look up (status=HIT on found) */
 #define  CA_NI_L2FE_FDB_OP_APPEND	0x45		/* add a static entry */

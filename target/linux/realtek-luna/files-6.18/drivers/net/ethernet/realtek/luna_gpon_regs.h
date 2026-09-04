@@ -674,42 +674,89 @@ static const struct gpon_chip luna_gpon_chip = {
  * -- an SMI transaction that never clears CMD_EN currently returns whatever the
  * data register held, and on this project a silent read is how a dead PHY bus
  * survived five candidate fixes. */
-static inline u16 luna_smi_read(void __iomem *sw, u8 phy, u8 reg)
+/* The SMI transaction is the SAME handshake the rest of this port already
+ * routes through the core: write a command word carrying an enable bit, poll
+ * the same register until the block clears it.  Only the bit differs
+ * (SMI_CMD_EN is bit0, not the BIT(31) the GTC and NI blocks use), and
+ * gpon_ind_poll() takes the busy bit as a parameter for exactly that reason.
+ * The bound and the pace are the ones both vendor copies had. */
+#define LUNA_SMI_TRIES		1000u
+
+static inline u32 luna_sw_hwio_rd(void *ctx, u32 off)
 {
-	u32 ctrl, data;
-	int i;
+	return ioread32((void __iomem *)ctx + off);
+}
+
+static inline void luna_sw_hwio_wr(void *ctx, u32 off, u32 val)
+{
+	iowrite32(val, (void __iomem *)ctx + off);
+}
+
+static inline void luna_smi_pause(void)
+{
+	udelay(10);
+}
+
+static inline struct hwio luna_sw_io(void __iomem *sw)
+{
+	struct hwio io = { .rd = luna_sw_hwio_rd, .wr = luna_sw_hwio_wr,
+			   .ctx = (void *)sw };
+
+	return io;
+}
+
+/**
+ * luna_smi_read - one SMI read through the switch's MDIO master
+ * @out: the 16-bit result, written ONLY when the transaction completed
+ *
+ * ★ IT REFUSES TO ANSWER WHEN IT DID NOT READ (2026-09-04).  Both vendor copies
+ * fell out of the poll on exhaustion and read SMI_CTRL_3 anyway, so a bus that
+ * never cleared CMD_EN handed back whatever that register still held -- the
+ * PREVIOUS transaction's data, presented as this one's.  This header's own
+ * comment recorded that as OWED rather than fixed, deliberately, because the
+ * repair should not ride along with a code move.
+ *
+ * It is the same defect repaired three times elsewhere in this tree on the same
+ * day (cortina_ni_rx_ind_entry, cortina_ni_rx_get_axi_attrib, the GTC CAM
+ * readback), and it is the worse one here: a stale value is not a degraded
+ * answer, it is a plausible wrong one, and every read would look healthy.
+ *
+ * Reachable only through luna_sw_proxy_rd(), whose two callers are the 9607C
+ * I2C-hole path in sw_rd() (gated on is_9607c, so unreachable on the 9602C and
+ * 9603CVD) and a self-checking diagnostic -- which is why the fix could land
+ * without a board.
+ */
+static inline int luna_smi_read(void __iomem *sw, u8 phy, u8 reg, u16 *out)
+{
+	struct hwio io = luna_sw_io(sw);
 
 	iowrite32(phy << 5, sw + SMI_BC_PHYID);
 	iowrite32(BIT(phy), sw + SMI_CTRL_2);		/* target port mask */
 	/* MAIN_PAGE=0x1FFF (broadcast), REG=phyreg, CMD=1 (trigger read) */
 	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | SMI_CMD_EN,
 		  sw + SMI_CTRL_0);
-	for (i = 0; i < 1000; i++) {
-		ctrl = ioread32(sw + SMI_CTRL_0);
-		if (!(ctrl & SMI_CMD_EN))
-			break;
-		udelay(10);
-	}
-	data = ioread32(sw + SMI_CTRL_3);
-	return (u16)(data >> 16);
+	if (gpon_ind_poll(&io, SMI_CTRL_0, SMI_CMD_EN, LUNA_SMI_TRIES,
+			  luna_smi_pause) < 0)
+		return -ETIMEDOUT;
+	*out = (u16)(ioread32(sw + SMI_CTRL_3) >> 16);
+	return 0;
 }
 
 static inline void luna_smi_write(void __iomem *sw, u8 phy, u8 reg, u16 val)
 {
-	u32 ctrl;
-	int i;
+
+	struct hwio io = luna_sw_io(sw);
 
 	iowrite32(phy << 5, sw + SMI_BC_PHYID);
 	iowrite32(BIT(phy), sw + SMI_CTRL_2);
 	iowrite32(val, sw + SMI_CTRL_3);
 	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | BIT(4) | SMI_CMD_EN,
 		  sw + SMI_CTRL_0);
-	for (i = 0; i < 1000; i++) {
-		ctrl = ioread32(sw + SMI_CTRL_0);
-		if (!(ctrl & SMI_CMD_EN))
-			break;
-		udelay(10);
-	}
+	/* the WRITE's completion is polled and the result deliberately unused,
+	 * exactly as both vendor copies had it: there is nothing to hand back,
+	 * and the next transaction re-arms the bus regardless. */
+	gpon_ind_poll(&io, SMI_CTRL_0, SMI_CMD_EN, LUNA_SMI_TRIES,
+		      luna_smi_pause);
 }
 
 /* 32-bit SWCORE access through the PHY-%d proxy: address low/high, then the
@@ -721,8 +768,12 @@ static inline u32 luna_sw_proxy_rd(void __iomem *sw, u32 swc_off)
 	luna_smi_write(sw, SWCORE_PROXY_PHY, 0, (u16)(swc_off & 0xffff));
 	luna_smi_write(sw, SWCORE_PROXY_PHY, 1, (u16)((swc_off >> 16) & 0xffff));
 	luna_smi_write(sw, SWCORE_PROXY_PHY, 6, 0x800b);	/* read trigger */
-	lo = luna_smi_read(sw, SWCORE_PROXY_PHY, 4);
-	hi = luna_smi_read(sw, SWCORE_PROXY_PHY, 5);
+	/* ~0u for a stuck bus, the convention cortina_ni_rx_mib_read already uses
+	 * here: a failed indirect read is made VISIBLE rather than silently
+	 * plausible.  0 would be a legitimate register value. */
+	if (luna_smi_read(sw, SWCORE_PROXY_PHY, 4, &lo) ||
+	    luna_smi_read(sw, SWCORE_PROXY_PHY, 5, &hi))
+		return ~0u;
 	return ((u32)hi << 16) | lo;
 }
 

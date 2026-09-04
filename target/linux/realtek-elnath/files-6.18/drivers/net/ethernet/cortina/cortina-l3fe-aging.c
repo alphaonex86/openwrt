@@ -39,6 +39,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include "cortina-l3fe-regs.h"	/* the L3FE registers more than one file needs */
 
 /* -------------------------------------------------------------------------
  * NE register base + L3FE hash-engine (HS) aging/cache register file.
@@ -49,17 +50,10 @@
 #define CL3A_NE_REG_BASE		0xf4300000UL
 
 /* --- indirect age memory (main-hash + overflow) --- */
-#define CL3A_AGING_GRANULARITY		0x3924	/* timer[29:0]; 0 = auto-countdown OFF */
-#define CL3A_AGE_ACCESS			0x3928	/* address[11:0] r0w1[30] go/busy[31] */
-#define CL3A_AGE_DATA0			0x3938	/* slots 0..15  (2-bit age each) */
-#define CL3A_AGE_DATA1			0x3934	/* slots 16..31 (2-bit age each) */
 #define  CL3A_AGE_TBL_HASH		(0u << 11)	/* address bit11 = age-table select */
 #define  CL3A_AGE_TBL_OVERFLOW		(1u << 11)
 
 /* --- on-chip action-cache control (invalidate/allocate) --- */
-#define CL3A_CACHE_CTRL			0x38ac	/* slot[4:0] crc16[20:5] loc[24] age[27:26] pri[29:28] cmd[31:30] */
-#define CL3A_CACHE_CTRL_REQ		0x38b0	/* req_sts[0] = go/busy */
-#define CL3A_CACHE_CTRL_STS		0x38b4	/* bsy0 err_hash1 err_free2 err_nch3 match4 match_loc5 evict6 */
 #define  CL3A_CACHE_CMD_INVALIDATE	(1u << 30)	/* cmd = 01 */
 #define  CL3A_CACHE_STS_ERR_NCH		BIT(3)		/* "entry not cached" (non-fatal) */
 #define  CL3A_CACHE_STS_EVICT		BIT(6)
@@ -124,7 +118,7 @@ static int cl3a_poll_go(struct cl3a_ctx *c, u32 off, u32 gobit)
  * 16 slots per 32-bit word: word0 = slots 0..15, word1 = slots 16..31. */
 static inline u32 cl3a_age_dataoff(u32 slot)
 {
-	return (slot & 0x1f) < 16 ? CL3A_AGE_DATA0 : CL3A_AGE_DATA1;
+	return (slot & 0x1f) < 16 ? L3FE_HS_AGE_DATA_LO : L3FE_HS_AGE_DATA_HI;
 }
 static inline u32 cl3a_age_shift(u32 slot)
 {
@@ -140,8 +134,8 @@ static int __maybe_unused cl3a_age_get(struct cl3a_ctx *c, u32 idx, u8 *age)
 	u32 word;
 	int ret;
 
-	cl3a_wr(c, CL3A_AGE_ACCESS, addr | CL3A_GO);		/* start read */
-	ret = cl3a_poll_go(c, CL3A_AGE_ACCESS, CL3A_GO);
+	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO);		/* start read */
+	ret = cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 
@@ -165,8 +159,8 @@ static int __maybe_unused cl3a_age_set(struct cl3a_ctx *c, u32 idx, u8 age)
 	age &= 0x3;
 
 	/* 1. read the bucket's age row */
-	cl3a_wr(c, CL3A_AGE_ACCESS, addr | CL3A_GO);
-	ret = cl3a_poll_go(c, CL3A_AGE_ACCESS, CL3A_GO);
+	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO);
+	ret = cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 
@@ -176,8 +170,8 @@ static int __maybe_unused cl3a_age_set(struct cl3a_ctx *c, u32 idx, u8 age)
 	cl3a_wr(c, dataoff, word);
 
 	/* 3. commit = GO-LIVE (bit31 go + bit30 write) */
-	cl3a_wr(c, CL3A_AGE_ACCESS, addr | CL3A_GO | CL3A_WRITE);
-	return cl3a_poll_go(c, CL3A_AGE_ACCESS, CL3A_GO);
+	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO | CL3A_WRITE);
+	return cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
 }
 
 /* ------------------------------------------------------------------ */
@@ -193,7 +187,7 @@ static int __maybe_unused cl3a_traffic_status_get(struct cl3a_ctx *c, u32 bucket
 				   u32 *trf)
 {
 	u32 addr = ((bucket_base_idx >> 5) & 0x7ff) | CL3A_AGE_TBL_HASH;
-	static const u32 dregs[2] = { CL3A_AGE_DATA0, CL3A_AGE_DATA1 };
+	static const u32 dregs[2] = { L3FE_HS_AGE_DATA_LO, L3FE_HS_AGE_DATA_HI };
 	int ret, w, k;
 
 	if (bucket_base_idx & 0x1f)		/* only the first index of a group */
@@ -202,8 +196,8 @@ static int __maybe_unused cl3a_traffic_status_get(struct cl3a_ctx *c, u32 bucket
 	*trf = 0;
 
 	/* read the whole 32-slot age row */
-	cl3a_wr(c, CL3A_AGE_ACCESS, addr | CL3A_GO);
-	ret = cl3a_poll_go(c, CL3A_AGE_ACCESS, CL3A_GO);
+	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO);
+	ret = cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
 	if (ret)
 		return ret;
 
@@ -224,8 +218,8 @@ static int __maybe_unused cl3a_traffic_status_get(struct cl3a_ctx *c, u32 bucket
 	}
 
 	/* commit the cleared row (GO-LIVE write) */
-	cl3a_wr(c, CL3A_AGE_ACCESS, addr | CL3A_GO | CL3A_WRITE);
-	return cl3a_poll_go(c, CL3A_AGE_ACCESS, CL3A_GO);
+	cl3a_wr(c, L3FE_HS_AGE_ACCESS, addr | CL3A_GO | CL3A_WRITE);
+	return cl3a_poll_go(c, L3FE_HS_AGE_ACCESS, CL3A_GO);
 }
 
 /* ------------------------------------------------------------------ */
@@ -241,16 +235,16 @@ static int __maybe_unused cl3a_cache_invalidate(struct cl3a_ctx *c, u32 idx, u16
 	     | CL3A_CACHE_CMD_INVALIDATE;		/* cmd = 01 */
 
 	/* decomp order: write CTRL params, wait REQ idle, pulse REQ GO, wait done */
-	cl3a_wr(c, CL3A_CACHE_CTRL, ctrl);
-	ret = cl3a_poll_go(c, CL3A_CACHE_CTRL_REQ, BIT(0));	/* wait not-busy */
+	cl3a_wr(c, L3FE_HS_CACHE_CTRL, ctrl);
+	ret = cl3a_poll_go(c, L3FE_HS_CACHE_CTRL_REQ, BIT(0));	/* wait not-busy */
 	if (ret)
 		return ret;
-	cl3a_wr(c, CL3A_CACHE_CTRL_REQ, cl3a_rd(c, CL3A_CACHE_CTRL_REQ) | 1);	/* GO */
-	ret = cl3a_poll_go(c, CL3A_CACHE_CTRL_REQ, BIT(0));
+	cl3a_wr(c, L3FE_HS_CACHE_CTRL_REQ, cl3a_rd(c, L3FE_HS_CACHE_CTRL_REQ) | 1);	/* GO */
+	ret = cl3a_poll_go(c, L3FE_HS_CACHE_CTRL_REQ, BIT(0));
 	if (ret)
 		return ret;
 
-	sts = cl3a_rd(c, CL3A_CACHE_CTRL_STS);
+	sts = cl3a_rd(c, L3FE_HS_CACHE_CTRL_STS);
 	if (sts & CL3A_CACHE_STS_ERR_NCH)
 		pr_debug("l3fe cache invalidate idx %u: entry was not cached (non-fatal)\n",
 			 idx);
@@ -321,7 +315,7 @@ static int __maybe_unused cl3a_aqm_mib_get(struct cl3a_ctx *c, u32 idx, u64 *byt
 /* ------------------------------------------------------------------ */
 static void __maybe_unused cl3a_aging_init(struct cl3a_ctx *c)
 {
-	cl3a_wr(c, CL3A_AGING_GRANULARITY, 0);	/* auto age-countdown OFF */
+	cl3a_wr(c, L3FE_HS_AGING_GRANULARITY, 0);	/* auto age-countdown OFF */
 }
 
 /*

@@ -26,6 +26,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/irqdomain.h>
+#include <linux/build_bug.h>	/* static_assert() for the lane composition */
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -53,10 +54,35 @@
  * needs a converged RX auto-cal which does NOT complete on this driver (see the
  * WiFi memory: 0x7c bit4/cal-done never sets, stuck 0x500e, vs stock's 0x5010),
  * so the DWC LTSSM still stalls at Polling.Compliance cold. */
-#define CORTINA_SERDES_BER_STAT_L0P0	0x007c
-#define CORTINA_SERDES_BER_STAT_L0P1	0x017c
-#define CORTINA_SERDES_BER_STAT_L1P0	0x107c
-#define CORTINA_SERDES_BER_STAT_L1P1	0x117c
+/*
+ * ★ ONE REGISTER, ONE NAME, AND THE LANE LIVES IN THE BASE (2026-09-04).
+ * These four constants were a FORMULA written out by hand: the SerDes window
+ * repeats per lane (stride 0x1000) and per sub-lane (stride 0x100), so
+ * 0x007c/0x017c/0x107c/0x117c are the same register at (lane, sub) =
+ * (0,0)/(0,1)/(1,0)/(1,1).  The rest of this file already computes that base --
+ * `u32 b = lane * LANE_STRIDE + sub` -- and then wrote `s + b + 0x7c` with the
+ * offset bare, ten times.  So the register had four names in one place and none
+ * in the other.
+ *
+ * ⚠ THE INDIVIDUAL REGISTERS OF THIS WINDOW ARE NOT IN THE TIER-2 ORACLE.  The
+ * vendor NAME->ADDRESS table covers 0xf4333000 only as S0_0_DUMMY_REG_BASE (and
+ * _1, the S1 pair and GPHY the same way) -- base markers, no register
+ * names.  That is a
+ * blind spot, not an omission to fix: naming 0x2c or 0x34 from anything we have
+ * would be inventing.  What the table DOES corroborate is the base itself and
+ * the lane layout, which is why THAT is what gets named here.
+ */
+#define CORTINA_PCIE_SERDES_SUB_STRIDE	0x100	/* two sub-lanes per lane */
+#define CORTINA_SERDES_BER_STAT		0x7c	/* within one sub-lane */
+#define CORTINA_SERDES_SUB(lane, sub) \
+	((lane) * CORTINA_PCIE_SERDES_LANE_STRIDE + \
+	 (sub) * CORTINA_PCIE_SERDES_SUB_STRIDE)
+
+/* the four spellings this replaced, pinned so the composition cannot drift */
+static_assert(CORTINA_SERDES_SUB(0, 0) + CORTINA_SERDES_BER_STAT == 0x007c);
+static_assert(CORTINA_SERDES_SUB(0, 1) + CORTINA_SERDES_BER_STAT == 0x017c);
+static_assert(CORTINA_SERDES_SUB(1, 0) + CORTINA_SERDES_BER_STAT == 0x107c);
+static_assert(CORTINA_SERDES_SUB(1, 1) + CORTINA_SERDES_BER_STAT == 0x117c);
 #define CORTINA_SERDES_LOCK_MASK	0x7800	/* CMU/PLL lock (0x7c bits 11-14) */
 #define CORTINA_SERDES_BER_POLL_MAX	500
 
@@ -263,14 +289,14 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	writel(readl(s + b + 0xbc) | 0x400, s + b + 0xbc);	usleep_range(10, 20);	/* L8 held-D */
 	writel(readl(s + b + 0x6c) & ~0x60, s + b + 0x6c);	usleep_range(10, 20);	/* L9 */
 	for (i = 0; i < 50000; i++) {		/* poll cal-done bit4 (capped ~0.75s) */
-		if (readl(s + b + 0x7c) & CORTINA_SERDES_CALDONE)
+		if (readl(s + b + CORTINA_SERDES_BER_STAT) & CORTINA_SERDES_CALDONE)
 			break;
 		usleep_range(10, 20);
 	}
 	writel(readl(s + b + 0x08) & ~0x200, s + b + 0x08);	usleep_range(10, 20);	/* L11 rel-C */
 	writel(readl(s + b + 0x6c) & ~0x60, s + b + 0x6c);	usleep_range(10, 20);	/* L12 */
 	writel(0x1a4, s + b + 0x40);				usleep_range(10, 20);	/* L13 */
-	c = readl(s + b + 0x7c);						/* R1 (load-bearing) */
+	c = readl(s + b + CORTINA_SERDES_BER_STAT);						/* R1 (load-bearing) */
 	writel((readl(s + b + 0x0c) & ~0x3e) | ((c & 0x1f) << 1), s + b + 0x0c);
 	usleep_range(10, 20);
 	if (cmu)						/* L15 undo L1 */
@@ -279,7 +305,7 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	writel(readl(s + b + 0xbc) & ~0x400, s + b + 0xbc);	usleep_range(10, 20);	/* L17 rel-D */
 	writel(readl(s + b + 0x6c) & ~0x60, s + b + 0x6c);	usleep_range(10, 20);	/* L18 */
 	writel(0x0c, s + b + 0x40);				usleep_range(10, 20);	/* L19 final */
-	c = readl(s + b + 0x7c);						/* R4 (load-bearing) */
+	c = readl(s + b + CORTINA_SERDES_BER_STAT);						/* R4 (load-bearing) */
 	writel((readl(s + b + 0x2c) & ~0x1e0) | (((c >> 1) & 0xf) << 5), s + b + 0x2c);
 	usleep_range(10, 20);
 	writel(readl(s + b + 0x34) & ~0x2000, s + b + 0x34);	usleep_range(10, 20);	/* L20 rel-A (our silicon needs it) */
@@ -292,7 +318,7 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	writel(readl(s + b + 0x28) & ~0x60, s + b + 0x28);	usleep_range(10, 20);	/* open latch */
 	if (cmu) {
 		writel(readl(s + b + 0x2c) | 0x10, s + b + 0x2c);	usleep_range(10, 20);	/* manual */
-		c = (readl(s + b + 0x7c) >> 9) & 0x7f;
+		c = (readl(s + b + CORTINA_SERDES_BER_STAT) >> 9) & 0x7f;
 		writel((readl(s + b + 0x90) & ~0x7f) | c, s + b + 0x90);	usleep_range(10, 20);	/* freeze */
 	} else {
 		writel(readl(s + b + 0x2c) & ~0x10, s + b + 0x2c);	usleep_range(10, 20);	/* auto/adaptive */
@@ -320,7 +346,8 @@ static void cortina_pcie_serdes_rx_cal(struct cortina_pcie *cp)
 	cortina_pcie_rx_eq_ramp(s, 0x000, true);	/* sub-lane 0 (with shared CMU strobe) */
 	cortina_pcie_rx_eq_ramp(s, 0x100, false);	/* sub-lane 1 (RX-EQ only) */
 	dev_info(cp->pci.dev, "rxcal(seq): 7c=%08x 17c=%08x\n",
-		 readl(s + 0x7c), readl(s + 0x17c)); /* DIAG revert */
+		 readl(s + CORTINA_SERDES_SUB(0, 0) + CORTINA_SERDES_BER_STAT),
+		 readl(s + CORTINA_SERDES_SUB(0, 1) + CORTINA_SERDES_BER_STAT)); /* DIAG revert */
 }
 
 /* Wait for the SerDes to report a good bit-error-rate lock on all paths. */
@@ -330,11 +357,11 @@ static bool cortina_pcie_serdes_ber_notify(struct cortina_pcie *cp)
 	u32 ready;
 
 	do {
-		ready = readl(cp->serdes + CORTINA_SERDES_BER_STAT_L0P0);
-		ready &= readl(cp->serdes + CORTINA_SERDES_BER_STAT_L0P1);
+		ready = readl(cp->serdes + CORTINA_SERDES_SUB(0, 0) + CORTINA_SERDES_BER_STAT);
+		ready &= readl(cp->serdes + CORTINA_SERDES_SUB(0, 1) + CORTINA_SERDES_BER_STAT);
 		if (cp->lanes == 2) {
-			ready &= readl(cp->serdes + CORTINA_SERDES_BER_STAT_L1P0);
-			ready &= readl(cp->serdes + CORTINA_SERDES_BER_STAT_L1P1);
+			ready &= readl(cp->serdes + CORTINA_SERDES_SUB(1, 0) + CORTINA_SERDES_BER_STAT);
+			ready &= readl(cp->serdes + CORTINA_SERDES_SUB(1, 1) + CORTINA_SERDES_BER_STAT);
 		}
 		if ((ready & CORTINA_SERDES_LOCK_MASK) == CORTINA_SERDES_LOCK_MASK)
 			return true;
@@ -504,7 +531,7 @@ static void s0_rmw_all(void __iomem *s, int lanes, u32 o, u32 clr, u32 set)
 	int lane, sub;
 
 	for (lane = 0; lane < lanes; lane++)
-		for (sub = 0; sub <= 0x100; sub += 0x100) {
+		for (sub = 0; sub <= 0x100; sub += CORTINA_PCIE_SERDES_SUB_STRIDE) {
 			u32 a = lane * CORTINA_PCIE_SERDES_LANE_STRIDE + sub + o;
 
 			writel((readl(s + a) & ~clr) | set, s + a);
@@ -518,7 +545,7 @@ static void s0_wr_all(void __iomem *s, int lanes, u32 o, u32 val)
 	int lane, sub;
 
 	for (lane = 0; lane < lanes; lane++)
-		for (sub = 0; sub <= 0x100; sub += 0x100) {
+		for (sub = 0; sub <= 0x100; sub += CORTINA_PCIE_SERDES_SUB_STRIDE) {
 			writel(val, s + lane * CORTINA_PCIE_SERDES_LANE_STRIDE + sub + o);
 			usleep_range(10, 20);
 		}
@@ -530,7 +557,7 @@ static void s0_poll_caldone(void __iomem *s, u32 base)
 	int i;
 
 	for (i = 0; i < 50000; i++) {
-		if (readl(s + base + 0x7c) & CORTINA_SERDES_CALDONE)
+		if (readl(s + base + CORTINA_SERDES_BER_STAT) & CORTINA_SERDES_CALDONE)
 			return;
 		usleep_range(10, 20);
 	}
@@ -541,9 +568,9 @@ static void s0_cap_0c(void __iomem *s, int lane)
 {
 	int sub;
 
-	for (sub = 0; sub <= 0x100; sub += 0x100) {
+	for (sub = 0; sub <= 0x100; sub += CORTINA_PCIE_SERDES_SUB_STRIDE) {
 		u32 b = lane * CORTINA_PCIE_SERDES_LANE_STRIDE + sub;
-		u32 c = readl(s + b + 0x7c);
+		u32 c = readl(s + b + CORTINA_SERDES_BER_STAT);
 
 		writel((readl(s + b + 0x0c) & ~0x3e) | ((c & 0x1f) << 1), s + b + 0x0c);
 		usleep_range(10, 20);
@@ -556,9 +583,9 @@ static void s0_cap_2c(void __iomem *s, int lanes)
 	int lane, sub;
 
 	for (lane = 0; lane < lanes; lane++)
-		for (sub = 0; sub <= 0x100; sub += 0x100) {
+		for (sub = 0; sub <= 0x100; sub += CORTINA_PCIE_SERDES_SUB_STRIDE) {
 			u32 b = lane * CORTINA_PCIE_SERDES_LANE_STRIDE + sub;
-			u32 c = readl(s + b + 0x7c);
+			u32 c = readl(s + b + CORTINA_SERDES_BER_STAT);
 
 			writel((readl(s + b + 0x2c) & ~0x1e0) | (((c >> 1) & 0xf) << 5),
 			       s + b + 0x2c);
@@ -711,7 +738,7 @@ static void cortina_pcie_long_cal(struct cortina_pcie *cp, void __iomem *s,
 		writel(readl(s + b + 0x28) & ~0x60, s + b + 0x28); usleep_range(10, 20);
 		writel(readl(s + b + 0x2c) | 0x10, s + b + 0x2c);  usleep_range(10, 20);
 		s0_poll_caldone(s, b);
-		c = (readl(s + b + 0x7c) >> 9) & 0x7f;
+		c = (readl(s + b + CORTINA_SERDES_BER_STAT) >> 9) & 0x7f;
 		writel((readl(s + b + 0x90) & ~0x7f) | c, s + b + 0x90); usleep_range(10, 20);
 		writel(readl(s + b + 0x28) | 0x60, s + b + 0x28);  usleep_range(10, 20);
 	}
@@ -750,8 +777,10 @@ static void cortina_pcie0_bringup_seq(struct cortina_pcie *cp, void __iomem *s)
 	ca_rmw(cp->gpio, CA_GPIO_B4_OUT, 0, S0_PERST);		/* PERST# deassert */
 
 	dev_info(cp->pci.dev, "pcie0/S0 bring-up: 7c=%08x 17c=%08x 107c=%08x 117c=%08x\n",
-		 readl(s + 0x7c), readl(s + 0x17c),
-		 readl(s + 0x107c), readl(s + 0x117c));
+		 readl(s + CORTINA_SERDES_SUB(0, 0) + CORTINA_SERDES_BER_STAT),
+		 readl(s + CORTINA_SERDES_SUB(0, 1) + CORTINA_SERDES_BER_STAT),
+		 readl(s + CORTINA_SERDES_SUB(1, 0) + CORTINA_SERDES_BER_STAT),
+		 readl(s + CORTINA_SERDES_SUB(1, 1) + CORTINA_SERDES_BER_STAT));
 	cortina_pcie0_done = true;
 }
 

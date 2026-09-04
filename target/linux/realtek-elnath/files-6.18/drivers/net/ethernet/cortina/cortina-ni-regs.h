@@ -2353,17 +2353,38 @@ enum cortina_ni_win {
  * :215-267, called from aal_l3fe_init :1030) -> the whole 0x30ac-0x30f8 block sat at 0 ->
  * the L3FE stage was uninitialized -> it never ingested frames -> l3fe_rx(0xa9bc)=0 ->
  * cls_hit=0 -> no CPU RX.  Values below = tier-1 live stock (captured under broadcast). */
-/* ★ build95: the remaining L3FE_GLB config our driver still left at 0 (tier-1 stock diff).
- * All CONFIG (NOT ring/DMA pointers - ca8277b structs: FWD_CTRL=fwd-control bitfields,
- * LF_CFG=ingress-FIFO thresholds, ILPB=per-port VLAN loopback config).  A zero LF_CFG
- * (thresholds=0) blocks the L3FE ingress FIFO -> l3fe_rx=0 = the prime remaining gate. */
+/* ★ build95: the remaining L3FE_GLB config our driver still left at 0 (tier-1 stock
+ * diff).  All CONFIG, not ring/DMA pointers.
+ *
+ * ★★ THE NAMES IN THIS SLICE ARE SHIFTED BY ONE SLOT, and the evidence is the
+ * VALUE, not an opinion (2026-09-04).  The vendor NAME->ADDRESS table puts
+ * L3FE_GLB_LF_CFG - the ingress-FIFO thresholds - at 0x30a8, which is what we
+ * call FWD_CTRL_2; and the default this header documented FOR "LF_CFG",
+ * 0x004641f4, is exactly the value written to 0x30a8.  So the LF_CFG semantics
+ * and its reset default were RE'd correctly and then attached to the wrong
+ * address: the write lands on the right register under a wrong name, which is
+ * why nothing ever looked broken.  0x30b4 and 0x30bc are NOT config at all (see
+ * the resolved-conflict note further down) and their writes are inert.
+ *
+ * The other names here hold ONE tier and are recorded, not renamed -- the
+ * CONTRADICTED ratchet in dev/rtl9607c-test/stock_regname_guard.py lists them,
+ * and each needs a live read that no board can give while the bench relay is
+ * dead.  Do not build a mechanism claim on any name in this slice. */
 #define CA_NI_L3FE_GLB_FWD_CTRL_1	0x30a4
 #define  CA_NI_L3FE_GLB_FWD_CTRL_1_VAL	0x8001B000u
+/* vendor: L3FE_GLB_LF_CFG -- the ingress-FIFO hi/low/wr_fifo thresholds.  The
+ * VALUE below is that register's documented default, so this write is correct
+ * however wrong the name is.  Renaming waits on a live read. */
 #define CA_NI_L3FE_GLB_FWD_CTRL_2	0x30a8
 #define  CA_NI_L3FE_GLB_FWD_CTRL_2_VAL	0x004641F4u
-#define CA_NI_L3FE_CLS_MON_RETURN		0x30b4	/* ingress-FIFO hi/low/wr_fifo thresholds (dft 0x004641f4) */
+/* vendor: L3FE_GLB_CLS_STG_MONITOR_RETURN -- the read-data half of the CLS stage
+ * monitor whose CTRL is 0x30b0.  A READ port: the write below is INERT and is
+ * kept only because it is on the shipping-proven boot path. */
+#define CA_NI_L3FE_CLS_MON_RETURN	0x30b4
 #define  CA_NI_L3FE_CLS_MON_RETURN_VAL	0x4855CFE4u
-#define CA_NI_L3FE_GLB_DBG_DAT		0x30bc	/* ingress-loopback VLAN config, entry0 (COUNT=4 stride 8) */
+/* vendor: L3FE_GLB_DBG_DAT -- the read-data half of the debug tap whose index is
+ * 0x30b8.  A READ port: the write below is INERT, kept for the same reason. */
+#define CA_NI_L3FE_GLB_DBG_DAT		0x30bc
 #define  CA_NI_L3FE_GLB_DBG_DAT_VAL	0x4856CF7Cu
 #define CA_NI_L3FE_GLB_FWD_CTRL_3	0x30ac
 #define  CA_NI_L3FE_GLB_FWD_CTRL_3_VAL	0x00000300u

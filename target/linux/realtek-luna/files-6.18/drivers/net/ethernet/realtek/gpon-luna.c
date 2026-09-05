@@ -62,6 +62,7 @@
 #include "gpon_gem_us.h"	/* GPON_GEM_US_RANGE_OK: the core's own bound predicate */
 #include "gpon_rtl9602c_logic.h"	/* hoisted logic */
 #include "hwio.h"	/* flowcore: the ONE canonical field-mask RMW */
+#include "gpon_gtc_ploam.h"	/* flowcore: the DS PLOAM buffer unpack, fed this shell's gpon_io */
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/gfp.h>		/* __get_free_pages / GFP_KERNEL for the US PBO DRAM pool */
@@ -6657,20 +6658,6 @@ static bool gpon_sn_differs(const char *s)
 	return memcmp(want, gpon_sn_bytes, sizeof(want)) != 0;
 }
 
-/* Read the 13-byte downstream PLOAM message (2 bytes per 32-bit word). */
-static void gpon_ploam_read(u8 *m)
-{
-	int i;
-
-	for (i = 0; i < 6; i++) {
-		u32 w = gpon_rd(GPON_GTC_DS_PLOAM_MSG + i * 4);
-
-		m[2 * i]     = (w >> 8) & 0xff;
-		m[2 * i + 1] = w & 0xff;
-	}
-	m[12] = (gpon_rd(GPON_GTC_DS_PLOAM_MSG + 6 * 4) >> 8) & 0xff;
-}
-
 /* Compose + enqueue an upstream Serial_Number_ONU PLOAM (HW fills CRC). */
 /*
  * Compose + transmit a 12-byte upstream PLOAM on the given US_PLOAM_IND queue
@@ -8950,8 +8937,15 @@ static void gpon_fsm_poll(struct timer_list *t)
 	       guard++ < 16) {
 		u8 m[13];
 
-		gpon_ploam_read(m);
-		gpon_fsm_handle(m);
+		/* The word-unpack is the core's (flowcore/gpon_gtc_ploam.h, x86-proven
+		 * by gpon_gtc_ploam_diff_test); this shell contributes the accessor
+		 * and the per-SoC offset.  A false cannot happen here -- the offset is
+		 * a compile-time constant, never REG_ABSENT -- so the branch folds
+		 * away; it is the ask a TABLE-fed caller would need.  The DEQ below
+		 * still advances the queue on a refusal: the queue discipline is
+		 * this loop's, never the reader's. */
+		if (gpon_gtc_ds_ploam_read(&gpon_io, GPON_GTC_DS_PLOAM_MSG, m))
+			gpon_fsm_handle(m);
 		gpon_ds_rx++;					/* DS-lock liveness */
 		gpon_wr(GPON_GTC_DS_PLOAM_IND, GPON_DS_PLM_DEQ);	/* advance */
 	}

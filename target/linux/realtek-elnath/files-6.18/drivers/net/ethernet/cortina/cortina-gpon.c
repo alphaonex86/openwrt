@@ -58,6 +58,7 @@
 #include "cortina-gpon-ddm.h"	/* SFF-8472 A2h optical decode (functional core) */
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
 #include "cortina-access.h"	/* the ONE indirect transaction */
+#include "gpon_ind_rmw.h"	/* the core's ACCESS/DATA entry read-modify-write */
 #include "cortina-ni.h"		/* cortina_ni_pon_rx_hook_set + cortina_ni_pon_tx */
 
 /*
@@ -422,6 +423,18 @@
 #define CG_TCONT_OMCI_EN	BIT(1)
 #define CG_TCONT_INDEX(x)	(((x) & 0x1f) << 2)
 #define CG_TCONT_INDEX_MASK	(0x1f << 2)
+
+/* The T-CONT CAM as the core's ACCESS/DATA table (gpon_ind_rmw.h): its two
+ * registers (offsets within cg->mac, like every CG_REG_*), the GO/RBW bits every
+ * table in this block shares, and the bound cg_tbl_op_at() polls with.  This is
+ * the whole per-chip half of cg_tcont_cam_rmw(); the sequence is the core's. */
+static const struct gpon_ind_tbl cg_tcont_cam_tbl = {
+	.access	= CG_REG_TCONT_ACCESS,
+	.data	= CG_REG_TCONT_DATA,
+	.go	= CG_TBL_GO,
+	.wr	= CG_TBL_WR,
+	.tries	= CG_TBL_TRIES,
+};
 
 #define CG_OMCC_US_GEM_IDX_NUM	8	/* vendor AAL_GPON_OMCI_RSV_PORT_MAX: us hw gems 0..7 = OMCC */
 
@@ -1322,6 +1335,18 @@ static int cg_go_poll(void __iomem *reg, unsigned int tries, bool pace)
  * because it was hunting poll LOOPS and this one had already been found and
  * not followed up.
  */
+/* The one line every timed-out indirect transaction in this driver prints: the
+ * ACCESS offset and the composed cmd (GO excluded), which carries the index
+ * and, for a write, CG_TBL_WR -- so a caller that says nothing itself is not
+ * blind.  Spelled once, because cg_tcont_cam_rmw() reaches the transaction
+ * through the core now and still owes its callers this line. */
+static void cg_tbl_timeout_warn(struct cortina_gpon *cg, u32 access_off,
+				u32 cmd)
+{
+	dev_warn(cg->dev, "indirect access +0x%04x cmd 0x%08x timed out\n",
+		 access_off, cmd);
+}
+
 static int cg_tbl_op_at(struct cortina_gpon *cg, void __iomem *base,
 			u32 access_off, u32 cmd)
 {
@@ -1330,9 +1355,7 @@ static int cg_tbl_op_at(struct cortina_gpon *cg, void __iomem *base,
 	writel(CG_TBL_GO | cmd, base + access_off);
 	rc = cg_go_poll(base + access_off, CG_TBL_TRIES, false);
 	if (rc < 0) {
-		dev_warn(cg->dev,
-			 "indirect access +0x%04x cmd 0x%08x timed out\n",
-			 access_off, cmd);
+		cg_tbl_timeout_warn(cg, access_off, cmd);
 		return rc;
 	}
 	return 0;
@@ -2285,14 +2308,22 @@ static int cg_tbl_op(struct cortina_gpon *cg, u32 access_reg, u32 cmd)
  * preserved everything above them by reading first.  Copying the DS-GEM shape
  * here would silently zero whatever the hardware keeps in [31:7].
  *
- * ★ WHY THIS IS NOT PROMOTED TO THE CORE.  The core's CAM owner
- * (gpon_gtc_cam_xact/_read/_write, flowcore/regtable.h) is a DIFFERENT hardware
- * block: OP_MODE WRITE/READ/CLEAN plus OP_REQ/OP_COMPL/OP_HIT, bounded at
- * GPON_GTC_CAM_TRIES = 1000 with a CALLER-SUPPLIED @delay_us (time is an
- * explicit input in that tier), addressed through struct hwio.  This CAM is go[31]/rbw[30],
- * CG_TBL_TRIES = 10000, and an undelayed spin.  As cg_go_poll() says, this
- * driver has no hwio seam yet; when it gets one, promoting this becomes a call
- * and not a rewrite -- a separate job, gated on that seam.
+ * ★ THE SEQUENCE IS THE CORE'S NOW (gpon_ind_rmw(), flowcore/gpon_ind_rmw.h,
+ * 2026-09-05).  Until then this comment said the driver "has no hwio seam yet";
+ * it has had one since cg_go_poll() became ca_go_spin() -> gpon_ind_poll(), and
+ * cortina-access.h's ca_hwio_rd/_wr over cg->mac is the same seam one block up.
+ * What moved is the DECISION -- read transaction, take DATA, put DATA back,
+ * write transaction, and REFUSE the write half after a READ half that never
+ * released GO, because DATA would then be stale.  What stays here is the
+ * shell's: the iomem accessor, the device, the pause (none, as cg_tbl_op_at()
+ * has always spun), and the two labelled warnings below.  The per-chip half is
+ * cg_tcont_cam_tbl, beside the register defines.
+ *
+ * ★ AND IT IS STILL NOT gpon_gtc_cam_xact().  That core engine is the Luna GTC
+ * CAM -- OP_MODE WRITE/READ/CLEAN plus OP_REQ/OP_COMPL/OP_HIT, COMPL SET by the
+ * hardware, 1000 tries at a caller-supplied delay.  This CAM is go[31] CLEARED
+ * by the hardware, rbw[30] for the direction, CG_TBL_TRIES = 10000, undelayed.
+ * Two handshakes; routing one through the other would change the bus stream.
  *
  * @alloc is masked to its 12 on-wire bits here because that is the width of the
  * ACCESS register's alloc_id[11:0] field, and the mask itself is the core's
@@ -2302,42 +2333,43 @@ static int cg_tbl_op(struct cortina_gpon *cg, u32 access_reg, u32 cmd)
  * @who, when non-NULL, names the caller in a per-phase ratelimited warning.
  * ★ THIS IS A failure-path DIFFERENCE AND IT IS CARRIED, NOT FLATTENED: only
  * cg_omcc_tcont_bind() distinguishes a read timeout from a write timeout, and a
- * single -ETIMEDOUT cannot say which half failed.  The two silent callers are
- * not blind either -- cg_tbl_op_at() already logs "indirect access +0x%04x cmd
- * 0x%08x timed out", and @cmd carries CG_TBL_WR, so the half survives there.
- * (The two ratelimit buckets are now per-HELPER rather than per-caller.  That
- * is not a change today because exactly one caller passes a label; a second one
+ * single -ETIMEDOUT cannot say which half failed.  The core hands the half back
+ * as @stuck -- the ACCESS word that never released GO, CG_TBL_WR set for the
+ * write half -- and the two warnings stay TWO statements so they keep the two
+ * ratelimit buckets they had.  The silent callers are not blind either: the
+ * "indirect access +0x%04x cmd 0x%08x timed out" line cg_tbl_op_at() prints for
+ * every other table is printed here too, through the same cg_tbl_timeout_warn().
+ * (The two ratelimit buckets are per-HELPER rather than per-caller.  That is
+ * not a change today because exactly one caller passes a label; a second one
  * would start sharing them, which is the moment to give it its own.)
  *
  * Return: 0, or -ETIMEDOUT when either half never released GO.  ★ The failure
  * path is the whole point of reporting at all: a stuck transaction must stop
- * the caller from acting on stale DATA.
+ * the caller from acting on stale DATA.  (The core can also refuse with -ENODEV
+ * / -EINVAL; neither is reachable with this table and a pause, and the callers'
+ * contract is kept as it was: any failure is -ETIMEDOUT.)
  */
 static int cg_tcont_cam_rmw(struct cortina_gpon *cg, u32 alloc,
 			    u32 clr, u32 set, const char *who)
 {
-	u32 d;
+	struct hwio io = { .rd = ca_hwio_rd, .wr = ca_hwio_wr,
+			   .ctx = (void *)cg->mac };
+	u32 stuck = 0;
 
 	alloc = gpon_gem_us_alloc_id(alloc);
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc)) {
-		if (who)
-			dev_warn_ratelimited(cg->dev,
-				"%s: T-CONT read access timed out for alloc %u - bind NOT complete\n",
-				who, alloc);
-		return -ETIMEDOUT;
-	}
-	d = readl(cg->mac + CG_REG_TCONT_DATA);
-	d &= ~clr;
-	d |= set;
-	writel(d, cg->mac + CG_REG_TCONT_DATA);
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc)) {
-		if (who)
-			dev_warn_ratelimited(cg->dev,
-				"%s: T-CONT write access timed out for alloc %u - bind NOT complete\n",
-				who, alloc);
-		return -ETIMEDOUT;
-	}
-	return 0;
+	if (gpon_ind_rmw(&io, &cg_tcont_cam_tbl, alloc, clr, set,
+			 ca_pause_none, &stuck) == 0)
+		return 0;
+	cg_tbl_timeout_warn(cg, CG_REG_TCONT_ACCESS, stuck & ~CG_TBL_GO);
+	if (who && (stuck & CG_TBL_WR))
+		dev_warn_ratelimited(cg->dev,
+			"%s: T-CONT write access timed out for alloc %u - bind NOT complete\n",
+			who, alloc);
+	else if (who)
+		dev_warn_ratelimited(cg->dev,
+			"%s: T-CONT read access timed out for alloc %u - bind NOT complete\n",
+			who, alloc);
+	return -ETIMEDOUT;
 }
 
 /*

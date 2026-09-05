@@ -2400,12 +2400,24 @@ static int cg_omcc_gem_bind(struct cortina_gpon *cg, u32 gem_id)
 
 /* DS GEM CAM: entry[GEM port-id] -> {intern gem index, vld} (vendor
  * aal_gpon_ds_gem_port_set; the aes bit is set later on Encrypted_Port-ID) */
+/* One DS GEM CAM entry, read-op then DATA then write-op.  The vendor has ONE
+ * function here (aal_gpon_ds_gem_port_set, with a `vld` argument) and we had
+ * two whose only difference was the DATA word; bind and unbind are that
+ * argument, spelled as the word itself (2026-09-04). */
+static int cg_ds_gem_set(struct cortina_gpon *cg, u32 gem_id, u32 data)
+{
+	u32 port = gpon_gem_us_port_id(gem_id);
+
+	if (cg_tbl_op(cg, CG_REG_DS_GEM_ACCESS, port))
+		return -ETIMEDOUT;
+	writel(data, cg->mac + CG_REG_DS_GEM_DATA);
+	return cg_tbl_op(cg, CG_REG_DS_GEM_ACCESS, CG_TBL_WR | port);
+}
+
 static int cg_ds_gem_bind(struct cortina_gpon *cg, u32 gem_id, u32 idx)
 {
-	if (cg_tbl_op(cg, CG_REG_DS_GEM_ACCESS, gem_id & 0xfff))
-		return -ETIMEDOUT;
-	writel(CG_DS_GEM_VLD | CG_DS_GEM_INDEX(idx), cg->mac + CG_REG_DS_GEM_DATA);
-	return cg_tbl_op(cg, CG_REG_DS_GEM_ACCESS, CG_TBL_WR | (gem_id & 0xfff));
+	return cg_ds_gem_set(cg, gem_id,
+			     CG_DS_GEM_VLD | CG_DS_GEM_INDEX(idx));
 }
 
 /* Invalidate a DS GEM CAM entry: clear the valid bit (and index) for GEM
@@ -2413,10 +2425,7 @@ static int cg_ds_gem_bind(struct cortina_gpon *cg, u32 gem_id, u32 idx)
  * reassigned DS GEM no longer routes into this ONU's de-encap path. */
 static int cg_ds_gem_unbind(struct cortina_gpon *cg, u32 gem_id)
 {
-	if (cg_tbl_op(cg, CG_REG_DS_GEM_ACCESS, gem_id & 0xfff))
-		return -ETIMEDOUT;
-	writel(0, cg->mac + CG_REG_DS_GEM_DATA);	/* vld=0, index=0 */
-	return cg_tbl_op(cg, CG_REG_DS_GEM_ACCESS, CG_TBL_WR | (gem_id & 0xfff));
+	return cg_ds_gem_set(cg, gem_id, 0);		/* vld=0, index=0 */
 }
 
 /*

@@ -114,8 +114,41 @@ struct luna_pcie_phy { u8 reg; u16 val; };
  * its ePHY table at 0x80ccc780 with exactly these five entries. Everything in
  * luna_pcie_phy_9602c[] below that is NOT here, we add on top of stock --
  * fourteen registers stock leaves at their default, traced to a 9607C
- * `pcie0_phy_params_revC`. The MDIO register field is masked to 5 bits, so some
- * of those fourteen alias onto registers nobody intended to touch.
+ * `pcie0_phy_params_revC`.
+ *
+ * ⚠⚠ THIS COMMENT USED TO SAY "the MDIO register field is masked to 5 bits, so
+ * some of those fourteen alias onto registers nobody intended to touch" -- and
+ * it was describing STOCK'S WRITER, not ours. VERIFIED 2026-09-05 on the
+ * board's own stock kernel (tier 2), helper at 0x3d71c0 in
+ * cross-compiler/stock_nor/k0_kernel:
+ *
+ *     3d71e4:  lui   t8,0xb8b0      port 0 base
+ *     3d71e8:  andi  a1,a1,0x1f     <- the register index, MASKED TO 5 BITS
+ *     3d71ec:  addiu t8,t8,4096     -> 0xb8b01000, our .hostext exactly
+ *     3d71f0:  sll   a1,a1,0x8
+ *     3d71f4:  sll   a2,a2,0x10
+ *     3d71fc:  ori   a2,a2,0x1
+ *     3d7200:  sw    a2,0(t8)
+ *
+ * The writer below masks NOTHING (`reg` is u8, shifted straight to [15:8]), so
+ * under OUR code those entries do NOT alias -- they are emitted as 8-bit
+ * indices. Six entries of luna_pcie_phy_9602c[] are >= 0x20 and therefore land
+ * somewhere different than stock would put them: 0x20, 0x21, 0x23, 0x24, 0x29,
+ * 0x2b, which stock's mask would turn into 0x00, 0x01, 0x03, 0x04, 0x09, 0x0b.
+ *
+ * ★ THE DEFAULT PATH IS NOT AFFECTED: chip->phy is luna_pcie_phy_9602c_stock,
+ * whose five registers are all < 0x20, so masked and unmasked are the same
+ * word. The divergence only exists on the `pcie_phy_full` arm -- which is
+ * exactly the arm that claims to be the A/B control, so the comparison it
+ * offers is not the one it says it is.
+ *
+ * ★ WHICH BEHAVIOUR THE SILICON WANTS IS UNPROVEN, and the tree disagrees with
+ * itself: the RTL9603CVD's vendor bring-up masks to EIGHT bits and programs a
+ * whole second bank at 0x40..0x6f, which a 5-bit decode would make
+ * self-destroying. So the mask is per-chip SOFTWARE and stock's 5 bits are not
+ * automatically this ePHY's decode width. Settling it needs a live read-back of
+ * an index >= 0x20 against its aliased low counterpart on a cold-booted board.
+ * See FINDING-our-ephy-writer-does-not-mask-where-stock-does.md.
  *
  * ⚠ AND THE COMMENT BELOW ALREADY ACCUSES THEM: it names 0x20=0xd4a4 /
  * 0x21=0x485a as "a sibling part's revC table [that] leaves the endpoint's

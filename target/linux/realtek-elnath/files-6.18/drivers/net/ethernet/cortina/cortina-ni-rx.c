@@ -6254,24 +6254,42 @@ static void rx_dump_cls_keys_and_fib(struct seq_file *m, struct cortina_ni *ni)
 		   readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_RETURN),
 		   CA_NI_L3FE_CLS_MON_RETURN_VAL);
 
-	/* ★ build75: profile-1 (LAN) CPU-trap rows - the LAN classifier searches
-	 * KEY[64..127]; KEY[66] (wildcard) is the LAN bcast/DLF catch-all -> FIB[264]
-	 * -> CPU_0.  Confirm they landed. */
+	/* ★ CPU-trap rows: the LAN classifier searches KEY[64..127]; KEY[66]
+	 * (wildcard) is the LAN bcast/DLF catch-all -> FIB[264] -> CPU_0.
+	 * Confirm they landed.
+	 *
+	 * ★★ THE ROWS ARE READ BACK OUT OF THE TABLES THAT INSTALL THEM. This
+	 * block used to carry its own `kr[] = { 64, 65, 66 }` and
+	 * `fr[] = { 256, 257, 260, 264 }` -- a hand-copy of the profile-1 half of
+	 * cls_key_golden[] and cls_fib_golden[]. Two lists of the same rows, and
+	 * the drift is SILENT IN THE REASSURING DIRECTION: add or move a golden
+	 * row and this dump keeps confirming the OLD ones, reporting health about
+	 * rows the driver no longer installs.
+	 *
+	 * It now walks the golden tables, so it cannot go stale -- and that means
+	 * it dumps the profile-0 (WAN) rows too, which the hand-copies omitted.
+	 * That is deliberate: the alternative is to filter on the profile-1 base,
+	 * and the tree names that boundary only in prose ("profile 1 =
+	 * KEY[64..127]", above), so writing an identifier for 64 would be
+	 * inventing a name. A superset of a debug dump costs seven lines and
+	 * cannot lie about which rows exist. */
 	{
-		static const u16 kr[] = { 64, 65, 66 };
-		static const u16 fr[] = { 256, 257, 260, 264 };
 		unsigned int k;
 
-		seq_puts(m, "build75 profile1:");
-		for (k = 0; k < ARRAY_SIZE(kr); k++) {
-			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_KEY_ACCESS, kr[k]);
-			seq_printf(m, " key[%u]{w0=0x%08x tr=0x%08x}", kr[k],
+		seq_puts(m, "cls golden rows:");
+		for (k = 0; k < ARRAY_SIZE(cls_key_golden); k++) {
+			u16 row = cls_key_golden[k].idx;
+
+			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_KEY_ACCESS, row);
+			seq_printf(m, " key[%u]{w0=0x%08x tr=0x%08x}", row,
 				   readl(ni_base(ni) + CA_NI_L3FE_CLS_KEY_ACCESS + 11 * 4),
 				   readl(ni_base(ni) + CA_NI_L3FE_CLS_KEY_ACCESS + 1 * 4));
 		}
-		for (k = 0; k < ARRAY_SIZE(fr); k++) {
-			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_FIB_ACCESS, fr[k]);
-			seq_printf(m, " fib[%u]{d4=0x%08x d6=0x%08x}", fr[k],
+		for (k = 0; k < ARRAY_SIZE(cls_fib_golden); k++) {
+			u16 row = cls_fib_golden[k].idx;
+
+			cortina_ni_rx_ind_read(ni, CA_NI_L3FE_CLS_FIB_ACCESS, row);
+			seq_printf(m, " fib[%u]{d4=0x%08x d6=0x%08x}", row,
 				   readl(ni_base(ni) + CA_NI_L3FE_CLS_FIB_ACCESS + 3 * 4),
 				   readl(ni_base(ni) + CA_NI_L3FE_CLS_FIB_ACCESS + 1 * 4));
 		}

@@ -602,9 +602,30 @@ enum cortina_ni_win {
  * vendor NAME->ADDRESS table -- which DOES cover this one, 25 entries.
  */
 #define CA_NI_AXI_REO_RD_ORIG_ID	0x000	/* vendor QM_AXI_REO_AXI_REO_RD_ORIG_ID */
+#define CA_NI_AXI_REO_RD_NEW_ID		0x004	/* vendor ..._RD_NEW_ID */
+#define CA_NI_AXI_REO_RD_TOP_ADDR0	0x008	/* vendor ..._RD_TOP_ADDR0 */
 #define CA_NI_AXI_REO_RD_TOP_ADDR_MASK0	0x00c	/* vendor ..._RD_TOP_ADDR_MASK0 */
 #define CA_NI_AXI_REO_RD_NEW_ID0	0x010	/* vendor ..._RD_NEW_ID0 */
+#define CA_NI_AXI_REO_RD_TOP_ADDR_MASK1	0x018	/* vendor ..._RD_TOP_ADDR_MASK1 */
+#define CA_NI_AXI_REO_RD_TOP_ADDR_MASK2	0x024	/* vendor ..._RD_TOP_ADDR_MASK2 */
 #define CA_NI_AXI_REO_WR_ORIG_ID	0x400	/* vendor ..._WR_ORIG_ID */
+#define CA_NI_AXI_REO_WR_NEW_ID		0x404	/* vendor ..._WR_NEW_ID */
+#define CA_NI_AXI_REO_WR_TOP_ADDR0	0x408	/* vendor ..._WR_TOP_ADDR0 */
+#define CA_NI_AXI_REO_WR_TOP_ADDR_MASK0	0x40c	/* vendor ..._WR_TOP_ADDR_MASK0 */
+#define CA_NI_AXI_REO_WR_NEW_ID0	0x410	/* vendor ..._WR_NEW_ID0 */
+#define CA_NI_AXI_REO_WR_TOP_ADDR_MASK1	0x418	/* vendor ..._WR_TOP_ADDR_MASK1 */
+#define CA_NI_AXI_REO_WR_TOP_ADDR_MASK2	0x424	/* vendor ..._WR_TOP_ADDR_MASK2 */
+/* ★ THE TEN ABOVE WERE ADDED 2026-09-05 FROM THE ORACLE, NOT INVENTED. Every
+ * one is `reg.txt` line N with 0xf432d000 subtracted: RD_NEW_ID :4415,
+ * RD_TOP_ADDR0 :4416, RD_TOP_ADDR_MASK1 :4420, RD_TOP_ADDR_MASK2 :4423, and the
+ * WR twins :4428, :4429, :4430, :4431, :4433, :4436. Before them
+ * cortina_ni_axi_reo_cfg[] spelled all fourteen offsets as bare numbers while
+ * four of the same block already had names three lines up -- half a block named
+ * and half not, in one table.
+ * ⚠ AND +0x18 / +0x24 ARE BOTH *MASK* WORDS. This tree used to call them
+ * "mask/valid words"; the oracle says TOP_ADDR_MASK1 and TOP_ADDR_MASK2, with
+ * the neighbouring TOP_ADDR1/2 (+0x14/+0x20) and NEW_ID1/2 (+0x1c/+0x28) left
+ * at 0. Nothing in this block is a `valid` bit. */
 /* +0x480 is not in the vendor table either, but THIS TREE names it --
  * CA_NI_L3FE_AXI_REO_ORIG_ID, with the whole 7-register channel layout, further
  * down.  "Not in the oracle" is not the same as "nothing to name it from". */

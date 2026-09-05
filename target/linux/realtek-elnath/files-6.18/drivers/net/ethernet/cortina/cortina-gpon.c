@@ -110,7 +110,9 @@
 #include "gpon_omci_core.h"	/* G.988 message layer: omci_onu_input()      */
 #include "gpon_omci_me.h"	/* G.988 ME model: struct omci_onu, the store */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log    */
+#include "gpon_omci_mic.h"	/* G.984.4 MIC dialect: gpon_omci_mic_conv() */
 #include "gpon_gem_us.h"	/* upstream GEM/T-CONT mapping + bind verdict */
+#include "gpon_data_plan.h"	/* armed-vs-provisioned reconcile + undo verdict */
 
 #define DRV_NAME		"cortina-gpon"
 
@@ -2560,6 +2562,21 @@ static int cg_ds_gem_unbind(struct cortina_gpon *cg, u32 gem_id)
 }
 
 /*
+ * The ARMED identity, as the core's reconcile and undo verdicts want it.
+ * Built in ONE place so the two callers below cannot describe the same silicon
+ * differently -- a shadow that disagrees with itself is how a "nothing armed"
+ * ledger ends up sitting on top of a live CAM entry.
+ */
+static void cg_data_armed(const struct cortina_gpon *cg,
+			  struct gpon_data_armed *a)
+{
+	a->alloc = cg->hw_data_alloc;
+	a->gem = cg->hw_data_gem;
+	a->rides_omcc = cg->data_rides_omcc;
+	a->installed = cg->data_installed;
+}
+
+/*
  * Tear down the currently-armed WAN data path in the vendor drain-then-clear
  * order (aal_gpon_datapath_reset -> aal_puc_voq_flush drain_out): disable the
  * data T-CONT's VoQs and flush them FIRST (so the scheduler stops draining
@@ -2573,7 +2590,21 @@ static void cg_data_teardown(struct cortina_gpon *cg)
 {
 	const struct gpon_gem_us_range *us_slots = &cg_us_data_slots;
 	struct gpon_gem_us_range ride;
+	struct gpon_data_armed armed;
+	struct gpon_data_undo undo;
 	u32 i;
+
+	/*
+	 * ★ WHICH STEPS APPLY IS THE CORE'S; THE ORDER AND THE REGISTERS ARE
+	 * OURS.  Both guards below are one protocol invariant -- THE OMCC'S
+	 * T-CONT IS SACRED -- which this function used to restate imperatively
+	 * twice, in two different spellings, 28 lines apart.  It now comes back
+	 * as data from gpon_data_undo_plan(), and the drain-then-clear ORDER
+	 * stays here because gpon_gem_us.c:196-200 records it as a hardware
+	 * requirement the core may not own.
+	 */
+	cg_data_armed(cg, &armed);
+	gpon_data_undo_plan(&armed, cg->omcc_alloc, &undo);
 
 	/*
 	 * ★ THE TEARDOWN MUST UNDO WHAT THE INSTALL ACTUALLY DID, and in
@@ -2590,8 +2621,9 @@ static void cg_data_teardown(struct cortina_gpon *cg)
 	 * ★ NEVER in ride mode: those VoQs belong to the OMCC's T-CONT, and
 	 * disabling its pvtbl would take OMCI and PLOAM down with the data
 	 * path.  Clearing the port stamps in step 2 is what stops the data
-	 * GEM riding; the queues themselves must stay served. */
-	if (!cg->data_rides_omcc) {
+	 * GEM riding; the queues themselves must stay served.  (undo.drain_tcont
+	 * IS that rule, decided in the core.) */
+	if (undo.drain_tcont) {
 		cg_puc_pvtbl_program(cg, CG_DATA_TCONT_IDX, false);
 		cg_puc_voq_flush(cg, CG_DATA_TCONT_IDX);
 	}
@@ -2612,15 +2644,14 @@ static void cg_data_teardown(struct cortina_gpon *cg)
 	}
 
 	/* 3. invalidate the DS GEM CAM (unicast data GEM + the broadcast GEM) */
-	if (cg->hw_data_gem)
+	if (undo.unbind_gem)
 		cg_ds_gem_unbind(cg, cg->hw_data_gem);
 	cg_ds_gem_unbind(cg, CG_MCAST_GEM_ID);
 
 	/* 4. finally invalidate the data T-CONT CAM entry — but NEVER the OMCC's:
 	 * on a single-alloc OLT the data path rides the OMCC alloc and its
 	 * T-CONT (index 0) must stay armed for OMCI/PLOAM. */
-	if (cg->hw_data_alloc && cg->hw_data_alloc != cg->omcc_alloc &&
-	    cg_tcont_unbind(cg, cg->hw_data_alloc))
+	if (undo.unbind_alloc && cg_tcont_unbind(cg, cg->hw_data_alloc))
 		dev_err(cg->dev,
 			"data T-CONT CAM[alloc %u] could NOT be invalidated; the teardown below is INCOMPLETE\n",
 			cg->hw_data_alloc);
@@ -2669,36 +2700,61 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	u32 us_tcont = CG_DATA_TCONT_IDX;
 	bool rides_omcc = false;
 	struct gpon_gem_us_range ride;
+	struct gpon_data_armed armed;
+	struct gpon_data_want want;
 	u32 i;
 
-	if (!cg->omcc_up)
-		return;
-
 	/*
-	 * ★ THE RIDE'S PREMISE IS PART OF THE ARMED IDENTITY, not just the data
-	 * Alloc-ID and GEM.  The ride-the-OMCC route was chosen because the data
-	 * alloc WAS the OMCC's; if the OLT then moves the OMCC to a different
-	 * Alloc-ID mid-O5 (cg_omcc_try_up rebinds T-CONT 0 and unbinds the old
-	 * CAM entry), that premise is gone — the data alloc now has no CAM entry
-	 * of its own and no longer matches the OMCC's either.  Without this the
-	 * stamps simply stay in T-CONT 0's VoQs and the data silently follows
-	 * whatever alloc the OMCC moved to, which may not be the one the OLT
-	 * provisioned for it.  Tear down and re-decide instead.
+	 * ★★ "IS WHAT IS ARMED STILL WHAT THE OLT WANTS?" IS THE CORE'S, and
+	 * this is the one call that makes it so.  gpon_data_plan_decide() lives
+	 * in drivers/net/gpon/gpon_data_plan.h because G.984.3 lets the OLT
+	 * reassign an Alloc-ID or a GEM Port-ID at any time: an ONU that latches
+	 * "installed" and never re-asks bursts a stale GEM into a grant slot
+	 * that now belongs to somebody else.  Which registers hold the binding
+	 * is silicon; whether the binding is still the right one is protocol,
+	 * and it was being answered in THREE places (see the header) each
+	 * covering a different subset.
+	 *
+	 * Two of its clauses exist in NEITHER other copy, and both were ours:
+	 * the ALLOC moving while the GEM does not, and THE RIDE PREMISE BEING
+	 * LOST -- we chose to ride the OMCC's T-CONT because the data alloc WAS
+	 * the OMCC's, and if the OLT then moves the OMCC to a different Alloc-ID
+	 * mid-O5 (cg_omcc_try_up rebinds T-CONT 0 and unbinds the old CAM entry)
+	 * the stamps stay in T-CONT 0's VoQs and the data silently follows
+	 * whatever alloc the OMCC moved to.  Neither {alloc, gem} comparison can
+	 * see that, because neither of those two values changed.
+	 *
+	 * ⚠ @want carries the UNMASKED provisioned values on purpose: "has the
+	 * OLT provisioned BOTH halves yet" tests them unmasked (Luna has no
+	 * masked equivalent and adding one would change Luna's behaviour) while
+	 * the staleness comparison masks them, exactly as the inline gates here
+	 * did.  The equivalence is not asserted, it is MEASURED: 3600 shadow
+	 * states in dev/rtl9607c-test/gpon_data_plan_diff_test.c drive the core
+	 * verdict against a verbatim transcription of the gates this replaced.
 	 */
-	if (cg->hw_data_alloc &&
-	    (cg->hw_data_alloc != gpon_gem_us_alloc_id(alloc) ||
-	     cg->hw_data_gem != gpon_gem_us_port_id(gem) ||
-	     (cg->data_rides_omcc && cg->hw_data_alloc != cg->omcc_alloc))) {
+	cg_data_armed(cg, &armed);
+	want.alloc = (u16)alloc;
+	want.gem = (u16)gem;
+	want.omcc_alloc = cg->omcc_alloc;
+	want.omcc_up = cg->omcc_up;
+
+	switch (gpon_data_plan_decide(&armed, &want)) {
+	case GPON_DATA_WAIT:		/* no OMCC yet, or nothing provisioned */
+	case GPON_DATA_KEEP:		/* the proven LOS/fiber-pull keep-path:
+					 * no HW writes, no re-provision churn */
+		return;
+	case GPON_DATA_TEARDOWN:	/* deprovisioned: undo, nothing follows */
 		cg_data_teardown(cg);
 		cg->data_installed = false;
-	}
-
-	/* "has the OLT provisioned BOTH halves yet" is a provisioning-lifecycle
-	 * gate and stays here: the shared verdict below deliberately does not
-	 * judge a zero Alloc-ID, because Luna has no such guard and adding one
-	 * would change Luna's behaviour. */
-	if (cg->data_installed || !alloc || !gem)
 		return;
+	case GPON_DATA_REPLACE:		/* a DIFFERENT identity is armed: the
+					 * stale CAM goes FIRST, then install */
+		cg_data_teardown(cg);
+		cg->data_installed = false;
+		break;
+	case GPON_DATA_INSTALL:
+		break;
+	}
 
 	/*
 	 * ★★ THE ALLOC-ID -> T-CONT DECISION IS COMMON, and this is the one call
@@ -2719,11 +2775,13 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	 * cg->omcc_alloc are both u16, so the u32 locals above carry no bits the
 	 * verdict could lose.
 	 *
-	 * BIND_DONE cannot be reached from here: the data_installed early-out
-	 * above already returned.  It is spelled out rather than folded into the
-	 * default so the shared enum stays exhaustively handled at every call
-	 * site, and so a later reader who removes that early-out gets a compiler
-	 * warning instead of a silent re-bind.
+	 * BIND_DONE cannot be reached from here: only the INSTALL and REPLACE
+	 * arms of the plan above fall through, and both leave data_installed
+	 * false (KEEP is the arm that returns on an already-armed path).  It is
+	 * spelled out rather than folded into the default so the shared enum
+	 * stays exhaustively handled at every call site, and so a later reader
+	 * who changes that plan gets a compiler warning instead of a silent
+	 * re-bind.
 	 */
 	switch (gpon_gem_us_tcont_decide((u16)alloc, cg->omcc_alloc,
 					 cg->data_installed)) {
@@ -3325,33 +3383,51 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 	mt = pdu[2];
 	name = gpon_omci_mt_name(mt);	/* G.988 Table 11.2.2-1, in the core */
 	/* log the first PDUs + then 1-in-64 (the MIB-upload walk is chatty) */
-	if (cg->omci_rx <= 24 || !(cg->omci_rx & 63))
-		dev_info(cg->dev,
-			 "DS OMCI #%u: len=%u tci=0x%02x%02x mt=%u(%s)%s%s dev=0x%02x me=%u/%u\n",
-			 cg->omci_rx, len, pdu[0], pdu[1], mt & 0x1f, name,
-			 (mt & BIT(6)) ? " AR" : "", (mt & BIT(5)) ? " AK" : "",
-			 pdu[3], (pdu[4] << 8) | pdu[5], (pdu[6] << 8) | pdu[7]);
+	if (cg->omci_rx <= 24 || !(cg->omci_rx & 63)) {
+		char det[96];
+
+		/* ★ THE DECODE IS THE CORE'S (gpon_omci_describe), 2026-09-04.
+		 * This shell is the board the function was PROMOTED FROM, and
+		 * it was the last one still open-coding the same line
+		 * field-for-field and flag-for-flag; the Luna shell has called
+		 * the core spelling since the promotion (rtl9602c_eth.c).  Two
+		 * hand-rolled copies of one G.988 decode is how the two boards'
+		 * logs drift apart, and no clone detector can see it -- the
+		 * previous divergence shared not one substring.
+		 * The emitted line is unchanged by construction: the core
+		 * produces exactly the old format string's body, and the "DS
+		 * OMCI #%u: " prefix and the sampling budget stay HERE because
+		 * console policy is this board's fact, not G.988's. */
+		gpon_omci_describe(pdu, len, det, sizeof(det));
+		dev_info(cg->dev, "DS OMCI #%u: %s\n", cg->omci_rx, det);
+	}
 
 	/* DS MIC self-check on the first PDUs: decides the CRC-32 convention
 	 * against live OLT frames — the same convention our US MIC must use.
 	 * be = I.363.5/AAL5 (~crc32_be, the G.984.4 spec form, what the
 	 * responder emits); le = reflected zlib (what the 9602C SW path used).
-	 * Diagnostic only. */
+	 * Diagnostic only.
+	 *
+	 * ★ THE VERDICT IS THE CORE'S (gpon_omci_mic_conv, 2026-09-04).  The
+	 *   reflected spelling and the which-one-is-it ternary used to be
+	 *   written out here, in the file whose job is registers, while
+	 *   gpon_omci_core.c states at length that this convention is spelled
+	 *   exactly once -- because it had already diverged in this tree.  The
+	 *   SAMPLE BUDGET, the counters and the log level stay here: they are
+	 *   console policy, not G.984.4. */
 	if (len >= OMCI_LEN && cg->omci_ds_crc_ok + cg->omci_ds_crc_bad < 16) {
-		u32 want = ((u32)pdu[44] << 24) | ((u32)pdu[45] << 16) |
-			   ((u32)pdu[46] << 8) | pdu[47];
+		enum gpon_mic_conv conv = gpon_omci_mic_conv(pdu, len);
+		u32 want = gpon_omci_mic_stamped(pdu);
 		u32 be = omci_mic_compute(pdu);	/* the core's ONE spelling */
-		u32 le = crc32_le(~0u, pdu, 44) ^ ~0u;
+		u32 le = gpon_omci_mic_zlib_le(pdu);
 
-		if (be == want)
+		if (conv == GPON_MIC_CONV_AAL5_BE)
 			cg->omci_ds_crc_ok++;
 		else
 			cg->omci_ds_crc_bad++;
 		if (cg->omci_rx <= 4)
 			dev_info(cg->dev, "DS OMCI MIC self-check: %s (want %08x be %08x le %08x)\n",
-				 be == want ? "AAL5-BE" :
-				 (le == want ? "ZLIB-LE" : "NEITHER"),
-				 want, be, le);
+				 gpon_mic_conv_name(conv), want, be, le);
 	}
 
 	/* ★★★ THE MIC GATE, BEFORE STAGE D.  The self-check above is DIAGNOSTIC
@@ -3361,15 +3437,33 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 	 * case bursting into ANOTHER ONU's grant slot, and a corrupted mt byte
 	 * fakes a whole MIB-Reset teardown (carrier off, CAM invalidated).
 	 *
-	 * ★ ARMED ONLY ONCE THE SELF-CHECK HAS SPOKEN (>= 4 verified frames).
-	 *   Gating from the first frame would let a wrong CRC convention drop
-	 *   every OMCI frame on a link that is actually fine -- our instrument
-	 *   silencing the OLT.  Four live AAL5-BE agreements is the evidence
-	 *   that the convention is right, and only then does the gate bite.
+	 * ★★ THE >= 4 ARMING CONDITION IS GONE (2026-09-04), AND IT WAS A THIRD
+	 *   SPELLING OF ONE G.988 RULE -- the loose one.  It read
+	 *   `cg->omci_ds_crc_ok >= 4 && !omci_mic_ok(...)`, so the first frames
+	 *   of every session reached the snoop UNVERIFIED.
+	 *
+	 *   Its own argument was that arming stops a wrong CRC convention from
+	 *   "silencing the OLT".  Measured against the code, it buys nothing of
+	 *   the kind: omci_onu_input() drops a bad MIC UNCONDITIONALLY
+	 *   (gpon_omci_core.c), so on a wrong-convention link this ONU already
+	 *   answers nothing whatever this gate does.  What the arming actually
+	 *   bought was the right for Stage D to install HW T-CONT/GEM CAM
+	 *   entries from frames nobody had verified -- the exact exposure the
+	 *   paragraph above says the gate exists to close.
+	 *
+	 *   And the window was WIDER than the threshold: while cg->omci_active
+	 *   is false (pre-OMCC) omci_onu_input is not called AT ALL, so in that
+	 *   window this gate was the ONLY gate, and it was not yet armed.
+	 *
+	 *   The rule is now the core's, once: act on a frame exactly when
+	 *   omci_mic_ok() says its MIC verifies -- which also refuses every
+	 *   8..47-byte runt, because a frame that cannot CARRY a MIC cannot be
+	 *   verified.  The self-check above still runs first and still reports
+	 *   the convention, so the diagnostic that settled it is untouched.
 	 *
 	 * ★ AND IT IS COUNTED: a drop nobody can see is a link that "just stops
 	 *   working".  omci_rx_bad_mic is in the /proc dump beside crc_ok/bad. */
-	if (cg->omci_ds_crc_ok >= 4 && !omci_mic_ok(pdu, len)) {
+	if (!omci_mic_ok(pdu, len)) {
 		cg->omci_rx_bad_mic++;
 		dev_warn_ratelimited(cg->dev,
 			"DS OMCI: MIC does not verify (len %u, mt 0x%02x) -- frame DISCARDED, "

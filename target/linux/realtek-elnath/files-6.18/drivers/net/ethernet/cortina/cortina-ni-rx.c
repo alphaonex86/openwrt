@@ -2210,7 +2210,19 @@ static void cortina_ni_rx_port_profiles_init(struct cortina_ni *ni)
 static void cortina_ni_rx_redir_ldpid_set(struct cortina_ni *ni, u8 idx,
 					  u8 dest_ldpid);
 
-/* Stock golden PDPID_MAP (tier-1 stock_l2fe_forwarding.txt): ldpid -> physical dest */
+/* Stock golden PDPID_MAP (tier-1 stock_l2fe_forwarding.txt): ldpid -> physical dest
+ *
+ * ⚠ ROW 0x19's VALUE IS NEVER READ (measured 2026-09-05). The writer overrides
+ * it unconditionally -- `if (map[e].ldpid == CA_NI_RX_L3LAN_LDPID) pdpid =
+ * pdpid_l3lan;` -- and CA_NI_RX_L3LAN_LDPID *is* 0x19, so what reaches the
+ * register is always the module parameter, never this 0x0d. The two agree
+ * TODAY (pdpid_l3lan defaults to 0x0d), which is exactly why the deadness is
+ * invisible: edit this row and nothing happens; change the default and this row
+ * says something untrue. The 0x0d is kept as the STOCK value it records --
+ * deleting it would lose the tier-1 fact -- and this note is what stops it
+ * being read as the source. The parameter is the owner; see its
+ * MODULE_PARM_DESC at :280.
+ */
 static const struct { u8 ldpid, pdpid; } cortina_ni_rx_pdpid_map[] = {
 	{ 0x08, 0x0c }, { 0x09, 0x0c }, { 0x0d, 0x0c }, { 0x10, 0x09 },
 	{ 0x19, 0x0d }, { 0x1d, 0x09 }, { 0x1f, 0x0f }, { 0x32, 0x08 },

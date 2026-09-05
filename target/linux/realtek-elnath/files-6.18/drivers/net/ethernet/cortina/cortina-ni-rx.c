@@ -38,6 +38,7 @@
 
 #include <linux/bitfield.h>
 #include "cortina_ni_rx_logic.h"	/* hoisted logic */
+#include "cortina_ni_rx_geom.h"	/* RX pool + frame geometry, host-tested */
 #include "cortina_l3fe_logic.h"	/* l3fe_wan_mac_derive(): the ONE WAN-MAC = LAN-MAC + 1 */
 #include <linux/crc32.h>	/* ★ TEMP DIAG rx_frag_tap - revert with it */
 #include <linux/delay.h>
@@ -1335,14 +1336,43 @@ drop:
  * free-list drains and RMU0 stops admitting. */
 static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc)
 {
+	/* ★ THE BOARD'S GEOMETRY, DECLARED HERE AND DECIDED WITH IN THE CORE.
+	 * cortina_ni_rx_geom.h owns the arithmetic and knows none of these
+	 * values, so it cannot drift from cortina-ni-regs.h / cortina-ni.h --
+	 * the same contract luna_gmac_logic.h states for the family descriptor
+	 * bit masks.  Both blocks are compile-time constant; nothing is built
+	 * per frame. */
+	static const struct ca_ni_rx_pool_geom pool_geom = {
+		.map_size	= CA_NI_RX_MAP_SIZE,
+		.pool0_bytes	= CA_NI_RX_CPU_POOL0_BYTES,
+		.dq_off		= CA_NI_RX_DQ_POOL_OFF,
+		.pool0_bufsz	= CA_NI_RX_CPU_POOL0_BUFSZ,
+		.pool1_bufsz	= CA_NI_RX_CPU_POOL1_BUFSZ,
+		/* the deep-queue pool uses the same 2048B buffers -- OUR fact to
+		 * state, which is why the core takes it as its own field */
+		.dq_bufsz	= CA_NI_RX_CPU_POOL0_BUFSZ,
+		.tailroom	= CA_NI_RX_BUF_TAILROOM,
+	};
+	static const struct ca_ni_rx_layout layout = {
+		.hdra_off	= CA_NI_RX_HDRA_OFF,
+		.frame_off	= CA_NI_RX_FRAME_OFF,
+		.hdr_cpu_len	= CA_NI_RX_HDR_CPU_LEN,
+		.desc_hdr_len	= CA_NI_RX_DESC_HDR_LEN,
+		.eth_hlen	= ETH_HLEN,
+	};
 	struct cortina_ni_rx *rx = ni->rx;
 	struct net_device *ndev = rx->netdev;
 	u32 pa = lower_32_bits(desc) & CA_NI_RX_DESC_PA;
 	u32 dlen = FIELD_GET(CA_NI_RX_DESC_LEN, desc);
 	u32 swid = FIELD_GET(CA_NI_RX_DESC_SWID, desc);
 	u32 base = lower_32_bits(rx->cpu_dram_dma);
-	u32 hdra_hi = 0, hdra_lo = 0, off_in_region, buf_max;
+	u32 hdra_hi = 0, hdra_lo = 0, buf_max;
 	u32 rpa;	/* the PA to hand back, or 0 if this buffer is not ours */
+	enum ca_ni_rx_geom_verdict verdict;
+	struct ca_ni_rx_geom fgeom;
+	struct ca_ni_rx_buf bufloc;
+	enum ca_ni_rx_pool pool;
+	int pkt_size = 0;	/* header-A's RAW packet size, before any header */
 	struct sk_buff *skb;
 	const u8 *buf;
 	unsigned int off;
@@ -1350,45 +1380,38 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 
 	rx->last_desc = desc;
 
-	/* bufPA (128B-aligned, low 7 bits are flags) must land inside the mapped
-	 * window: the two CPU pools, then the deep-queue pool after them */
-	if (unlikely(pa < base || pa >= base + CA_NI_RX_MAP_SIZE)) {
+	/*
+	 * One buffer's span, and who owns it.  bufPA (128B-aligned, low 7 bits
+	 * are flags) must land inside the mapped window: the two CPU pools, then
+	 * the DEEP-QUEUE pool after them.
+	 *
+	 * ★ THE DECISION IS THE CORE'S (ca_ni_rx_buf_locate): the range test, the
+	 * pool split, the buffer's USABLE PAYLOAD WINDOW -- which is NOT the
+	 * buffer size, because the QM reserves CA_NI_RX_BUF_TAILROOM at the back
+	 * that the frame DMA never writes (cortina-ni.h:225 records the 384 bytes
+	 * this bound used to allow, and the frame copied out of memory the
+	 * hardware had not written) -- and whether the PA is ours to recycle.
+	 * Under cpu_pool_push we return a CPU-pool PA to its free list once the
+	 * frame has been copied out; the deep-queue pool is deliberately
+	 * hardware-managed (this chip's deep-queue enqueue cannot consume a
+	 * pushed buffer), so its buffers are NOT ours to hand back and rpa = 0.
+	 *
+	 * What stays here is what only a shell can do: the counters, the log and
+	 * turning the offset into a VA.
+	 */
+	pool = ca_ni_rx_buf_locate(pa, base, &pool_geom, &bufloc);
+	if (unlikely(pool == CA_NI_RX_POOL_BAD)) {
 		rx->drop_badpa++;
 		ndev->stats.rx_errors++;
 		net_err_ratelimited("%s: RX desc %016llx: PA outside CPU pool\n",
 				    netdev_name(ndev), desc);
 		return 0;	/* unknown PA: cannot safely recycle it */
 	}
-	off_in_region = pa - base;
-	buf = (const u8 *)rx->cpu_dram + off_in_region;
-	/*
-	 * One buffer's span, and who owns it.  EQ5 (pool0) below POOL0_BYTES,
-	 * EQ6 (pool1) above it, and the DEEP-QUEUE pool (EQ12) above both.
-	 *
-	 * Under cpu_pool_push the caller returns a CPU-pool PA to its free list
-	 * once the frame has been copied out - that ownership interval is what
-	 * stops the next frame landing on top of this one.  ★ The deep-queue
-	 * pool is deliberately hardware-managed (this chip's deep-queue enqueue
-	 * cannot consume a pushed buffer), so its buffers are NOT ours to hand
-	 * back: pushing one into a CPU pool's free list would put the same
-	 * buffer in two allocators at once and corrupt both.  rpa = 0 for those.
-	 */
-	/* ★ buf_max is the end of the buffer's USABLE PAYLOAD WINDOW, not the
-	 * buffer size: the QM reserves CA_NI_RX_BUF_TAILROOM at the back and the
-	 * frame DMA never writes there, so the 384 bytes this used to allow were
-	 * memory the hardware had not written.  See CA_NI_RX_BUF_USABLE_END. */
-	if (off_in_region < CA_NI_RX_CPU_POOL0_BYTES) {
-		buf_max = CA_NI_RX_BUF_USABLE_END(CA_NI_RX_CPU_POOL0_BUFSZ);
-		rpa = pa;
-	} else if (off_in_region < CA_NI_RX_DQ_POOL_OFF) {
-		buf_max = CA_NI_RX_BUF_USABLE_END(CA_NI_RX_CPU_POOL1_BUFSZ);
-		rpa = pa;
-	} else {
-		/* DQ pool, same 2048B buffers */
-		buf_max = CA_NI_RX_BUF_USABLE_END(CA_NI_RX_CPU_POOL0_BUFSZ);
-		rpa = 0;				/* hardware-managed */
+	buf = (const u8 *)rx->cpu_dram + bufloc.off_in_region;
+	buf_max = bufloc.buf_max;
+	rpa = bufloc.rpa;
+	if (unlikely(pool == CA_NI_RX_POOL_DQ))
 		rx->dq_frames++;
-	}
 
 	/* ★ multi-buffer receive (rx_chain, default off).  A descriptor that is
 	 * not a self-contained frame - SOP without EOP, or neither - belongs to a
@@ -1411,45 +1434,46 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	if (likely(!swid)) {
 		/* normal frame: HEADER_A at +0x40 = two BIG-ENDIAN 32-bit
 		 * words (stock byte-swaps both before extracting fields);
-		 * authoritative frame length = HEADER_A.pkt_size */
+		 * authoritative frame length = HEADER_A.pkt_size.  The two DMA
+		 * reads and the field decode stay HERE - FIELD_GET needs a
+		 * constant mask, which is cortina-ni-regs.h's to own - and only
+		 * the resulting scalars cross into the core. */
 		hdra_hi = get_unaligned_be32(buf + CA_NI_RX_HDRA_OFF);
 		hdra_lo = get_unaligned_be32(buf + CA_NI_RX_HDRA_OFF + 4);
 		rx->last_hdra = ((u64)hdra_hi << 32) | hdra_lo;
-
-		len = FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo);
-
-		/* ★ Staleness witness, free: the descriptor's own pktlen and
-		 * HEADER_A.pkt_size describe the SAME frame from two
-		 * INDEPENDENT places - the ring, written by the EPP writeback
-		 * engine, and the buffer, written by the RMU frame DMA - and on
-		 * every good frame differ by exactly the 8-byte HEADER_A
-		 * (pktlen counts from buf+0x40, pkt_size from buf+0x48;
-		 * board-measured 414/406, 1530/1522, 578/570).  A mismatch
-		 * means the buffer no longer holds the frame this descriptor
-		 * was written for - the exact condition the ownership fix
-		 * removes, so this counter must read 0.  Both values are
-		 * already in registers here, so the check costs one compare.
-		 * Counted and logged, NOT dropped: dropping would turn a
-		 * duplicate into a hole, the datagram fails either way, and a
-		 * silent behaviour change would muddy the A/B. */
-		if (unlikely(dlen != len + (CA_NI_RX_FRAME_OFF -
-					    CA_NI_RX_HDRA_OFF))) {
-			rx->stale_buf++;
-			net_warn_ratelimited("%s: RX stale buffer: desc pktlen=%u vs HEADER_A.pkt_size=%d at pa=%08x (buffer reused before the copy)\n",
-					     netdev_name(ndev), dlen, len, pa);
-		}
-
-		off = CA_NI_RX_FRAME_OFF;
-		if (hdra_hi & CA_NI_HDRA_W0_CPU_FLG) {
-			off += CA_NI_RX_HDR_CPU_LEN;
-			len -= CA_NI_RX_HDR_CPU_LEN;
-		}
+		pkt_size = FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo);
 	} else {
 		/* headerless format (stock: nonzero sw_id, WiFi-FF style):
 		 * frame at +0x10, length from the descriptor */
 		rx->swid_frames++;
-		off = CA_NI_RX_DESC_HDR_LEN;
-		len = (int)dlen - CA_NI_RX_DESC_HDR_LEN;
+	}
+
+	/* ★ WHERE THE FRAME IS AND WHETHER IT IS WELL FORMED - the core's
+	 * (ca_ni_rx_frame_geom): the header-A vs headerless offset, the CPU
+	 * header block, the runt/oversize split against the usable window, and
+	 * the staleness witness. */
+	verdict = ca_ni_rx_frame_geom(&layout, swid, dlen,
+				      !!(hdra_hi & CA_NI_HDRA_W0_CPU_FLG),
+				      pkt_size, buf_max, &fgeom);
+	off = fgeom.off;
+	len = fgeom.len;
+
+	/* ★ Staleness witness, free: the descriptor's own pktlen and
+	 * HEADER_A.pkt_size describe the SAME frame from two INDEPENDENT places
+	 * - the ring, written by the EPP writeback engine, and the buffer,
+	 * written by the RMU frame DMA - and on every good frame differ by
+	 * exactly the 8-byte HEADER_A (pktlen counts from buf+0x40, pkt_size
+	 * from buf+0x48; board-measured 414/406, 1530/1522, 578/570).  A
+	 * mismatch means the buffer no longer holds the frame this descriptor
+	 * was written for - the exact condition the ownership fix removes, so
+	 * this counter must read 0.  Both values are already in registers here,
+	 * so the check costs one compare.  Counted and logged, NOT dropped:
+	 * dropping would turn a duplicate into a hole, the datagram fails either
+	 * way, and a silent behaviour change would muddy the A/B. */
+	if (unlikely(fgeom.stale)) {
+		rx->stale_buf++;
+		net_warn_ratelimited("%s: RX stale buffer: desc pktlen=%u vs HEADER_A.pkt_size=%d at pa=%08x (buffer reused before the copy)\n",
+				     netdev_name(ndev), dlen, pkt_size, pa);
 	}
 
 	if (unlikely(rx_debug && rx->frames < 4)) {
@@ -1464,14 +1488,14 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 			       16, 1, buf + CA_NI_RX_HDRA_OFF, 96, false);
 	}
 
-	if (unlikely(len < (int)ETH_HLEN || off + len > buf_max)) {
+	if (unlikely(verdict != CA_NI_RX_GEOM_OK)) {
 		rx->drop_len++;
 		/* ★ split, because the two causes mean opposite things and the
 		 * aggregate cannot tell them apart: a runt is a bad frame, while
 		 * an oversize one is a good frame that does not fit a buffer's
 		 * usable window and needs rx_chain.  Distinguishing them is what
 		 * makes the buffer-window fix measurable rather than a claim. */
-		if (len < (int)ETH_HLEN)
+		if (verdict == CA_NI_RX_GEOM_RUNT)
 			rx->drop_runt++;
 		else
 			rx->drop_oversize++;
@@ -1576,13 +1600,27 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	 * does the same data += 16 / len -= 16).  Ethernet frames cannot
 	 * false-match: 0xfff1 is not a real ethertype on this LAN.
 	 */
-	if (unlikely(buf[off + 12] == 0xff && buf[off + 13] == 0xf1)) {
-		cortina_ni_pon_rx_fn fn = READ_ONCE(cortina_ni_pon_rx_cb);
+	{
+		/* ★ THE PREDICATE AND THE PDU BOUND ARE THE CORE'S
+		 * (ca_ni_rx_pon_ctrl).  It is three lines, and it is the ONE
+		 * place a bad bound would hand a NEGATIVE length to the OMCI
+		 * core: pdu.len is published only when the frame is STRICTLY
+		 * longer than the prepended header.  0xfff1 stays spelled HERE,
+		 * as it always was - it is the Cortina PDC's marker, not
+		 * G.988's, so the core takes it as an argument and never learns
+		 * it. */
+		struct ca_ni_pon_pdu pdu;
 
-		rx->pon_frames++;
-		if (fn && len > 16)
-			fn(buf + off + 16, len - 16);
-		return rpa;
+		if (unlikely(ca_ni_rx_pon_ctrl(buf + off, len, 0xfff1,
+					       CA_NI_PON_HDR_LEN, &pdu))) {
+			cortina_ni_pon_rx_fn fn =
+				READ_ONCE(cortina_ni_pon_rx_cb);
+
+			rx->pon_frames++;
+			if (fn && pdu.len)
+				fn(buf + off + pdu.off, pdu.len);
+			return rpa;
+		}
 	}
 
 	/*

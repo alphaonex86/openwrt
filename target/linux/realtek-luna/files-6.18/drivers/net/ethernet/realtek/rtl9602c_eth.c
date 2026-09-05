@@ -1552,13 +1552,15 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 	{
 		int spin = 64;
 
-		while ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1 && spin-- > 0) {
+		while (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
+					      TX_RING_SIZE, 0) && spin-- > 0) {
 			ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | BIT(0));	/* retire ring0 */
 			cpu_relax();
 			rtl9602c_eth_tx_reclaim(ep);
 		}
 	}
-	if ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1) {
+	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
+				   TX_RING_SIZE, 0)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		dma_unmap_single(ep->dev, da, len, DMA_TO_DEVICE);
 		dev_kfree_skb_any(skb);
@@ -1703,7 +1705,8 @@ static netdev_tx_t rtl9602c_eth_wan_xmit(struct sk_buff *skb, struct net_device 
 	 * and a dropped US OMCI is the churn-lock class of failure.  The cost is
 	 * two of 64 slots on gpon0; DHCP and TCP retransmit, the OLT's audit
 	 * loop is less forgiving. */
-	if ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1 - OMCI_RESV) {
+	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
+				   TX_RING_SIZE, OMCI_RESV)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		dma_unmap_single(ep->dev, da, len, DMA_TO_DEVICE);
 		dev_kfree_skb_any(skb);
@@ -1820,7 +1823,8 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 		return -ENODEV;
 	}
 	rtl9602c_eth_omci_reclaim(ep);
-	if ((ep->otx_head - ep->otx_dirty) >= OTX_RING_SIZE - 1) {
+	if (luna_gmac_tx_ring_full(ep->otx_head, ep->otx_dirty,
+				   OTX_RING_SIZE, 0)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		dma_unmap_single(ep->dev, da, len, DMA_TO_DEVICE);
 		dev_kfree_skb_any(skb);
@@ -2512,7 +2516,8 @@ static void rtl9602c_eth_tx_reclaim(struct rtl9602c_eth *ep)
 		ep->tx_dirty++;
 	}
 	if (netif_queue_stopped(ep->ndev) &&
-	    (ep->tx_head - ep->tx_dirty) < TX_RING_SIZE - 1 - OMCI_RESV)
+	    !luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
+				     TX_RING_SIZE, OMCI_RESV))
 		netif_wake_queue(ep->ndev);
 }
 
@@ -3466,7 +3471,8 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
 	 * reallocs (padto/cow) and dma_map below all use GFP_ATOMIC / are IRQ-safe,
 	 * so holding the irqsave lock across them is sound. */
 	spin_lock_irqsave(&ep->tx_lock, flags);
-	if ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1 - OMCI_RESV) {
+	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
+				   TX_RING_SIZE, OMCI_RESV)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		netif_stop_queue(ndev);
 		return NETDEV_TX_BUSY;

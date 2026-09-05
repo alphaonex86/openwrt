@@ -1568,7 +1568,8 @@ static void eth_tx_reclaim(struct luna_eth *ep)
 		ep->tx_dirty++;
 	}
 	if (netif_queue_stopped(ep->ndev) &&
-	    (ep->tx_head - ep->tx_dirty) < TX_RING_SIZE - 1)
+	    !luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
+				     TX_RING_SIZE, 0))
 		netif_wake_queue(ep->ndev);
 }
 
@@ -1634,7 +1635,17 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	}
 
 	spin_lock_irqsave(&ep->tx_lock, flags);
-	if ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1) {
+	/* Ring-space test hoisted to luna_gmac_tx_ring_full() (flowcore): the
+	 * ring size is passed, and the reserve is ZERO because this shell has a
+	 * single producer on ring 0.  The reserve argument exists because the
+	 * family's other Ethernet shell shares this ring with an OMCI injector
+	 * and must stop that many slots early -- one of its five spellings was
+	 * measured carrying the wrong bound (rtl9602c_eth.c:1690-1702), which is
+	 * why the expression now lives in one place.  The wake-queue twin in
+	 * eth_tx_reclaim() is still spelled by hand and INVERTED; converting it
+	 * is the point of the helper and is left to the pass that may touch that
+	 * function. */
+	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty, TX_RING_SIZE, 0)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		netif_stop_queue(ndev);
 		return NETDEV_TX_BUSY;
@@ -1681,11 +1692,16 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	ep->tx_ring[i].opts2 = 0;	/* plain frame: switch forwards by L2 DA */
 	ep->tx_ring[i].opts3 = 0;
 	ep->tx_ring[i].opts4 = 0;
-	opts1 = D_OWN | D_FS | D_LS | D_TXCRC | (len & TXD_LEN_MASK);
-	if (i == TX_RING_SIZE - 1)
-		opts1 |= D_EOR;
+	/* Body word composed by luna_gmac_txd_word0() (flowcore); the flag set,
+	 * the length mask and D_EOR are this shell's and are PASSED, never
+	 * re-spelled there.  D_OWN is deliberately NOT part of the composed word:
+	 * ownership is publish-order, so it is OR'd on at the store below, after
+	 * the barrier that orders the body ahead of it. */
+	opts1 = luna_gmac_txd_word0(D_FS | D_LS | D_TXCRC, len, TXD_LEN_MASK,
+				    luna_gmac_slot_is_eor(i, TX_RING_SIZE),
+				    D_EOR);
 	wmb();				/* descriptor body before ownership */
-	ep->tx_ring[i].opts1 = opts1;
+	ep->tx_ring[i].opts1 = D_OWN | opts1;
 	wmb();
 
 	ep->tx_head++;

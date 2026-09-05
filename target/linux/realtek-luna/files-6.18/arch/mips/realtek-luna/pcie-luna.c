@@ -180,9 +180,30 @@ static int __init pcie_phy_full_setup(char *str)
 early_param("pcie_phy_full", pcie_phy_full_setup);
 
 static const struct luna_pcie_phy luna_pcie_phy_9602c[] = {
+	/* ★ THE FOUR ENTRIES THIS TREE CAN NAME ARE NAMED AT THE ENTRY, 2026-09-05.
+	 * The rest are register INDICES in the PCIe ePHY's own MDIO-style space,
+	 * and NOTHING here establishes a name for them: the chipdefs describe
+	 * memory addresses, not this space; the vendor kernel tree contains no
+	 * ePHY register names at all (searched); and the stock reg.txt oracle is
+	 * Cortina silicon, which this tree may not cross. So they stay numbers and
+	 * this comment says why -- an un-nameable entry and a not-yet-named entry
+	 * must not read alike. */
 	{ 0x01, 0xa852 }, { 0x06, 0x0017 }, { 0x08, 0x3591 }, { 0x09, 0x520c },
 	{ 0x0a, 0xf670 }, { 0x0b, 0xa90d }, { 0x0d, 0xe720 }, { 0x0e, 0x1000 },
-	{ 0x1c, 0x2001 }, { 0x1e, 0x66eb }, { 0x20, 0xd4a4 }, { 0x21, 0x485a },
+	{ 0x1c, 0x2001 }, { 0x1e, 0x66eb },
+	/* 0x20 = SerDes PLL, 0x21 = its clock divider -- the pair that also clocks
+	 * the downstream endpoint's CONFIG CORE (see the block comment above).
+	 * ⚠ THESE TWO VALUES ARE THE ONES THAT COMMENT ACCUSES: it names
+	 * 0x20=0xd4a4 / 0x21=0x485a as a sibling part's revC table that bit-locks
+	 * the lane to L0 but leaves the config core mistuned, so every config TLP
+	 * aborts and reads back 0xeeeeeeee -- and the table ships them verbatim.
+	 * Left as they are: the default path never reaches here (chip->phy is
+	 * luna_pcie_phy_9602c_stock, five registers, all < 0x20), this arm exists
+	 * only under `pcie_phy_full`, and settling it needs a live read-back on a
+	 * COLD-BOOTED board, which the dead bench relay makes impossible today.
+	 * Named here so the next reader meets the contradiction at the values
+	 * rather than forty lines above them. */
+	{ 0x20, 0xd4a4 }, { 0x21, 0x485a },
 	{ 0x23, 0x0b66 }, { 0x24, 0x4f0c }, { 0x29, 0xf0f3 }, { 0x2b, 0xa0a1 },
 	{ 0x09, 0x500c }, { 0x09, 0x520c },
 	/* 25 MHz reference-clock SerDes values (the board has a 25 MHz crystal at
@@ -190,9 +211,13 @@ static const struct luna_pcie_phy luna_pcie_phy_9602c[] = {
 	 * 0x03 is the refclk PLL multiplier (0x3031 for 25 MHz, vs 0x7b31 for
 	 * 40 MHz) and reg 0x06 = 0xe0b8 (vs 0xe2b8). A 40 MHz PLL on a 25 MHz
 	 * refclk mistunes the config-core clock -> marginal high-offset access. */
-	{ 0x03, 0x3031 }, { 0x06, 0xe0b8 }, { 0x0e, 0x98c5 },
+	{ 0x03, 0x3031 },	/* refclk PLL multiplier: 0x3031 = 25 MHz
+				 * (0x7b31 is the 40 MHz value) */
+	{ 0x06, 0xe0b8 },	/* refclk-dependent companion of 0x03
+				 * (0xe2b8 on the 40 MHz table) */
+	{ 0x0e, 0x98c5 },
 	{ 0x0f, 0x400f }, { 0x19, 0xfc70 },
-	{ 0xff, 0xffff },
+	{ 0xff, 0xffff },	/* the terminator, not a register */
 };
 
 /*

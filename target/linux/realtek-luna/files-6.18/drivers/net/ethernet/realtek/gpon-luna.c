@@ -3158,6 +3158,45 @@ static void bosa_laser_maint(void)
 }
 
 /*
+ * ★ THE W77 MCU COMMAND WALK, AND IT LIVES HERE ONCE.
+ *
+ * The RTL8290B's on-chip 8051 consumes W77 (0x24d) as a COMMAND BYTE: write
+ * one, let it settle, then read R29 (0x31d) -- the MCU treats that read as its
+ * acknowledgement. Both APC paths -- bosa_apc_calibrate() and
+ * rtl8290b_apc_init() -- walked the same two batches with their own
+ * byte-identical copies of the tables.
+ *
+ * ⚠ THE ENTRIES ARE DELIBERATELY UNNAMED, and that is a RECORDED QUESTION, not
+ * an oversight. Two of this file's own comments disagree about the bit map:
+ * the batch comment reads BIAS_MAX_EN/LOADIN = b7/b6 and MOD_MAX_EN/LOADIN =
+ * b5/b4, which makes 0xb0 = BIAS_MAX_EN|MOD_MAX_EN|MOD_MAX_LOADIN -- while the
+ * done-check site below spells 0xb0 as "BIAS_MAX_EN|MOD_MAX_EN", which is 0xa0
+ * on that same map. Neither names b3, which 0xa8/0xd8/0xe8 all set. The BOSA
+ * is an external I2C part with no entry in the SoC register oracle, so nothing
+ * in reach settles the contradiction, and inventing a decode would be worse
+ * than leaving the bytes bare.
+ *
+ * ★ THE SETTLE IS A PARAMETER, NOT A CONSTANT: the calibrate path waits 10 ms
+ * per command and the apc_init path 11 ms. Both are preserved exactly --
+ * unifying them would be a timing change wearing a cleanup's clothes.
+ * (apc_init spelled its wait as 11 x udelay(1000); mdelay(n) is that same
+ * loop, so the emitted delay is unchanged.)
+ */
+static const u8 bosa_w77_batch1[] = { 0xa8, 0xb0, 0xd0, 0xd8, 0xe8, 0xe0 };
+static const u8 bosa_w77_batch2[] = { 0xb0, 0xd0, 0xb8, 0xb0, 0xd0, 0xc0 };
+
+static void bosa_w77_walk(const u8 *cmds, unsigned int n, unsigned int settle_ms)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		bosa_write_reg(0x24d, cmds[i]);	/* W77 MCU command */
+		mdelay(settle_ms);
+		bosa_read_reg(0x31d);		/* R29 status (the MCU consumes it) */
+	}
+}
+
+/*
  * Cold laser ignition — the RTL8290B's MCU-driven APC power-on, expressed as the
  * register-level sequence the silicon requires (APC-enable flow then TX-enable
  * flow). The A4 register image (loaded into 0x200-0x27c by bosa_tx_enable) arms
@@ -3245,25 +3284,16 @@ static void __init bosa_apc_calibrate(void)
 	 * (each + ~10ms settle + an R29/0x31d status read the MCU consumes). An ignition
 	 * path that omits this handshake leaves the MCU with the laser never enabled
 	 * (EN_L/bias=0). The bytes strobe BIAS_MAX_EN/LOADIN (b7/b6) + MOD_MAX_EN/LOADIN
-	 * (b5/b4) to latch the bias/mod max limits set just above. */
+	 * (b5/b4) to latch the bias/mod max limits set just above.
+	 * ⚠ THAT BIT MAP IS NOT SETTLED -- it contradicts the done-check site's
+	 * reading of the same byte, and neither names b3. See bosa_w77_walk(),
+	 * which owns the tables and records the contradiction. */
 	{
-		static const u8 w77_a[] = { 0xa8, 0xb0, 0xd0, 0xd8, 0xe8, 0xe0 };
-		static const u8 w77_b[] = { 0xb0, 0xd0, 0xb8, 0xb0, 0xd0, 0xc0 };
-		int j;
-
 		bosa_set_bit(0x24e, 7, 1);		/* W78 b7 (apc_init prefix) */
-		for (j = 0; j < ARRAY_SIZE(w77_a); j++) {
-			bosa_write_reg(0x24d, w77_a[j]);	/* W77 MCU command */
-			mdelay(10);
-			bosa_read_reg(0x31d);		/* R29 status (MCU consumes) */
-		}
+		bosa_w77_walk(bosa_w77_batch1, ARRAY_SIZE(bosa_w77_batch1), 10);
 		bosa_set_bit(0x243, 7, 1);		/* W67 b7 */
 		bosa_set_field(0x27c, 0x08, 0x00);	/* W80 clear bit3 */
-		for (j = 0; j < ARRAY_SIZE(w77_b); j++) {
-			bosa_write_reg(0x24d, w77_b[j]);
-			mdelay(10);
-			bosa_read_reg(0x31d);
-		}
+		bosa_w77_walk(bosa_w77_batch2, ARRAY_SIZE(bosa_w77_batch2), 10);
 		pr_info("rtl9602c-gpon: DBG post-W77hs: EN_L=%d bias=0x%02x R29=0x%02x R33=0x%02x 0x383=0x%02x R30=0x%02x\n",
 			!!(bosa_read_reg(0x204) & 0x10), bosa_read_reg(0x236) & 0xff,
 			bosa_read_reg(0x31d) & 0xff, bosa_read_reg(0x321) & 0xff,
@@ -3493,9 +3523,7 @@ static void __init rtl8290b_apc_init(void)
 	 * so stock SKIPS it -> we MUST NOT write it (the spurious write parked R29 at
 	 * 0x0e). The terminal OFFK latch ((R29 0x31d &0x3c)==0x3c) is done by the
 	 * runtime servo in gpon_fsm_poll, once the laser bursts at O5. */
-	static const u8 w77_a[] = { 0xa8, 0xb0, 0xd0, 0xd8, 0xe8, 0xe0 };
-	static const u8 w77_b[] = { 0xb0, 0xd0, 0xb8, 0xb0, 0xd0, 0xc0 };
-	int i, j;
+	int i;
 	u8 t8;
 
 	pr_info("rtl9602c-gpon: rtl8290b_apc_init: B-variant OFFK (exact stock seq, base 0x578)\n");
@@ -3539,12 +3567,7 @@ static void __init rtl8290b_apc_init(void)
 	bosa_read_reg(0x31d);
 
 	/* step 4: W77 (0x24d) MCU-command walk BATCH 1 */
-	for (j = 0; j < ARRAY_SIZE(w77_a); j++) {
-		bosa_write_reg(0x24d, w77_a[j]);
-		for (i = 0; i < 11; i++)
-			udelay(1000);
-		bosa_read_reg(0x31d);
-	}
+	bosa_w77_walk(bosa_w77_batch1, ARRAY_SIZE(bosa_w77_batch1), 11);
 
 	/* step 5: ERC chopper + W80 b3 toggle */
 	bosa_set_bit(0x243, 7, 1);
@@ -3556,12 +3579,7 @@ static void __init rtl8290b_apc_init(void)
 	bosa_write_reg(0x27c, t8 | 0x08);
 
 	/* step 6: W77 walk BATCH 2 */
-	for (j = 0; j < ARRAY_SIZE(w77_b); j++) {
-		bosa_write_reg(0x24d, w77_b[j]);
-		for (i = 0; i < 11; i++)
-			udelay(1000);
-		bosa_read_reg(0x31d);
-	}
+	bosa_w77_walk(bosa_w77_batch2, ARRAY_SIZE(bosa_w77_batch2), 11);
 
 	/* step 7: OFFK offset compute+write -- STOCK SKIPS IT (optics-cfg[0x72]=0). */
 

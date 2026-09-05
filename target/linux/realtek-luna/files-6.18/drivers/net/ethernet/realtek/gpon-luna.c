@@ -1960,11 +1960,29 @@ static int i2c_rd_bus(int bus, u8 slave, u8 reg, u32 *cmd_out)
 /* Scan both i2c buses for the common optical-module slaves. */
 static void i2c_scan_9607c(void)
 {
-	static const u8 slaves[] = { 0x50, 0x51, 0x54 };
-	int bus, k;
+	/* ★ 0x50 and 0x51 are the SFF-8472 standard addresses, and this tree spells
+	 * out what each holds where it images them: page 0 / slave 0x50 is the A0
+	 * identification page and page 1 / slave 0x51 the A2 diagnostics (DDM) page.
+	 * 0x54 is vendor space; the same tree names it as the analog/APC "W"
+	 * register page, which is established for BOARD C's RTL8290B -- on whatever
+	 * module answers here it is simply the vendor page this scan probes for.
+	 * ⚠ Page 3 / slave 0x55 exists in the paging map (bosa_slave_for) and is
+	 * deliberately NOT scanned; this comment RECORDS that gap rather than
+	 * closing it, because nothing here establishes whether the omission was
+	 * intended. */
+	static const u8 slaves[] = {
+		0x50,	/* SFF-8472 A0 identification page */
+		0x51,	/* SFF-8472 A2 diagnostics page (DDM) */
+		0x54,	/* vendor page -- the analog/APC "W" registers on Board C */
+	};
+	int bus;
+	unsigned int k;
 
+	/* ★ WAS `k < 3`, a hand-written bound beside a three-entry array. It could
+	 * only ever drift one way: add a slave and the scan silently keeps probing
+	 * three. ARRAY_SIZE cannot. (k is unsigned because ARRAY_SIZE is size_t.) */
 	for (bus = 0; bus < 2; bus++)
-		for (k = 0; k < 3; k++) {
+		for (k = 0; k < ARRAY_SIZE(slaves); k++) {
 			u32 cmd = 0;
 			int b = i2c_rd_bus(bus, slaves[k], 0, &cmd);
 
@@ -9676,7 +9694,17 @@ static int __init rtl9602c_gpon_init(void)
 		if (force_soc_clk) {
 			/* Match the live-stock (100%-deterministic) SoC sysctl/clock regs that our
 			 * FAIL boot differed from, BEFORE the SerDes CMU locks. Same physical board,
-			 * so these are Board C's own stock values. */
+			 * so these are Board C's own stock values.
+			 *
+			 * ★ THE THREE ADDRESSES STAY BARE, AND THAT IS A SEARCHED ANSWER, not a
+			 * shrug (2026-09-05). Nothing on disk names them: the tier-2 name oracle
+			 * (x400axf stock /etc/reg.txt, 5637 entries, the only reg.txt here) holds
+			 * ZERO addresses in 0x18xxxxxx -- it maps the Cortina RTL9607F windows
+			 * (0xf430/f431/f432/f550/f700), different silicon entirely -- and the
+			 * vendor SDK has no hit for 0x1800012c or 0x18000140 anywhere, its one
+			 * 0x18000000 being BSP_XHCI_PADDR on the RTL9607C. These are the RTL9602C
+			 * Luna sysctl block, captured live. An absolute address written with a
+			 * FULL-WORD writel() and no read-modify-write, so every bit is stock's. */
 			static const struct { u32 off, val; } soc_clk[] = {
 				{ 0x18000100u, 0x00440e00u },
 				{ 0x1800012cu, 0x024d024du },

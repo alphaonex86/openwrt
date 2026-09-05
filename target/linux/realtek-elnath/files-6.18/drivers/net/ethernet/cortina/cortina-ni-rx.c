@@ -3615,7 +3615,12 @@ static void cortina_ni_rx_l3fe_glb_init(struct cortina_ni *ni)
 /*
  * ★★ build96: the L3FE AXI read-reorder channel init (vendor aal_l3fe_axi_reo_init,
  * aal_l3fe.c:341, run LAST in aal_l3fe_init).  Our driver programs the main NI AXI-REO
- * (cortina_ni_rx_axi_reo_init, low offsets) but SKIPS the L3FE channel at win10+0x2080.
+ * (cortina_ni_rx_axi_reo_init) and, since that table gained its third block, the L3FE
+ * channel too -- so this function is now the SECOND writer of the same seven words.
+ * ⚠ THE ADDRESS THIS COMMENT USED TO NAME, win10+0x2080, WAS A build96 GUESS AND IS
+ * WRONG; the channel is at win10+0x480, as cortina-ni-regs.h has said since build97.
+ * Corrected 2026-09-05: the refutation was recorded in the header and never reached
+ * the comment that made the claim.
  * Without it the L3FE cannot AXI-fetch/reorder a frame from memory -> never ingests ->
  * l3fe_rx(0xa9bc)=0.  Uses the same AXI-REO window (idx10) as the main reorder.  ★ the
  * values are SDK-derived (aal_l3fe_axi_reo_init) - flag for stock validation.
@@ -4932,26 +4937,61 @@ static void cortina_ni_rx_fbm_fill(struct cortina_ni *ni)
  * never wrote.  Without it the RMU's dequeue-side AXI transactions never complete, so
  * a CPU-bound frame reaches the QM but is never admitted (wptr=0, 0x6900=0, no drop). */
 /* Full stock axi_reo golden (tier-1 live devmem, g_ne_axi_reo base 0xf432d000):
- * THREE channel blocks - READ (0x000), WRITE (0x400), WRITE2 (0x480) - each with 7
- * non-zero words at block-relative 0x00/0x04/0x08/0x0c/0x10/0x18/0x24 (the two
- * 0xFFFFFFFF at +0x18/+0x24 are mask/valid words); every other offset resets to 0.
+ * THREE channel blocks - READ (0x000), WRITE (0x400), WRITE2/L3FE (0x480) - each with 7
+ * non-zero words at block-relative 0x00/0x04/0x08/0x0c/0x10/0x18/0x24; every other
+ * offset resets to 0.
  * Blocks 1&2 are identical bar word[0] (0x0F read vs 0x04 write); block 3 differs
  * (word[0]=0x02, word[1]=0x80000008, word[4]=0x80000009).  Our OLD init wrote only
  * 6 words with rd3@0x0c wrong (0x8000000d belongs at +0x10) and skipped block 3
  * entirely -> the RMU's dequeue-side AXI DMA never completed, so a CPU-bound frame
  * reached the QM but was NEVER admitted (0x6900=0, 0x6944=0, wptr 0x7000=0).  This
  * engine is on the SEPARATE g_ne_axi_reo window (DT idx10), invisible to every
- * NI-core-window diff - which is why all NI regs matched stock yet RX was dead. */
+ * NI-core-window diff - which is why all NI regs matched stock yet RX was dead.
+ *
+ * ★★ EVERY OFFSET IS NAMED, AND NONE OF THE NAMES IS INVENTED. Blocks 1 and 2 come
+ * from the vendor NAME->ADDRESS oracle, which covers this window with 25 entries
+ * (see cortina-ni-regs.h); block 3 is not in the oracle but THIS TREE names it, with
+ * the whole 7-register layout AND its values, as CA_NI_L3FE_AXI_REO_*.
+ *
+ * ★★ AND BLOCK 3's SEVEN VALUES WERE WRITTEN TWICE. They are also spelled, as
+ * CA_NI_L3FE_AXI_REO_*_VAL, by cortina_ni_rx_l3fe_axi_reo_init() below -- so the
+ * same seven words existed in two places, once as bare numbers here and once as
+ * named constants there. They now reference the constants, so the numbers live in
+ * ONE place. The two WRITERS are deliberately left alone: they run from different
+ * init paths at different times, and collapsing them would change WHEN the block is
+ * programmed, which is a behavioural change nothing on this bench can currently test
+ * (the power relay is dead, so there is no cold boot).
+ *
+ * ★ A TIER-3 VALUE JUST BECAME TIER-1-CONFIRMED. cortina_ni_rx_l3fe_axi_reo_init()
+ * carries "the values are SDK-derived (aal_l3fe_axi_reo_init) - flag for stock
+ * validation". This table is the tier-1 live devmem capture, and all seven AGREE
+ * exactly. That flag is answered: two independent tiers, not one. */
 static const struct { u16 off; u32 val; } cortina_ni_axi_reo_cfg[] = {
-	{ 0x000, 0x0000000F }, { 0x004, 0x8000000C }, { 0x008, 0x10000000 },
-	{ 0x00c, 0x10000000 }, { 0x010, 0x8000000D }, { 0x018, 0xFFFFFFFF },
-	{ 0x024, 0xFFFFFFFF },
-	{ 0x400, 0x00000004 }, { 0x404, 0x8000000C }, { 0x408, 0x10000000 },
-	{ 0x40c, 0x10000000 }, { 0x410, 0x8000000D }, { 0x418, 0xFFFFFFFF },
-	{ 0x424, 0xFFFFFFFF },
-	{ 0x480, 0x00000002 }, { 0x484, 0x80000008 }, { 0x488, 0x10000000 },
-	{ 0x48c, 0x10000000 }, { 0x490, 0x80000009 }, { 0x498, 0xFFFFFFFF },
-	{ 0x4a4, 0xFFFFFFFF },
+	/* READ channel: AXI ID 0x0F -> 0x0C, one remap region at 0x10000000 */
+	{ CA_NI_AXI_REO_RD_ORIG_ID,		0x0000000F },
+	{ CA_NI_AXI_REO_RD_NEW_ID,		0x8000000C },
+	{ CA_NI_AXI_REO_RD_TOP_ADDR0,		0x10000000 },
+	{ CA_NI_AXI_REO_RD_TOP_ADDR_MASK0,	0x10000000 },
+	{ CA_NI_AXI_REO_RD_NEW_ID0,		0x8000000D },
+	{ CA_NI_AXI_REO_RD_TOP_ADDR_MASK1,	0xFFFFFFFF },
+	{ CA_NI_AXI_REO_RD_TOP_ADDR_MASK2,	0xFFFFFFFF },
+	/* WRITE channel: same shape, AXI ID 0x04 instead of 0x0F */
+	{ CA_NI_AXI_REO_WR_ORIG_ID,		0x00000004 },
+	{ CA_NI_AXI_REO_WR_NEW_ID,		0x8000000C },
+	{ CA_NI_AXI_REO_WR_TOP_ADDR0,		0x10000000 },
+	{ CA_NI_AXI_REO_WR_TOP_ADDR_MASK0,	0x10000000 },
+	{ CA_NI_AXI_REO_WR_NEW_ID0,		0x8000000D },
+	{ CA_NI_AXI_REO_WR_TOP_ADDR_MASK1,	0xFFFFFFFF },
+	{ CA_NI_AXI_REO_WR_TOP_ADDR_MASK2,	0xFFFFFFFF },
+	/* WRITE2 = the L3FE read channel, AXI ID 2 -> 8. Offsets AND values from the
+	 * CA_NI_L3FE_AXI_REO_* pairs, so nothing here is a second spelling. */
+	{ CA_NI_L3FE_AXI_REO_ORIG_ID,		CA_NI_L3FE_AXI_REO_ORIG_ID_VAL },
+	{ CA_NI_L3FE_AXI_REO_NEW_ID,		CA_NI_L3FE_AXI_REO_NEW_ID_VAL },
+	{ CA_NI_L3FE_AXI_REO_TOP_ADDR,		CA_NI_L3FE_AXI_REO_TOP_ADDR_VAL },
+	{ CA_NI_L3FE_AXI_REO_TOP_ADDR_MASK,	CA_NI_L3FE_AXI_REO_TOP_ADDR_MASK_VAL },
+	{ CA_NI_L3FE_AXI_REO_NEW_ID0,		CA_NI_L3FE_AXI_REO_NEW_ID0_VAL },
+	{ CA_NI_L3FE_AXI_REO_RD18,		CA_NI_L3FE_AXI_REO_RD18_VAL },
+	{ CA_NI_L3FE_AXI_REO_RD24,		CA_NI_L3FE_AXI_REO_RD24_VAL },
 };
 
 static void cortina_ni_rx_axi_reo_init(struct cortina_ni *ni)

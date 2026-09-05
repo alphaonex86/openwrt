@@ -2055,34 +2055,19 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
  * ============================================================================
  */
 
-/* G.988 baseline message-type action codes (low 5 bits of msg[2]). */
-#define OMCI_MT_CREATE		0x04
-#define OMCI_MT_DELETE		0x06
-#define OMCI_MT_SET		0x08
-#define OMCI_MT_GET		0x09
-#define OMCI_MT_GET_ALL_ALARMS	0x0b
-#define OMCI_MT_GET_ALL_ALRM_NX	0x0c
-#define OMCI_MT_MIB_UPLOAD	0x0d
-#define OMCI_MT_MIB_UPLOAD_NX	0x0e
-#define OMCI_MT_MIB_RESET	0x0f
-/* ★★★ 0x1a, NOT 0x10 -- CORRECTED 2026-08-27, and it is a WIRE defect.
- * G.988 assigns 0x10 (16) to the ONU-autonomous ALARM and 0x1a (26) to Get
- * Next. This file said 0x10, so the driver answered alarms as if they were Get
- * Next requests and NEVER handled a real one. It surfaced only when the two
- * copies of these constants were put side by side: gpon_omci_me.h has the
- * right value and had even recorded the disagreement as "follow-up F1", which
- * nobody could act on while a second copy existed. */
-#define OMCI_MT_GET_NEXT	0x1a
-/* Config-apply / management action MTs the OLT issues after MIB-upload+HGU classification.
- * We ACK them OK (no real action needed to pass config-load) so the OLT completes provisioning. */
-#define OMCI_MT_TEST		0x12	/* 18 — ANI-G optical test */
-#define OMCI_MT_START_SW_DL	0x13	/* 19 */
-#define OMCI_MT_DOWNLOAD_SEC	0x14	/* 20 */
-#define OMCI_MT_END_SW_DL	0x15	/* 21 */
-#define OMCI_MT_ACTIVATE_SW	0x16	/* 22 */
-#define OMCI_MT_COMMIT_SW	0x17	/* 23 */
-#define OMCI_MT_SYNC_TIME	0x18	/* 24 — Synchronize Time (ONT-G) */
-#define OMCI_MT_REBOOT		0x19	/* 25 */
+/* ★★★ THE MESSAGE-TYPE CODES ARE NOT REDEFINED HERE ANY MORE (2026-09-05).
+ * This file included gpon_omci_core.h at the top AND re-declared eighteen of
+ * its twenty OMCI_MT_* codes below -- a second spelling that compiled only
+ * because the values happened to agree, checked and found identical before
+ * this deletion (18 of 20 present, none disagreeing).
+ *
+ * They did NOT always agree, and the header keeps that history where the
+ * numbering lives: GET_NEXT was 0x10 here against the core's 0x1a, so this
+ * driver answered every ONU-autonomous ALARM as if it were a Get Next and
+ * never handled a real one. It surfaced only when the two copies were put
+ * side by side. The same week, a THIRD spelling in gpon_omci_trace.c put
+ * Delete at 5 instead of 6 and every Delete the OLT sent logged as unknown.
+ * One numbering, one owner: gpon_omci_core.h. */
 
 /* G.988 result/reason codes (GET / response content byte 8). */
 #define OMCI_RC_OK		0x00

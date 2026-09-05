@@ -5,18 +5,59 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 
+#include "gpon_omci_core.h"	/* OMCI_MT_*: the ONE numbering of Table 11.2.2-1 */
 #include "gpon_omci_trace.h"
 
-/* G.988 Table 11.2.2-1.  32 entries because the message type is 5 bits. */
+/*
+ * G.988 Table 11.2.2-1.  32 entries because the message type is 5 bits.
+ *
+ * ★★★ INDEXED BY THE CORE'S OWN OMCI_MT_* NAMES, NOT BY BARE NUMBERS, AND THE
+ *   TWO SPELLINGS DISAGREED (found 2026-09-05).  This table used to write the
+ *   numbering a SECOND time, in decimal, and it said
+ *
+ *	[5] = "Delete"
+ *
+ *   while gpon_omci_core.h:80 says OMCI_MT_DELETE 0x06 -- and so does the
+ *   independent oracle (rtl9607c-oracle/omci_msg.h:90) and G.988 itself, where
+ *   5 is a deprecated type no OLT sends.  So every Delete this ONU actually
+ *   received printed as unknown, and the one code that would have printed
+ *   "Delete" is one that never arrives.  A tracer that mislabels the message
+ *   the OLT sent is worse than one that says nothing: it is read as evidence.
+ *
+ *   The differential could not see it -- its "before" half calls this same
+ *   table, so both sides were wrong together.  What finds this shape is not a
+ *   test, it is refusing to let one fact have two spellings.
+ *
+ *   ⇒ with the index written as OMCI_MT_*, a disagreement of this kind is no
+ *   longer expressible: there is one numbering and this file reads it.
+ */
 static const char *const gpon_omci_mt[32] = {
-	[4] = "Create", [5] = "Delete", [8] = "Set", [9] = "Get",
-	[11] = "Get-all-alarms", [12] = "Get-all-alarms-next",
-	[13] = "MIB-upload", [14] = "MIB-upload-next",
-	[15] = "MIB-reset", [16] = "Alarm", [17] = "AVC", [18] = "Test",
-	[19] = "Start-SW-dl", [20] = "DL-section", [21] = "End-SW-dl",
-	[22] = "Activate-SW", [23] = "Commit-SW", [24] = "Sync-time",
-	[25] = "Reboot", [26] = "Get-next", [27] = "Test-result",
-	[28] = "Get-current-data", [29] = "Set-table",
+	[OMCI_MT_CREATE]		= "Create",
+	[OMCI_MT_DELETE]		= "Delete",
+	[OMCI_MT_SET]			= "Set",
+	[OMCI_MT_GET]			= "Get",
+	[OMCI_MT_GET_ALL_ALARMS]	= "Get-all-alarms",
+	[OMCI_MT_GET_ALL_ALRM_NX]	= "Get-all-alarms-next",
+	[OMCI_MT_MIB_UPLOAD]		= "MIB-upload",
+	[OMCI_MT_MIB_UPLOAD_NX]		= "MIB-upload-next",
+	[OMCI_MT_MIB_RESET]		= "MIB-reset",
+	[OMCI_MT_ALARM]			= "Alarm",
+	[OMCI_MT_AVC]			= "AVC",
+	[OMCI_MT_TEST]			= "Test",
+	[OMCI_MT_START_SW_DL]		= "Start-SW-dl",
+	[OMCI_MT_DOWNLOAD_SEC]		= "DL-section",
+	[OMCI_MT_END_SW_DL]		= "End-SW-dl",
+	[OMCI_MT_ACTIVATE_SW]		= "Activate-SW",
+	[OMCI_MT_COMMIT_SW]		= "Commit-SW",
+	[OMCI_MT_SYNC_TIME]		= "Sync-time",
+	[OMCI_MT_REBOOT]		= "Reboot",
+	[OMCI_MT_GET_NEXT]		= "Get-next",
+	[27]				= "Test-result",
+	[28]				= "Get-current-data",
+	[29]				= "Set-table",
+	/* ⚠ 27/28/29 stay NUMERIC: the core declares no OMCI_MT_* for them, and
+	 * naming one here would be a second spelling again -- the exact defect
+	 * this change removes.  They are owed a core #define, not a local one. */
 };
 
 const char *gpon_omci_mt_name(u8 msg_type)

@@ -39,6 +39,8 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
+#include "luna_gpon_regs.h"	/* the family's luna_sw_io(): a struct hwio over the SWCORE base */
+#include "regtable.h"		/* flowcore: gpon_ind_poll() -- the ONE bounded busy-wait */
 #include "gpon_omci_core.h"	/* the responder + omci_set_mic + the AVC emitters */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log */
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
@@ -436,8 +438,19 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 /* VLAN filtering: VLAN_CTRL @ 0x13008 bit0 = VLAN_FILTERING; VLAN_INGRESS @
  * 0x13004 = per-port ingress filter. The operational config enables both + a
  * default VLAN; for flat bring-up we DISABLE them so a parsed cpu-tag's directed
- * egress is not dropped by VLAN membership checks (we have no VLAN table set up). */
-#define SW_VLAN_INGRESS		0x13004
+ * egress is not dropped by VLAN membership checks (we have no VLAN table set up).
+ *
+ * ★ SW_VLAN_INGRESS IS NO LONGER DEFINED HERE (2026-09-04).  It was, as
+ * 0x13004, while luna_eth_regs.h -- included at the top of this file -- defines
+ * the SAME name at the SAME value, so one translation unit carried the address
+ * twice.  The replacement lists were identical, so cpp said nothing (checked,
+ * not remembered: gcc -Wall -Wextra warns only once the two values DIFFER).
+ * That silence is the hazard rather than a comfort -- an edit to one spelling
+ * would have given THIS object the local value and gpon-luna.c the header's,
+ * two objects disagreeing about one register with no diagnostic anywhere.  The
+ * header is the owner: gpon-luna.c reads SW_VLAN_INGRESS from it and keeps no
+ * copy of its own, so the collapse only has one safe direction.
+ * SW_VLAN_FILTERING below has no twin in the header and stays here. */
 #define SW_VLAN_FILTERING	BIT(0)
 /* Operational value: VLAN_CTRL=0x19 (filtering + VID0/VID4095 type bits). */
 #define SW_VLAN_CTRL_VAL	0x19	/* VLAN filtering ON at init — required during ranging/config-apply for
@@ -456,7 +469,26 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 #define SW_TBL_STS		0x12004
 #define SW_TBL_WRDATA		0x12008
 #define SW_TBL_BUSY		BIT(13)
+#define SW_TBL_TRIES		1000u	/* the bound the poll below refuses at */
 #define SW_TBL_VLAN_WR(vid)	(BIT(31) | (((vid) & 0xfff) << 9) | (1u << 4) | (1u << 3) | 1u)
+/* ★ THE SAME THREE ADDRESSES ARE SPELLED THREE TIMES IN THIS ONE TRANSLATION
+ * UNIT, and that is recorded rather than repaired here.  Besides SW_TBL_* above
+ * they are L2_CMD / L2_STS / L2_WDATA in rtl9602c_l34.h (rtl9602c_l34.c is
+ * #included into this file, so both spellings are live in one object) and
+ * TBL_CTRL_OFF / TBL_STS_OFF / TBL_WRDATA_OFF in luna_gpon_regs.h.  Collapsing
+ * them onto the family header is the right end state, but that header carries
+ * NO busy-bit constant -- only a `BUSY = bit13` comment -- while the bit is
+ * spelled as code three times (here, L2_STS_BUSY, and gpon-luna.c's
+ * TBL_BUSY_BIT).  Giving the family header that constant is an edit to a file
+ * two other drivers compile, so it is owed work, named, not smuggled in behind
+ * a poll repair.
+ * ⚠ AND THE COPIES HAVE ALREADY DRIFTED: gpon-luna.c writes TWO data words
+ * (+0x0 and +0x4 = 0x7f) for the very same VLAN-1 all-ports entry this file
+ * writes with one, and never sets the CTRL bit31 this file's SW_TBL_VLAN_WR
+ * does.  rtl9602c_l34.h calls WRDATA `word0..2 @ +4`, i.e. an ARRAY -- so one
+ * of the two entry encodings is short.  Nothing in the tree settles which, no
+ * board is available to ask, and guessing would move a hardware write on the
+ * VLAN domain the whole LAN path depends on.  Left as it is, deliberately. */
 
 /* OMCI (OMCC) trap. The GTC de-encapsulates DS OMCI GEM frames and delivers them
  * to the CPU port tagged with rx-reason OMCI from the PON port; CPUTAG1CR[14:8]
@@ -771,6 +803,15 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_tx_dirty);
  * (OR-in). Without this, the bootloader-left switch state only forwarded its
  * own TFTP unicast flow and ingress never reached the CPU GMAC.
  */
+/* The per-iteration pause the core's gpon_ind_poll() injects.  The core has no
+ * clock and may not sleep, so the WAITING is the shell's to define -- and it is
+ * NOT luna_smi_pause(): that one is udelay(10) for the SMI master, and reusing
+ * it here would silently turn this 1000-try loop's 1 ms bound into 10 ms. */
+static void rtl9602c_sw_tbl_pause(void)
+{
+	udelay(1);
+}
+
 static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 {
 	if (!ep->sw)
@@ -863,13 +904,31 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	 * then lands in a VLAN the target LAN port belongs to instead of being
 	 * filtered/dropped. */
 	{
-		int p, to;
+		struct hwio io = luna_sw_io(ep->sw);
+		int p, rc;
+
 		/* 4k-table entry: untag[7:4]=0xf | mbr[3:0]=0xf (all four ports) */
 		iowrite32((0xf << 4) | 0xf, ep->sw + SW_TBL_WRDATA);
 		iowrite32(SW_TBL_VLAN_WR(SW_DEFAULT_VID), ep->sw + SW_TBL_CTRL);
-		for (to = 0; to < 1000 &&
-			    (ioread32(ep->sw + SW_TBL_STS) & SW_TBL_BUSY); to++)
-			udelay(1);
+		/* ★ THE POLL WAS HAND-ROLLED AND ITS ANSWER WAS THROWN AWAY.  It
+		 * counted to 1000 and nothing ever looked at the counter, so a
+		 * table engine that never dropped BUSY left this function walking
+		 * on to enable the VLAN function over an entry that was never
+		 * installed -- the same shape as the alloc-CAM and DS-CAM timeouts
+		 * repaired elsewhere in this tree, and the reason gpon_ind_poll()
+		 * exists at all.  The FAILURE PATH is the whole point of routing it:
+		 * the core helper cannot return success without having SEEN the bit
+		 * clear.  Note it is gpon_ind_poll() and NOT gpon_ind_go(): the
+		 * request word goes to CTRL (0x12000) and the busy bit lives in STS
+		 * (0x12004), which is the one shape gpon_ind_go() cannot express.
+		 * A failure is reported, not fatal: LAN egress degrades, and a boot
+		 * that says why beats a boot that is merely quiet. */
+		rc = gpon_ind_poll(&io, SW_TBL_STS, SW_TBL_BUSY, SW_TBL_TRIES,
+				   rtl9602c_sw_tbl_pause);
+		if (rc < 0)
+			netdev_warn(ep->ndev,
+				    "swcore VLAN 4k-table engine still BUSY after %u tries (rc=%d): default VLAN %u may not be installed, LAN egress may stay filtered\n",
+				    SW_TBL_TRIES, rc, SW_DEFAULT_VID);
 		iowrite32(0, ep->sw + SW_VLAN_PORT_ACCEPT_FRAME_TYPE);	/* accept all frame types */
 		for (p = 0; p < 4; p++)
 			iowrite32((ioread32(ep->sw + SW_VLAN_PB_VID + p * 4) & ~0xfffu) |
@@ -1329,6 +1388,89 @@ static void rtl9602c_eth_tx_fetch(struct rtl9602c_eth *ep)
 }
 
 /*
+ * ─── the steered-descriptor LAN-ring-0 publish, written ONCE ───────────────
+ *
+ * TWO netdevs put frames on LAN ring 0 through the SAME GMAC cpu-tag direct-TX
+ * descriptor: the US-OMCI shared-ring inject (rtl9602c_eth_omci_xmit_ring0)
+ * and the WAN data GEM (rtl9602c_eth_wan_xmit).  gpon0's private area is a
+ * POINTER to this same struct rtl9602c_eth, so both really do drive one ring,
+ * one lock and one doorbell -- and they were written out twice, 38 of the 87
+ * lines byte-identical, the wmb/OWN publish order among them.  That ordering is
+ * the half where a divergence is a silent corruption instead of a build error.
+ *
+ * ★ THE MECHANISM IS NOT "OMCI", AND THE NAMES SAY OTHERWISE.
+ * TXD0_OMCI_KEEP_DISLRN_PSEL and rtl9602c_omci_txd_word2()/word3() are used by
+ * the WAN DATA path too; what they encode is cpu-tag direct-TX to the PON
+ * US-NIC with a tx_dst_stream_id, and OMCI is merely one stream id (64) of two.
+ * That prefix is precisely what hid these two paths being one mechanism, so it
+ * is recorded here as a misleading name.  Renaming it reaches
+ * rtl9602c_l34_logic.h in flowcore, which this file may not edit; owed work,
+ * named rather than tidied.
+ *
+ * ★ WHAT DELIBERATELY DID *NOT* MOVE, and why each stays at the call site:
+ *   - the DESCRIPTOR CONTENT (stream id: OMCC SID 64 vs GPON_DATA_FLOW, the
+ *     two module-param overrides, and the omci_minimal test descriptor).  That
+ *     difference is the entire reason there are two callers; flattening it into
+ *     a flag would hide the one thing a reader needs to see.
+ *   - the FULL-RING POLICY.  The OMCI inject kicks the engine and re-reclaims
+ *     in a bounded spin because dropping a control frame costs an OLT
+ *     retransmit cycle; the WAN path drops at once because stalling user data
+ *     for one frame is worse.  Folding it in would also put the OMCI path's
+ *     doorbell write on the WAN path's reachable set, which is a real change to
+ *     what the hardware sees, not a refactor.
+ *   - the ERROR CONVENTION: an errno for the internal OMCI caller, and
+ *     NETDEV_TX_OK + tx_dropped for the ndo_start_xmit, which may not return an
+ *     errno to the stack.
+ *   - the STATS netdev (eth0 vs gpon0) and the OMCI post-TX probe.
+ *
+ * ★ NOT MERGED WITH rtl9602c_eth_omci_xmit() EITHER, and that is not an
+ * oversight: that one drives the DEDICATED ring (otx_ring / OTX_RING_SIZE) with
+ * its own doorbell derived to R_IO_CMD1, and its word0 carries no
+ * keep/dislrn/psel.  Different ring, different descriptor: a shared helper
+ * there would be a coincidence of shape, not of mechanism.
+ */
+
+/* The word0 base every steered descriptor on this ring carries.  D_EOR is NOT
+ * here: it is a property of the SLOT, which the caller only learns from
+ * txd_take_slot() below. */
+static inline u32 txd_word0_steered(unsigned int len)
+{
+	return D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) |
+	       TXD0_OMCI_KEEP_DISLRN_PSEL;
+}
+
+/* Claim the next LAN-ring-0 slot for @skb and describe its buffer.  Caller
+ * holds tx_lock and has ALREADY decided the ring has room -- the two callers
+ * decide that differently on purpose (see above).  The descriptor is NOT
+ * published, so the caller may still set opts2/opts3 before handing the slot to
+ * txd_publish().  Returns the slot. */
+static unsigned int txd_take_slot(struct rtl9602c_eth *ep, struct sk_buff *skb, dma_addr_t da, u32 len)
+{
+	unsigned int i = tx_slot(ep, ep->tx_head);
+
+	ep->tx_skb[i] = skb;		/* the LAN ring reclaim frees it */
+	ep->tx_buf_dma[i] = da;
+	ep->tx_buf_len[i] = len;
+	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
+	return i;
+}
+
+/* Hand slot @i to the hardware.  OWN goes into opts1 LAST and behind a barrier,
+ * because the engine may consume the descriptor the instant ownership flips;
+ * the second barrier orders that store ahead of the doorbell.  tx_fetch is the
+ * stock per-packet GO -- without it the engine parks on a sparse inject.
+ * Caller holds tx_lock. */
+static void txd_publish(struct rtl9602c_eth *ep, unsigned int i, u32 word0)
+{
+	wmb();				/* descriptor body before ownership */
+	ep->tx_ring[i].opts1 = word0 | D_OWN;	/* OWN in opts1: publish to HW */
+	wmb();
+	ep->tx_head++;
+	rtl9602c_eth_tx_fetch(ep);	/* stock per-packet TX-fetch GO (0x18001038[31]) */
+	ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | BIT(0));	/* kick LAN ring 0 */
+}
+
+/*
  * Shared-ring-0 US-OMCI transmit (omci_tx_ring==0 test path).
  *
  * Enqueue the OMCI frame onto the SAME LAN ring 0 (ep->tx_ring) the normal TX
@@ -1423,11 +1565,7 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 		ep->dbg_omci_tx_drop++;
 		return -EBUSY;
 	}
-	i = tx_slot(ep, ep->tx_head);
-	ep->tx_skb[i] = skb;		/* LAN reclaim frees it */
-	ep->tx_buf_dma[i] = da;
-	ep->tx_buf_len[i] = len;
-	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
+	i = txd_take_slot(ep, skb, da, len);
 
 	/*
 	 * word0 (opts1) = FS|LS|len|0x02240000 (keep|dislrn|cputag_psel), OWN
@@ -1450,7 +1588,7 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 	 * (RX_OK=ERR=MISS=0, rxsid[4]=0 — the exact US-OMCI symptom). The LAN TX path
 	 * sets D_TXCRC and works; only this OMCI path omitted it.
 	 */
-	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_KEEP_DISLRN_PSEL;
+	word0 = txd_word0_steered(len);
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
 
@@ -1470,14 +1608,11 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 		ep->tx_ring[i].opts2 = 0;
 		ep->tx_ring[i].opts3 = 0;
 	}
-	wmb();				/* descriptor body before ownership */
-	ep->tx_ring[i].opts1 = word0 | D_OWN;	/* OWN in opts1: publish to HW */
-	wmb();
-
+	/* Recorded BEFORE the publish, not after it as this used to be: it is a
+	 * diagnostic, and naming the slot while it is still ours is the half that
+	 * can never describe a descriptor the engine has already eaten. */
 	ep->omci_r0_last_slot = (int)i;
-	ep->tx_head++;
-	rtl9602c_eth_tx_fetch(ep);	/* stock per-packet TX-fetch GO (0x18001038[31]) — fetch the just-published OMCI descriptor */
-	ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | BIT(0));	/* kick LAN ring 0 */
+	txd_publish(ep, i, word0);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
 	if (ep->dbg_omci_tx < 30) {	/* first few only, so serial isn't flooded */
@@ -1557,30 +1692,32 @@ static netdev_tx_t rtl9602c_eth_wan_xmit(struct sk_buff *skb, struct net_device 
 		return NETDEV_TX_OK;
 	}
 	rtl9602c_eth_tx_reclaim(ep);	/* shared LAN ring 0; drop on full (DHCP retransmits) */
-	if ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1) {
+	/* ★ THE OMCI RESERVE IS HONOURED HERE TOO (2026-09-04).  This test read
+	 * TX_RING_SIZE - 1, i.e. the whole ring, while OMCI_RESV exists so that
+	 * "the sparse shared-ring OMCI inject always has room (never dropped)"
+	 * and rtl9602c_eth_xmit() stops that many slots early for exactly that
+	 * reason.  gpon0 is the OTHER producer on this ring and it is the one
+	 * that runs at line rate, so saturated WAN user data could fill the last
+	 * slots and leave the OMCI inject to its bounded kick-and-retry or a
+	 * drop -- the reserve defeated by the traffic it was reserved against,
+	 * and a dropped US OMCI is the churn-lock class of failure.  The cost is
+	 * two of 64 slots on gpon0; DHCP and TCP retransmit, the OLT's audit
+	 * loop is less forgiving. */
+	if ((ep->tx_head - ep->tx_dirty) >= TX_RING_SIZE - 1 - OMCI_RESV) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		dma_unmap_single(ep->dev, da, len, DMA_TO_DEVICE);
 		dev_kfree_skb_any(skb);
 		ndev->stats.tx_dropped++;
 		return NETDEV_TX_OK;
 	}
-	i = tx_slot(ep, ep->tx_head);
-	ep->tx_skb[i] = skb;		/* freed by the LAN ring reclaim */
-	ep->tx_buf_dma[i] = da;
-	ep->tx_buf_len[i] = len;
-	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
-	word0 = D_FS | D_LS | D_TXCRC | D_IPCS | (len & TXD_LEN_MASK) | TXD0_OMCI_KEEP_DISLRN_PSEL;
+	i = txd_take_slot(ep, skb, da, len);
+	word0 = txd_word0_steered(len);
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
 	ep->tx_ring[i].opts2 = rtl9602c_omci_txd_word2(0);	/* stock cputag|efid */
 	ep->tx_ring[i].opts3 = rtl9602c_omci_txd_word3(0, GPON_DATA_FLOW);	/* steer to the data SID */
 	ep->tx_ring[i].opts4 = 0;
-	wmb();				/* descriptor body before ownership */
-	ep->tx_ring[i].opts1 = word0 | D_OWN;
-	wmb();
-	ep->tx_head++;
-	rtl9602c_eth_tx_fetch(ep);
-	ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | BIT(0));	/* kick LAN ring 0 */
+	txd_publish(ep, i, word0);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
 	ndev->stats.tx_packets++;
@@ -2892,6 +3029,8 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
  * the US-OMCI rides (the non-register init-state the stock/ours diff proved is the gap).
  * The bootloader's switch-register accesses correspond to sw_wr(off) here.
  */
+#define SW_RDY_FOR_PATCH_TRIES	200000	/* 200 ms at 1 us a try; the bound the wait below refuses at */
+
 static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 {
 	void __iomem *sysstat = (void __iomem *)0xb8000044ul;	/* SoC SYSREG */
@@ -2899,9 +3038,23 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 
 	if (!ep->sw)
 		return;
-	/* wait for RDY_FOR_PATCH (0xB8000044 bit1) after the IP-block reset */
-	for (to = 0; to < 200000 && !(readl(sysstat) & 0x2); to++)
+	/* wait for RDY_FOR_PATCH (0xB8000044 bit1) after the IP-block reset.
+	 * ★ THE NEIGHBOUR OF THE VLAN-TABLE POLL, found auditing it (2026-09-04),
+	 * and the SAME shape: it counted and nobody read the counter, so a SoC that
+	 * never raised RDY_FOR_PATCH let the GPHY analog patch below be written into
+	 * a block that had not announced itself, silently -- and the symptom would be
+	 * a LAN port that links and does not carry, three days later.  It is NOT
+	 * routed to gpon_ind_poll(): that helper waits for a busy bit to CLEAR, this
+	 * waits for a ready bit to be SET, and inverting the core helper's contract
+	 * to reuse it here would make it lie for every other caller.  Bounded and
+	 * REPORTED instead; not fatal, because the patch is a variant fixup and the
+	 * bringup is worth attempting either way. */
+	for (to = 0; to < SW_RDY_FOR_PATCH_TRIES && !(readl(sysstat) & 0x2); to++)
 		udelay(1);
+	if (to == SW_RDY_FOR_PATCH_TRIES)
+		netdev_warn(ep->ndev,
+			    "SoC never raised RDY_FOR_PATCH after %d us: the GMAC<->switch resync below runs against a block that did not announce itself\n",
+			    SW_RDY_FOR_PATCH_TRIES);
 	/* GPHY analog patch (0x6485 variant only) through the GPHY indirect pair:
 	 * one DATA word, then the COMMAND words that place it.  The command
 	 * VALUES are left as the bootloader wrote them -- nothing in reach

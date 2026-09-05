@@ -318,6 +318,16 @@
 #define PI_RX_SID_GOOD_CNT_US		0x0203c
 #define PI_RX_SID_BAD_CNT_US		0x02054
 #define GPON_BWMAP_DATA			0x02400
+/* ★ GPON_BWMAP_DATA IS AN ARRAY OF 256 32-BIT WORDS, and gpon_proc_show() reads
+ * it as 128 captured ALLOCATIONS of two words each (named 2026-09-05).  The
+ * stride is the chipdef's: "array offset 32" (32 BITS = 4 bytes), index 0..255,
+ * identical on the RTL9602C and the RTL9603CVD.  The pairing is the consumer's
+ * own loop -- it always read "GPON_BWMAP_DATA + i * 8" and "0x02404 + i * 8",
+ * i.e. words 2i and 2i+1 -- which is a G.984.3 BWmap allocation structure
+ * (Alloc-ID, flags, SStart, SStop, CRC = 8 bytes).  Words 1..5 were spelled
+ * as 0x02404..0x02414; they are BWMAP_DATA(1)..BWMAP_DATA(5). */
+#define GPON_BWMAP_DATA_STRIDE	4u	/* bytes per word (chipdef array offset 32 bits) */
+#define BWMAP_DATA(n)		(GPON_BWMAP_DATA + (u32)(n) * GPON_BWMAP_DATA_STRIDE)
 #define GPON_GEM_DS_FRM_TIMEOUT		0x04098
 #define GPON_GTC_US_INTR_DLT		0x05000
 #define GPON_GTC_US_INTR_MASK		0x05004
@@ -343,13 +353,19 @@
  * TCONT_IDLE_BYTE_STAT[16] = 0x6c00 + 16*64 = 0x7000; the code reads 0x6c80,
  * which is 0x6c00 + 16*8. Naming the stride is what stops that arithmetic being
  * re-derived by hand a third time. */
-#define GPON_TCONT_IDLE_BYTE_STAT	0x06c00
+/* ⚠ RENAMED 2026-09-05: this was GPON_TCONT_IDLE_BYTE_STAT for one day.  The
+ * chipdef's name -- on the RTL9602C, the RTL9603CVD and the RTL9607C alike --
+ * is TCONT_IDLE_BYTE_STAT with no GPON_ prefix, and the driver comment this
+ * name was taken from spells it that way too; `bare_offset_chip_audit.py
+ * --names` reported the prefixed spelling as WRONG.  Same address, same
+ * stride, same consumers (TCONT_IDLE_STAT(n) below). */
+#define TCONT_IDLE_BYTE_STAT		0x06c00
 #define GPON_US_BYTE_STAT_STRIDE	8u	/* bytes per entry (64-bit counter) */
 /* Entry N of each array. Written once here so a caller never re-derives the
  * stride -- which is exactly how 0x7000 got written for 0x6c80. */
 #define GEM_US_STAT(n)		(GPON_GEM_US_BYTE_STAT + \
 				 (u32)(n) * GPON_US_BYTE_STAT_STRIDE)
-#define TCONT_IDLE_STAT(n)	(GPON_TCONT_IDLE_BYTE_STAT + \
+#define TCONT_IDLE_STAT(n)	(TCONT_IDLE_BYTE_STAT + \
 				 (u32)(n) * GPON_US_BYTE_STAT_STRIDE)
 #define PI_PKT_OK_CNT_DS		0x0c010
 #define PI_PKT_ERR_CNT_DS		0x0c014
@@ -436,6 +452,54 @@
 #define SWCORE_PROXY_PHY	10
 #define SW_IO_MODE_EN_9607C	0x23014u	/* 9607C: I2C_EN[13] + MDX_M_EN[10] */
 
+/* ★ THE SWCORE REGISTERS rtl9602c_datapath_tables_init() AND
+ * rtl9602c_ponmac_modeset_gpon() WROTE AS BARE HEX (named 2026-09-05).  The names
+ * are the RTL9602C chipdef's own and were already spelled in the driver's
+ * trailing comments beside each write.  luna_eth_regs.h is the natural home for
+ * SWCORE names (its SW_ prefix is the one `bare_offset_chip_audit.py --names`
+ * verifies) and moving these there is OWED; this header is the one this pass
+ * could edit.
+ * ⚠ SCH_WFQ_TKN_CTRL and LINE_RATE_2500M exist in the RTL9602C chipdef ONLY --
+ *   the RTL9603CVD names nothing at either address -- so like the function that
+ *   writes them they are RTL9602C facts, not family ones. */
+#define SW_SCH_WFQ_TKN_CTRL	0x2d89c		/* SCH_WFQ_TKN_CTRL (RTL9602C only) */
+#define SW_LINE_RATE_2500M	0x2d8b8		/* LINE_RATE_2500M  (RTL9602C only) */
+/* P_MISC is the per-port MAC misc register: ONE WORD PER SWITCH PORT, at the
+ * chip's per-port register interval.  Base 0x20004 is P_MISC in all three
+ * chipdefs (RTL9602C: "port index 0..3").  The INTERVAL is per chip and this
+ * tree already carried it twice: rtl9602c_eth.c -- "P_MISC = 0x20004 +
+ * port*0x400 (the chip's per-port register interval is 0x400 -- the old
+ * 0x20-stride wrote unrelated registers and RX_SPC never landed)" -- and
+ * luna_ponmac.c, MACPP_INTERVAL 0x100 on the RTL9603CVD/RTL9607C.  The vendor
+ * SDK states it as data: rtl9602c_macPpInfo = { 0x20000, 0x203FF, interval
+ * 0x400 } (sdk/src/hal/chipdef/chip.c), 0x100 for the 9603CVD and 9607C.  So
+ * P_MISC[2] (PON) = 0x20804 and P_MISC[3] (CPU) = 0x20c04, which is what the
+ * RTL9602C code has always written.  A LITERAL 0x20804 in a shared file would
+ * be P_MISC[8] on the other two chips -- the reason a name matters here. */
+#define SW_P_MISC		0x20004		/* P_MISC[port 0] -- the BASE is family:
+						 * the chipdefs of the RTL9602C, the
+						 * RTL9603CVD and the RTL9607C all name
+						 * 0x20004 P_MISC (checked by address). */
+/* ★★★ THE STRIDE IS NOT FAMILY, AND ITS NAME NOW SAYS SO (2026-09-05).
+ * This was `SW_MACPP_STRIDE 0x400u` in THIS header -- which the RTL9603CVD
+ * also includes -- while the comment four lines up says that chip's macPpInfo
+ * interval is 0x100. An unsuffixed name in a shared header invites exactly the
+ * write it warns against: on the 9603CVD, base + 2 * 0x400 is P_MISC[8].
+ * The tree already has the convention for this (SW_IO_MODE_EN_9607C, :453).
+ * ⚠ AND IT WAS DEFINED TWICE. rtl9602c_eth.c carried its own SW_P_MISC
+ * 0x20004 + SW_P_MISC_STRIDE 0x400u AND includes this header, so SW_P_MISC was
+ * two macros in one translation unit -- identical token sequences, therefore
+ * silent under -Wall -Wextra today and a redefinition error the day either
+ * side is edited. Two agents landed them the same hour in files that were
+ * disjoint by filename and not by content. One home, one spelling, and the
+ * arithmetic is asserted once instead of at nine call sites. */
+#define SW_MACPP_STRIDE_9602C	0x400u		/* RTL9602C macPpInfo.interval;
+						 * 0x100 on the 9603CVD/9607C */
+#define SW_P_MISC_PORT_9602C(p)	(SW_P_MISC + (p) * SW_MACPP_STRIDE_9602C)
+static_assert(SW_P_MISC_PORT_9602C(2) == 0x20804u &&
+	      SW_P_MISC_PORT_9602C(3) == 0x20C04u,
+	      "P_MISC moved: the PON (2) and CPU (3) port words are these two");
+
 #define TBL_CTRL_OFF	0x12000u
 #define TBL_STS_OFF	0x12004u	/* BUSY = bit13 */
 #define TBL_WRDATA_OFF	0x12008u
@@ -499,6 +563,15 @@
  * unrelated register and is accepted without complaint. */
 #define   GEM_US_PORT_MAP_IDX_MAX 127u
 
+/* ★ THE TWO PTI REGISTERS BESIDE THE OMCI ONE, NAMED 2026-09-05.  gpon_install_omcc()
+ * wrote them as 0x1200 / 0x1208 under a guessed description ("general DS-PTI",
+ * "eth DS-PTI").  Both vendor chipdefs (RTL9602C and RTL9603CVD, GTC block 0x70;
+ * the RTL9607C agrees) name them GPON_GTC_DS_TDM_PTI and GPON_GTC_DS_ETH_PTI,
+ * each with four fields like GPON_GTC_DS_OMCI_PTI, and `bare_offset_chip_audit.py
+ * --names` re-checks these names against the chipdefs on every run.  What the
+ * driver writes -- stock's 0x11 into all three -- is unchanged. */
+#define GPON_GTC_DS_TDM_PTI	0x1200		/* DS PTI config, TDM flows; stock O5 = 0x11 */
+#define GPON_GTC_DS_ETH_PTI	0x1208		/* DS PTI config, Ethernet flows; stock O5 = 0x11 */
 #define GPON_GTC_DS_OMCI_PTI	0x1204		/* [6:4] PTI_MASK [2:0] END_PTI */
 #define   DS_OMCI_PTI_VAL	((1u << 4) | 1u)	/* mask=1 ptn=1 -> 0x11 */
 #define GPON_GEM_DS_MC_CFG	0x4080		/* [6] BROADCAST_PASS [4] NON_MULTICAST_PASS [3] FCS_CHK_EN */

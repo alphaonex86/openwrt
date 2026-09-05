@@ -307,6 +307,37 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
 #define R_RxMRingCfg(k)	(0x1380 + (k) * 16)	/* RX multiring k config block (stock stride 16) */
 #define R_RxFDP		0x13F0	/* RX ring0 fetch-descriptor pointer (phys) */
 #define R_RxCDO		0x13F4	/* RX ring0 current-descriptor offset */
+/* ★ RX multiring k's {FDP, CDO} pair sits at +0 / +4 of its 16-byte block --
+ * the layout ring 0 has at R_RxFDP/R_RxCDO and every TX ring has at
+ * R_TxFDP/R_TxCDO, and stock's own hw_reg dump lists RxFDPk/RxCDOk per ring
+ * (dev/STOCK_GMAC_REGS.md).  Read only, by the /proc dump (2026-09-05). */
+#define R_RxMRingCDO(k)	(R_RxMRingCfg(k) + 4)	/* [RxCDO:RxRingSize] of ring k */
+static_assert(R_RxMRingCDO(1) == 0x1394 && R_RxMRingCDO(5) == 0x13d4,
+	      "the RX multiring block moved");
+/* ★ MSR: the sibling driver already names it (luna_eth.c `R_MSR 0x58`) and
+ * this file wrote it as a literal under a comment saying "MSR(0x58)" at five
+ * sites (2026-09-05).  Same name, same value; the family header is its right
+ * home, beside R_IMR, which was named the same way. */
+#define R_MSR		0x58	/* media/flow status; top byte = force flow ctl (msr_top) */
+/* ★ THE GMAC0 MAC-LEVEL MIB COUNTERS ARE ONE ARRAY: fourteen 16-bit counters
+ * packed two per 32-bit word from 0x10, in the order stock's own hw_reg dump
+ * prints them (dev/STOCK_GMAC_REGS.md: TXOKCNT RXOKCNT TXERR RXERR MISSPKT
+ * FAE TX1COL TXMCOL RXOKPHY RXOKBRD RXOKMUL TXABT TXUNDRN RDUMISSPKT).  Five
+ * anchors in this tree pin that order to addresses: 0x10 TXOK and 0x14 TXERR
+ * (the /proc dump below), 0x18 MISSPKT (luna_eth.c), 0x26 TXABT and 0x28
+ * TXUNDRN (dev/harnesses/txdma_state.py) -- six names between 0x18 and 0x26
+ * for six slots, no freedom left.  A 32-bit read at R_X returns X in [31:16]
+ * and the NEXT counter in [15:0]: the BE packing measured for IMR/ISR at 0x3c.
+ * ⚠ 0x20 and 0x24 are therefore COUNTERS, not configuration -- see the
+ * R_RXOKMUL write sites, which this naming exposed. */
+#define R_MIB16(n)	(0x10 + 2 * (n))
+#define R_TXOKCNT	R_MIB16(0)	/* word = [TXOKCNT:RXOKCNT] */
+#define R_TXERR		R_MIB16(2)	/* word = [TXERR:RXERR]     */
+#define R_MISSPKT	R_MIB16(4)	/* word = [MISSPKT:FAE]     */
+#define R_RXOKPHY	R_MIB16(8)	/* word = [RXOKPHY:RXOKBRD] */
+#define R_RXOKMUL	R_MIB16(10)	/* word = [RXOKMUL:TXABT]   */
+static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
+	      R_RXOKPHY == 0x20 && R_RXOKMUL == 0x24, "the GMAC MIB array moved");
 /* Live-stock 9602C operating values (read off a running stock ONU at O5). The
  * U-Boot value 0x400f3330 is its polled-TFTP config; the stock OS reprograms
  * IO_CMD/IO_CMD1 after the IP-block reset. Bits[3:0] of IO_CMD stay 0 here (the
@@ -398,6 +429,23 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * naming a variable the macro's own text never mentions. */
 #define SW_FORCE_P_ABLTY(ep, p)	((ep)->swm->force_ablty + ((p) << 2))
 #define SW_ABLTY_FORCE_MODE(ep, p)	((ep)->swm->ablty_force + ((p) << 2))
+/* ★ P_MISC, the per-port misc word (bit2 = RX_SPC: accept sub-64 B frames).
+ * The RTL9602C resolves a per-port register in the MACPP block
+ * [0x20000,0x203FF] as base + port * 0x400 -- dev/SDK_FACT_MAP.md ("how the
+ * silicon resolves a per-port register") and dev/harnesses/addrsim.py both
+ * record it, and it is why the old 0x20 stride in rtl9602c_sw_min_init()
+ * "wrote unrelated registers and RX_SPC never landed".  The base is P_MISC
+ * on every chipdef; the STRIDE is per chip (the RTL9603CVD's interval is
+ * 0x100, luna_ponmac.c C3_P_MISC_PON), so it stays a constant of the one
+ * chip that compiles this file and not a family #define (2026-09-05). */
+/* ★ SW_P_MISC / the stride / the port macro / the static_assert all live in
+ * luna_gpon_regs.h (included at :42), which is where the other half of this
+ * pass put them the same hour. This file defined SW_P_MISC 0x20004 a second
+ * time in the same translation unit -- identical tokens, so silent today and a
+ * redefinition error the day either side is edited -- and gave the stride a
+ * second name (SW_P_MISC_STRIDE vs SW_MACPP_STRIDE). Deleted, not re-spelled:
+ * the reasoning that lived here (base is family, stride is per-SoC, so the
+ * stride's NAME carries the chip) moved with it. */
 #define SW_SYS_LRN_LIMITNO	0x17018	/* system MAC-learn limit [10:0]; 0 = no learning */
 #define SW_DLF_ACT_TRAP2CPU	2
 /* Forced ability value: 1000M (speed[1:0]=2) + full duplex (b2) + link-up (b4) */
@@ -953,12 +1001,16 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	/* Accept short (runt) frames on the PON port (2) and CPU port (3). A DS OMCI
 	 * frame is the 48-byte G.988 baseline + headers = ~60 bytes, BELOW the 64-byte
 	 * Ethernet minimum, so the switch runt-filters it unless RX_SPC (P_MISC bit2) is
-	 * set. Stock sets RX_SPC per-port. P_MISC = 0x020004 + port*0x20; bit2 =
-	 * RX_SPC. Without it the de-encapsulated OMCI never reaches the CPU. */
-	/* P_MISC = 0x20004 + port*0x400 (the chip's per-port register interval is 0x400 —
-	 * the old 0x20-stride wrote unrelated registers and RX_SPC never landed). */
-	iowrite32(ioread32(ep->sw + 0x20804) | BIT(2), ep->sw + 0x20804); /* port 2 (PON) */
-	iowrite32(ioread32(ep->sw + 0x20C04) | BIT(2), ep->sw + 0x20C04); /* port 3 (CPU) */
+	 * set. Stock sets RX_SPC per-port. Without it the de-encapsulated OMCI never
+	 * reaches the CPU.
+	 * ★ TWO COMMENTS HERE DISAGREED ABOUT THE STRIDE (0x20 vs 0x400) while the
+	 * code read 0x400 -- the wrong one is gone, the arithmetic is the define's
+	 * (SW_P_MISC_PORT_9602C, static_assert-pinned to 0x20804 / 0x20C04) and the port
+	 * numbers are the chip table's, as SW_FORCE_P_ABLTY() above already does. */
+	iowrite32(ioread32(ep->sw + SW_P_MISC_PORT_9602C(ep->swm->pon_port)) | BIT(2),
+		  ep->sw + SW_P_MISC_PORT_9602C(ep->swm->pon_port));	/* port 2 (PON) */
+	iowrite32(ioread32(ep->sw + SW_P_MISC_PORT_9602C(ep->swm->cpu_port)) | BIT(2),
+		  ep->sw + SW_P_MISC_PORT_9602C(ep->swm->cpu_port));	/* port 3 (CPU) */
 
 	/*
 	 * Force the PON port (2) link UP for the SAME reason as the CPU port: the
@@ -2853,7 +2905,12 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 	 * after a true reset the split bit must be set by us, the per-ring
 	 * IMR0/ISR1 model the driver already uses assumes it. */
 	ep_wr(ep, R_CONFIG, 0x21000000);
-	ep_wr(ep, 0x24, 0x010c0000);		/* stock O5 */
+	/* ⚠ R_RXOKMUL IS A MIB COUNTER WORD ([RXOKMUL:TXABT]), NOT A CONFIG
+	 * REGISTER (named 2026-09-05).  0x010c0000 is the stock O5 snapshot the
+	 * full-block diff flagged -- RXOKMUL=0x010c, TXABT=0 -- a counter read as
+	 * a configuration difference.  The write is kept verbatim until its
+	 * removal is MEASURED on the board; recorded, not repaired. */
+	ep_wr(ep, R_RXOKMUL, 0x010c0000);	/* stock O5 counter snapshot */
 	/* cpu-tag ADD engine: off-then-on edge re-latches it (see open notes) */
 	rtl9602c_cpu_tag_arm(ep);
 
@@ -2879,7 +2936,7 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		ep_wr(ep, R_RRING_ROUTING1 + k * 4, 0);
 
 	/* MSR top byte: see the msr_top param note (0xf0 kills sparse TX). */
-	ep_wr(ep, 0x58, (ep_rd(ep, 0x58) & 0x00ffffff) | ((msr_top & 0xffu) << 24));
+	ep_wr(ep, R_MSR, (ep_rd(ep, R_MSR) & 0x00ffffff) | ((msr_top & 0xffu) << 24));
 	rtl9602c_eth_set_hwaddr(ep, ndev->dev_addr);	/* IDR wiped by the reset */
 	iowrite32(0xffffffff, ep->base + R_MAR0);		/* MAR0 */
 	iowrite32(0xffffffff, ep->base + R_MAR4);		/* MAR4 */
@@ -2927,7 +2984,7 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 	netdev_warn(ndev,
 		    "TX-DMA parked (head=%u dirty=%u otx=%u/%u cdo0=%u txok=%u IO_CMD=%08x ISR1=%08x): IP-block power-cycle recovery #%u\n",
 		    ep->tx_head, ep->tx_dirty, ep->otx_head, ep->otx_dirty,
-		    ioread16(ep->base + R_TxCDO(0)), ep_rd(ep, 0x10) >> 16,
+		    ioread16(ep->base + R_TxCDO(0)), ep_rd(ep, R_TXOKCNT) >> 16,
 		    ep_rd(ep, R_IO_CMD), ep_rd(ep, R_ISR1),
 		    ep->dbg_tx_recover + 1);
 
@@ -3070,8 +3127,12 @@ static void rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	iowrite32(0x00001140, ep->sw + SW_GPHY_IND_WD);	/* GPHY power up + autoneg */
 	iowrite32(0x0061a400, ep->sw + SW_GPHY_IND_CMD);
 	msleep(500);
+	/* ⚠ 0x230c4 STAYS A LITERAL: this chip's chipdef calls it SVLAN_UPLINK_PMSK,
+	 * luna_gpon_regs.h calls the same address SMI_CTRL_3, and the two never run
+	 * on one silicon -- dev/FINDING-one-address-two-blocks-smi-vs-svlan.md.
+	 * Naming it either way would make the disagreement look settled. */
 	iowrite32(0,          ep->sw + 0x230c4);	/* SVLAN uplink port */
-	iowrite32(0x003fffff, ep->sw + 0x27000);	/* port isolation */
+	iowrite32(0x003fffff, ep->sw + SW_PISO_PORT);	/* port isolation, element 0 */
 	iowrite32(0x003fffff, ep->sw + SW_PISO_PORT + 1 * SW_PISO_PORT_STRIDE);
 	/* ★ THE SAME TWO REGISTERS THIS FILE ALREADY REACHES THROUGH THE CHIP
 	 * TABLE (2026-09-04).  rtl9602c_hw_program() writes them as
@@ -3332,10 +3393,10 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	 * 0xd0 (the per-ring RX-DMA enable mask, stock=0x3f = rings 0-5) left 0, the GMAC
 	 * RX engine never DMA'd the DS-NIC-drained OMCI to any ring (filled=0 despite
 	 * PKT_OK_CNT_DS climbing). Restore stock values. */
-	ep_wr(ep, 0x24, 0x010c0000);		/* stock O5 */
+	ep_wr(ep, R_RXOKMUL, 0x010c0000);	/* stock O5 counter snapshot -- a MIB word, not config; see rtl9602c_hw_program() */
 	ep_wr(ep, R_IMR0, IMR0_TX_BITS);	/* per-ring TX-completion IRQ mask, rings 0-5 (stock 0x3f) */
 	iowrite16(IMR_RX_BITS, ep->base + R_IMR);	/* RX IRQ mask: RX_OK + RX-err + RDU (stock 0xf835) */
-	ep_wr(ep, 0x58, (ep_rd(ep, 0x58) & 0x00ffffff) |
+	ep_wr(ep, R_MSR, (ep_rd(ep, R_MSR) & 0x00ffffff) |
 			((msr_top & 0xffu) << 24));	/* MSR top byte: param (0xf0 kills sparse TX, see msr_top) */
 	iowrite32(0xffffffff, ep->base + R_MAR0);	/* MAR0: accept-all-multicast */
 	iowrite32(0xffffffff, ep->base + R_MAR4);	/* MAR4 */
@@ -3722,7 +3783,7 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 	}
 	seq_printf(m, "GMAC IO_CMD=%08x IO_CMD1=%08x MSR(0x58)=%08x\n",
 		   ep_rd(ep, R_IO_CMD), ep_rd(ep, R_IO_CMD1),
-		   ioread32(ep->base + 0x58));
+		   ep_rd(ep, R_MSR));
 	/* TX-DMA park forensics: per-ring HW fetch cursors (descriptor index
 	 * relative to TxFDP), the ring rotations, and the recovery counters.
 	 * cdo0+rot vs (dirty%64) localises a park instantly. */
@@ -3743,32 +3804,47 @@ static int rtl9602c_diag_show(struct seq_file *m, void *v)
 		   (u32)ep->rx_ring_dma);
 	/* Full GMAC config diff vs LIVE stock O5 (stock golden values in comments).
 	 * Hunting the reg that brings up the internal DS-NIC->GMAC RX link (MSR 0x58
-	 * stock=0xf0638000 vs mine=0x10638000). */
+	 * stock=0xf0638000 vs mine=0x10638000).
+	 * ⚠ NOT ALL OF THESE ARE CONFIG (named 2026-09-05): 0x10, 0x20 and 0x24 are
+	 * MIB counter words (R_TXOKCNT, R_RXOKPHY, R_RXOKMUL), so their "golden"
+	 * values are a counter snapshot.  Three words stay LITERALS because the
+	 * tree names none of them AS A WORD: 0x3c is the 32-bit [IMR:ISR] pair
+	 * whose 16-bit halves are R_IMR/R_ISR (a 32-bit read under the 16-bit
+	 * name is exactly what reg_store_width_guard.py refuses), 0x38 is the
+	 * word whose low byte is R_CMD (0x3B), and 0x5c is named by nothing. */
 	seq_printf(m, "GMACcfg 10=%08x[f:04a80457] 20=%08x[034c0003] 24=%08x[010c0000] 38=%08x[0a] 3c=%08x[f8350240]\n",
-		   ep_rd(ep, 0x10), ep_rd(ep, 0x20), ep_rd(ep, 0x24),
+		   ep_rd(ep, R_TXOKCNT), ep_rd(ep, R_RXOKPHY), ep_rd(ep, R_RXOKMUL),
 		   ep_rd(ep, 0x38), ep_rd(ep, 0x3c));
 	seq_printf(m, "GMACcfg 44=%08x[0f] 58=%08x[f0638000] 5c=%08x[04000000] d0=%08x[3f] d8=%08x[11110000]\n",
-		   ep_rd(ep, 0x44), ep_rd(ep, 0x58), ep_rd(ep, 0x5c),
-		   ep_rd(ep, 0xd0), ep_rd(ep, 0xd8));
-	/* GMAC0 MAC-level MIB counters (16-bit, BE-packed two per 32-bit word):
-	 * 0x10=[TXOK:RXOK] 0x14=[TXERR:RXERR] 0x18=[MISS:..]. DECISIVE for the OMCI MII
+		   ep_rd(ep, R_RCR), ep_rd(ep, R_MSR), ep_rd(ep, 0x5c),
+		   ep_rd(ep, R_IMR0), ep_rd(ep, R_ISR1));
+	/* GMAC0 MAC-level MIB counters (16-bit, BE-packed two per 32-bit word, the
+	 * R_MIB16 array): R_TXOKCNT=[TXOKCNT:RXOKCNT] R_TXERR=[TXERR:RXERR]
+	 * R_MISSPKT=[MISSPKT:FAE]. DECISIVE for the OMCI MII
 	 * delivery: at O5 with no LAN traffic, if rxok climbs the OMCI frame reaches the
 	 * GMAC0 MAC; if miss climbs it reached the MAC but couldn't DMA (descriptor gap);
 	 * if BOTH stay flat the DS-NIC->GMAC0 internal MII never delivered the frame. */
 	seq_printf(m, "GMAC_MIB txok=%u rxok=%u txerr=%u rxerr=%u miss=%u\n",
-		   ep_rd(ep, 0x10) >> 16, ep_rd(ep, 0x10) & 0xffff,
-		   ep_rd(ep, 0x14) >> 16, ep_rd(ep, 0x14) & 0xffff,
-		   ep_rd(ep, 0x18) >> 16);
+		   ep_rd(ep, R_TXOKCNT) >> 16, ep_rd(ep, R_TXOKCNT) & 0xffff,
+		   ep_rd(ep, R_TXERR) >> 16, ep_rd(ep, R_TXERR) & 0xffff,
+		   ep_rd(ep, R_MISSPKT) >> 16);
 	/* NIC interrupt status: per-ring RDU (Receive-Descriptor-Unavailable) bits show
-	 * a frame ARRIVED at the NIC on a ring with no posted descriptor. ISR(0x3c):
+	 * a frame ARRIVED at the NIC on a ring with no posted descriptor. The 32-bit
+	 * word at 0x3c is [IMR:ISR] (its 16-bit halves are R_IMR/R_ISR; the word
+	 * itself has no name, so the literal stays). The ISR bits, in its low half:
 	 * RDU=bit5(ring0) RDU2=bit11(r1) RDU3=bit12(r2) RDU4=bit13(r3) RDU5=bit14(r4)
 	 * RDU6=bit15(r5). If RDU2-6 set => OMCI is reaching the NIC on rings 1-5 that I
-	 * don't set up (frame dropped). RxCDO per ring shows HW fetch progress. */
-	seq_printf(m, "NIC ISR(0x3c)=%08x ISR1(0xd8)=%08x  perRingRxCDO r0=%04x r1=%04x r2=%04x r3=%04x r4=%04x r5=%04x\n",
-		   ep_rd(ep, 0x3c), ep_rd(ep, 0xd8),
-		   ep_rd(ep, 0x13f4) & 0xffff, ep_rd(ep, 0x1394) & 0xffff,
-		   ep_rd(ep, 0x13a4) & 0xffff, ep_rd(ep, 0x13b4) & 0xffff,
-		   ep_rd(ep, 0x13c4) & 0xffff, ep_rd(ep, 0x13d4) & 0xffff);
+	 * don't set up (frame dropped). RxCDO per ring shows HW fetch progress.
+	 * ★ THE CDO IS THE UPPER HALF (2026-09-05): the word at R_RxCDO is
+	 * [RxCDO:RxRingSize] (luna_eth.c's map, luna_gmac_rxcdo_pack() packs the
+	 * size into [15:4], and this file's own "0x13f6 = ring size" note), so the
+	 * old `& 0xffff` printed the RING SIZE -- a constant 0x3f00 for our 64
+	 * entries -- under the label "RxCDO".  Rings 1-5 share ring 0's layout. */
+	seq_printf(m, "NIC ISR(0x3c=[IMR:ISR])=%08x ISR1(0xd8)=%08x  perRingRxCDO r0=%04x r1=%04x r2=%04x r3=%04x r4=%04x r5=%04x\n",
+		   ep_rd(ep, 0x3c), ep_rd(ep, R_ISR1),
+		   ep_rd(ep, R_RxCDO) >> 16, ep_rd(ep, R_RxMRingCDO(1)) >> 16,
+		   ep_rd(ep, R_RxMRingCDO(2)) >> 16, ep_rd(ep, R_RxMRingCDO(3)) >> 16,
+		   ep_rd(ep, R_RxMRingCDO(4)) >> 16, ep_rd(ep, R_RxMRingCDO(5)) >> 16);
 	if (ep->sw) {
 		seq_printf(m, "SW permit(1c088)=%08x flood bc/mc/uc=%08x/%08x/%08x\n",
 			   ioread32(ep->sw + ep->swm->src_permit),

@@ -123,6 +123,39 @@
 #define   GPON_BOH_LEN		12		/* stored bytes (TOTAL_OVERHEAD_BITS(96)/8); HW extends via REPEAT */
 #define   GPON_BOH_MAX_LEN	252		/* hardware BOH_LENGTH field cap */
 
+/* ★ MOVED UP FROM THE OMCC SECTION, 2026-09-05.  gpon_proc_show() reads
+ * GEM_US_PORT_MAP[GPON_OMCC_FLOW] and the SID-64 page count, and both names
+ * were #defined ~1000 lines BELOW it, so it carried "0x6500" and a bare 64u
+ * with comments explaining why.  Nothing about the values or the guards
+ * changed; the two range static_asserts stayed where they were. */
+#define   GEM_US_PORT_MAP_STRIDE 4u		/* MUST be 4 (one 32-bit word/entry).
+						 *
+						 * The register array's declared "32" is the element
+						 * BIT width (32 bits = 4 bytes), NOT a byte stride —
+						 * identical to DS_TRAFFIC_CFG (32-bit elements,
+						 * strided at 4 above). So byte stride = 32/8 = 4 and
+						 * flow 64 lands at 0x6500.
+						 *
+						 * A 0x20 stride is a regression: it writes flow 64
+						 * to 0x6400+64*0x20 = 0x6C00, which is a DIFFERENT
+						 * register (the per-T-CONT idle-byte STAT counter),
+						 * leaving the real port-map slot 0x6500 = 0
+						 * (unmapped). With no GEM-port for the OMCC flow the
+						 * GEM-US engine cannot drain qid64's pages on the
+						 * T-CONT 16 grant: the TX bank underflows, gemus64
+						 * stays 0, and the OLT sees a silent T-CONT and
+						 * reports "Laser out" -> DEACT.
+						 *
+						 * (The old "0x6C00 reads non-zero, looks mapped"
+						 * check was a false positive: 0x6C00 is a live byte
+						 * counter, non-zero on any online ONU, and both the
+						 * write and the readback used 0x6C00 — a self-
+						 * consistent wrong offset.) */
+/* Compile-time guard: the stride must stay 4 (see above); catch any regression. */
+static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
+	      "GEM_US_PORT_MAP stride MUST be 4 (32-bit words) per chipdef array-offset 32");
+#define GPON_OMCC_FLOW		64		/* RTL9602C fixed OMCI flow/SID */
+
 /*
  * PLOAM message path (ITU-T G.984.3 management channel that drives the ONU
  * through O3..O5). This MAC is a software-PLOAM design: received downstream
@@ -4599,11 +4632,11 @@ void rtl9602c_datapath_tables_init(void)
 	pi_field(0x2190, 15, 8, 0x95);
 	sw_field(SW_METER_TB_CTRL, 7, 0, 43);			/* METER_TB_CTRL tick    */
 	sw_field(SW_METER_TB_CTRL, 15, 8, 189);
-	sw_field(0x2d89c, 0, 0, 1);			/* SCH_WFQ_TKN_CTRL      */
-	sw_field(0x2d8b8, 18, 0, 0x3ffff);		/* LINE_RATE_2500M       */
+	sw_field(SW_SCH_WFQ_TKN_CTRL, 0, 0, 1);		/* SCH_WFQ_TKN_CTRL      */
+	sw_field(SW_LINE_RATE_2500M, 18, 0, 0x3ffff);	/* LINE_RATE_2500M       */
 	sw_field(WRAP_GPHY_MISC, 0, 0, 1);			/* PATCH_PHY_DONE        */
 	sw_field(CFG_UNHIOL, 0, 0, 1);			/* CFG_UNHIOL IPG_COMP   */
-	sw_field(0x20c04, 2, 2, 1);			/* P_MISC[CPU] RX_SPC    */
+	sw_field(SW_P_MISC_PORT_9602C(3), 2, 2, 1);	/* P_MISC[CPU] RX_SPC    */
 	for (port = 0; port <= 3; port++)
 		sw_field(ACCEPT_MAX_LEN_CTRL + port * 4, 1, 0, 0x3);	/* ACCEPT_MAX_LEN */
 
@@ -4662,8 +4695,8 @@ void rtl9602c_datapath_tables_init(void)
 	sw_field(FORCE_P_ABLTY + 2 * 4, 4, 4, 1); sw_wr(ABLTY_FORCE_MODE + 2 * 4, 0xfff);
 
 	/* 5) cpu_init: TAG_AWARE AFTER the CPU port is forced link-up. */
-	sw_field(0x23030, 8, 8, 1);			/* TRAP_TAGET_INSERT_EN  */
-	sw_field(0x23030, 9, 9, 1);			/* TAG_AWARE             */
+	sw_field(SW_MAC_CPU_TAG_CTRL, 8, 8, 1);		/* TRAP_TAGET_INSERT_EN  */
+	sw_field(SW_MAC_CPU_TAG_CTRL, 9, 9, 1);		/* TAG_AWARE             */
 
 	/* 6) trap_init: RMA baseline */
 	sw_field(RMA_CFG, 2, 0, 0);
@@ -4734,8 +4767,8 @@ void rtl9602c_datapath_tables_init(void)
 	 * CONFIRMS rev-A clears it ("must turn off due to the tcont 16"). The old
 	 * "live-stock reads 0x66000, keep it set" note read the power-up default
 	 * BEFORE the rev-A clear. */
-	sw_field(0x20804, 2, 2, 1);			/* P_MISC[PON] RX_SPC    */
-	sw_field(0x20c04, 2, 2, 1);			/* P_MISC[CPU] RX_SPC    */
+	sw_field(SW_P_MISC_PORT_9602C(2), 2, 2, 1);	/* P_MISC[PON] RX_SPC    */
+	sw_field(SW_P_MISC_PORT_9602C(3), 2, 2, 1);	/* P_MISC[CPU] RX_SPC    */
 
 	pr_info("rtl9602c-gpon: datapath_tables_init done (tbl_ok=%d)\n", tbl_ok);
 }
@@ -6014,7 +6047,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * (GPON_OMCC_PHYS_QID). The 0x2130 word (SID 56's slot under this packing) is kept
 		 * alongside as the value the OLD contiguous-packing bug mistakenly wrote/read. */
 		seq_printf(s, "us_arm: media_us(0x4058)=0x%08x io0_us(0x5434)=0x%08x gemus_map64(0x6500)=0x%08x sidvld(0x2144)=0x%08x s2q(0x2138/0x2130)=0x%08x/0x%08x s2q64=%lu omcicfg(0x2154)=0x%08x\n",
-			   pi_rd(PI_MEDIA_STS_US), pi_rd(PI_IO_CMD_0_US), gpon_rd(0x6500 /* GEM_US_PORT_MAP[flow 64] = 0x6400+64*4; macros defined later in file */),
+			   pi_rd(PI_MEDIA_STS_US), pi_rd(PI_IO_CMD_0_US), gpon_rd(GPON_GEM_US_PORT_MAP + GPON_OMCC_FLOW * GEM_US_PORT_MAP_STRIDE),
 			   pi_rd(0x2144), pi_rd(0x2138), pi_rd(0x2130),
 			   pi_rd(0x2138) & 0x7fUL, pi_rd(PI_PON_OMCI_CFG));
 		/* sched64: US queue-64 (OMCI T-CONT 16) drain-side witnesses on one line.
@@ -6170,17 +6203,20 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 			seq_printf(s, "bwmap: ctrl(0x200c)=0x%08x sts(0x2010)=0x%08x[OVERFL=%lu] tcont_en=0x%08x alloc[0..2]=%08x/%08x %08x/%08x %08x/%08x\n",
 				   gpon_rd(GPON_BWMAP_CTRL), gpon_rd(GPON_BWMAP_STS),
 				   (gpon_rd(GPON_BWMAP_STS) >> 8) & 1UL, en,
-				   gpon_rd(GPON_BWMAP_DATA), gpon_rd(0x02404),
-				   gpon_rd(0x02408), gpon_rd(0x0240c),
-				   gpon_rd(0x02410), gpon_rd(0x02414));
+				   /* allocation i = words 2i, 2i+1 of the 256-word array;
+				    * word 0 is spelled as the base so the alias guard keeps
+				    * its gpon_rd() window evidence for GPON_BWMAP_DATA */
+				   gpon_rd(GPON_BWMAP_DATA), gpon_rd(BWMAP_DATA(1)),
+				   gpon_rd(BWMAP_DATA(2)), gpon_rd(BWMAP_DATA(3)),
+				   gpon_rd(BWMAP_DATA(4)), gpon_rd(BWMAP_DATA(5)));
 
 			/* 32 allocations is what the vendor's own readers walk, of
 			 * the 128 the address space holds; entries past 32 are
 			 * never exercised by any vendor code, so we do not invent a
 			 * meaning for them. */
 			for (i = 0; i < 32; i++) {
-				u32 w0 = gpon_rd(GPON_BWMAP_DATA + i * 8);
-				u32 w1 = gpon_rd(0x02404 + i * 8);
+				u32 w0 = gpon_rd(BWMAP_DATA(2 * i));	/* 8-byte allocation i */
+				u32 w1 = gpon_rd(BWMAP_DATA(2 * i + 1));
 				u8 tc, dmp[9];
 
 				if (!(w0 & BIT(23)))		/* VALID */
@@ -6209,7 +6245,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 				   nvalid);
 		}
 		/* US GTC emission breakdown: PLOAM (idx2 cpu / idx3 auto) vs GEM (idx4 byte /
-		 * idx1 dbru) + per-T-CONT-16 idle-GEM (GPON_TCONT_IDLE_BYTE_STAT[16]).
+		 * idx1 dbru) + per-T-CONT-16 idle-GEM (TCONT_IDLE_BYTE_STAT[16]).
 		 * ⚠ THIS LINE USED TO SAY "0x6c00+16*64 = 0x7000" and it was wrong: the
 		 * register map's "array offset 64" is 64 BITS, so the stride is 8 BYTES
 		 * and entry 16 is 0x6c80 -- which is what the code below has always
@@ -6269,14 +6305,14 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		{
 			/* The request word, the 0x00086000 guard and the bounded
 			 * poll are pi_sid_page_cnt() -- ONE spelling for this probe
-			 * and the SID-1 data-flow one below.  SID 64 is spelled as a
-			 * number here because GPON_OMCC_FLOW is #defined BELOW this
-			 * function; 64 == (64 & 0x7f), so the helper's mask changes
-			 * nothing.  poll= is now the rc: >= 0 is the iteration BUSY
+			 * and the SID-1 data-flow one below.  SID 64 is GPON_OMCC_FLOW
+			 * (until 2026-09-05 a bare 64u, because the name was #defined
+			 * BELOW this function; it now sits at the top of the file).
+			 * poll= is now the rc: >= 0 is the iteration BUSY
 			 * cleared at (what it always printed), < 0 is -ETIMEDOUT and
 			 * says the used/max beside it is a STALE word. */
 			u32 pc;
-			int prc = pi_sid_page_cnt(64u, &pc);
+			int prc = pi_sid_page_cnt(GPON_OMCC_FLOW, &pc);
 
 			seq_printf(s, "sidpage64: used=%u max=%u (max>0 = OMCI ENQUEUED to queue 64) [r255c=0x%08x r2564=0x%08x poll=%d]\n",
 				   pc & 0x1fff, (pc >> 16) & 0x1fff, pi_rd(0x255c), pc, prc);
@@ -6302,8 +6338,11 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 			 * printed a stale pgbank1 that read exactly like a fresh one. */
 			prc1 = pi_sid_page_cnt(GPON_DATA_FLOW, &pc1);
 			seq_printf(s, "data1: s2q[1]=%u sidvld[1]=%u usmap1(0x6404)=0x%x usbyte1(0x6808)=%u pgbank1_used=%u max=%u q32_idle(0x6c40)=%u pgpoll=%d\n",
-				   s2q1, svl1, gpon_rd(0x6404), gpon_rd(0x6808),
-				   pc1 & 0x1fff, (pc1 >> 16) & 0x1fff, gpon_rd(0x6c40),
+				   s2q1, svl1,
+				   gpon_rd(GPON_GEM_US_PORT_MAP + GPON_DATA_FLOW * GEM_US_PORT_MAP_STRIDE),
+				   gpon_rd(GEM_US_STAT(GPON_DATA_FLOW)),
+				   pc1 & 0x1fff, (pc1 >> 16) & 0x1fff,
+				   gpon_rd(TCONT_IDLE_STAT(8)),	/* T-CONT 8 = the data T-CONT (qid 32) */
 				   prc1);
 		}
 		/* CAM read-back: does the DS GEM CAM actually map gem->flow 64 at runtime?
@@ -6870,33 +6909,10 @@ static void gpon_send_key(void)
  * (offset = phys-0x1b700000); PON-IP datapath regs via pi_wr (offset =
  * phys-0x1bf00000), packed arrays -> read-modify-write.
  */
-#define   GEM_US_PORT_MAP_STRIDE 4u		/* MUST be 4 (one 32-bit word/entry).
-						 *
-						 * The register array's declared "32" is the element
-						 * BIT width (32 bits = 4 bytes), NOT a byte stride —
-						 * identical to DS_TRAFFIC_CFG (32-bit elements,
-						 * strided at 4 above). So byte stride = 32/8 = 4 and
-						 * flow 64 lands at 0x6500.
-						 *
-						 * A 0x20 stride is a regression: it writes flow 64
-						 * to 0x6400+64*0x20 = 0x6C00, which is a DIFFERENT
-						 * register (the per-T-CONT idle-byte STAT counter),
-						 * leaving the real port-map slot 0x6500 = 0
-						 * (unmapped). With no GEM-port for the OMCC flow the
-						 * GEM-US engine cannot drain qid64's pages on the
-						 * T-CONT 16 grant: the TX bank underflows, gemus64
-						 * stays 0, and the OLT sees a silent T-CONT and
-						 * reports "Laser out" -> DEACT.
-						 *
-						 * (The old "0x6C00 reads non-zero, looks mapped"
-						 * check was a false positive: 0x6C00 is a live byte
-						 * counter, non-zero on any online ONU, and both the
-						 * write and the readback used 0x6C00 — a self-
-						 * consistent wrong offset.) */
-/* Compile-time guard: the stride must stay 4 (see above); catch any regression. */
-static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
-	      "GEM_US_PORT_MAP stride MUST be 4 (32-bit words) per chipdef array-offset 32");
-#define GPON_OMCC_FLOW		64		/* RTL9602C fixed OMCI flow/SID */
+/* GEM_US_PORT_MAP_STRIDE and GPON_OMCC_FLOW are #defined at the TOP of this
+ * file since 2026-09-05 (after the luna_gpon_regs.h include): gpon_proc_show()
+ * sits ABOVE this section and read GEM_US_PORT_MAP[GPON_OMCC_FLOW] as a bare
+ * 0x6500 for as long as the two names were only visible below it. */
 /* Both flows this driver stamps into the US port map must be INSIDE it.  The
  * same predicate the Cortina shell uses, so one family cannot drift into a
  * private idea of what "in range" means; count is 1 because Luna stamps single
@@ -6996,8 +7012,8 @@ static void rtl9602c_ponmac_modeset_gpon(void)
 	}
 
 	/* (3) PON-port(2) + CPU-port(3) RX_SPC: accept the sub-64B OMCI frame. */
-	sw_field(0x20804, 2, 2, 1);
-	sw_field(0x20c04, 2, 2, 1);
+	sw_field(SW_P_MISC_PORT_9602C(2), 2, 2, 1);
+	sw_field(SW_P_MISC_PORT_9602C(3), 2, 2, 1);
 
 	/* (4) [risky, separately gated] SerDes RE-COMMIT — stock re-runs the SDS mode
 	 * cycle inside the same GPON mode-set window so the SerDes commit and the US-NIC SID latch share one
@@ -7065,10 +7081,12 @@ static int gpon_install_omcc(u16 gem)
 	/* A live online stock ONU sets the ADJACENT DS-PTI registers too — 0x1200 and
 	 * 0x1208 both = 0x11, same as the OMCI PTI 0x1204. My driver set only 0x1204 and
 	 * the DS de-encap/reassembly produced NOTHING (DS SRAM flat, PKT_OK_DS=0, no OMCI
-	 * to the CPU). 0x1200 is the GENERAL DS-PTI / frame-boundary config the reassembly
-	 * engine needs for ANY flow; 0x1208 = the eth-PTI. Set both to stock's 0x11. */
-	gpon_wr(0x1200, DS_OMCI_PTI_VAL);	/* general DS-PTI (stock O5 = 0x11) */
-	gpon_wr(0x1208, DS_OMCI_PTI_VAL);	/* eth DS-PTI (stock O5 = 0x11)     */
+	 * to the CPU). The chipdefs name them: 0x1200 is GPON_GTC_DS_TDM_PTI and 0x1208
+	 * GPON_GTC_DS_ETH_PTI (the earlier "general DS-PTI" reading of 0x1200 was a
+	 * guess; the observed effect -- reassembly needs all three -- stands). Set both
+	 * to stock's 0x11. */
+	gpon_wr(GPON_GTC_DS_TDM_PTI, DS_OMCI_PTI_VAL);	/* stock O5 = 0x11 */
+	gpon_wr(GPON_GTC_DS_ETH_PTI, DS_OMCI_PTI_VAL);	/* stock O5 = 0x11 */
 
 	/* GEM DS pass config: WITHOUT NON_MULTICAST_PASS (bit4) the GTC drops every
 	 * unicast downstream GEM frame BEFORE de-encapsulation — including OMCI, which
@@ -7090,8 +7108,8 @@ static int gpon_install_omcc(u16 gem)
 	 * (as done before) CLEARS OMCI_TR_MODE — and with OMCI transparent mode off the
 	 * DS GEM de-assembler does not pass OMCI frames, so the GEM-DS MISC counters
 	 * (UC_RX/OMCI_RX) stay 0 and no OMCI ever reaches the CPU. Field-write only. */
-	gpon_field(0x4098, 8, 8, 1);		/* OMCI_TR_MODE = 1 (stock reset default) */
-	gpon_field(0x4098, 4, 0, 16);		/* ASSM_TIMEOUT_FRM = 16 frames */
+	gpon_field(GPON_GEM_DS_FRM_TIMEOUT, 8, 8, 1);	/* OMCI_TR_MODE = 1 (stock reset default) */
+	gpon_field(GPON_GEM_DS_FRM_TIMEOUT, 4, 0, 16);	/* ASSM_TIMEOUT_FRM = 16 frames */
 
 	/* US GEM-port map for flow 64 (the OMCC): stamp the OLT-assigned GEM Port-ID into
 	 * GEM_US_PORT_MAP[64] = 0x6500 (base 0x6400 + 64*4). STRIDE is 4 (32-bit words), the
@@ -7198,10 +7216,10 @@ static int gpon_install_omcc(u16 gem)
 	 * leaving the framer parked on operational grants (idle16=0, gemus64=0). */
 	if (o5_sstart) {
 		gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_UNLOCK);
-		gpon_field(0x5200, 0, 0, 1);	/* US_PROC_MODE.AUTO_PROC_SSTART = 1 */
+		gpon_field(GPON_GTC_US_PROC_MODE, 0, 0, 1);	/* US_PROC_MODE.AUTO_PROC_SSTART = 1 */
 		gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_LOCK);
 		pr_info("rtl9602c-gpon: O5 re-asserted AUTO_PROC_SSTART (0x5200 bit0=%u)\n",
-			gpon_rd(0x5200) & 1u);
+			gpon_rd(GPON_GTC_US_PROC_MODE) & 1u);
 	}
 
 	pr_info("rtl9602c-gpon: OMCC installed gem=%u flow=%u (compl %d)\n",

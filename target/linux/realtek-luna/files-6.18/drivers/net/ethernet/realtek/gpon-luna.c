@@ -6209,8 +6209,13 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 				   nvalid);
 		}
 		/* US GTC emission breakdown: PLOAM (idx2 cpu / idx3 auto) vs GEM (idx4 byte /
-		 * idx1 dbru) + per-T-CONT-16 idle-GEM (TCONT_IDLE_BYTE_STAT[16] = 0x6c00+16*64
-		 * = 0x7000). The decisive signature for "OLT deactivates ~42s, no OMCI": cpu>0
+		 * idx1 dbru) + per-T-CONT-16 idle-GEM (GPON_TCONT_IDLE_BYTE_STAT[16]).
+		 * ⚠ THIS LINE USED TO SAY "0x6c00+16*64 = 0x7000" and it was wrong: the
+		 * register map's "array offset 64" is 64 BITS, so the stride is 8 BYTES
+		 * and entry 16 is 0x6c80 -- which is what the code below has always
+		 * read. The comment three lines down already explained the trap. The
+		 * stride is a named constant now so nobody derives it a third time.
+		 * The decisive signature for "OLT deactivates ~42s, no OMCI": cpu>0
 		 * (ACKs egress) but gem_byte=0 AND idle16=0 (no US GEM fills the grants). */
 		/* OMCC US-emission detector. TCONT_IDLE_BYTE_STAT array base 0x6c00, stride 8
 		 * BYTES (register-map "array offset 64"=64 BITS), 64-bit/entry: T-CONT 16 (OMCC) =
@@ -6221,8 +6226,10 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		seq_printf(s, "us_gtc: ploam_cpu=%u ploam_auto=%u | gem_byte=%u gem_dbru=%u | idle16=%u/%u idle8=%u gemus64=%u/%u gem2=%u(0x6810) | us_cfg=0x%04x pti=0x%08x\n",
 			   gpon_us_misc_cnt(2), gpon_us_misc_cnt(3),
 			   gpon_us_misc_cnt(4), gpon_us_misc_cnt(1),
-			   gpon_rd(0x6c80), gpon_rd(0x6c84), gpon_rd(0x6c40),
-			   gpon_rd(0x6a00), gpon_rd(0x6a04), gpon_rd(0x6810),
+			   gpon_rd(TCONT_IDLE_STAT(16)), gpon_rd(TCONT_IDLE_STAT(16) + 4),
+			   gpon_rd(TCONT_IDLE_STAT(8)),
+			   gpon_rd(GEM_US_STAT(64)), gpon_rd(GEM_US_STAT(64) + 4),
+			   gpon_rd(GEM_US_STAT(2)),
 			   gpon_rd(GPON_GTC_US_CFG), gpon_rd(GPON_GEM_US_PTI_CFG));
 		/* GEM_US_BYTE_STAT full scan (base 0x6800, stride 8): which flow does the
 		 * port-2 OMCI actually land on? Non-zero on flow!=64 => SID-stamp/SID2QID
@@ -8562,7 +8569,8 @@ static void gpon_fsm_handle(const u8 *m)
 			pr_info("rtl9602c-gpon: EVT t=%u DEACT(0x05) onu=%u | dsrx64=%u pirx=%u omcirx=%u | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
 				gpon_fsm_ticks, gpon_fsm_onu_id,
 				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
-				gpon_us_misc_cnt(2), gpon_us_misc_cnt(4), gpon_rd(0x6a00), gpon_rd(0x6c80));
+				gpon_us_misc_cnt(2), gpon_us_misc_cnt(4),
+				gpon_rd(GEM_US_STAT(64)), gpon_rd(TCONT_IDLE_STAT(16)));
 			gpon_fsm_onu_id = 0xff;
 			/* FULL reset to O1 — mirror the SN-reprovision path (≈line 3068).
 			 * Previously only the SW onu-id/key were cleared, leaving the
@@ -8994,7 +9002,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		u32 dsc = pi_rd(0x02158);
 
 		if ((dsc & 0x1fffu) > 0 && ((dsc >> 16) & 0x1fffu) == 0 &&
-		    gpon_rd(0x06a00) == 0)
+		    gpon_rd(GEM_US_STAT(64)) == 0)
 			gpon_us_feed_rearm_light();
 	}
 
@@ -9169,7 +9177,8 @@ static void gpon_fsm_poll(struct timer_list *t)
 			gpon_fsm_ticks, gpon_last_ds_type, gpon_fsm_onu_id,
 			gpon_rd(GPON_GTC_DS_ONU_ID_STATUS) & 0xf, gpon_rd(GPON_GTC_US_EQD),
 			gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
-			gpon_us_misc_cnt(2), gpon_us_misc_cnt(4), gpon_rd(0x6a00), gpon_rd(0x6c80));
+			gpon_us_misc_cnt(2), gpon_us_misc_cnt(4),
+			gpon_rd(GEM_US_STAT(64)), gpon_rd(TCONT_IDLE_STAT(16)));
 	/* US-OMCI EGRESS STALL LOCALIZER (SAFE reads only — sw_rd/gpon_rd, NO pi_rd and
 	 * NO cross-driver accessor; both were the suspected hang sources). Diagnosis:
 	 * the US OMCI is queued to qid64 but gemus64 (0x6a00) stays 0 (no OMCC GEM

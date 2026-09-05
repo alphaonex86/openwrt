@@ -332,6 +332,25 @@
 #define GPON_GEM_US_PWR_SAV_CFG	0x06024
 #define GPON_GEM_US_EOB_MERGE	0x06260
 #define GPON_GEM_US_BYTE_STAT		0x06800
+/* ★ THE TWO US EMISSION COUNTER ARRAYS, NAMED 2026-09-05. Both were reached by
+ * bare hex from gpon-luna.c (0x6a00, 0x6c80, 0x6c40, 0x6810...) while their
+ * BASE and STRIDE were spelled only in a driver comment. The names and the
+ * arithmetic are the tree's own (gpon-luna.c:6215-6218): "TCONT_IDLE_BYTE_STAT
+ * array base 0x6c00, stride 8 BYTES (register-map 'array offset 64' = 64 BITS),
+ * 64-bit/entry" and "GEM_US_BYTE_STAT base 0x6800, stride 8". Nothing invented.
+ * ⚠ THE STRIDE IS 8 BYTES AND THE REGISTER MAP SAYS 64: the map counts BITS.
+ * A comment three lines above the consumer read that 64 as bytes and computed
+ * TCONT_IDLE_BYTE_STAT[16] = 0x6c00 + 16*64 = 0x7000; the code reads 0x6c80,
+ * which is 0x6c00 + 16*8. Naming the stride is what stops that arithmetic being
+ * re-derived by hand a third time. */
+#define GPON_TCONT_IDLE_BYTE_STAT	0x06c00
+#define GPON_US_BYTE_STAT_STRIDE	8u	/* bytes per entry (64-bit counter) */
+/* Entry N of each array. Written once here so a caller never re-derives the
+ * stride -- which is exactly how 0x7000 got written for 0x6c80. */
+#define GEM_US_STAT(n)		(GPON_GEM_US_BYTE_STAT + \
+				 (u32)(n) * GPON_US_BYTE_STAT_STRIDE)
+#define TCONT_IDLE_STAT(n)	(GPON_TCONT_IDLE_BYTE_STAT + \
+				 (u32)(n) * GPON_US_BYTE_STAT_STRIDE)
 #define PI_PKT_OK_CNT_DS		0x0c010
 #define PI_PKT_ERR_CNT_DS		0x0c014
 #define PI_PKT_MISS_CNT_DS		0x0c018

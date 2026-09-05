@@ -2096,19 +2096,6 @@ static int bosa_write_reg(u16 reg, u8 val)
 }
 
 /* Single-bit read-modify-write of a BOSA register. */
-static void bosa_set_bit(u16 reg, u8 bit, int set)
-{
-	int r = bosa_read_reg(reg);
-
-	if (r < 0)
-		return;
-	if (set)
-		r |= (1u << bit);
-	else
-		r &= ~(1u << bit);
-	bosa_write_reg(reg, r);
-}
-
 /* Masked field read-modify-write: val is the field value, placed at the mask's
  * low bit. */
 static void bosa_set_field(u16 reg, u8 mask, u8 val)
@@ -2120,6 +2107,15 @@ static void bosa_set_field(u16 reg, u8 mask, u8 val)
 		return;
 	shift = __ffs(mask);
 	bosa_write_reg(reg, (r & ~mask) | ((val << shift) & mask));
+}
+
+/* One bit is a one-bit FIELD.  Every caller passes bit 0..7, so the mask fits
+ * the u8 bosa_set_field takes, and (r & ~m) | ((set << bit) & m) computes the
+ * same bytes the open-coded or/and-not did -- checked over all 97 call sites
+ * before this became a wrapper (2026-09-04). */
+static void bosa_set_bit(u16 reg, u8 bit, int set)
+{
+	bosa_set_field(reg, (u8)(1u << bit), set ? 1 : 0);
 }
 
 /* Read a masked field, right-justified. Returns 0 on I2C error. */
@@ -8890,9 +8886,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 15, 8, 0xff);
 		gpon_field(GPON_GTC_US_ONU_ID, 15, 8, 0xff);
 		if (cdr_reseat_on_reactivate) {
-			sw_field(WSDS_DIG_1D, 16, 16, 0);
-			udelay(500);
-			sw_field(WSDS_DIG_1D, 16, 16, 1);
+			gpon_cdr_reseat();
 			schedule_work(&gpon_cdr_reset_work);
 		}
 		gpon_fsm_set_state(1);
@@ -8968,9 +8962,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 				gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 15, 8, 0xff);
 				gpon_field(GPON_GTC_US_ONU_ID, 15, 8, 0xff);
 				if (cdr_reseat_on_reactivate) {
-					sw_field(WSDS_DIG_1D, 16, 16, 0);
-					udelay(500);
-					sw_field(WSDS_DIG_1D, 16, 16, 1);
+					gpon_cdr_reseat();
 					schedule_work(&gpon_cdr_reset_work);
 				}
 				gpon_fsm_set_state(1);
@@ -9081,9 +9073,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * ModeV1 TX config — that is removed; this toggles only the reset-B. */
 	if (gpon_fsm_state >= 3 && gpon_fsm_onu_id == 0xff &&
 	    (gpon_fsm_ticks % 200) == 0) {
-		sw_field(WSDS_DIG_1D, 16, 16, 0);
-		udelay(500);
-		sw_field(WSDS_DIG_1D, 16, 16, 1);
+		gpon_cdr_reseat();
 		gpon_sds_synced++;
 	}
 	/* While unregistered in O3, re-offer our Serial_Number_ONU ~twice a second

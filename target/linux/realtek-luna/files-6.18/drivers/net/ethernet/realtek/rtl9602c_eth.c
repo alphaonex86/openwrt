@@ -2673,6 +2673,43 @@ static void rtl9602c_hw_stop(struct rtl9602c_eth *ep)
  * rotation (TxFDP -> first pending slot). Values are the LIVE-STOCK operating
  * set, not U-Boot's polled config.
  */
+/*
+ * Re-latch the cpu-tag engine, GMAC side then SWITCH side.
+ *
+ * ★ IT WAS WRITTEN TWICE, VERBATIM (2026-09-04) -- once in rtl9602c_hw_program()
+ * and once in the gmac_reset=0 half of rtl9602c_eth_open().  Every write, every
+ * value, every barrier and the order were identical; only the surrounding prose
+ * differed, and the three flow-control thresholds were each spelled twice.  A
+ * corrected threshold would have reached whichever bring-up path its author
+ * happened to be reading.
+ *
+ * OFF->ON edge on BOTH sides: TAG_AWARE re-arms the CPU-port HSB cpu-tag parser,
+ * and a straight write can leave it half-armed so it ignores the descriptor's
+ * PSEL/PON_SID -- the cpu-tagged US OMCI then falls through to L2 flood instead
+ * of PSEL direct-TX to the PON/US-NIC.  Clear-then-set forces a re-sample.
+ */
+static void rtl9602c_cpu_tag_arm(struct rtl9602c_eth *ep)
+{
+	ep_wr(ep, R_CPUTAGCR, 0x00000000u);	/* OFF first: re-latches the ADD engine */
+	wmb();					/* the clear must land before the re-arm edge */
+	ep_wr(ep, R_CPUTAGCR, 0x901eff04u);	/* ON: post-init stock value */
+	ep_wr(ep, R_CPUTAG1CR,
+	      CPUTAG1_OMCI_SID(RTL9602C_OMCC_SID) | CPUTAG1_LOW);	/* = 0x4002 (live stock) */
+
+	if (!ep->sw)
+		return;
+	/* OFF->ON edge on the SWITCH CPU-port cpu-tag PARSER, mirroring the GMAC
+	 * re-latch above. */
+	iowrite32(0, ep->sw + SW_MAC_CPU_TAG_CTRL);
+	wmb();					/* clear must land before the re-arm edge */
+	iowrite32(sw_tagaware, ep->sw + SW_MAC_CPU_TAG_CTRL);
+	/* aux flow-control thresholds, live-stock, NAMED from the chip's own
+	 * chipdef (2026-08-29) */
+	iowrite32(0x00400034, ep->sw + SW_FC_P_LO_TH);
+	iowrite32(0x00f000ea, ep->sw + SW_FC_P_FCOFF_HI_TH);
+	iowrite32(0x00400034, ep->sw + SW_FC_P_FCOFF_LO_TH);
+}
+
 static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 {
 	struct net_device *ndev = ep->ndev;
@@ -2691,25 +2728,7 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 	ep_wr(ep, R_CONFIG, 0x21000000);
 	ep_wr(ep, 0x24, 0x010c0000);		/* stock O5 */
 	/* cpu-tag ADD engine: off-then-on edge re-latches it (see open notes) */
-	ep_wr(ep, R_CPUTAGCR, 0x00000000u);
-	wmb();
-	ep_wr(ep, R_CPUTAGCR, 0x901eff04u);
-	ep_wr(ep, R_CPUTAG1CR, CPUTAG1_OMCI_SID(RTL9602C_OMCC_SID) | CPUTAG1_LOW);	/* = 0x4002 (live-stock ref ONU devmem) */
-	/* SWITCH side of the cpu-tag engine (param: 0 = plain-LAN-safe). */
-	if (ep->sw) {
-		/* OFF->ON edge re-latches the SWITCH CPU-port cpu-tag PARSER, mirroring the
-		 * GMAC CPUTAGCR re-latch above. Behavioral note: TAG_AWARE
-		 * re-arms the CPU-port HSB cpu-tag parser; a straight write can leave the parser
-		 * half-armed so it ignores the descriptor's PSEL/PON_SID and the cpu-tagged US
-		 * OMCI falls through to L2 flood instead of PSEL direct-TX to the PON/US-NIC.
-		 * Clear-then-set forces the parser to re-sample TAG_AWARE/TRAP_INSERT. */
-		iowrite32(0, ep->sw + SW_MAC_CPU_TAG_CTRL);
-		wmb();					/* clear must land before the re-arm edge */
-		iowrite32(sw_tagaware, ep->sw + SW_MAC_CPU_TAG_CTRL);
-		iowrite32(0x00400034, ep->sw + SW_FC_P_LO_TH);
-		iowrite32(0x00f000ea, ep->sw + SW_FC_P_FCOFF_HI_TH);
-		iowrite32(0x00400034, ep->sw + SW_FC_P_FCOFF_LO_TH);
-	}
+	rtl9602c_cpu_tag_arm(ep);
 
 	/* Ring pointers, programmed while IO_CMD==0 (stock order; CDO is
 	 * writable only in this stopped state). */
@@ -3162,36 +3181,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	 * register read (serial-pasted mmap reader on the stock ONU, 2026-06-11) shows
 	 * CPUTAG1CR = 0x4002, i.e. bit1 IS set on this chip. Restoring it (the bare 0x4000
 	 * was a 9607C->9602C port regression). SID is fixed (== GPON flow 64), latch before O5. */
-	ep_wr(ep, R_CPUTAGCR, 0x00000000u);	/* OFF first — re-latches the cpu-tag ADD engine */
-	wmb();					/* the clear must land before the re-arm edge */
-	ep_wr(ep, R_CPUTAGCR, 0x901eff04u);	/* ON: re-latches the TX cpu-tag ADD (post-init stock value) */
-	ep_wr(ep, R_CPUTAG1CR, CPUTAG1_OMCI_SID(RTL9602C_OMCC_SID) | CPUTAG1_LOW);	/* = 0x4002 (live-stock ref ONU devmem) */
-	/* Arm the SWITCH cpu-tag engine (CPU-port tag-aware + insert mode + aux) here,
-	 * BEFORE R_IO_CMD enables TX — mainline rtl8365mb arms the cpu-tag engine before
-	 * the TX/forwarding path; doing it later (in sw_min_init, post-TX-enable) left
-	 * port-3 ingress unable to parse the cpu-tagged US OMCI. Latching the full
-	 * cpu-tag engine (GMAC CPUTAGCR/CPUTAG1CR above + switch MAC_CPU_TAG_CTRL/TAG_AWARE
-	 * + aux here) before the TX engine comes up mirrors mainline ordering.
-	 * MAC_CPU_TAG_CTRL = 0x300 (TAG_AWARE bit9 + TRAP_TARGET_INSERT_EN bit8): the
-	 * switch PARSES the cpu-tag on CPU-port ingress so a CPU TX frame is steered by
-	 * the tag (stream-id for the OMCC US OMCI) instead of L2-DA-flooded. Aux regs
-	 * (live-stock, and NAMED from the chip's own chipdef 2026-08-29):
-	 * FC_P_LO_TH=0x00400034, FC_P_FCOFF_HI_TH=0x00f000ea,
-	 * FC_P_FCOFF_LO_TH=0x00400034. */
-	if (ep->sw) {
-		/* OFF->ON edge re-latches the SWITCH CPU-port cpu-tag PARSER, mirroring the
-		 * GMAC CPUTAGCR re-latch above. Behavioral note: TAG_AWARE
-		 * re-arms the CPU-port HSB cpu-tag parser; a straight write can leave the parser
-		 * half-armed so it ignores the descriptor's PSEL/PON_SID and the cpu-tagged US
-		 * OMCI falls through to L2 flood instead of PSEL direct-TX to the PON/US-NIC.
-		 * Clear-then-set forces the parser to re-sample TAG_AWARE/TRAP_INSERT. */
-		iowrite32(0, ep->sw + SW_MAC_CPU_TAG_CTRL);
-		wmb();					/* clear must land before the re-arm edge */
-		iowrite32(sw_tagaware, ep->sw + SW_MAC_CPU_TAG_CTRL);
-		iowrite32(0x00400034, ep->sw + SW_FC_P_LO_TH);
-		iowrite32(0x00f000ea, ep->sw + SW_FC_P_FCOFF_HI_TH);
-		iowrite32(0x00400034, ep->sw + SW_FC_P_FCOFF_LO_TH);
-	}
+	rtl9602c_cpu_tag_arm(ep);
 	/* GMAC config regs that a LIVE stock ONU at O5 SETS but my driver left at 0 /
 	 * masked wrong — found by full block diff. The earlier masking of MSR(0x58) down
 	 * to 0x10638000 was the bug: it CLEARED bits 31/30 that stock keeps set

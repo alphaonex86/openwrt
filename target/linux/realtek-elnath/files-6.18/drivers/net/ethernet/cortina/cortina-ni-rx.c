@@ -1963,9 +1963,30 @@ static int cortina_ni_rx_ind_read(struct cortina_ni *ni, u32 access_reg, unsigne
  * emitted a ratelimited warning naming the register and the index, so the 0 is
  * never silent.
  *
- * 0 is not a sentinel and cannot be: a table word may legitimately be 0.  What
- * the change buys is that a failure can no longer LOOK like data from a
- * neighbouring entry.
+ * ★★ THE TREE HAS TWO SENTINELS AND BOTH ARE DELIBERATE (2026-09-04).  This
+ * file already ships the other one:
+ * cortina_ni_rx_mib_read() returns ~0u on a stuck access, and its ethtool row
+ * says why -- "so a broken instrument is visible instead of reading as a silent
+ * zero" (cortina-ni-ethtool.c, CA_ST_PORT_MIB; CA_ST_PHY_LINK argues the same
+ * for ~0ULL).  Flattening the two would silently pick a side, so the difference
+ * survives and each reader states its choice:
+ *
+ *   0      -- HERE, and at every diagnostic reader (dev_info / seq_printf).
+ *             The value is printed next to a label naming the register, and
+ *             the ratelimited warn lands in the same log, so the reader has
+ *             the context to tell a failure from a datum.
+ *   ~0u    -- the values EXPORTED as bare numbers (ethtool -S), which arrive
+ *             with no label and no log beside them.  ONE site needs this, and
+ *             it spells its own two-line check rather than take a sentinel
+ *             parameter here: cortina_ni_rx_cb_port_free_word() below says
+ *             why.  ⚠ DO NOT "tidy" that site into this helper -- doing so
+ *             substitutes 0 for a stuck read of a free-buffer count, and 0 is
+ *             the alarming value that count can legitimately hold.
+ *
+ * 0 is not a sentinel and cannot be: a table word may legitimately be 0 (a
+ * free-buffer count of 0 is itself an alarming, meaningful value, which is why
+ * the exported reader must not use it).  What the rc check buys everywhere is
+ * that a failure can no longer LOOK like data from a neighbouring entry.
  *
  * ⚠ ONE WORD ONLY, and that is a deliberate limit.  Several entries here span
  * DATA0..DATA3 from a SINGLE latch; converting just the first word of such a
@@ -2279,17 +2300,21 @@ static void cortina_ni_rx_arb_deepq_init(struct cortina_ni *ni)
 	 * PDPID_MAP[0x32]=0x08 -> deep_q=1 -> deep-buffer -> RMU0.  Readback ONLY (no
 	 * write) so the boot confirms REDIR_LDPID[0x19] is no longer forced to CPU.
 	 */
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_REDIR_LDPID_ACCESS, CA_NI_RX_L3LAN_LDPID);
 	dev_info(ni->dev,
 		 "arb-deepq: REDIR_LDPID[0x19] data=0x%08x (redirect REMOVED; want NOT rdir_en|0x%x)\n",
-		 readl(ni_base(ni) + CA_NI_L2FE_REDIR_LDPID_DATA), CA_NI_RX_CPU_LDPID);
+		 cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_REDIR_LDPID_ACCESS,
+					 CA_NI_RX_L3LAN_LDPID,
+					 CA_NI_L2FE_REDIR_LDPID_DATA),
+		 CA_NI_RX_CPU_LDPID);
 
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS, CA_NI_RX_QM_REDIR_LDPID);
-	d0 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	d0 = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+				     CA_NI_RX_QM_REDIR_LDPID,
+				     CA_NI_L2FE_PDPID_MAP_DATA) &
 	     CA_NI_L2FE_PDPID_MAP_PDPID;
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-			       CA_NI_L2FE_PDPID_IDX_DBUF | CA_NI_RX_QM_REDIR_LDPID);
-	d1 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	d1 = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+				     CA_NI_L2FE_PDPID_IDX_DBUF |
+				     CA_NI_RX_QM_REDIR_LDPID,
+				     CA_NI_L2FE_PDPID_MAP_DATA) &
 	     CA_NI_L2FE_PDPID_MAP_PDPID;
 	dev_info(ni->dev,
 		 "arb-deepq: base LAN->CPU: PDPID_MAP[0x32]{dbuf0}=0x%x {dbuf1}=0x%x arb_ctrl=0x%08x (want both 0x%x=CPU); DFT_FWD set to 0x%04x\n",
@@ -2394,10 +2419,11 @@ static void __maybe_unused cortina_ni_rx_mc_flood_init(struct cortina_ni *ni)
 	cortina_ni_rx_settle();
 
 	/* pollable read-back for the boot log */
-	cortina_ni_rx_ind_read(ni, CA_NI_NI_MCE_INDX_ACCESS, CA_NI_RX_FLOOD_MCGID);
 	dev_emerg(ni->dev, "MCFLOOD 5 (survived): mcgid=%u mc_vec.lo=0x%08x\n",
 		  CA_NI_RX_FLOOD_MCGID,
-		  readl(ni_base(ni) + CA_NI_NI_MCE_INDX_DATA0));
+		  cortina_ni_rx_ind_entry(ni, CA_NI_NI_MCE_INDX_ACCESS,
+					  CA_NI_RX_FLOOD_MCGID,
+					  CA_NI_NI_MCE_INDX_DATA0));
 }
 
 /*
@@ -2458,10 +2484,11 @@ static void cortina_ni_rx_mc_group_init(struct cortina_ni *ni)
 						CA_NI_RX_CPU_LDPID + k);	/* 0x10 + k */
 			cortina_ni_rx_settle();
 		}
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS, CA_NI_RX_L3LAN_LDPID);
 		dev_info(ni->dev,
 			 "tbl@0x1634 (ex-\"MC_FIB\", stock-match): [0x19]=0x%08x (want 0x0b); [0x10..0x1b] set\n",
-			 readl(ni_base(ni) + CA_NI_L2FE_NKPOL_MAP_DATA));
+			 cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS,
+						 CA_NI_RX_L3LAN_LDPID,
+						 CA_NI_L2FE_NKPOL_MAP_DATA));
 	}
 
 	/* readback via the INDIRECT read protocol (ACCESS=idx|GO, poll, then the entry
@@ -3281,8 +3308,8 @@ static void cortina_ni_rx_deepq_thrsh_read(struct cortina_ni *ni, unsigned int i
 					   u32 *dq, u32 *cb1, u32 *cb0)
 {
 	mutex_lock(&cortina_ni_deepq_lock);
-	cortina_ni_rx_ind_read(ni, CA_NI_L2TM_DQSCH_VOQ_THRSH_ACCESS, idx);
-	*dq = readl(ni_base(ni) + CA_NI_L2TM_DQSCH_VOQ_THRSH_DATA);
+	*dq = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_DQSCH_VOQ_THRSH_ACCESS, idx,
+				      CA_NI_L2TM_DQSCH_VOQ_THRSH_DATA);
 	cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_VOQ_THRSH_ACCESS, idx);
 	*cb1 = readl(ni_base(ni) + CA_NI_L2TM_CB_VOQ_THRSH_DATA1);
 	*cb0 = readl(ni_base(ni) + CA_NI_L2TM_CB_VOQ_THRSH_DATA0);
@@ -5066,14 +5093,6 @@ static void cortina_ni_rx_gphy_cal_save(struct cortina_ni *ni)
 				      cortina_ni_rx_gphy_cal_off[i]);
 }
 
-static void cortina_ni_rx_gphy_intf_rst_pulse(struct cortina_ni *ni)
-{
-	writel(CA_NI_HV_INTF_RST_GPHY(CA_NI_RX_PORT),
-	       ni_base(ni) + CA_NI_HV_INTF_RST);
-	usleep_range(1000, 1500);	/* stock: 1 ms */
-	writel(0, ni_base(ni) + CA_NI_HV_INTF_RST);
-}
-
 /*
  * Force the GPHY-wrapper enables to the stock golden steady state (EN0 =
  * 0xFF000000, EN1 = 0x1001).  EN1 bit12 (patch_phy_done) is the GPHY->port-MAC
@@ -5091,65 +5110,36 @@ static void cortina_ni_rx_wrap_establish(struct cortina_ni *ni)
 	writel(CA_NI_GPHY_WRAP_EN1_VAL, wrap + CA_NI_GPHY_WRAP_EN1);
 }
 
-/* the stock reinit sequence, port 0 only (order verified in the shipped ko;
- * every step is a plain register write - nothing here can hang) */
-static void cortina_ni_rx_gphy_reinit(struct cortina_ni *ni)
-{
-	void __iomem *gphy = cortina_ni_rx_gphy(ni);
-	void __iomem *wrap = ni->win[CA_NI_WIN_GPHY_WRAP];
-	u32 val;
-	int i;
-
-	if (!gphy)
-		return;
-
-	/* serialize against phylib's MDIO polling of the same GPHY */
-	mutex_lock(&ni->mii->mdio_lock);
-
-	cortina_ni_rx_gphy_intf_rst_pulse(ni);
-
-	/* re-enable the GPHY uC patch/self-check */
-	val = readl(gphy + CA_NI_GPHY_PATCH_EN);
-	writel(val | CA_NI_GPHY_PATCH_EN_BIT, gphy + CA_NI_GPHY_PATCH_EN);
-
-	/* wrapper interface toggle (ko-only step, absent in the SDK C) */
-	if (wrap) {
-		val = readl(wrap + CA_NI_GPHY_WRAP_EN1);
-		writel(val & ~CA_NI_GPHY_WRAP_EN1_IF(CA_NI_RX_PORT),
-		       wrap + CA_NI_GPHY_WRAP_EN1);
-		writel(val | CA_NI_GPHY_WRAP_EN1_IF(CA_NI_RX_PORT),
-		       wrap + CA_NI_GPHY_WRAP_EN1);
-	}
-
-	cortina_ni_rx_gphy_intf_rst_pulse(ni);
-	msleep(200);			/* stock: 200 ms settle */
-
-	/* restore the probe-time calibration snapshot (register file only;
-	 * the DSP-SRAM mirror is uC-patch-specific, see cortina-ni-regs.h) */
-	for (i = 0; i < CA_NI_RX_GPHY_CAL_REGS; i++)
-		writel(ni->rx->gphy_cal[CA_NI_RX_PORT][i],
-		       gphy + cortina_ni_rx_gphy_cal_off[i]);
-
-	/* power the PHY back up + release the page-0xa46 hold bit */
-	val = readl(gphy + CA_NI_GPHY_BMCR);
-	writel(val & ~CA_NI_GPHY_BMCR_PDOWN, gphy + CA_NI_GPHY_BMCR);
-	val = readl(gphy + CA_NI_GPHY_HOLD);
-	writel(val & ~CA_NI_GPHY_HOLD_BIT, gphy + CA_NI_GPHY_HOLD);
-
-	/* land on the stock steady wrapper state (EN1 = 0x1001, per-port toggle
-	 * cleared, patch_phy_done re-set) so RX resumes after the reinit */
-	cortina_ni_rx_wrap_establish(ni);
-
-	mutex_unlock(&ni->mii->mdio_lock);
-}
-
 /* ★ Per-port GPHY<->MAC interface establishment (Fable RE 2026-07-22): the
  * vendor per-port INTF_RST + EN1_IF-edge + 200ms-settle sequence that connects
- * GPHY <port> to its MAC AFTER the port's SRAM bank is patched.  gphy_reinit
- * above does this for CA_NI_RX_PORT=0 ONLY - so a cabled port other than 0 (this
- * rig: port 3) LINKS but never delivers a frame into the L2FE, because its
- * MAC-side GMII sync is left at the pre-patch state.  EN1_IF(port) is an
- * edge/strobe (not a resting level), pulsed here between the two INTF_RSTs. */
+ * GPHY <port> to its MAC AFTER the port's SRAM bank is patched.  A cabled port
+ * other than 0 (this rig: port 3) LINKS but never delivers a frame into the
+ * L2FE without it, because its MAC-side GMII sync is left at the pre-patch
+ * state.  EN1_IF(port) is an edge/strobe (not a resting level), pulsed here
+ * between the two INTF_RSTs.
+ *
+ * ★★ THIS IS ALSO THE STOCK FAULT-RECOVERY REINIT (merged 2026-09-04).  The
+ * same sequence was written twice: cortina_ni_rx_gphy_reinit() sat just above
+ * and hard-coded CA_NI_RX_PORT, hiding index 0 inside an accessor
+ * (cortina_ni_rx_gphy() = win[GPHY] + CA_NI_GPHY_BANK(CA_NI_RX_PORT), and
+ * CA_NI_RX_PORT is 0, so its base WAS bank 0).  Proven identical before the
+ * merge as an ORDERED sequence of 20 device-visible effects - both INTF_RST
+ * pulses, both usleep_range(1000,1500), the PATCH_EN set, the EN1_IF edge, the
+ * msleep(200), the 7-register cal restore, BMCR PDOWN, HOLD release,
+ * wrap_establish and the mdio_lock pair - not merely the same register set.
+ * (extract_parity.py compares statement TEXT, so it cannot judge this one: a
+ * parameterisation necessarily renames `gphy`->`bank` and CA_NI_RX_PORT->port.)
+ *
+ * Two things the merge ADDS on the recovery path, both off the bus: the
+ * !ni->mii / port-range guard (unreachable from that caller - ni->mii is set in
+ * probe before the worker is ever scheduled, and 0 < CA_NI_GPHY_COUNT), and one
+ * extra dev_info per fault recovery beside the caller's own two lines.
+ *
+ * NOT merged, deliberately: the two 4-port `for (p = 0; p < CA_NI_GPHY_COUNT;
+ * p++)` loops below (in the recovery worker and in link_up).  They are NOT two
+ * homes for one idea - they run back-to-back in the same tick, and folding
+ * their !intf_done early-out into a shared helper would silently delete four
+ * establish passes and ~800 ms of settle. */
 static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
 					      unsigned int port)
 {
@@ -5223,7 +5213,9 @@ static void cortina_ni_rx_recovery_work(struct work_struct *work)
 		dev_warn(ni->dev,
 			 "GPHY port %d fault latch 0x%04x - reinit (#%llu)\n",
 			 CA_NI_RX_PORT, fault, rx->recoveries + 1);
-		cortina_ni_rx_gphy_reinit(ni);
+		/* the stock port-0 reinit IS gphy_intf_establish(port 0); see the
+		 * merge note on that function.  It logs a line of its own. */
+		cortina_ni_rx_gphy_intf_establish(ni, CA_NI_RX_PORT);
 		rx->recoveries++;
 		dev_info(ni->dev, "GPHY port %d reinit done (latch now 0x%04x)\n",
 			 CA_NI_RX_PORT, cortina_ni_rx_gphy_fault(ni));
@@ -5680,7 +5672,23 @@ u32 cortina_ni_rx_cb_port_free_word(struct cortina_ni *ni, unsigned int port)
 {
 	if (!ni_base(ni))
 		return 0;
-	cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_PORT_FREECNT_ACCESS, port);
+	/* ~0u, NOT 0, on a stuck indirect access.  This word leaves the driver as
+	 * a bare ethtool -S number with no label beside it, and its two immediate
+	 * neighbours in that table already chose the visible sentinel for exactly
+	 * this reason (CA_ST_PORT_MIB -> cortina_ni_rx_mib_read's ~0u,
+	 * CA_ST_PHY_LINK -> ~0ULL).  0 would be worse here than anywhere else in
+	 * the file: a free-buffer count of 0 is itself a meaningful, alarming
+	 * value -- the wedge signature is "pages held while the free pool reads
+	 * 0" -- so a failed read must not be able to forge it.  (!ni_base keeps
+	 * returning 0 to match how every other CA_ST_* case answers "no window".)
+	 *
+	 * ⚠ THIS IS THE ONE LATCH-AND-READ THAT MAY NOT BECOME
+	 * cortina_ni_rx_ind_entry(): that owner substitutes 0, which is exactly
+	 * the value this counter must never forge.  The two lines below are not
+	 * a leftover copy -- they are the other sentinel, kept visible.  If the
+	 * owner ever gains a sentinel argument, this site is its first caller. */
+	if (cortina_ni_rx_ind_read(ni, CA_NI_L2TM_CB_PORT_FREECNT_ACCESS, port))
+		return ~0u;
 	return readl(ni_base(ni) + CA_NI_L2TM_CB_PORT_FREECNT_DATA);
 }
 
@@ -6047,16 +6055,16 @@ static void rx_dump_fwd_chain(struct seq_file *m, struct cortina_ni *ni,
 	if (!cortina_ni_rx_ind_read(ni, CA_NI_PLE_DFT_FWD_ACCESS, addr))
 		dft = readl(ni_base(ni) + CA_NI_PLE_DFT_FWD_DATA);
 
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-			       CA_NI_RX_CPU_LDPID);
-	pdpid = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	pdpid = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+					CA_NI_RX_CPU_LDPID,
+					CA_NI_L2FE_PDPID_MAP_DATA) &
 		CA_NI_L2FE_PDPID_MAP_PDPID;
 
 	/* PDPID_MAP[0x19] (L3_LAN classifier output): must read QM(0x08)
 	 * after our remap so my-MAC/ARP frames reach the RMU, not ES8. */
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-			       CA_NI_RX_L3LAN_LDPID);
-	p19 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	p19 = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+				      CA_NI_RX_L3LAN_LDPID,
+				      CA_NI_L2FE_PDPID_MAP_DATA) &
 	      CA_NI_L2FE_PDPID_MAP_PDPID;
 
 	/* PDPID_MAP[0x18] (L3_WAN): the HW-L3 DS ingress admission - a PON
@@ -6066,9 +6074,9 @@ static void rx_dump_fwd_chain(struct seq_file *m, struct cortina_ni *ni,
 	{
 		u32 p18;
 
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-				       CA_NI_RX_L3WAN_LDPID);
-		p18 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+		p18 = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+					      CA_NI_RX_L3WAN_LDPID,
+					      CA_NI_L2FE_PDPID_MAP_DATA) &
 		      CA_NI_L2FE_PDPID_MAP_PDPID;
 		seq_printf(m, "fwd-chain: pdpid[0x18]=0x%x (L3_WAN; stock 0x0a = L3FE WAN ingress; 0 = DS never enters L3FE)\n",
 			   p18);
@@ -6107,25 +6115,23 @@ static void rx_dump_dft_fwd_and_rmu(struct seq_file *m, struct cortina_ni *ni)
 	/* verify the VLAN check-id map is programmed (the CPU-RX-dead fix) */
 	v = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_CHKID_MAP_ACCESS,
 					     0x10, CA_NI_L2FE_CHKID_MAP_DATA);
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_CHKID_MAP_ACCESS, 0x19);
 	seq_printf(m, "  chkid[CPU_0]=%u(want 8) chkid[L3_LAN]=%u(want 15)\n",
-		   v, readl(ni_base(ni) + CA_NI_L2FE_CHKID_MAP_DATA));
+		   v, cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_CHKID_MAP_ACCESS,
+					      0x19, CA_NI_L2FE_CHKID_MAP_DATA));
 
 	/* ★ 2026-07-15: real MC_FIB is @0x1644 and STOCK KEEPS IT EMPTY (no
 	 * flood-to-CPU).  Dump it (want all 0) plus the 0x1634 table build70
 	 * misread as MC_FIB (want stock's 0F 04 0F 09 .. values). */
 	seq_puts(m, "mc_fib@0x1644 [0x10..0x1b] D2:");
-	for (i = 0x10; i <= 0x1b; i++) {
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_MC_FIB_ACCESS, i);
+	for (i = 0x10; i <= 0x1b; i++)
 		seq_printf(m, " [0x%x]=0x%08x", i,
-			   readl(ni_base(ni) + CA_NI_L2FE_MC_FIB_DATA2));
-	}
+			   cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_MC_FIB_ACCESS, i,
+						   CA_NI_L2FE_MC_FIB_DATA2));
 	seq_puts(m, "  (want all 0 = stock EMPTY)\ntbl@0x1634 [0x10..0x1b]:");
-	for (i = 0x10; i <= 0x1b; i++) {
-		cortina_ni_rx_ind_read(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS, i);
+	for (i = 0x10; i <= 0x1b; i++)
 		seq_printf(m, " [0x%x]=0x%08x", i,
-			   readl(ni_base(ni) + CA_NI_L2FE_NKPOL_MAP_DATA));
-	}
+			   cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS, i,
+						   CA_NI_L2FE_NKPOL_MAP_DATA));
 	seq_printf(m, "  (want stock 0f 04 0f 09 0f 05 0f 0a 0f 0b 0f 0c; arb_ctrl0x1600=0x%08x want 0x89c71c82; dq_tmport0x212c=0x%08x want 0x76543210)\n",
 		   readl(ni_base(ni) + CA_NI_L2FE_ARB_CTRL),
 		   readl(ni_base(ni) + CA_NI_L2TM_BM_DQ_TO_TM_PORT_MAP));
@@ -6243,13 +6249,14 @@ static void rx_dump_l2fe_arbitration(struct seq_file *m, struct cortina_ni *ni)
 
 	portdbuf = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_ARB_PORT_DBUF_ACCESS,
 					     0, CA_NI_L2FE_ARB_PORT_DBUF_DATA);
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-			       CA_NI_RX_REDIR_LDPID);
-	pd0 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	pd0 = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+				      CA_NI_RX_REDIR_LDPID,
+				      CA_NI_L2FE_PDPID_MAP_DATA) &
 	      CA_NI_L2FE_PDPID_MAP_PDPID;
-	cortina_ni_rx_ind_read(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
-			       CA_NI_L2FE_PDPID_IDX_DBUF | CA_NI_RX_REDIR_LDPID);
-	pd1 = readl(ni_base(ni) + CA_NI_L2FE_PDPID_MAP_DATA) &
+	pd1 = cortina_ni_rx_ind_entry(ni, CA_NI_L2FE_PDPID_MAP_ACCESS,
+				      CA_NI_L2FE_PDPID_IDX_DBUF |
+				      CA_NI_RX_REDIR_LDPID,
+				      CA_NI_L2FE_PDPID_MAP_DATA) &
 	      CA_NI_L2FE_PDPID_MAP_PDPID;
 	bmhdr = cortina_ni_rx_ind_entry(ni, CA_NI_L2TM_BM_PKT_MEM_ACCESS,
 					     0, CA_NI_L2TM_BM_PKT_MEM_DATA7);
@@ -6268,12 +6275,10 @@ static void rx_dump_l2fe_arbitration(struct seq_file *m, struct cortina_ni *ni)
 		u32 fd[4];
 		unsigned int k;
 
-		for (k = 0; k < 4; k++) {
-			cortina_ni_rx_ind_read(ni,
-				CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, k);
-			fd[k] = readl(ni_base(ni) +
-				      CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
-		}
+		for (k = 0; k < 4; k++)
+			fd[k] = cortina_ni_rx_ind_entry(ni,
+					CA_NI_L2FE_ARB_FLOW_DBUF_ACCESS, k,
+					CA_NI_L2FE_ARB_FLOW_DBUF_DATA);
 		seq_printf(m,
 			   "flow-dbuf[0..3]@0x165c=0x%08x 0x%08x 0x%08x 0x%08x (want all 0 = stock; 0x0f = deep_q regression)\n",
 			   fd[0], fd[1], fd[2], fd[3]);

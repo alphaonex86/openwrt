@@ -2253,6 +2253,161 @@ static int cg_tbl_op(struct cortina_gpon *cg, u32 access_reg, u32 cmd)
 }
 
 /*
+ * ONE read-modify-write of a T-CONT CAM entry, for every site that has one.
+ *
+ * ★ IT WAS SPELLED THREE TIMES (2026-09-04).  cg_tcont_unbind(),
+ * cg_omcc_tcont_bind() and cg_data_try_install()'s GPON_GEM_US_BIND_TCONT arm
+ * each carried the identical skeleton -- cg_tbl_op(ACCESS, alloc) ->
+ * readl(DATA) -> clear some bits, set some bits -> writel(DATA) ->
+ * cg_tbl_op(ACCESS, CG_TBL_WR | alloc) -- with nothing between the read and the
+ * write at any of them.  A census of CG_REG_TCONT_DATA over the whole cortina/
+ * directory finds exactly those three read/write pairs and no fourth site.
+ *
+ * The three differed ONLY in the two bit masks, which is why they compose into
+ * (@clr, @set) with no loss:
+ *   unbind      clr = OMCI_EN|PLOAM_EN|INDEX_MASK  set = 0
+ *   OMCC bind   clr = INDEX_MASK                   set = OMCI_EN|PLOAM_EN
+ *   data bind   clr = INDEX_MASK                   set = INDEX(data)|OMCI_EN|PLOAM_EN
+ *
+ * ★ WHY (clr, set) AND NOT THE CORE'S FIELD-SHAPED hwio_rmw().  flowcore/hwio.h
+ * writes ONE contiguous field [msb:lsb].  Two of the three sites SET bits they
+ * do not CLEAR, and for these particular masks a field form over [6:0] happens
+ * to land the same word -- but that is an accident of these three values, not a
+ * property of the register, and it stops being true the first time a site
+ * clears a bit it does not set.  (clr, set) is the shape that stays correct.
+ *
+ * ★ WHY THE READ CANNOT BE DROPPED, unlike its DS-GEM sibling.  cg_ds_gem_set()
+ * passes the WHOLE data word with no readl, because DS_GEM_DATA is fully owned
+ * by this driver.  Only bits [6:0] of TCONT_DATA are documented (ploam_en[0],
+ * omci_en[1], index[6:2] -- see CG_REG_TCONT_DATA), and all three sites
+ * preserved everything above them by reading first.  Copying the DS-GEM shape
+ * here would silently zero whatever the hardware keeps in [31:7].
+ *
+ * ★ WHY THIS IS NOT PROMOTED TO THE CORE.  The core's CAM owner
+ * (gpon_gtc_cam_xact/_read/_write, flowcore/regtable.h) is a DIFFERENT hardware
+ * block: OP_MODE WRITE/READ/CLEAN plus OP_REQ/OP_COMPL/OP_HIT, bounded at
+ * GPON_GTC_CAM_TRIES = 1000 with a CALLER-SUPPLIED @delay_us (time is an
+ * explicit input in that tier), addressed through struct hwio.  This CAM is go[31]/rbw[30],
+ * CG_TBL_TRIES = 10000, and an undelayed spin.  As cg_go_poll() says, this
+ * driver has no hwio seam yet; when it gets one, promoting this becomes a call
+ * and not a rewrite -- a separate job, gated on that seam.
+ *
+ * @alloc is masked to its 12 on-wire bits here because that is the width of the
+ * ACCESS register's alloc_id[11:0] field, and the mask itself is the core's
+ * G.984.3 one.  Callers that need the masked value for their own logging or
+ * shadow state mask it themselves; doing it twice is idempotent.
+ *
+ * @who, when non-NULL, names the caller in a per-phase ratelimited warning.
+ * ★ THIS IS A failure-path DIFFERENCE AND IT IS CARRIED, NOT FLATTENED: only
+ * cg_omcc_tcont_bind() distinguishes a read timeout from a write timeout, and a
+ * single -ETIMEDOUT cannot say which half failed.  The two silent callers are
+ * not blind either -- cg_tbl_op_at() already logs "indirect access +0x%04x cmd
+ * 0x%08x timed out", and @cmd carries CG_TBL_WR, so the half survives there.
+ * (The two ratelimit buckets are now per-HELPER rather than per-caller.  That
+ * is not a change today because exactly one caller passes a label; a second one
+ * would start sharing them, which is the moment to give it its own.)
+ *
+ * Return: 0, or -ETIMEDOUT when either half never released GO.  ★ The failure
+ * path is the whole point of reporting at all: a stuck transaction must stop
+ * the caller from acting on stale DATA.
+ */
+static int cg_tcont_cam_rmw(struct cortina_gpon *cg, u32 alloc,
+			    u32 clr, u32 set, const char *who)
+{
+	u32 d;
+
+	alloc = gpon_gem_us_alloc_id(alloc);
+	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc)) {
+		if (who)
+			dev_warn_ratelimited(cg->dev,
+				"%s: T-CONT read access timed out for alloc %u - bind NOT complete\n",
+				who, alloc);
+		return -ETIMEDOUT;
+	}
+	d = readl(cg->mac + CG_REG_TCONT_DATA);
+	d &= ~clr;
+	d |= set;
+	writel(d, cg->mac + CG_REG_TCONT_DATA);
+	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc)) {
+		if (who)
+			dev_warn_ratelimited(cg->dev,
+				"%s: T-CONT write access timed out for alloc %u - bind NOT complete\n",
+				who, alloc);
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+/*
+ * Stamp ONE upstream GEM Port-ID into every slot of a DECLARED slot run.
+ *
+ * ★ IT WAS SPELLED TWICE (2026-09-04): cg_omcc_gem_bind() walked
+ * cg_us_omcc_slots and cg_data_try_install() walked cg_us_data_slots (or the
+ * ride range), and per slot BOTH did exactly cg_tbl_op(ACCESS, idx) ->
+ * readl(DATA) -> replace id[11:0] -> writel(DATA) -> cg_tbl_op(ACCESS,
+ * CG_TBL_WR | idx).  The only differences were the range object, the Port-ID
+ * source variable, and how the caller reported a timeout; all three are
+ * parameters now.  A census of CG_REG_US_PORT_DATA over the tree finds six
+ * lines -- the #define plus five accesses -- all of them in this file, and no
+ * third stamping loop anywhere.
+ *
+ * ★ WHAT IS DELIBERATELY *NOT* MERGED IN.  cg_data_teardown()'s loop looks like
+ * a third copy and is not one: it writes the WHOLE register
+ * (GPON_GEM_US_PORT_NONE) with no read, and its own comment declares that
+ * asymmetry pre-existing and deliberate.  Folding it in would either add a read
+ * the teardown never did or drop the read the install needs.
+ *
+ * ★ WHY THIS IS NOT THE CORE'S gpon_gtc_us_gem_stamp().  That owner
+ * (flowcore/regtable.h) writes a DIRECT, STRIDED ARRAY --
+ * hwio_wr(io, r->gem_us_port_map + flow * r->gem_us_port_stride, port_id) --
+ * which is what Luna's GTC has.  This block is an INDIRECT ACCESS/DATA
+ * transaction behind a GO handshake (CG_REG_US_PORT_ACCESS go[31]/rbw[30],
+ * CG_REG_US_PORT_DATA), polled through cg_tbl_op.  The two merely LOOK alike;
+ * they are different hardware, and the declared-slot-range comment on
+ * cg_us_omcc_slots is this tree already saying so in words.  What IS shared is
+ * the vocabulary: struct gpon_gem_us_range, gpon_gem_us_index() and the 12-bit
+ * GPON_GEM_US_PORT_MASK all come from the core.
+ *
+ * @who, when non-NULL, names the caller in a per-slot ratelimited warning --
+ * the failure-path difference between the two sites, carried rather than
+ * flattened.  The NULL caller is not blind: cg_tbl_op_at() logs the offset and
+ * the composed cmd, which carries both the slot index and CG_TBL_WR.  As above,
+ * the ratelimit buckets are per-helper; only one caller labels today.
+ *
+ * Return: 0, or -ETIMEDOUT on the first slot whose access never released GO.
+ */
+static int cg_us_gem_stamp_range(struct cortina_gpon *cg,
+				 const struct gpon_gem_us_range *r,
+				 u32 gem, const char *who)
+{
+	u32 n;
+
+	for (n = 0; n < r->count; n++) {
+		u32 idx = gpon_gem_us_index(r, n);
+		u32 d;
+
+		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx)) {
+			if (who)
+				dev_warn_ratelimited(cg->dev,
+					"%s: us-gem slot %u read access timed out - bind NOT complete\n",
+					who, n);
+			return -ETIMEDOUT;
+		}
+		d = readl(cg->mac + CG_REG_US_PORT_DATA);
+		d = (d & ~GPON_GEM_US_PORT_MASK) | gpon_gem_us_port_id(gem);
+		writel(d, cg->mac + CG_REG_US_PORT_DATA);
+		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, CG_TBL_WR | idx)) {
+			if (who)
+				dev_warn_ratelimited(cg->dev,
+					"%s: us-gem slot %u write access timed out - bind NOT complete\n",
+					who, n);
+			return -ETIMEDOUT;
+		}
+	}
+	return 0;
+}
+
+/*
  * Invalidate a stale T-CONT CAM entry: RMW-clear omci_en + ploam_en and zero
  * the hw-T-CONT index for alloc-id `alloc` (vendor aal_gpon_tcont_set with
  * en=0).  Read-modify-write so unrelated bits are preserved.  Called when a
@@ -2269,15 +2424,15 @@ static int cg_tbl_op(struct cortina_gpon *cg, u32 access_reg, u32 cmd)
  */
 static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
 {
-	u32 d;
-
-	alloc &= 0xfff;
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc))
-		return -ETIMEDOUT;
-	d = readl(cg->mac + CG_REG_TCONT_DATA);
-	d &= ~(CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN | CG_TCONT_INDEX_MASK);
-	writel(d, cg->mac + CG_REG_TCONT_DATA);
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc))
+	/* masked HERE too, not only inside the helper: the dev_info below prints
+	 * this value, and it printed the MASKED one before the extraction. */
+	alloc = gpon_gem_us_alloc_id(alloc);
+	if (cg_tcont_cam_rmw(cg, alloc,
+			     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN |
+			     CG_TCONT_INDEX_MASK,	/* clear */
+			     0,				/* set nothing */
+			     NULL))			/* both callers dev_err on the
+							 * failure themselves */
 		return -ETIMEDOUT;
 	dev_info(cg->dev, "T-CONT CAM[alloc %u] invalidated (stale)\n", alloc);
 	return 0;
@@ -2307,9 +2462,10 @@ static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
 static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 {
 	u16 old = cg->omcc_alloc;
-	u32 d;
 
-	alloc_id &= 0xfff;
+	/* masked HERE too: alloc_id is printed, warned on and stored in the
+	 * shadow below, and all of those saw the MASKED value before. */
+	alloc_id = gpon_gem_us_alloc_id(alloc_id);
 	/* `old != 0` used to stand in for "previously bound", which is wrong for
 	 * the legal ONU-ID 0: a real 0 -> N reassignment then left CAM entry 0
 	 * live and able to burst into the reassigned grant slot.  The explicit
@@ -2324,22 +2480,14 @@ static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 			"T-CONT CAM[alloc %u] could NOT be invalidated; it stays armed and may burst into the slot reassigned to alloc %u\n",
 			old, alloc_id);
 
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc_id)) {
-		dev_warn_ratelimited(cg->dev,
-			"OMCC: T-CONT read access timed out for alloc %u - bind NOT complete\n",
-			alloc_id);
+	/* index = 0 (the OMCC T-CONT), omci_en + ploam_en on.  "OMCC" is the
+	 * label that keeps this site's two DISTINCT timeout messages -- read
+	 * half vs write half -- which a bare -ETIMEDOUT could not tell apart. */
+	if (cg_tcont_cam_rmw(cg, alloc_id,
+			     CG_TCONT_INDEX_MASK,		/* clear */
+			     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN,
+			     "OMCC"))
 		return -ETIMEDOUT;
-	}
-	d = readl(cg->mac + CG_REG_TCONT_DATA);
-	d &= ~CG_TCONT_INDEX_MASK;			/* index = 0 (OMCC T-CONT) */
-	d |= CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN;
-	writel(d, cg->mac + CG_REG_TCONT_DATA);
-	if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | alloc_id)) {
-		dev_warn_ratelimited(cg->dev,
-			"OMCC: T-CONT write access timed out for alloc %u - bind NOT complete\n",
-			alloc_id);
-		return -ETIMEDOUT;
-	}
 
 	cg->omcc_alloc = alloc_id;
 	cg->omcc_alloc_valid = true;	/* set ONLY here, after both table ops
@@ -2368,29 +2516,12 @@ static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
  * retry: the caller has to be able to see that it did not work. */
 static int cg_omcc_gem_bind(struct cortina_gpon *cg, u32 gem_id)
 {
-	u32 idx, d, n;
-
 	/* walk the DECLARED OMCC slot run rather than re-deriving it here; the
-	 * 12-bit Port-ID mask is the G.984.3 field width and lives in the
+	 * stamping loop itself is shared with the data path (cg_us_gem_stamp_range),
+	 * and the 12-bit Port-ID mask is the G.984.3 field width that lives in the
 	 * shared layer (gpon_gem_us_port_id) so the two families state it once */
-	for (n = 0; n < cg_us_omcc_slots.count; n++) {
-		idx = gpon_gem_us_index(&cg_us_omcc_slots, n);
-		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx)) {
-			dev_warn_ratelimited(cg->dev,
-				"OMCC: us-gem slot %u read access timed out - bind NOT complete\n",
-				n);
-			return -ETIMEDOUT;
-		}
-		d = readl(cg->mac + CG_REG_US_PORT_DATA);
-		d = (d & ~0xfffu) | gpon_gem_us_port_id(gem_id);
-		writel(d, cg->mac + CG_REG_US_PORT_DATA);
-		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, CG_TBL_WR | idx)) {
-			dev_warn_ratelimited(cg->dev,
-				"OMCC: us-gem slot %u write access timed out - bind NOT complete\n",
-				n);
-			return -ETIMEDOUT;
-		}
-	}
+	if (cg_us_gem_stamp_range(cg, &cg_us_omcc_slots, gem_id, "OMCC"))
+		return -ETIMEDOUT;
 
 	cg->omcc_gem = gpon_gem_us_port_id(gem_id);
 	dev_info(cg->dev, "OMCC: us-gem 0..%d bound to GEM port-id %u\n",
@@ -2538,7 +2669,7 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	u32 us_tcont = CG_DATA_TCONT_IDX;
 	bool rides_omcc = false;
 	struct gpon_gem_us_range ride;
-	u32 d, i;
+	u32 i;
 
 	if (!cg->omcc_up)
 		return;
@@ -2555,8 +2686,8 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	 * provisioned for it.  Tear down and re-decide instead.
 	 */
 	if (cg->hw_data_alloc &&
-	    (cg->hw_data_alloc != (alloc & 0xfff) ||
-	     cg->hw_data_gem != (gem & 0xfff) ||
+	    (cg->hw_data_alloc != gpon_gem_us_alloc_id(alloc) ||
+	     cg->hw_data_gem != gpon_gem_us_port_id(gem) ||
 	     (cg->data_rides_omcc && cg->hw_data_alloc != cg->omcc_alloc))) {
 		cg_data_teardown(cg);
 		cg->data_installed = false;
@@ -2636,30 +2767,33 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 			 GPON_GEM_US_OMCI_RESERVED_SLOTS);
 		break;
 	case GPON_GEM_US_BIND_TCONT:
-		if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, alloc & 0xfff))
-			return;
-		d = readl(cg->mac + CG_REG_TCONT_DATA);
-		d &= ~CG_TCONT_INDEX_MASK;
-		d |= CG_TCONT_INDEX(CG_DATA_TCONT_IDX) |
-		     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN;
-		writel(d, cg->mac + CG_REG_TCONT_DATA);
-		if (cg_tbl_op(cg, CG_REG_TCONT_ACCESS, CG_TBL_WR | (alloc & 0xfff)))
+		/* NULL label: this function gives up SILENTLY on a table timeout.
+		 * That bare `return` is left as it was -- adding a warn would be a
+		 * behaviour change, not part of a code-motion extraction, and
+		 * cg_tbl_op_at() already logs the offset and the composed cmd.
+		 *
+		 * ⚠ AN EARLIER DRAFT OF THIS COMMENT QUOTED A SENTENCE FROM
+		 * cg_isr_work() THAT DOES NOT EXIST THERE (2026-09-04): the quoted
+		 * words appear nowhere in this file except inside that comment, so
+		 * it was citing itself.  What IS true, and checkable: cg_isr_work()
+		 * calls cg_data_try_install() from its reconciling tail, so a
+		 * failed install does get another attempt.  Whether that is
+		 * sufficient recovery is NOT established here -- it is a claim
+		 * nobody has measured, and it should not be written as if it were. */
+		if (cg_tcont_cam_rmw(cg, alloc,
+				     CG_TCONT_INDEX_MASK,	/* clear */
+				     CG_TCONT_INDEX(CG_DATA_TCONT_IDX) |
+				     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN,
+				     NULL))
 			return;
 		break;
 	}
 
-	/* US: every VoQ of the SELECTED T-CONT stamps the data GEM port-id */
-	for (i = 0; i < us_slots->count; i++) {
-		u32 idx = gpon_gem_us_index(us_slots, i);
-
-		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, idx))
-			return;
-		d = readl(cg->mac + CG_REG_US_PORT_DATA);
-		d = (d & ~0xfffu) | gpon_gem_us_port_id(gem);
-		writel(d, cg->mac + CG_REG_US_PORT_DATA);
-		if (cg_tbl_op(cg, CG_REG_US_PORT_ACCESS, CG_TBL_WR | idx))
-			return;
-	}
+	/* US: every VoQ of the SELECTED T-CONT stamps the data GEM port-id.
+	 * @us_slots is the declared data run, or the ride range when this ONU
+	 * rides the OMCC T-CONT -- the helper walks whichever it is given. */
+	if (cg_us_gem_stamp_range(cg, us_slots, gem, NULL))
+		return;
 
 	/* DS: unicast data GEM + the broadcast GEM (DHCP OFFER rides it) */
 	if (cg_ds_gem_bind(cg, gem, CG_DATA_GEM_IDX) ||
@@ -2719,8 +2853,10 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	/* the TX header's ldpid and policer id must target the SAME T-CONT, or
 	 * the frames are queued where no grant ever arrives */
 	cortina_ni_pon_data_set_tcont((u8)us_tcont);
-	cg->hw_data_alloc = alloc & 0xfff;	/* record the armed identity so a */
-	cg->hw_data_gem = gem & 0xfff;		/* later reconfig can invalidate it */
+	cg->hw_data_alloc = gpon_gem_us_alloc_id(alloc);	/* record the armed */
+	cg->hw_data_gem = gpon_gem_us_port_id(gem);	/* identity so a later
+							 * reconfig can
+							 * invalidate it */
 	/* report the LIVE data-path identity to the L3FE offload backend (the
 	 * US hit-action's mcgid/T-CONT source - never a compiled-in constant) */
 	cortina_ni_gpon_data_path_set(cg->hw_data_gem, (u8)us_tcont);

@@ -1513,6 +1513,83 @@ static void gpon_cam_delay_us(unsigned int us)
 	udelay(us);
 }
 
+/* gpon_ind_poll()/gpon_ind_go() (flowcore/regtable.h) take their per-iteration
+ * wait as a void(*)(void): the core has no clock, so the PACE is the SHELL's --
+ * the same split gpon_cam_delay_us() serves for the shared CAM helper above.
+ * This is the 1 us pace every PON-IP indirect strobe in this file uses.  It is
+ * deliberately NOT shared with tbl_pause(): the SWCORE table engine also has to
+ * let the scheduler in, and that yield must not be paid on a PON-IP strobe. */
+static void pi_pause_1us(void)
+{
+	udelay(1);
+}
+
+/*
+ * PONIP_DBG_CTRL_US strobe -- ONE spelling of a sequence this file had TWICE.
+ *
+ * WHAT WAS DUPLICATED: gpon_proc_show() built the same request word, ran the
+ * same 2000 x 1 us busy poll and read the same counter register twice, 21 lines
+ * apart (the SID-64 OMCC page probe and the SID-1 data-flow page probe).  The
+ * only difference was the SID -- and since 64 == (64 & 0x7f), even the mask was
+ * a no-op difference.
+ *
+ * WHY THE MERGE IS SAFE: the poll itself now belongs to the CORE (gpon_ind_go(),
+ * flowcore/regtable.h, over this file's &pi_io).  Its loop is byte-for-byte the
+ * shape that was here -- write, then read-first / pause-after, bound tested
+ * before the read -- so the SAME reads and the SAME pauses land at the same
+ * places on the success path AND on expiry.  The one difference is the verdict:
+ * the caller now gets -ETIMEDOUT instead of a count it could not tell from a
+ * slow success.  That is the whole reason the owner exists -- a stuck
+ * transaction must stop looking like a fresh answer.
+ *
+ * WHAT IS DELIBERATELY *NOT* MERGED, and why:
+ *  - the addresses stay BARE LITERALS -- but NOT because nothing names them.
+ *    An earlier draft of this comment said exactly that and it was FALSE; the
+ *    correction is worth more than the claim (2026-09-04).  The tree names both
+ *    registers, on BOTH chips, at DIFFERENT addresses:
+ *        RTL9602C   ONU-FAMILY-RTL960x.md:108   DBG_CTRL_US 0x255c,
+ *                                               SID_USED_PAGE_CNT_US 0x2564
+ *        RTL9603CVD its own vendor chipdef      PONIP_DBG_CTRL_US 0x26e8,
+ *                                               PONIP_SID_USED_PAGE_CNT_US 0x26f0
+ *                                               -- and NOTHING at 0x255c/0x2564
+ *    So the pair MOVED, this function carries no chip guard, and on the
+ *    RTL9603CVD these literals strobe two unmapped PON-IP offsets.  The fix is
+ *    a PI_X() name plus two luna_pi_moves_9603cvd[] rows -- a literal bypasses
+ *    the per-chip translation entirely, which is why the rows cannot appear
+ *    while the literal does.  NOT done here: it changes which register the
+ *    G24W writes, on a bench whose relay is dead, so it is measured and
+ *    recorded rather than landed blind.
+ *    FINDING-the-sid-page-strobe-hits-unmapped-offsets-on-the-9603cvd.md
+ *  - the counter is still read after an EXPIRED poll.  Refusing the read (what
+ *    gpon_gtc_cntr_read() and luna_smi_read() do) would change the bus stream
+ *    and hand /proc an unexplained zero; the caller gets the rc instead, and
+ *    both call sites print it.
+ *  - nothing restores the stock word afterwards.  The strobe LEAVES 0x255c
+ *    holding 0x86000|sid|RD_MAX, exactly as it always has (gpon_pbo_init() and
+ *    the O5 path re-assert 0x00086000); a "helpful" restore would ADD a write
+ *    that does not exist today.
+ *
+ * The 0x00086000 OR is the GUARD both old call sites documented: writing only
+ * SID_NO+RD_MAX clears DBG_IGNORE_TAG (bit19) and CFG_US_EP_IPG (bits[18:11]),
+ * which re-breaks the US GEM encapsulation (the CPU tag stops being stripped ->
+ * malformed GEM payload -> gemus64 drops to 0).
+ *
+ * 0x255c = PONIP_DBG_CTRL_US {SID_NO[6:0], RD_MAX bit7, CLR bit8, BUSY bit9};
+ * 0x2564 = PONIP_SID_USED_PAGE_CNT_US {USED[12:0], MAX[28:16]}.
+ *
+ * Return: gpon_ind_go()'s rc -- >= 0 is the iteration BUSY cleared at, < 0 is
+ * -ETIMEDOUT and *cnt is then a STALE word, not this SID's.
+ */
+static int pi_sid_page_cnt(u32 sid, u32 *cnt)
+{
+	int rc = gpon_ind_go(&pi_io, 0x255c,
+			     0x00086000u | (sid & 0x7fu) | (1u << 7),
+			     1u << 9, 2000, pi_pause_1us);
+
+	*cnt = pi_rd(0x2564);
+	return rc;
+}
+
 /* Read-modify-write the bit-field [msb:lsb] of the SWCORE register at off. */
 static void sw_field(u32 off, unsigned int msb, unsigned int lsb, u32 val)
 {
@@ -4350,13 +4427,32 @@ MODULE_PARM_DESC(us_intr_svc, "1=read-to-clear the US GPON interrupt deltas (0x5
 
 /* swcore TBL_ACCESS engine (L2/VLAN tables) */
 #define TBL_BUSY_BIT	(1u << 13)
+/* The bound, named the way LUNA_SMI_TRIES and L3FE_ACCESS_TRIES already are
+ * in this tree, because it is now an ARGUMENT to the shared poll and not a
+ * number buried in a loop.  Why 2000 and not 0x4000: see tbl_wait(). */
+#define TBL_WAIT_TRIES	2000u
 
 static bool tbl_ok = true;
 
+/* The SWCORE table engine's pace for gpon_ind_poll().  1 us like the PON-IP
+ * strobes, PLUS the cond_resched() tbl_wait()'s comment below is about.
+ *
+ * The core's @pause is a void(*)(void) with no iteration index, so the "every
+ * 256th" stride that used to be per-CALL is counted in a file-static here.  The
+ * protection is unchanged in substance -- a yield at least every 256 pauses,
+ * and the watchdog is what it protects -- only the exact yield POINTS move, and
+ * nothing on the bus depends on where they fall. */
+static void tbl_pause(void)
+{
+	static unsigned int spins;
+
+	udelay(1);
+	if ((++spins & 0xff) == 0)
+		cond_resched();
+}
+
 static void tbl_wait(void)
 {
-	int to = 0;
-
 	/*
 	 * ★★★ THE BUDGET IS 2 ms, NOT 16 ms, AND IT COST THIS BOARD EVERY BOOT
 	 * (measured 2026-08-27).  This polled 0x4000 times at udelay(1) = 16.4 ms
@@ -4380,12 +4476,30 @@ static void tbl_wait(void)
 	 * the encoding is wrong.  Waiting 16 ms to reach the same verdict only
 	 * makes the failure slower.
 	 */
-	while ((sw_rd(TBL_STS_OFF) & TBL_BUSY_BIT) && to++ < 2000) {
-		udelay(1);
-		if ((to & 0xff) == 0)
-			cond_resched();
-	}
-	if (to >= 2000)
+	/*
+	 * ★ AND THE LOOP ITSELF NOW BELONGS TO THE CORE (gpon_ind_poll(),
+	 * flowcore/regtable.h, over this file's &sw_io).  This was the FOURTH
+	 * hand-spelled copy of one idea -- raise a request, watch one bit until
+	 * the hardware drops it, bounded -- and regtable.h's own header records
+	 * that the idea had six spellings across this tree which had drifted in
+	 * the ways copies do (one spun with no pause at all; three spelled one
+	 * bound under three names).
+	 *
+	 * ⚠ WHY _poll AND NOT _go: TBL_STS_OFF (0x12004) is POLLED and
+	 * TBL_CTRL_OFF (0x12000) is WRITTEN -- two different registers of the
+	 * same ctrl/sts/wrdata triple.  gpon_ind_go() would emit the transaction
+	 * word INTO the status register.  tbl_write() below keeps its own write.
+	 *
+	 * WHAT CHANGED ON THE BUS: nothing on the success path -- the core's loop
+	 * reads first and pauses after, exactly as this one did, so the same reads
+	 * land at the same places.  On EXPIRY it stops one read earlier: the old
+	 * `to++ < 2000` short-circuited only AFTER a 2001st read taken purely to
+	 * discover the bound had already gone.  The VERDICT is identical on every
+	 * input -- 2000 x 1 us of waiting either way, tbl_ok cleared on exactly
+	 * the same engine states.
+	 */
+	if (gpon_ind_poll(&sw_io, TBL_STS_OFF, TBL_BUSY_BIT, TBL_WAIT_TRIES,
+			  tbl_pause) < 0)
 		tbl_ok = false;		/* engine wedged / wrong encoding: stop */
 }
 
@@ -4902,8 +5016,10 @@ void gpon_pbo_init(void)
 		 * log: gemus64=2040204938 in the first O5 window).
 		 *
 		 * WARNING: the /proc/gpon show handler ALSO writes 0x255c (to read
-		 * the sidpage counter). That write MUST preserve DBG_IGNORE_TAG —
-		 * see the /proc handler's pi_wr(0x255c, 0x00086000u | ...) below. */
+		 * the sidpage counter). That write MUST preserve DBG_IGNORE_TAG — it
+		 * is pi_sid_page_cnt() above, which ORs in this same stock base.
+		 * (It used to be two open-coded pi_wr(0x255c, ...) in the handler;
+		 * naming the helper keeps this pointer able to find its subject.) */
 		pi_wr(0x255c, 0x00086000u);	/* PONIP_DBG_CTRL_US = stock value (DBG_IGNORE_TAG=1) */
 		if (dbru_blksize)
 			pi_wr(0x2568, 0x00003002u);	/* DPRU_RPT_PRD: DBA_BLKSIZE=48 (0x30 in [15:8]) +
@@ -6107,14 +6223,19 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * (the CPU tag is no longer stripped -> malformed GEM payload ->
 		 * gemus64 drops to 0). Always OR in the 0x00086000 stock base. */
 		{
-			u32 n, pc;
-			/* OR in 0x00086000 to preserve DBG_IGNORE_TAG + CFG_US_EP_IPG */
-			pi_wr(0x255c, 0x00086000u | 64u | (1u << 7));	/* stock base + SID_NO=64 + RD_MAX */
-			for (n = 0; n < 2000 && (pi_rd(0x255c) & (1u << 9)); n++)
-				udelay(1);
-			pc = pi_rd(0x2564);
-			seq_printf(s, "sidpage64: used=%u max=%u (max>0 = OMCI ENQUEUED to queue 64) [r255c=0x%08x r2564=0x%08x poll=%u]\n",
-				   pc & 0x1fff, (pc >> 16) & 0x1fff, pi_rd(0x255c), pc, n);
+			/* The request word, the 0x00086000 guard and the bounded
+			 * poll are pi_sid_page_cnt() -- ONE spelling for this probe
+			 * and the SID-1 data-flow one below.  SID 64 is spelled as a
+			 * number here because GPON_OMCC_FLOW is #defined BELOW this
+			 * function; 64 == (64 & 0x7f), so the helper's mask changes
+			 * nothing.  poll= is now the rc: >= 0 is the iteration BUSY
+			 * cleared at (what it always printed), < 0 is -ETIMEDOUT and
+			 * says the used/max beside it is a STALE word. */
+			u32 pc;
+			int prc = pi_sid_page_cnt(64u, &pc);
+
+			seq_printf(s, "sidpage64: used=%u max=%u (max>0 = OMCI ENQUEUED to queue 64) [r255c=0x%08x r2564=0x%08x poll=%d]\n",
+				   pc & 0x1fff, (pc >> 16) & 0x1fff, pi_rd(0x255c), pc, prc);
 		}
 		/* ★2026-07-04 flow-1 (WAN data) US datapath witness — the sustained-data-US dig.
 		 * The data flow (SID GPON_DATA_FLOW=1, gem 193) rides qid 64's grants but keeps its
@@ -6126,17 +6247,20 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * the same 0x255c strobe as sidpage64 (OR 0x86000 to keep DBG_IGNORE_TAG). All PI reads
 		 * — /proc context, safe (this handler already does pi_rd here). */
 		{
-			u32 n1, pc1;
+			u32 pc1;
+			int prc1;
 			u32 s2q1 = (pi_rd(PI_PON_SID2QID) >> ((GPON_DATA_FLOW % 4) * 7)) & 0x7fu;
 			u32 svl1 = (pi_rd(PI_PON_SIDVALID) >> GPON_DATA_FLOW) & 1u;
 
-			pi_wr(0x255c, 0x00086000u | (GPON_DATA_FLOW & 0x7fu) | (1u << 7));
-			for (n1 = 0; n1 < 2000 && (pi_rd(0x255c) & (1u << 9)); n1++)
-				udelay(1);
-			pc1 = pi_rd(0x2564);
-			seq_printf(s, "data1: s2q[1]=%u sidvld[1]=%u usmap1(0x6404)=0x%x usbyte1(0x6808)=%u pgbank1_used=%u max=%u q32_idle(0x6c40)=%u\n",
+			/* Same strobe as sidpage64 above, different SID: one helper.
+			 * pgpoll= is NEW and is the helper's rc -- this site used to
+			 * compute the poll count and THROW IT AWAY, so a wedged strobe
+			 * printed a stale pgbank1 that read exactly like a fresh one. */
+			prc1 = pi_sid_page_cnt(GPON_DATA_FLOW, &pc1);
+			seq_printf(s, "data1: s2q[1]=%u sidvld[1]=%u usmap1(0x6404)=0x%x usbyte1(0x6808)=%u pgbank1_used=%u max=%u q32_idle(0x6c40)=%u pgpoll=%d\n",
 				   s2q1, svl1, gpon_rd(0x6404), gpon_rd(0x6808),
-				   pc1 & 0x1fff, (pc1 >> 16) & 0x1fff, gpon_rd(0x6c40));
+				   pc1 & 0x1fff, (pc1 >> 16) & 0x1fff, gpon_rd(0x6c40),
+				   prc1);
 		}
 		/* CAM read-back: does the DS GEM CAM actually map gem->flow 64 at runtime?
 		 * e64 should read gem=2 (the OMCC) HIT=1; traffic_cfg[64] should be 0x4. */
@@ -7334,15 +7458,20 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 		 * bits from the chip's register/field map; field semantics from the stock
 		 * ponmac queue-add behavior.
 		 */
-		{
-			int n;
-
-			pi_wr(PI_DRN_CMD, (1u << 2) | ((qid & 0x7f) << 3) | (1u << 1));
-			for (n = 0; n < 10000 && (pi_rd(PI_DRN_CMD) & 1u); n++)
-				udelay(1);
-			if (n >= 10000)
-				pr_warn("rtl9602c-gpon: qid %u drain-out timeout\n", qid);
-		}
+		/* THIRD instance of the contract the two PONIP_DBG_CTRL_US strobes
+		 * in gpon_proc_show() use, so it goes to the same core owner: write
+		 * a request word, poll the SAME register until the block drops its
+		 * busy bit, bounded.  Only the BIT (DRN_FLG bit0 vs BUSY bit9) and
+		 * the BOUND (10000 vs 2000) differ, and gpon_ind_go() takes both as
+		 * parameters for exactly that reason -- neither is flattened.
+		 * The for-loop it replaces tested its bound BEFORE the read, which is
+		 * the core's own shape, so the bus stream is unchanged on BOTH paths;
+		 * only the expiry is now NAMED (-ETIMEDOUT) instead of inferred from
+		 * a counter that had reached its bound. */
+		if (gpon_ind_go(&pi_io, PI_DRN_CMD,
+				(1u << 2) | ((qid & 0x7f) << 3) | (1u << 1),
+				1u, 10000, pi_pause_1us) < 0)
+			pr_warn("rtl9602c-gpon: qid %u drain-out timeout\n", qid);
 		pi_wr(0x023a0 + tcont * 4, 0x1);		/* PON_SCH_QMAP[tcont] = logical-q0 */
 		pi_field(0x0229c + qid * 4, 17, 0, 0x3ffff);	/* PON_QID_PIR_RATE[qid] = MAX (1 word/qid) */
 		pi_field(0x02198 + qid * 4, 17, 0, 0);		/* PON_QID_CIR_RATE[qid] = 0 (live-stock; STRICT uses PIR only) */

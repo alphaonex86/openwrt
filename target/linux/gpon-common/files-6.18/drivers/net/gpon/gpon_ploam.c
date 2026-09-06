@@ -542,6 +542,14 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	switch (type) {
 	case PLM_DS_UPSTREAM_OVERHEAD:
+		/* ★★ NO SERIAL, NO ANNOUNCEMENT.  An ONU nobody has provisioned
+		 * stays parked at O1 and lets the acquisition broadcast pass:
+		 * the only G.984.3 encoding of "I do not know who I am" is
+		 * silence (see gpon_sn_is_set()). The shell unparks it by
+		 * handing a serial to gpon_ploam_set_sn(); the next
+		 * Upstream_Overhead then takes the normal edge below. */
+		if (!gpon_sn_is_set(o->sn))
+			break;
 		/* The OLT is acquiring ONUs (it broadcasts this continuously).
 		 * On the O1/O2 -> O3 edge, program the burst overhead and the
 		 * pre-ranging EqD the OLT dictates BEFORE the first Serial

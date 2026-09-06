@@ -85,3 +85,15 @@ void gpon_sn_format(const u8 sn[GPON_SN_BYTES], char *out)
 	}
 	out[GPON_SN_TEXT_LEN] = '\0';
 }
+
+bool gpon_sn_is_set(const u8 sn[GPON_SN_BYTES])
+{
+	int i;
+
+	if (!sn)
+		return false;
+	for (i = 0; i < GPON_SN_BYTES; i++)
+		if (sn[i])
+			return true;
+	return false;
+}

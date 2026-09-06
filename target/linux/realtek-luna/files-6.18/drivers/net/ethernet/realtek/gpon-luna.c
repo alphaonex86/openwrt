@@ -234,11 +234,18 @@ static void __iomem *ponip_base;
  * parsed serial each time it sends its Serial_Number_ONU upstream. */
 static void gpon_parse_sn(const char *s);	/* defined below; re-parses onu_sn */
 static bool gpon_sn_differs(const char *s);	/* defined below; parsed-byte compare */
-static char *onu_sn = "XPON39013867";	/* TEST-ONLY default = this board's SN, so the FSM
-					 * ranges with the real SN immediately (no placeholder
-					 * phantom / re-range that races OLT discovery). For
-					 * production revert to a placeholder + provision via the
-					 * gpon_provision init script at OS startup. */
+/* ★★★ NO COMPILED-IN SERIAL.  This used to default to "XPON39013867", ONE
+ * unit's (the X111W's) real serial, so that board ranged at t=2 s without
+ * waiting for userspace.  The same source builds the LANLY G24W, and MEASURED
+ * 2026-09-06 (its boot log, `PLOAM FSM start, SN 'XPON39013867'`) that board
+ * reached O3 announcing the X111W's identity on the same splitter the X111W
+ * was online on -- while the OLT listed its own serial nowhere.  A default
+ * serial is a board fact in family code, and this project's rule for that is
+ * a defect.  Empty = "not provisioned": the FSM parks at O1 and announces
+ * NOTHING until gpon_provision (or `gpon_luna.onu_sn=` on the command line)
+ * writes the unit's own serial -- which is also stock's order: SN set, THEN
+ * activate. */
+static char *onu_sn = "";
 static bool gpon_sn_changed;		/* SN (re)provisioned -> FSM must re-range */
 
 /* ⚠ FORWARD DECLARATION.  The core FSM object is defined with the rest of the
@@ -588,6 +595,47 @@ static const struct gpon_swc_map gpon_swc_9607c = {
  * chip-selected offset. Defaults to the 9602C so a boot on an undeclared board
  * behaves exactly as this driver did before the table existed. */
 static const struct gpon_swc_map *swc = &gpon_swc_9602c;
+
+/*
+ * ★ THE UPSTREAM-OPTICS OPERATING VALUES ARE A PER-CHIP TABLE, NOT LITERALS.
+ * Three GTC words that the family shell programs identically on every Luna
+ * chip but whose VALUES stock chooses per silicon:
+ *
+ *   GTC_US_LASER      [13:8] LON_TIME / [5:0] LOFF_TIME, the laser-enable
+ *                     edges around each burst.
+ *   GTC_US_OPTIC_SD_TH [30:16] MISM_THRESH / [14:0] TOOLONG_THRESH, how long
+ *                     the laser-driver's TX_SD may lag before the GTC judges
+ *                     its own burst "too long" and gates it.
+ *   GTC_US_PWR_SAV_MODE bit16 DG_TX_OPT (dying-gasp TX option), beside the
+ *                     bit0 PWR_SAV_MODE every chip sets.
+ *
+ * RTL9602C: the values this driver has always written, taken from the X111W's
+ * live stock (US_OPTIC_SD_TH 0x00504bfa read at O5 2026-06-13; US_LASER
+ * 0x2028).  RTL9603CVD: its OWN stock read live at O5 on the LANLY G24W
+ * (2026-09-06, gpon-oracle/2026-09-06.2/gtc-regs.json): 0x0504c=0x00001820,
+ * 0x05188=0x00a07fff, 0x0526c=0x00010001 -- and the same numbers are the
+ * vendor SDK's 9603CVD fallbacks (laser on 0x18 / off 0x20; MISM 0xa0 /
+ * TOOLONG 0x7fff), two tiers agreeing.  The 9607C keeps the 9602C values it
+ * has always run with; nothing was measured there.
+ */
+struct luna_gtc_tune {
+	const char *chip;
+	u32 us_laser;
+	u32 us_optic_sd_th;
+	bool us_pwr_sav_dg_tx_opt;
+};
+
+static const struct luna_gtc_tune luna_gtc_tune_9602c = {
+	.chip = "RTL9602C", .us_laser = 0x2028u, .us_optic_sd_th = 0x00504bfau,
+	.us_pwr_sav_dg_tx_opt = false,
+};
+
+static const struct luna_gtc_tune luna_gtc_tune_9603cvd = {
+	.chip = "RTL9603CVD", .us_laser = 0x1820u, .us_optic_sd_th = 0x00a07fffu,
+	.us_pwr_sav_dg_tx_opt = true,
+};
+
+static const struct luna_gtc_tune *gtune = &luna_gtc_tune_9602c;
 
 /* Keep the register NAMES at the call sites; the value is now per chip. */
 #define SOC_IO_MODE_EN		(swc->io_mode_en)
@@ -6700,9 +6748,11 @@ static int gpon_proc_show(struct seq_file *s, void *v)
  */
 static void gpon_parse_sn_into(u8 *out, const char *s)
 {
+	if (!s || !*s)
+		return;		/* nothing provisioned yet: not an error, leave `out` alone */
 	if (gpon_sn_parse(s, out))
 		pr_warn("gpon: ONU-SN \"%s\" is not 4 ID chars + 8 hex digits -- keeping the serial in force\n",
-			s ? s : "(null)");
+			s);
 }
 
 static void gpon_parse_sn(const char *s)
@@ -7858,8 +7908,10 @@ static void gpon_o5_rearm_burst(void)
 	 * US-side only, harmless to DS/ranging. */
 	if (!o5_rearm_burst_gate)
 		return;
-	gpon_wr_us_protected(0x5188, 0x00504bfa);	/* US_OPTIC_SD_TH */
+	gpon_wr_us_protected(0x5188, gtune->us_optic_sd_th);	/* US_OPTIC_SD_TH, per chip */
 	gpon_field(0x526c, 0, 0, 1);			/* US_PWR_SAV_MODE */
+	if (gtune->us_pwr_sav_dg_tx_opt)
+		gpon_field(0x526c, 16, 16, 1);		/* DG_TX_OPT, per chip */
 	gpon_wr(GPON_GEM_US_PWR_SAV_CFG, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG */
 	gpon_wr(GPON_GEM_US_EOB_MERGE, 0x00000028u);			/* GEM_US_EOB_MERGE */
 	memset(nomsg, 0xaa, sizeof(nomsg));
@@ -8475,6 +8527,18 @@ static void gpon_fsm_handle(const u8 *m)
 
 	switch (type) {
 	case PLM_DS_UPSTREAM_OVERHEAD:
+		/* ★★ NO SERIAL, NO ANNOUNCEMENT -- the same rule the core states
+		 * at its own Upstream_Overhead edge (gpon_ploam.c). Park at O1
+		 * until onu_sn is provisioned; say so once per boot. */
+		if (!gpon_sn_is_set(gpon_sn_bytes)) {
+			static bool said;
+
+			if (!said) {
+				said = true;
+				pr_info("rtl9602c-gpon: OLT is acquiring, but no ONU serial is provisioned yet -- holding at O1 (write /sys/module/gpon_luna/parameters/onu_sn)\n");
+			}
+			break;
+		}
 		/* OLT is acquiring ONUs (it broadcasts this continuously). On the
 		 * O1/O2 -> O3 edge, program the burst overhead + pre-ranging EqD the
 		 * OLT dictates BEFORE the first SN, then move to O3; the SN is (re)sent,
@@ -9461,6 +9525,86 @@ static void __init rtl9602c_sc_ldo_init(void)
 	pr_info("rtl9602c-gpon: sc_ldo_init AFTER: 0x130=0x%08x\n", sw_rd(THERMAL_CTRL_0));
 }
 
+/*
+ * ★★ THE LASER'S ENABLE PINS ARE SoC GPIOs ON SOME BOARDS, AND THE DRIVER THAT
+ * NEEDS THE LASER OWNS THEM.  Two pins, both BOARD facts declared in that
+ * board's DTS under `/pon-optics`:
+ *
+ *   realtek,tx-disable-gpio   the laser driver's TX_DISABLE input; driven 0
+ *                             = laser may emit.
+ *   realtek,tx-power-gpio     the laser driver's supply gate; driven 0 =
+ *                             powered (active-low).
+ *
+ * MEASURED on the LANLY G24W (RTL9603CVD), stock at O5, 2026-09-06 (tier 1,
+ * stock_peek, read-only): GPIO PABCD_DIR 0x18003308 = 0x00008014 (pins 2, 4,
+ * 15 outputs), PABCD_DAT 0x1800330c = 0xffe3170b (bits 2 and 4 LOW), switch
+ * IO_GPIO_EN 0x3c = 0x00008014.  Ours read DIR 0x8000 / IO_GPIO_EN 0x8000:
+ * both pins INPUTS, so the laser driver saw whatever its pull-ups gave it, and
+ * nothing this driver programmed into the GTC could reach the fibre.  Tier 2/3
+ * agree: that board's stock kernel carries CONFIG_TX_DISABLE_GPIO_PIN=2 and
+ * CONFIG_TX_POWER_GPO_PIN=4, its PON-MAC mode-set ends by driving the power
+ * pin low, and its GPON init drives TX_DISABLE low before activation.
+ *
+ * The MECHANISM is the family's (the SoC GPIO block at 0x18003300: DIR +0x08 /
+ * DAT +0x0c for pins 0-31, +0x24 / +0x28 for 32-63, bit = pin, DIR 1 = output;
+ * plus the switch's IO_GPIO_EN, bit = pin).  Only the pin NUMBERS are the
+ * board's, and a board that declares none (the X111W, whose BOSA is enabled
+ * over I2C) gets exactly the behaviour it had.  The level is written BEFORE the
+ * pin becomes an output, so it never glitches through the other state.
+ */
+static int laser_tx_dis_gpio = -1;	/* from DT; -1 = this board has none */
+static int laser_tx_pwr_gpio = -1;
+
+static void __init luna_laser_gpio_from_dt(void)
+{
+	struct device_node *np = of_find_node_by_path("/pon-optics");
+	u32 v;
+
+	if (!np)
+		return;
+	if (!of_property_read_u32(np, "realtek,tx-disable-gpio", &v))
+		laser_tx_dis_gpio = (int)v;
+	if (!of_property_read_u32(np, "realtek,tx-power-gpio", &v))
+		laser_tx_pwr_gpio = (int)v;
+	of_node_put(np);
+	pr_info("rtl9602c-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d\n",
+		laser_tx_dis_gpio, laser_tx_pwr_gpio);
+}
+
+/* Drive SoC GPIO `pin` LOW as an output with its GPIO function enabled. */
+static void __init luna_gpio_drive_low(int pin, const char *what)
+{
+	void __iomem *gpio;
+	u32 dir_off, dat_off, bit, v;
+
+	if (pin < 0)
+		return;
+	if (pin >= 64 || !swc->io_gpio_en) {
+		pr_warn("rtl9602c-gpon: %s: GPIO %d not driven (pin >= 64, or %s declares no IO_GPIO_EN)\n",
+			what, pin, swc->chip);
+		return;
+	}
+	gpio = ioremap(GPIO_PHYS_BASE, GPIO_REG_SIZE);
+	if (!gpio) {
+		pr_warn("rtl9602c-gpon: %s: GPIO block ioremap failed, GPIO %d not driven\n",
+			what, pin);
+		return;
+	}
+	dir_off = pin < 32 ? GPIO_DIR_ABCD  : GPIO_DIR_EFGH;
+	dat_off = pin < 32 ? GPIO_DATA_ABCD : GPIO_DATA_EFGH;
+	bit = 1u << (pin & 31);
+
+	v = ioread32(gpio + dat_off);			/* level first ... */
+	iowrite32(v & ~bit, gpio + dat_off);
+	v = ioread32(gpio + dir_off);			/* ... then make it an output */
+	iowrite32(v | bit, gpio + dir_off);
+	sw_field(SOC_IO_GPIO_EN + 4 * (pin / 32), pin & 31, pin & 31, 1); /* GPIO function on the pad */
+	pr_info("rtl9602c-gpon: %s: GPIO %d driven LOW (dir=0x%08x dat=0x%08x io_gpio_en=0x%08x)\n",
+		what, pin, ioread32(gpio + dir_off), ioread32(gpio + dat_off),
+		sw_rd(SOC_IO_GPIO_EN + 4 * (pin / 32)));
+	iounmap(gpio);
+}
+
 static int __init rtl9602c_gpon_init(void)
 {
 	u32 ver, rst, test;
@@ -9513,6 +9657,8 @@ static int __init rtl9602c_gpon_init(void)
 	 * chip-selected register (the BOSA I2C pad-mux below is the first). */
 	swc = is_9607c ? &gpon_swc_9607c
 	    : is_9603cvd ? &gpon_swc_9603cvd : &gpon_swc_9602c;
+	gtune = is_9603cvd ? &luna_gtc_tune_9603cvd : &luna_gtc_tune_9602c;
+	luna_laser_gpio_from_dt();
 	pr_info("rtl9602c-gpon: SWCORE map = %s (io_mode_en=0x%05x i2c_en_bus0=%u oem_en=%u gpio_en=0x%05x fib_status=0x%05x sds_reg0=0x%05x)\n",
 		swc->chip, swc->io_mode_en, swc->io_i2c_en_bus0, swc->io_oem_en,
 		swc->io_gpio_en, swc->sds_fib_status, swc->sds_reg0);
@@ -9868,6 +10014,9 @@ static int __init rtl9602c_gpon_init(void)
 				via, sw_rd(FIB_EXT_REG21));
 		else
 			pr_info("rtl9602c-gpon: PON SerDes up (%s, analog ready)\n", via);
+		/* Stock powers the laser driver as the LAST step of its PON-MAC
+		 * mode set, i.e. right here, once the SerDes is up. */
+		luna_gpio_drive_low(laser_tx_pwr_gpio, "laser TX power");
 
 		/*
 		 * M3 DIAGNOSTIC (TEMPORARY — remove once the SD path is settled):
@@ -10042,7 +10191,7 @@ skip_bosa_init:
 	 * end-of-fragment; some OLTs (e.g. ALU) only accept OMCI with
 	 * NON_END_FRAG=0 and END_FRAG=1. Set it so the upstream GEM/OMCC is well-formed. */
 	gpon_wr(GPON_GEM_US_PTI_CFG, force_idle ? 0x80001010u : 0x00001010u);	/* FS_GEM_IDLE(bit31)=force_idle: bisection diag (stock=0) */
-	gpon_wr_us_protected(GPON_GTC_US_LASER, GPON_US_LASER_VAL);
+	gpon_wr_us_protected(GPON_GTC_US_LASER, gtune->us_laser);	/* per chip: 0x2028 / 0x1820 */
 
 	/*
 	 * (Removed the brief-CW OFFK-converge step: it DID converge OFFK (R30=0xa0)
@@ -10167,8 +10316,10 @@ skip_bosa_init:
 	/* Values CORRECTED to the LIVE stock-ref-ONU oracle (live stock register read @O5, 2026-06-13) —
 	 * the stock *init* programmed value for OPTIC_SD_TH (0x00a07fff) did NOT match the live operating
 	 * value (0x00504bfa): MISM_THRESH[30:16]=0x50, TOOLONG_THRESH[14:0]=0x4bfa. Oracle-parity. */
-	gpon_wr_us_protected(0x5188, 0x00504bfa);	/* US_OPTIC_SD_TH: live stock = MISM 0x50 | TOOLONG 0x4bfa */
+	gpon_wr_us_protected(0x5188, gtune->us_optic_sd_th);	/* US_OPTIC_SD_TH: per chip (9602C live 0x00504bfa, 9603CVD live 0x00a07fff) */
 	gpon_field(0x526c, 0, 0, 1);			/* US_PWR_SAV_MODE.PWR_SAV_MODE = 1 (live stock = 1) */
+	if (gtune->us_pwr_sav_dg_tx_opt)
+		gpon_field(0x526c, 16, 16, 1);		/* DG_TX_OPT: 9603CVD live 0x00010001 */
 	gpon_wr(GPON_GEM_US_PWR_SAV_CFG, (0x10u << 16) | 0x100u);	/* GEM_US_PWR_SAV_CFG = 0x00100100 (live stock) */
 	gpon_wr(GPON_GEM_US_EOB_MERGE, 0x00000028u);			/* GEM_US_EOB_MERGE = 0x28 (live stock; mine omitted) */
 
@@ -10203,6 +10354,10 @@ skip_bosa_init:
 	 * So the FSM applies them once, a few seconds into O3, to reproduce that
 	 * post-laser-up SDS-TX re-sync. (Left at their wrong boot-default here.)
 	 */
+
+	/* Stock releases TX_DISABLE in its device initialise, before activation
+	 * -- the MAC is configured, the FSM is about to run. */
+	luna_gpio_drive_low(laser_tx_dis_gpio, "laser TX_DISABLE");
 
 	/* Start the PLOAM activation FSM: parse the per-board serial number and
 	 * begin draining downstream PLOAM to drive O1 -> O5. */
@@ -10247,8 +10402,11 @@ skip_bosa_init:
 	luna_ploam_cfg_live.o5_ploam_keepalive_ticks = o5_ploam_keepalive_ticks;
 	gpon_ploam_init(&luna_ploam, &luna_ploam_ops, &luna_ploam_cfg_live, NULL,
 			gpon_sn_bytes);
-	pr_info("rtl9602c-gpon: PLOAM FSM start, SN '%s' = %*phN\n",
-		onu_sn, 8, gpon_sn_bytes);
+	if (gpon_sn_is_set(gpon_sn_bytes))
+		pr_info("rtl9602c-gpon: PLOAM FSM start, SN '%s' = %*phN\n",
+			onu_sn, 8, gpon_sn_bytes);
+	else
+		pr_info("rtl9602c-gpon: PLOAM FSM start with NO serial provisioned -- parked at O1 until onu_sn is written\n");
 	INIT_WORK(&gpon_cdr_reset_work, gpon_cdr_reset_worker);
 	INIT_DELAYED_WORK(&gpon_optical_work, gpon_optical_work_fn);
 	if (optical_poll)

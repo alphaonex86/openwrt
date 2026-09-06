@@ -69,6 +69,30 @@
 	};
 
 	/*
+	 * The laser driver's two enable pins are SoC GPIOs on this board, and
+	 * both must be driven LOW for the ONU to emit at all. Read by
+	 * gpon-luna.c (luna_laser_gpio_from_dt), which owns the pad because
+	 * it owns the laser.
+	 *
+	 * MEASURED (tier 1, 2026-09-06, this unit on its STOCK firmware at O5,
+	 * stock_peek read-only): PABCD_DIR 0x18003308 = 0x00008014 (pins 2, 4,
+	 * 15 are outputs), PABCD_DAT 0x1800330c = 0xffe3170b (bits 2 and 4
+	 * LOW), switch IO_GPIO_EN (0x3c) = 0x00008014. Tier 2: this board's
+	 * stock kernel config carries CONFIG_TX_DISABLE_GPIO_PIN=2 and
+	 * CONFIG_TX_POWER_GPO_PIN=4 (IKCONFIG embedded in mtd4 k0, and
+	 * /proc/config.gz live). Under OUR image both pins read as INPUTS
+	 * (DIR 0x8000), which is one reason the OLT never heard this board.
+	 *
+	 * Pin 15 is ALSO an output on stock and is NOT declared here: nothing
+	 * in this tree establishes what it drives, and a guessed name is worse
+	 * than an unnamed pin.
+	 */
+	pon-optics {
+		realtek,tx-disable-gpio = <2>;	/* driven 0 = laser may emit */
+		realtek,tx-power-gpio = <4>;	/* driven 0 = laser driver powered (active-low) */
+	};
+
+	/*
 	 * RAM -- 128 MiB DDR2, with TWO HARDWARE HOLES the port must respect.
 	 *
 	 * MEASURED (tier 1, this board's own boot console). U-Boot calibrates

@@ -69,4 +69,23 @@ int gpon_sn_parse(const char *s, u8 out[GPON_SN_BYTES]);
  */
 void gpon_sn_format(const u8 sn[GPON_SN_BYTES], char *out);
 
+/**
+ * gpon_sn_is_set() - has a serial number been provisioned at all?
+ * @sn: the 8 bytes; may be NULL.
+ *
+ * Return: true when any byte is non-zero.
+ *
+ * ★★ ALL-ZERO MEANS "NOBODY HAS TOLD THIS ONU WHO IT IS", and an ONU in that
+ * state may not announce itself: a Serial_Number_ONU carrying a placeholder is
+ * a second ONU on the PON wearing somebody's identity. MEASURED 2026-09-06 on
+ * the LANLY G24W: the Luna driver compiled in one board's real serial as its
+ * default, so a SECOND board of the family ranged under the FIRST board's
+ * serial, on the same splitter the first board was online on. The OLT listed
+ * the impostor's own serial nowhere -- "absent" -- because it was never sent.
+ * The rule lives here because it is a PROTOCOL fact: G.984.3 has no
+ * "unknown serial" value, so the only safe encoding of "not provisioned" is
+ * "do not transmit".
+ */
+bool gpon_sn_is_set(const u8 sn[GPON_SN_BYTES]);
+
 #endif /* _GPON_SN_H */

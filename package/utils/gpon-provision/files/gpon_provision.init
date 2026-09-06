@@ -120,7 +120,17 @@ provision() {
 	# ranging cycle even though we run after module init. START=09 makes this land
 	# well before the OLT completes ranging.
 	if [ -n "$sn" ]; then
-		for p in /sys/module/gpon_rtl9602c/parameters/onu_sn \
+		# The Luna driver is `gpon_luna` since the 2026-08-29 rename; the
+		# older spellings stay so an image built before it still provisions.
+		# MEASURED on the LANLY G24W 2026-09-06 (its boot log): without this
+		# path the driver kept its compiled-in placeholder -- the X111W's
+		# own serial -- and reached O3 announcing it, on the splitter the
+		# X111W was online on; the OLT listed the G24W's own serial nowhere.
+		# Since the same day the driver ships NO placeholder: it parks at
+		# O1 until this write lands, so a missing write is a silent PON,
+		# never a wrong identity.
+		for p in /sys/module/gpon_luna/parameters/onu_sn \
+			 /sys/module/gpon_rtl9602c/parameters/onu_sn \
 			 /sys/module/gpon/parameters/onu_sn; do
 			[ -w "$p" ] && { printf '%s' "$sn" > "$p"; break; }
 		done

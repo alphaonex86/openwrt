@@ -56,8 +56,17 @@
 /* pages (tables) of the 0x80-0xFF window */
 #define BOSA_PAGE_ALARM		0x01	/* table 1: alarm/warning enables */
 #define BOSA_PAGE_DEVICE	0x02	/* table 2: device settings, slopes/offsets */
-#define BOSA_PAGE_BIAS_LUT	0x04	/* table 4: bias-DAC LUT */
-#define BOSA_PAGE_MOD_LUT	0x05	/* table 5: modulation-DAC LUT */
+/*
+ * ⚠ THE TABLE-4 / TABLE-5 LABELS ARE DISPUTED, ONE TIER EACH (2026-09-05):
+ * these two names and cortina-gpon-bosa-cal.h say 4 = bias, 5 = modulation;
+ * the vendor's own GN25L95 rtkbosa source programs table 4 from its
+ * MODULATION-LUT region and table 5 from its BIAS-LUT region.  Neither is
+ * measured on this board.  The VALUES are not in question -- both sides map
+ * tables 4/5/6 to cal 0x280/0x300/0x380 -- only which LUT each one holds.
+ * Do not build on either label until it is settled.
+ */
+#define BOSA_PAGE_BIAS_LUT	0x04	/* table 4: bias-DAC LUT (label disputed, above) */
+#define BOSA_PAGE_MOD_LUT	0x05	/* table 5: modulation-DAC LUT (label disputed, above) */
 #define BOSA_PAGE_APD_LUT	0x06	/* table 6: APD LUT */
 
 /*
@@ -98,7 +107,9 @@ static int bosa_rd(struct device *dev, u8 reg, u8 *val)
  *
  * The earlier step-wise re-expression (LUT pages 4/5/6 + device page 2 +
  * alarm page 1 + unpaged thresholds) MISSED whole sections of the stock
- * sequence — pages 0x00/0x03/0x86/0x87/0xff never got programmed — and the
+ * sequence — pages 0x00/0x03/0x86/0x87/0xff never got programmed (⚠ measured
+ * 2026-09-05 on the trace: stock only SELECTS those pages for its part-ID
+ * reads, no register inside them is ever written) — and the
  * laser never armed (TX_CTL 0x6e stuck at 0x80, zero TX bias, OLT saw zero
  * upstream) even with every GPIO/pin-route register byte-matching stock.
  * Replay first, re-express into named steps only after ranging is proven.
@@ -169,16 +180,58 @@ int cg_bosa_init(struct device *dev)
  * golden (the cold-vs-warm DS-RX/LOF investigation: config the stock daemon
  * programs survives a warm reboot inside the BOSA but is lost on a
  * power-cycle).  Read-only apart from the table-select register 0x7F, which
- * is saved and restored.  Reads 0x00-0xFF of every table the stock daemon
- * touches (0-6 plus the high tables 0x80/0x81/0x86/0x87/0xFF seen in the
- * rtkbosa write trace); 0x00-0x7F is un-paged so it repeats per page — a
+ * is saved and restored.  Reads 0x00-0xFF of every table stock touches:
+ * 0-6 (rtkbosa programs 1/2/4/5/6 and selects 0/3 for its part-ID probes),
+ * 0x86/0x87/0xFF (selected by the same probes, read-only in the trace) and
+ * 0x80/0x81 (written by stock's LD_disable.sh, NOT by rtkbosa — the trace
+ * holds zero selects of either); 0x00-0x7F is un-paged so it repeats per page — a
  * free consistency check against bus noise.  ~3k reads at 100 kHz ≈ 1.5 s,
  * one shot, never touches the PON engine.
  */
 int cg_bosa_dump(struct device *dev)
 {
-	static const u8 pages[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-				    0x80, 0x81, 0x86, 0x87, 0xff };
+	/*
+	 * Every table stock selects, each with WHY it is worth a dump.
+	 * Evidence = the X400AXF's own /bin/rtkbosa v2.24 (objdump of
+	 * is_semtech_gn2xl9x, is_uxfastic_ux33xx, is_realtek_rtl8290c/rtl8291
+	 * and their {dev, table, reg, expected} arrays), cross-checked against
+	 * the ftrace of its run (dev/x400axf/stock/bosa/rtkbosa_i2c_trace.txt);
+	 * tables 0x80/0x81 come from stock's LD_disable.sh, not from rtkbosa.
+	 * WHAT the GN25L95 keeps in tables 0x03/0x80/0x81/0x86/0x87 is named
+	 * nowhere — not in this tree, not in the stock binary, and the vendor
+	 * source names 0x80-0x83 only for the GN28L96/97, a different part whose
+	 * names do not transfer — so those entries name what stock DOES there.
+	 */
+	static const u8 pages[] = {
+		0x00,			/* table 0: the SFF-8472 A2h upper page (tables
+					 * 0/1 alias it); the Semtech-series probe selects
+					 * it, then requires PASSWD 0x7b-0x7e == 00 00 00 00 */
+		BOSA_PAGE_ALARM,	/* table 1: alarm/warning enables 0xf8-0xfd */
+		BOSA_PAGE_DEVICE,	/* table 2: device settings; (0xd1 & 0xf0) == 0xa0
+					 * is how stock IDs a GN25L95, 0xbb == 0x1c is the
+					 * post-replay verify in cg_bosa_init() */
+		0x03,			/* table 3: the UX3320_S probe reads 0xf5-0xfc and
+					 * wants ASCII "UX3320S0"; this GN25L95 answers
+					 * 80 cf 80 ff c0 00 00 ff — meaning unnamed */
+		BOSA_PAGE_BIAS_LUT,	/* table 4: LUT (label disputed, see the define) */
+		BOSA_PAGE_MOD_LUT,	/* table 5: LUT (label disputed, see the define) */
+		BOSA_PAGE_APD_LUT,	/* table 6: APD LUT */
+		0x80,			/* table 0x80: LD_disable.sh writes 0x8a = 0xe0 then
+					 * 0xa0 here to stop the laser driver; contents
+					 * unnamed for the GN25L95 */
+		0x81,			/* table 0x81: LD_disable.sh writes 0x94 = 0x01 here
+					 * on the same path; contents unnamed for the GN25L95 */
+		0x86,			/* table 0x86: the UX3360 probe reads 0x80-0x85 and
+					 * wants "UX3360"; this GN25L95 answers all 0xff */
+		0x87,			/* table 0x87: the UX3361/UX3322/UX3365 probes read
+					 * 0x80-0x86 and want "UX33631"/"UX33640"/"UX33650";
+					 * this GN25L95 answers all 0xff */
+		0xff,			/* table 0xff: the part-ID table.  Semtech ID at
+					 * 0x80/0x85/0x86 — a1 00 00 or ASCII "G96"/"G97"/
+					 * "G98" select the GN28L9x family; a GN25L95 answers
+					 * ff ff ff and is IDed via table 2 instead.  The
+					 * RTL8290C/RTL8291 probes read 0x80/0x81/0x84 here */
+	};
 	char line[3 * 16 + 1];
 	u8 curpage = 0xee, v;
 	unsigned int p, r, i, rd_fail = 0;

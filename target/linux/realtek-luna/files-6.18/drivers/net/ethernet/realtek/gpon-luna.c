@@ -62,7 +62,7 @@
 #include "gpon_gem_us.h"	/* GPON_GEM_US_RANGE_OK: the core's own bound predicate */
 #include "gpon_rtl9602c_logic.h"	/* hoisted logic */
 #include "hwio.h"	/* flowcore: the ONE canonical field-mask RMW */
-#include "gpon_gtc_ploam.h"	/* flowcore: the DS PLOAM buffer unpack, fed this shell's gpon_io */
+#include "gpon_gtc_ploam.h"	/* the core: the DS PLOAM buffer unpack, fed this shell's gpon_io */
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/gfp.h>		/* __get_free_pages / GFP_KERNEL for the US PBO DRAM pool */
@@ -8965,7 +8965,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	       guard++ < 16) {
 		u8 m[13];
 
-		/* The word-unpack is the core's (flowcore/gpon_gtc_ploam.h, x86-proven
+		/* The word-unpack is the core's (gpon/gpon_gtc_ploam.h, x86-proven
 		 * by gpon_gtc_ploam_diff_test); this shell contributes the accessor
 		 * and the per-SoC offset.  A false cannot happen here -- the offset is
 		 * a compile-time constant, never REG_ABSENT -- so the branch folds

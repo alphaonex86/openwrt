@@ -84,14 +84,18 @@ CONFIG_KPROBE_EVENTS=y
 CONFIG_DYNAMIC_DEBUG=y
 
 #
-# Run-from-RAM initramfs bring-up: no on-board flash backing for M1. The
-# RTL9602C GMAC driver is for the r1/RLX sibling and does not apply here; this
-# SoC uses its own RTL9607C NIC + switch driver (M2). The GPON driver IS shared
-# (chip-agnostic family lib + the interAptiv c7 path, picked by DT compatible),
-# so it is enabled here for M3 (SerDes/PON-MAC ranging -> O5).
+# The RTL9602C GMAC driver is for the r1/RLX sibling and does not apply here;
+# this SoC uses its own RTL9607C NIC + switch driver (M2). The GPON driver IS
+# shared (chip-agnostic family lib + the interAptiv c7 path, picked by DT
+# compatible), so it is enabled here for M3 (SerDes/PON-MAC ranging -> O5).
 #
-# CONFIG_MTD_ROM is not set
-# CONFIG_MTD_PHYSMAP is not set
+# Flash: MTD_ROM + MTD_PHYSMAP(_OF) come from the shared config-6.18 and, since
+# 2026-09-06, this subtarget no longer switches them OFF (it did while the
+# G24W's flash base was unverified). The G24W reads its 16 MB SPI-NOR through
+# the same memory-mapped window the RTL9602C does (`mtd-rom` at 0x14000000;
+# the evidence is in rtl9603cvd_g24w.dts) -- it is how gpon-provision learns
+# this unit's own GPON_SN. READ-ONLY: no program/erase driver exists here.
+#
 # CONFIG_RTL9602C_ETH is not set
 CONFIG_RTL9602C_GPON=y
 # The on-chip NIC + switch live under the Realtek vendor menu, so the kernel

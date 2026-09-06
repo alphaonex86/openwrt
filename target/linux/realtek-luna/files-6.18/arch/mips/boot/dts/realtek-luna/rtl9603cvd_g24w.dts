@@ -17,8 +17,12 @@
  *     addresses, so every witness above it is a phantom -- see
  *     dev/FINDING-g24w-gtc-window-returns-a-constant.md before touching an
  *     offset here.
- *   - WiFi, LEDs, flash: still not claimed. See the "DELIBERATELY ABSENT"
- *     block in rtl9603cvd.dtsi for why each is out.
+ *   - Flash: READ-ONLY, claimed 2026-09-06 (the `mtd-rom` node below). It
+ *     is what lets gpon-provision read this unit's own GPON_SN out of the
+ *     vendor MIB in `config`, so the board announces ITS OWN serial with
+ *     nothing on the kernel command line. Program/erase have no driver.
+ *   - WiFi, LEDs: still not claimed. See the "DELIBERATELY ABSENT" block
+ *     in rtl9603cvd.dtsi for why each is out.
  *
  * Clean-room: board description from observed hardware only.
  *
@@ -177,45 +181,52 @@
 	};
 
 	/*
-	 * 16 MB flash.
+	 * 16 MB SPI-NOR, read through the controller's memory-mapped window.
 	 *
-	 * *** status = "disabled" ON PURPOSE. READ THIS BEFORE ENABLING. ***
+	 * ENABLED 2026-09-06. The base and the access method were the two
+	 * unknowns that kept this node disabled; both are now established by
+	 * two independent tiers, which is the bar for believing a value:
 	 *
-	 * The PARTITION TABLE below is MEASURED (the board's own /proc/mtd)
-	 * and is the single most valuable fact in this file, so it is
-	 * recorded here rather than thrown away. The CONTROLLER is not:
+	 *   BASE 0x14000000, tier 1 (this unit, its vendor kernel):
+	 *     /proc/iomem   14000000-17ffffff : physmap-flash
+	 *     boot log      physmap platform flash device: 04000000 at 14000000
+	 *     boot log      SPI-F: 5E4018/MMIO16-1/ModeC 1x16 MB      (the loader)
+	 *     boot log      Luna SPI NOR FLASH G3 driver-5E4018/MMIO16-1/ModeC
+	 *   ACCESS, tier 3 (this SoC's own SDK: drivers/mtd/maps + the spi-nor
+	 *   "G3" driver): the vendor registers a physmap device whose resource
+	 *     ends at 0x17ffffff, and its READ path for any offset+len <= 16 MB
+	 *     is a plain memcpy from that window; the SPI-F PIO block at
+	 *     0x18001200 serves program/erase and parts above 16 MB only. So
+	 *     a read-only `mtd-rom` over the window IS the vendor's own read
+	 *     path minus the writes. Nothing to configure: the loader already
+	 *     put the controller in MMIO read mode ("MMIO16-1/ModeC") to boot
+	 *     from it, and nothing in our image touches that mode.
+	 *   JEDEC id 5E4018 (both loader lines): capacity byte 0x18 ->
+	 *     2^24 = 16 MiB, which the partition sum below also gives.
 	 *
-	 *   UNKNOWN: the flash base and the access method on this SoC.
-	 *     0x14000000 with a memory-mapped read window is the RTL9602C's
-	 *     arrangement; the RTL9607C description declares no flash node at
-	 *     all, so there is nothing to corroborate it with. `mtd-rom` also
-	 *     means READ-ONLY by construction -- program/erase live behind a
-	 *     separate PIO register block with no driver in this tree.
+	 * READ-ONLY by construction (map_rom, MTD_CAP_ROM): program and erase
+	 * live behind the PIO block, for which this tree has no driver.
+	 * Nothing in this node can write flash.
 	 *
-	 *   WHY DISABLED RATHER THAN OMITTED: bring-up is run-from-RAM and
-	 *     needs no flash whatsoever, while a WRONG base is actively
-	 *     destructive -- the kernel would map 16 MB of nothing, publish
-	 *     garbage partitions, and (if `linux,rootfs` were set) hand
-	 *     ROOT_DEV a garbage device and panic at mount. Disabled, the
-	 *     node is inert: nothing probes it, the measurement is preserved,
-	 *     and turning it on later is a one-word change.
+	 * WHAT IT IS FOR: gpon-provision's rtk_factory reads the vendor MIB
+	 * (JFFS2, lastgood_hs.xml) out of `config` and hands GPON_SN /
+	 * GPON_PLOAM_PASSWD / ELAN_MAC_ADDR to the driver -- the SAME chain
+	 * the X111W uses, PROVEN offline on x86 against this unit's own mtd3
+	 * dump before the first boot (sn=XPON23B3CE90, ploam=1234567890,
+	 * mac=5c:19:23:b3:ce:90).
 	 *
-	 *   NOTE there is deliberately NO `linux,rootfs` on r0 yet. Adding it
-	 *     is part of the same later step, not this one.
-	 *
-	 * ENABLE IT ONLY AFTER establishing the base and confirming the
-	 * offsets, with:
-	 *   for d in /sys/class/mtd/mtd[0-9]*; do \
-	 *       echo "$d off=$(cat $d/offset) size=$(cat $d/size) \
-	 *             erase=$(cat $d/erasesize) name=$(cat $d/name)"; done
-	 *   ls -l /sys/bus/spi/devices/  (then read <dev>/modalias under it)
-	 *   cat /proc/iomem
+	 * NOTE there is deliberately NO `linux,rootfs` on r0: this image runs
+	 * from RAM, and booting from flash is a later, separate step.
 	 */
 	spi_nor: flash@14000000 {
 		compatible = "mtd-rom";
-		reg = <0x14000000 0x1000000>;	/* base UNVERIFIED -- see above */
-		bank-width = <2>;
-		status = "disabled";
+		reg = <0x14000000 0x1000000>;	/* 16 MiB: JEDEC 5E4018 + the partition sum */
+		/*
+		 * 4: the width the vendor map declares (tier 3). It does not
+		 * alter the read path -- map_rom copies with memcpy_fromio at
+		 * any width -- so this records the vendor's bus, it chooses none.
+		 */
+		bank-width = <4>;
 
 		/*
 		 * MEASURED, and DIFFERENT from the X111W's declaration: this
@@ -245,14 +256,16 @@
 			/*
 			 * SIZES and NAMES are MEASURED from /proc/mtd.
 			 *
-			 * OFFSETS are DERIVED, not read: /proc/mtd publishes
-			 * size and erasesize only, never offset. The derivation
-			 * assumes the listing is ascending and contiguous from
-			 * 0. What supports it: the seven sizes sum to EXACTLY
-			 * 0x1000000 with zero slack, and every resulting
-			 * boundary is 4 KiB-aligned -- a layout with real gaps
-			 * could only reproduce that by coincidence. What would
-			 * PROVE it: /sys/class/mtd/mtdN/offset (command above).
+			 * OFFSETS: PROVEN 2026-09-06, tier 1 -- the vendor kernel
+			 * prints them as it carves the device (this unit's boot
+			 * log, "Creating 7 MTD partitions on physmap-flash"):
+			 *   0x000000-0x040000 boot     0x040000-0x042000 env
+			 *   0x042000-0x044000 env2     0x044000-0x084000 config
+			 *   0x084000-0x3b8000 k0       0x3b8000-0xe58000 r0
+			 *   0xe58000-0x1000000 framework1
+			 * and its command line carries the same table as
+			 * `mtdparts=physmap-flash:256K(boot),8K(env),...`.
+			 * Every `reg` below matches that print.
 			 *
 			 * SINGLE BANK: there is no k1/r1 here, unlike the
 			 * X111W. Whatever fallback scheme this product uses, it

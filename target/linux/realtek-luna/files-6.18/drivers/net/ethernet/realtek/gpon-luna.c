@@ -3220,15 +3220,23 @@ static void bosa_laser_maint(void)
  * rtl8290b_apc_init() -- walked the same two batches with their own
  * byte-identical copies of the tables.
  *
- * ⚠ THE ENTRIES ARE DELIBERATELY UNNAMED, and that is a RECORDED QUESTION, not
- * an oversight. Two of this file's own comments disagree about the bit map:
- * the batch comment reads BIAS_MAX_EN/LOADIN = b7/b6 and MOD_MAX_EN/LOADIN =
- * b5/b4, which makes 0xb0 = BIAS_MAX_EN|MOD_MAX_EN|MOD_MAX_LOADIN -- while the
- * done-check site below spells 0xb0 as "BIAS_MAX_EN|MOD_MAX_EN", which is 0xa0
- * on that same map. Neither names b3, which 0xa8/0xd8/0xe8 all set. The BOSA
- * is an external I2C part with no entry in the SoC register oracle, so nothing
- * in reach settles the contradiction, and inventing a decode would be worse
- * than leaving the bytes bare.
+ * ★ WHERE THE ENTRY NAMES COME FROM (2026-09-06). W77's bit map is the
+ * transceiver's OWN, not a reading of ours: the vendor europa register
+ * definition (europa_reg_definition.h, tier 3) lays W77 = 0x24D out as
+ * BIAS_MAX_EN[7] / BIAS_MAX_LOADIN[6] / MOD_MAX_EN[5] / MOD_MAX_LOADIN[4] /
+ * BACKUP[3:0], and the stock europa_drv.ko ignition disassembly (tier 2,
+ * cross-compiler/rtl8290b_apc_init_blueprint.txt) writes these same twelve
+ * bytes in this same order. The names live in luna_gpon_regs.h (BOSA_W77_*)
+ * and the static_asserts under the tables pin each named command to the
+ * stock byte. That settles what this comment used to record as a
+ * contradiction: the done-check site spelled 0xb0 as "BIAS_MAX_EN|MOD_MAX_EN",
+ * which on that map is 0xa0 -- 0xb0 is BIAS_MAX_EN|MOD_MAX_EN|MOD_MAX_LOADIN,
+ * and that site now says so.
+ * ⚠ WHAT IS STILL NOT ESTABLISHED: bit 3, set by 0xa8/0xd8/0xe8/0xb8. The
+ * definition only NAMES the field it sits in ("BACKUP"); nothing on this
+ * bench says what the MCU does with it, so it is spelled BOSA_W77_BACKUP_B3
+ * -- the field's name, never a meaning. The BOSA is an external I2C part with
+ * no entry in the SoC register oracle, which is why that oracle was not asked.
  *
  * ★ THE SETTLE IS A PARAMETER, NOT A CONSTANT: the calibrate path waits 10 ms
  * per command and the apc_init path 11 ms. Both are preserved exactly --
@@ -3236,17 +3244,44 @@ static void bosa_laser_maint(void)
  * (apc_init spelled its wait as 11 x udelay(1000); mdelay(n) is that same
  * loop, so the emitted delay is unchanged.)
  */
-static const u8 bosa_w77_batch1[] = { 0xa8, 0xb0, 0xd0, 0xd8, 0xe8, 0xe0 };
-static const u8 bosa_w77_batch2[] = { 0xb0, 0xd0, 0xb8, 0xb0, 0xd0, 0xc0 };
+static const u8 bosa_w77_batch1[] = {
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_BACKUP_B3,		/* 0xa8 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN,		/* 0xb0 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN,	/* 0xd0 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN
+		| BOSA_W77_BACKUP_B3,							/* 0xd8 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN
+		| BOSA_W77_BACKUP_B3,							/* 0xe8 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN,		/* 0xe0 */
+};
+static const u8 bosa_w77_batch2[] = {
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN,		/* 0xb0 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN,	/* 0xd0 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN
+		| BOSA_W77_BACKUP_B3,							/* 0xb8 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN,		/* 0xb0 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN,	/* 0xd0 */
+	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN,					/* 0xc0 */
+};
+/* The named form MUST reproduce the stock bytes -- one line per distinct
+ * command, so a re-defined bit cannot silently move a write. */
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_BACKUP_B3) == 0xa8, "W77 0xa8");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN) == 0xb0, "W77 0xb0");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN | BOSA_W77_BACKUP_B3) == 0xb8, "W77 0xb8");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN) == 0xc0, "W77 0xc0");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN) == 0xd0, "W77 0xd0");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN | BOSA_W77_BACKUP_B3) == 0xd8, "W77 0xd8");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN) == 0xe0, "W77 0xe0");
+static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN | BOSA_W77_BACKUP_B3) == 0xe8, "W77 0xe8");
 
 static void bosa_w77_walk(const u8 *cmds, unsigned int n, unsigned int settle_ms)
 {
 	unsigned int i;
 
 	for (i = 0; i < n; i++) {
-		bosa_write_reg(0x24d, cmds[i]);	/* W77 MCU command */
+		bosa_write_reg(BOSA_REG_W77, cmds[i]);	/* the MCU command */
 		mdelay(settle_ms);
-		bosa_read_reg(0x31d);		/* R29 status (the MCU consumes it) */
+		bosa_read_reg(BOSA_REG_R29);		/* status; the MCU consumes the read */
 	}
 }
 
@@ -3339,9 +3374,8 @@ static void __init bosa_apc_calibrate(void)
 	 * path that omits this handshake leaves the MCU with the laser never enabled
 	 * (EN_L/bias=0). The bytes strobe BIAS_MAX_EN/LOADIN (b7/b6) + MOD_MAX_EN/LOADIN
 	 * (b5/b4) to latch the bias/mod max limits set just above.
-	 * ⚠ THAT BIT MAP IS NOT SETTLED -- it contradicts the done-check site's
-	 * reading of the same byte, and neither names b3. See bosa_w77_walk(),
-	 * which owns the tables and records the contradiction. */
+	 * The bit map is the transceiver's own (BOSA_W77_* in luna_gpon_regs.h);
+	 * bosa_w77_walk() owns the tables and says where the names came from. */
 	{
 		bosa_set_bit(0x24e, 7, 1);		/* W78 b7 (apc_init prefix) */
 		bosa_w77_walk(bosa_w77_batch1, ARRAY_SIZE(bosa_w77_batch1), 10);
@@ -3411,9 +3445,10 @@ static void __init bosa_apc_calibrate(void)
 	bosa_set_bit(0x20e, 7, 1);		/*          W14 b7 high (LOADIN) */
 	bosa_set_bit(0x27c, 5, 1);		/*          W80 b5 high (path strobe) */
 	bosa_set_bit(0x241, 6, 0);		/* fsuMode 0: W65 b6 */
-	bosa_write_reg(0x24d, 0xb0);		/* W77=0xB0: BIAS_MAX_EN|MOD_MAX_EN arm done-check */
+	bosa_write_reg(BOSA_REG_W77, BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN |
+		       BOSA_W77_MOD_MAX_LOADIN);	/* W77=0xb0 arms the done-check */
 	for (k = 0; k < 250; k++) {
-		int r29 = bosa_read_reg(0x31d);
+		int r29 = bosa_read_reg(BOSA_REG_R29);
 
 		if (r29 >= 0 && (r29 & 0x3c) == 0x3c) {
 			locked = 1;
@@ -9380,8 +9415,9 @@ static void gpon_fsm_poll(struct timer_list *t)
 	if (apc_offk_armed && !apc_offk_latched && (gpon_fsm_ticks % 5) == 0) {
 		int r;
 
-		bosa_write_reg(0x24d, 0xb0);
-		r = bosa_read_reg(0x31d);
+		bosa_write_reg(BOSA_REG_W77, BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN |
+			       BOSA_W77_MOD_MAX_LOADIN);	/* 0xb0, as the done-check */
+		r = bosa_read_reg(BOSA_REG_R29);
 		if (r >= 0 && (r & 0x3c) == 0x3c) {
 			bosa_set_bit(0x20e, 7, 0);
 			bosa_set_bit(0x27c, 4, 0);

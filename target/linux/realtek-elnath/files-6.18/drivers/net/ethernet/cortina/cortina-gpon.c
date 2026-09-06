@@ -183,12 +183,15 @@
  * at +0xa08c, read-data at +0xa090.  The vendor aal_psds_reset CMU/PLL re-lock
  * (cg_psds_relock) strobes internal reg CG_PSDS_CMU_IDX bits[7:4].
  */
-#define CG_PSDS_IND_CMD		0xa088
-#define CG_PSDS_IND_WDATA	0xa08c
-#define CG_PSDS_IND_RDATA	0xa090
+#define CG_PSDS_IND_CMD		0xa088		/* stock reg.txt: PSDS_REG_ACCESS */
+#define CG_PSDS_IND_WDATA	0xa08c		/* stock reg.txt: PSDS_REG_DATAIN */
+#define CG_PSDS_IND_RDATA	0xa090		/* stock reg.txt: PSDS_REG_DATAOUT */
 #define CG_PSDS_IND_READ	0x80000000u	/* command: strobe, read */
 #define CG_PSDS_IND_WRITE	0xc0000000u	/* command: strobe, write */
-#define CG_PSDS_CMU_IDX		0x400		/* analog CMU reg; [7:4] = re-lock strobe */
+#define CG_PSDS_CMU_IDX		0x400		/* analog reg; [7:4] = re-lock strobe.  "CMU" is OUR label:
+						 * the vendor calls index 0x400 (page 0x20, num 0) ANA_MISC_REG00
+						 * and its walk a CDR power-down/rx_en cycle (aal_psds.c
+						 * __psds_cdr_reset, tier 3, one source) -- see cg_psds_relock() */
 
 /*
  * GLB (global) PON/GPON reset & clock control window: phys 0x4_F4320000, 4 KiB.
@@ -2035,7 +2038,22 @@ static inline u32 cg_mac_rd(struct cortina_gpon *cg, u32 off)
 static void cg_psds_relock(struct cortina_gpon *cg)
 {
 	void __iomem *pon = cg->pon;
-	static const u8 seq[] = { 0x8, 0xd, 0x7, 0x0 };
+	/* ANA_MISC_REG00[7:4] (vendor's name for internal reg page 0x20/num 0
+	 * = index 0x400, aal-77c aal_psds.c __psds_cdr_reset, tier 3).  The vendor
+	 * documents the walk as a CDR power-cycle: b7 is the CDR power-down and the
+	 * receiver enable rides in the low bits, so pdown/rx_en below are ITS
+	 * names for each step, not ours.  Values and cadence are tier 2 as well:
+	 * stock ca-ne.ko aal_psds_reset writes 0x80/0xd0/0x70/0x00 into the same
+	 * index 1 ms apart, then waits the same 0x8c01==0x8c00 on rgb8.  The vendor
+	 * does not say which of b6/b4 is rx_en (both are set whenever it says
+	 * rx_en=1), and NOTHING we hold names b5, set in 0x7 alone -- so the step
+	 * is named, the bit is not.  The names rest on that one tier-3 source. */
+	static const u8 seq[] = {
+		0x8,	/* pdown=1, rx_en=0: CDR held in power-down, receiver off */
+		0xd,	/* pdown=1, rx_en=1: receiver enabled while still powered down */
+		0x7,	/* pdown=0, rx_en=1: CDR powered up, receiver on (+b5, unnamed) */
+		0x0,	/* pdown=0, rx_en=0: strobe released, nibble left clear */
+	};
 	u32 base;
 	int i, k;
 

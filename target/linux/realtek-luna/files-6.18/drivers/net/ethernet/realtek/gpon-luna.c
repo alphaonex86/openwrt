@@ -1193,8 +1193,10 @@ MODULE_PARM_DESC(bosa_i2c_restore_pad, "restore SOC_IO_MODE_EN[13]=0 (optical-SD
 static bool lan_keep_open = true;
 module_param(lan_keep_open, bool, 0644);
 MODULE_PARM_DESC(lan_keep_open, "keep LAN open from boot independent of GPON/WAN state (default 1); 0=legacy O5-gated");
-/* force_soc_clk: before the SerDes bring-up, write the 3 SoC sysctl/clock registers
- * (0x18000100/12c/140) to the live-STOCK (100%-deterministic) values that OUR FAIL boot
+/* force_soc_clk: before the SerDes bring-up, write the 3 SoC sysreg words at 0x18000100/12c/140
+ * (⚠ NOT clock registers -- the stock binaries show a strap word and two DRAM-calibration result
+ * words, see the soc_clk[] table; the parameter keeps its historical name) to the live-STOCK
+ * (100%-deterministic) values that OUR FAIL boot
  * was found to differ from (stock 0x00440e00/0x024d024d/0x024d024d vs ours 0x00440f00/
  * 0x02490249). Candidate fix for the cold-start ~50% US-TX metastability (stock-vs-ours
  * clock-config diff, same methodology that found REG01/REG11). 0 = legacy (no write). */
@@ -9713,23 +9715,41 @@ static int __init rtl9602c_gpon_init(void)
 		luna_c2_skip_rstb_dance = serdes_skip_rstb_dance;	/* A/B: skip the gratuitous DIG_1D reset-B pulse (already released) */
 		luna_c2_minimal_analog = serdes_minimal_analog;	/* A/B: skip the over-configure golden-table writes (match stock's minimal set) */
 		if (force_soc_clk) {
-			/* Match the live-stock (100%-deterministic) SoC sysctl/clock regs that our
-			 * FAIL boot differed from, BEFORE the SerDes CMU locks. Same physical board,
-			 * so these are Board C's own stock values.
+			/* Match the live-stock (100%-deterministic) values of three SoC sysreg words that
+			 * our FAIL boot differed from, BEFORE the SerDes CMU locks. Same physical board,
+			 * so these are Board C's own stock values, captured live (tier 1) and written
+			 * back with a FULL-WORD writel() and no read-modify-write, so every bit is stock's.
 			 *
-			 * ★ THE THREE ADDRESSES STAY BARE, AND THAT IS A SEARCHED ANSWER, not a
-			 * shrug (2026-09-05). Nothing on disk names them: the tier-2 name oracle
-			 * (x400axf stock /etc/reg.txt, 5637 entries, the only reg.txt here) holds
-			 * ZERO addresses in 0x18xxxxxx -- it maps the Cortina RTL9607F windows
-			 * (0xf430/f431/f432/f550/f700), different silicon entirely -- and the
-			 * vendor SDK has no hit for 0x1800012c or 0x18000140 anywhere, its one
-			 * 0x18000000 being BSP_XHCI_PADDR on the RTL9607C. These are the RTL9602C
-			 * Luna sysctl block, captured live. An absolute address written with a
-			 * FULL-WORD writel() and no read-modify-write, so every bit is stock's. */
+			 * ★ WHAT THE THREE WORDS ARE -- from this unit's OWN stock binaries (tier 2,
+			 * 2026-09-05), because no register NAME for them exists anywhere we may read:
+			 * the SDK chipdefs map the switch core only (regtable_vs_sdk.find_by_address
+			 * answers [] for all three on every chip), the x400axf /etc/reg.txt oracle is
+			 * Cortina silicon, and the one vendor #define at this address is the RTL9607C's
+			 * (bspchip_9607c.h:222 BSP_SYSREG_PIN_STATUS_REG, CLSEL = bit 5) -- a sibling die,
+			 * cited as corroboration below and deliberately NOT adopted as this die's name.
+			 *   0x18000100  a STRAP / PIN-STATUS word, not a clock register. The stock kernel
+			 *               (stock_nor/k0_kernel, kallsyms recovered, base 0x80000000) reads it
+			 *               in _is_CKSEL_25MHz @0x80000dc8 = !((reg >> 5) & 1) -- bit 5 is the
+			 *               clock-select strap (0 = 25 MHz), consumed by sys_LX_freq_mhz -- tests
+			 *               bit 11 in aipc_module_voip_set_pcm_fs @0x8019416c and RMWs the low
+			 *               12 bits in rtl8954E_hw_init @0x8046d068. The 9607C's CLSEL sits at
+			 *               the same bit 5.
+			 *   0x1800012c  DRAM AUTO-CALIBRATION RESULT words, not clock registers. Across
+			 *   0x18000140  every stock binary on disk (stage-1 of mtd0_boot.bin, its LZMA
+			 *               U-Boot body, k0_kernel, all 363 rootfs ELFs incl. 20 .ko) only
+			 *               stage-1 touches them: the routine that prints "AK: DRAM AUTO
+			 *               CALIBRATION" (0x9fc14904) stores them at 0x9fc14b70 / 0x9fc14b74
+			 *               after encoding the calibration fields twice, into both 16-bit
+			 *               halves -- hence the 0x024d024d shape -- and 0x9fc138bc presets
+			 *               0x18000140 to 0x00010001. A per-boot calibration result explains
+			 *               a stock-vs-ours delta with no clock involved.
+			 *   Stock's real clock init is elsewhere: stage-1 prints "cg_cpu_clk_init done"
+			 *   after touching 0x18000044 / 0x208 / 0x380 and "cg_lx_pll_init done" after
+			 *   0x180003a8..0x3d8 (mtd0_boot.bin 0x9fc00de4). */
 			static const struct { u32 off, val; } soc_clk[] = {
-				{ 0x18000100u, 0x00440e00u },
-				{ 0x1800012cu, 0x024d024du },
-				{ 0x18000140u, 0x024d024du },
+				{ 0x18000100u, 0x00440e00u },	/* strap / pin-status word (bit 5 = CKSEL, read by stock _is_CKSEL_25MHz): stock's live value */
+				{ 0x1800012cu, 0x024d024du },	/* DRAM auto-calibration result word A (two identical 16-bit halves), stock stage-1 store @0x9fc14b70: stock's value on the captured boot */
+				{ 0x18000140u, 0x024d024du },	/* DRAM auto-calibration result word B, stock stage-1 store @0x9fc14b74: same encoding, same boot */
 			};
 			unsigned int k;
 			for (k = 0; k < ARRAY_SIZE(soc_clk); k++) {

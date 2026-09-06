@@ -2222,10 +2222,38 @@ static void cortina_ni_rx_redir_ldpid_set(struct cortina_ni *ni, u8 idx,
  * deleting it would lose the tier-1 fact -- and this note is what stops it
  * being read as the source. The parameter is the owner; see its
  * MODULE_PARM_DESC at :280.
+ *
+ * HOW TO READ A ROW (names added 2026-09-05, values untouched):
+ *   ldpid = the Cortina NE logical dest port, AAL_LPORT_*.  Six of the eight
+ *   are this tree's own defines (cortina-ni-regs.h: CA_NI_LDPID_9QUEUE_LO/HI,
+ *   CA_NI_RX_CPU_LDPID, CA_NI_RX_L3LAN_LDPID, CA_NI_RX_MC_CPU_LDPID and the
+ *   0x20..0x3f CPU_MQ range); CPU_Q 0x1d and BLACKHOLE 0x1f are what this
+ *   tree's comments already call them, and the Cortina NE aal_port.h (T4:
+ *   the generic and the 77c copies agree; the 07f AAL is not on disk) spells
+ *   all eight at exactly these values.
+ *   pdpid = the physical dest port, AAL_PPORT_*: CA_NI_PPORT_OAM/QM/BLACKHOLE
+ *   and CA_NI_RX_CPU_PDPID are this tree's; PPORT_L3_LAN 0x0d is the same
+ *   aal_port.h, and live stock reads [0x18]=0x0a L3_WAN / [0x19]=0x0d L3_LAN
+ *   (tier 1, dev/x400axf/stock_golden_qm.txt), so the PPORT numbering is
+ *   proven on this silicon, not inherited.
  */
 static const struct { u8 ldpid, pdpid; } cortina_ni_rx_pdpid_map[] = {
-	{ 0x08, 0x0c }, { 0x09, 0x0c }, { 0x0d, 0x0c }, { 0x10, 0x09 },
-	{ 0x19, 0x0d }, { 0x1d, 0x09 }, { 0x1f, 0x0f }, { 0x32, 0x08 },
+	{ 0x08, 0x0c },	/* 9QUEUE_NI0 (CA_NI_LDPID_9QUEUE_LO)   -> PPORT_OAM: CPU-injected PON control frames; stock maps every 9QUEUE row 0x08..0x0f to 0x0c */
+	{ 0x09, 0x0c },	/* 9QUEUE_NI1 (9QUEUE_LO + 1)            -> PPORT_OAM */
+	{ 0x0d, 0x0c },	/* 9QUEUE_NI5 (9QUEUE_LO + 5)            -> PPORT_OAM */
+	{ 0x10, 0x09 },	/* CPU_0 (CA_NI_RX_CPU_LDPID)             -> PPORT_CPU (CA_NI_RX_CPU_PDPID): the redir dest resolves to the CPU */
+	{ 0x19, 0x0d },	/* L3_LAN (CA_NI_RX_L3LAN_LDPID)          -> PPORT_L3_LAN: my-MAC/ARP/L3-hit -> ES8 -> L3FE -> CLS trap -> CPU.  ROW NEVER READ, see above */
+	{ 0x1d, 0x09 },	/* CPU_Q (AAL_LPORT_CPU_Q)                -> PPORT_CPU */
+	{ 0x1f, 0x0f },	/* BLACKHOLE (AAL_LPORT_BLACKHOLE)        -> PPORT_BLACKHOLE (CA_NI_PPORT_BLACKHOLE): drop */
+	{ 0x32, 0x08 },	/* CA_NI_RX_MC_CPU_LDPID -> PPORT_QM (CA_NI_PPORT_QM).
+			 * ⚠ 0x32 has NO declared enumerator: cortina-ni-regs.h:1946-1947
+			 * declares the ENDPOINTS only (CA_NI_LDPID_CPU_MQ_LO 0x20 =
+			 * AAL_LPORT_CPU_MQ_0 / LLID_GEM_INDEX_0, _HI 0x3f). 0x32 is
+			 * 0x20 + 18, i.e. INSIDE that declared range -- a derivation,
+			 * not a name. This comment first said `CPU_MQ_18 /
+			 * LLID_GEM_INDEX_18`, which the tree does not establish. Stock
+			 * maps the whole 0x20..0x3f range to QM, which is what the
+			 * endpoints are for. */
 	/* ★★★ build68: REVERT build67's [0x19]/[0x32]->0x00.  Stock ground truth (working
 	 * CPU-RX boot, devmem): the CPU frame does NOT reach the CPU via a PDPID unicast
 	 * dest at all - it rides the MC_FIB FLOOD: DFT_FWD 0x1832 -> mcgid 0x19 -> MC_FIB
@@ -2513,15 +2541,48 @@ static void cortina_ni_rx_mc_group_init(struct cortina_ni *ni)
 	/* ★ 2026-07-15 relabeled (build70 misread): this table @0x1634 is NOT the
 	 * MC_FIB (real MC_FIB ACCESS = 0x1644, EMPTY on stock - there is NO flood-to-
 	 * CPU; the CPU copy comes via DFT_FWD 0x1832 -> L3_LAN -> L3FE -> CLS trap).
-	 * 0x1634 is a different table (likely NON_KNOWN_POL_MAP, rtl8277c 0x1624 +
-	 * 0x10).  The values below ARE stock's own content of THAT table (tier-1
-	 * devmem, dev/x400axf/stock_golden_qm.txt), so writing them is a plain
-	 * stock-match of it - kept byte-identical to the proven boots.  The two zero
-	 * latch-writes to 0x1640/0x163c (DSCP_TE block, no GO) are inert; also kept. */
+	 * ★ 2026-09-05 IDENTIFIED: 0x1634/0x1638 IS L2FE_ARB_NON_KNOWN_POL_MAP_TBL
+	 * _ACCESS/_DATA -- the L2FE flooding-policer map -- on THIS silicon:
+	 *   tier 2  stock /etc/reg.txt:173-174 names both addresses exactly so;
+	 *   tier 2  stock ca-ne.ko, aal_arb_non_known_pol_map_set (.text 0x37b90):
+	 *           bounds idx<8, type<4, id<16; row = idx<<2 | type
+	 *           (`orr w21, w2, w1, lsl #2`); DATA[3:0] = id (`bfxil w0, w22,
+	 *           #0, #4`); commit 0xC0000000|row on 0x1634;
+	 *   T4      Cortina NE aal-77c/aal_arb.c:389-421 is that function in C
+	 *           (addr = (lspid_pol_idx << 2) | pkt_type; data.flooding_pol_id)
+	 *           and rtl8277c_registers.h:7621/7637 give the same 5-bit addr and
+	 *           4-bit flooding_pol_id.  Two tiers agree.
+	 * So a ROW is {ILPB unkwn_pol_idx[2:0], pkt_type[1:0]} and its value is the
+	 * flooding-policer PROFILE id that {port-class, packet-type} is metered by.
+	 * ⚠ THE ROW INDEX IS NOT AN LDPID: the writer's CA_NI_RX_CPU_LDPID + k is
+	 * only the number 0x10 + k, i.e. the rows of unkwn_pol_idx 4, 5 and 6.
+	 * The values ARE stock's own content of THAT table (tier-1 devmem,
+	 * dev/x400axf/stock_golden_qm.txt; all 32 rows in dev/x400axf/stock/
+	 * STOCK_l2fe_forwarding.txt), so writing them is a plain stock-match of it -
+	 * kept byte-identical to the proven boots.  0xF is the NE's DEFAULT profile
+	 * (CA_AAL_FDB_PORT_FLOOD_DEF_PROFILE = 15, written to all 32 rows at init;
+	 * T4 aal/aal_fdb.c:4713, aal-77c/aal_arb.c:79) and is what stock still
+	 * reads in every row nobody re-assigned (idx 0 and 7, every MC_UC and UMC
+	 * row).  Which RATE sits behind profile 4..12 is in the L2 TE policer
+	 * table, not read here.  The pkt_type names are the T4 enum
+	 * aal_arb_pkt_fwd_type_t (0 MC_UC, 1 UUC, 2 UMC, 3 BC); only the bound
+	 * 0..3 is proven on this board.  The two zero latch-writes to 0x1640/0x163c
+	 * (DSCP_TE block, no GO) are inert; also kept. */
 	{
 		static const u8 nkpol_d[] = {
-			/* 0x10 */ 0x0F, 0x04, 0x0F, 0x09, 0x0F, 0x05,
-			/* 0x16 */ 0x0F, 0x0A, 0x0F, 0x0B, 0x0F, 0x0C,
+			/* row = unkwn_pol_idx << 2 | pkt_type  ->  flooding_pol_id */
+			0x0F,	/* [0x10] idx 4, MC_UC : default profile 15 */
+			0x04,	/* [0x11] idx 4, UUC   : profile 4 */
+			0x0F,	/* [0x12] idx 4, UMC   : default profile 15 */
+			0x09,	/* [0x13] idx 4, BC    : profile 9 */
+			0x0F,	/* [0x14] idx 5, MC_UC : default profile 15 */
+			0x05,	/* [0x15] idx 5, UUC   : profile 5 */
+			0x0F,	/* [0x16] idx 5, UMC   : default profile 15 */
+			0x0A,	/* [0x17] idx 5, BC    : profile 10 */
+			0x0F,	/* [0x18] idx 6, MC_UC : default profile 15 */
+			0x0B,	/* [0x19] idx 6, UUC   : profile 11 */
+			0x0F,	/* [0x1a] idx 6, UMC   : default profile 15 */
+			0x0C,	/* [0x1b] idx 6, BC    : profile 12 */
 		};
 		unsigned int k;
 
@@ -2531,7 +2592,7 @@ static void cortina_ni_rx_mc_group_init(struct cortina_ni *ni)
 			writel(nkpol_d[k], ni_base(ni) + CA_NI_L2FE_NKPOL_MAP_DATA);
 			cortina_ni_rx_settle();
 			cortina_ni_rx_ind_store(ni, CA_NI_L2FE_NKPOL_MAP_ACCESS,
-						CA_NI_RX_CPU_LDPID + k);	/* 0x10 + k */
+						CA_NI_RX_CPU_LDPID + k);	/* = row 0x10 + k = {unkwn_pol_idx, pkt_type}, NOT an ldpid */
 			cortina_ni_rx_settle();
 		}
 		dev_info(ni->dev,

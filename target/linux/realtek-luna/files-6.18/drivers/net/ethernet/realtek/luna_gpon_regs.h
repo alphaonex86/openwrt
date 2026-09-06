@@ -196,6 +196,20 @@
 #define BOSA_REG_W41		0x229		/* [4] RXI_PWDN_L (0=RX on)    */
 #define BOSA_REG_CONTROL2	0x254		/* [6] LOS_PIN_TRI (0=drive SD)*/
 #define BOSA_REG_STATUS2	0x383		/* [2] RX_LOS_STATUS (0=signal)*/
+#define BOSA_REG_W77		0x24d		/* APC max-enable strobes = the MCU command byte */
+/*
+ * W77's fields, as the transceiver's own register definition lays them out
+ * (europa_reg_definition.h, W77 = 0x24D; the stock europa_drv.ko ignition
+ * disassembly strobes the same bits). BACKUP[3:0] is NAMED there and nothing
+ * on this bench says what the MCU does with it -- BOSA_W77_BACKUP_B3 is the
+ * field's name, never a meaning.
+ */
+#define   BOSA_W77_BIAS_MAX_EN		BIT(7)
+#define   BOSA_W77_BIAS_MAX_LOADIN	BIT(6)
+#define   BOSA_W77_MOD_MAX_EN		BIT(5)
+#define   BOSA_W77_MOD_MAX_LOADIN	BIT(4)
+#define   BOSA_W77_BACKUP_B3		BIT(3)		/* in BACKUP[3:0]; the one bit the ignition strobes */
+#define BOSA_REG_R29		0x31d		/* FSU/MCU status; the MCU consumes each read */
 #define WSDS_DIG_00		0x22030		/* SDS clock + soft-reset-B bank */
 #define   WSDS_SFT_RSTB		BIT(8)		/* digital soft reset-B        */
 #define   WSDS_DIG00_RUN	0xf30u		/* operational run state       */

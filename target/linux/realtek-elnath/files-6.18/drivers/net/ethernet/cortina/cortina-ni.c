@@ -203,6 +203,20 @@ struct cortina_ni_gphy_patch_word {
  * is for.  It was the only array embedded_blob_audit.py still marked
  * EXTERNALISE.
  *
+ * ⚠ IT IS NOT ACCELERATOR MICROCODE.  The message of the commit that added the
+ * file (d7a19f1762) calls it "2250 bytes of accelerator microcode"; that is
+ * wrong, and being published it cannot be rewritten, so a reader who greps for
+ * "accelerator" must land here.  What the bytes are: a sliding 16-bit window
+ * over ONE byte stream -- of the 517 consecutive-address word pairs, 512
+ * satisfy data[k] & 0xff == data[k+1] >> 8, which 560 independent register
+ * values could not -- written through the PHY's own SRAM address/data pair
+ * (0xa436/0xa438, the only registers this loop touches) while the PHY's uC is
+ * HELD, then released for that uC to run (CA_NI_GPHY_LOCK_HOLD, below).  The
+ * SoC's ARM never executes a byte of it.  "apro" is the vendor's ApolloPro
+ * platform codename (its own clock driver is named for it) and apro_gen2 the
+ * vendor's name for this GPHY generation's patch path -- the file name says
+ * what the image is for, and stays.
+ *
  * It now ships as "cortina-apro-gen2.fw": magic "APROGEN2", a big-endian u16
  * count, then count x (big-endian u16 addr, big-endian u16 data).  Dull on
  * purpose, and read with EXPLICIT BYTE MATH below so the same file is parsed
@@ -215,8 +229,17 @@ struct cortina_ni_gphy_patch_word {
  * continues.  That is deliberate: refusing to probe would take the whole LAN
  * down, while skipping is exactly the state `gphy_patch=0` already selects --
  * and that state was MEASURED indistinguishable from the default on this board
- * (3/4 ports up either way, 527.7 vs 500.6 Mbps).  A missing file must never be
- * silent, and must never be fatal either.
+ * (X400AXF, 2026-08-31, TFTP->RAM; the record is
+ * x400axf/FINDING-gphy-blob-exists-only-as-a-live-read.md plus the console log
+ * ONU-test-case/results/host/console/onu/2026-08-31.log, where the parameter
+ * reads back N and all four banks log "wrote 0 words"): 3 of 4 BOOTS reached
+ * DATA path UP on each arm (gphy_patch_rate.py, n=4), and board->host over
+ * `dd | nc` gave 527.7 Mbps with the patch off vs 500.6 with it on.  ⚠ Scope:
+ * the ONE cabled RJ45, ONE direction, ~1 s of transfer, no soak -- an earlier
+ * wording here said "3/4 ports", which misread the boot tally as a port count.
+ * "Not REQUIRED to come up and forward" is all that is measured; the image
+ * stays until the other sockets, the reverse direction and a soak say the
+ * same.  A missing file must never be silent, and must never be fatal either.
  */
 
 static u16 cortina_ni_gphy_ocp_read(void __iomem *bank, u16 ocp)

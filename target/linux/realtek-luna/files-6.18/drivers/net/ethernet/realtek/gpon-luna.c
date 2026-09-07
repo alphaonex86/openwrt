@@ -8765,7 +8765,32 @@ static void gpon_fsm_handle(const u8 *m)
 		}
 		break;
 	case PLM_DS_ASSIGN_ONU_ID:
-		/* d[0] = assigned ONU-ID, d[1..8] = serial number to match */
+		/* d[0] = assigned ONU-ID, d[1..8] = serial number to match
+		 *
+		 * ★★★ THREE CONDITIONS, NOT ONE -- ported edge-for-edge from the
+		 * vendor's own handler (tier 3, its SDK's ASSIGNONUID case): it
+		 * programs the assigned ID only when the FSM is in O3, AND the
+		 * message is addressed to the broadcast ONU-ID, AND the serial
+		 * matches.  We guarded the serial alone.
+		 *
+		 * WHY IT MATTERS HERE.  The captured DS-PLOAM trace shows this OLT
+		 * sending Assign_ONU-ID THREE times, 100 ms apart, all addressed
+		 * 0xFF.  With the serial-only guard we re-processed every one of
+		 * them -- and #2 and #3 arrive when we are ALREADY IN O4, so each
+		 * re-wrote US_ONU_ID and DS_ONU_ID_STATUS and re-installed the
+		 * T-CONT binding WHILE RANGING WAS IN PROGRESS.  The vendor's O3
+		 * test drops those repeats; ours did not.
+		 *
+		 * ⚠ NOT CLAIMED AS THE CAUSE of the O4 wall: the one cycle in ~100
+		 * that did range re-processed them too.  It is a real divergence
+		 * from the vendor in the exact handler at the exact window, and the
+		 * project's rule is to port the vendor's CONDITIONS faithfully --
+		 * so it belongs here whether or not it turns out to be the wall.
+		 */
+		if (gpon_fsm_state != 3)
+			break;			/* repeats after O3: the vendor ignores them */
+		if (onu_id != GPON_PLOAM_ONU_ID_BROADCAST)
+			break;			/* only the broadcast-addressed Assign assigns */
 		if (!memcmp(&d[1], gpon_sn_bytes, 8)) {
 			u16 tcont16_alloc;
 

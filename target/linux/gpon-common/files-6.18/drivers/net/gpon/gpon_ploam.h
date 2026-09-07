@@ -133,6 +133,12 @@ typedef uint32_t u32;
  * These are wire FACTS from ITU-T G.984.3 §9.2.3, not vendor expression.
  * ------------------------------------------------------------------------- */
 #define PLM_DS_UPSTREAM_OVERHEAD	0x01
+/* ★ The broadcast/unassigned ONU-ID. G.984.3 reserves 0xFF for a message the OLT
+ * addresses to every ONU on the PON, and it is what an ONU carries until the OLT
+ * assigns it one. A PROTOCOL constant, so it lives in the core: both families
+ * test against it and neither should spell the literal. */
+#define GPON_PLOAM_ONU_ID_BROADCAST	0xffu
+
 #define PLM_DS_ASSIGN_ONU_ID		0x03
 #define PLM_DS_RANGING_TIME		0x04
 #define PLM_DS_DEACTIVATE_ONU		0x05

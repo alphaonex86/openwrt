@@ -320,7 +320,13 @@
 #define GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL	0x011a0
 #define GPON_GTC_DS_MISC_CNTR_BWM_FAIL	0x011a4
 #define GPON_GTC_DS_MISC_CNTR_BWM_INV	0x011a8
-#define GPON_GTC_DS_MISC_CNTR_ACTIVE	0x011ac
+#define GPON_GTC_DS_MISC_CNTR_ACTIVE	0x011ac	/* ⚠ NOT an "active" count: [31:16] CNTR_RANGING_REQ, [15:0] CNTR_SN_REQ
+						 * (rtl9602c chipdef field names, tier 3) -- the ranging requests and the
+						 * Serial_Number requests the GTC RECEIVED.  The chipdef's register name is
+						 * kept; every reader splits it (GPON_GTC_DS_ACTIVE_*).  Clear-on-read like
+						 * its neighbours (measured 2026-09-07). */
+#define   GPON_GTC_DS_ACTIVE_RNG_REQ(v)	((u32)(v) >> 16)
+#define   GPON_GTC_DS_ACTIVE_SN_REQ(v)	((u32)(v) & 0xffffu)
 #define GPON_GTC_DS_MISC_CNTR_BWM_ACPT	0x011b0
 #define GPON_GTC_DS_MISC_CNTR_GEM_LOS	0x011b4
 #define GPON_GTC_DS_MISC_CNTR_HEC_CORRECT	0x011b8
@@ -342,6 +348,28 @@
  * as 0x02404..0x02414; they are BWMAP_DATA(1)..BWMAP_DATA(5). */
 #define GPON_BWMAP_DATA_STRIDE	4u	/* bytes per word (chipdef array offset 32 bits) */
 #define BWMAP_DATA(n)		(GPON_BWMAP_DATA + (u32)(n) * GPON_BWMAP_DATA_STRIDE)
+/* The capture engine's controls -- the rtl9602c and rtl9603cvd chipdefs name
+ * these three fields identically at these offsets (tier 3), and the vendor's
+ * own reader arms it as: write 0, write CAP_CLR|frames, write CAP_EN|frames.
+ * ★ MEASURED on the RTL9602C 2026-09-07: CAP_FRAME_NUM=32 captures 32 frames
+ *   and CAP_EN then self-CLEARS (a done flag the tree used to say did not
+ *   exist); CAP_FRAME_NUM=0 keeps CAP_EN set and captures until read.  And
+ *   the buffer holds only allocations the GTC ACCEPTED: 20 s of capture with
+ *   a second ONU Online on the same PON held ONE entry -- ours -- and none of
+ *   the other ONU's grants.  It is a post-filter witness, not a wire tap. */
+#define GPON_BWMAP_CAP_EN	BIT(15)
+#define GPON_BWMAP_CAP_CLR	BIT(14)
+#define GPON_BWMAP_CAP_FRAME_NUM_MASK	0xffu	/* [7:0] */
+#define GPON_BWMAP_CAP_OVERFL	BIT(8)		/* in GPON_BWMAP_STS */
+/* One captured allocation = 2 words (8-byte stride), layout per the vendor's
+ * reader (the same one gpon_proc_show() decodes): word 0 [27:24] frame#,
+ * [23] VALID, [22] LST, [21] EoB, [20] SoB, [19] PLOAMu, [18] FEC,
+ * [17:16] DBRu, [14:12] MF, [4:0] the T-CONT the alloc-CAM resolved it to;
+ * word 1 [15:0] SStart, [31:16] SStop.  There is NO Alloc-ID in it. */
+#define GPON_BWMAP_ENT_VALID	BIT(23)
+#define GPON_BWMAP_ENT_PLOAMU	BIT(19)
+#define GPON_BWMAP_ENT_TCONT_MASK	0x1fu
+#define GPON_BWMAP_ENTRIES	32u		/* what the vendor's reader walks */
 #define GPON_GEM_DS_FRM_TIMEOUT		0x04098
 #define GPON_GTC_US_INTR_DLT		0x05000
 #define GPON_GTC_US_INTR_MASK		0x05004

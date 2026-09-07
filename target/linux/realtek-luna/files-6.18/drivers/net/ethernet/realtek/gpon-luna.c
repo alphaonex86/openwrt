@@ -6058,9 +6058,17 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	 * grants and asserts BEN (so a zero at the OLT = analog SerDes-TX emission);
 	 * bwm_fail/inv nonzero => grants seen but rejected (CRC/format); all zero =>
 	 * GTC never sees the OLT grants (downstream BWmap parse issue). */
-	seq_printf(s, "ds_cntr: ploam_acpt=%u ploam_fail=%u bwm_acpt=%u bwm_fail=%u bwm_inv=%u active=%u\n",
-		   gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT), gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT),
-		   gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV), gpon_rd(GPON_GTC_DS_MISC_CNTR_ACTIVE));
+	{
+		/* `active=` used to print this word raw: it is two 16-bit counters,
+		 * the SN requests and the RANGING requests the GTC received (chipdef
+		 * field names), and the split is what decides an activation fork. */
+		u32 act = gpon_rd(GPON_GTC_DS_MISC_CNTR_ACTIVE);
+
+		seq_printf(s, "ds_cntr: ploam_acpt=%u ploam_fail=%u bwm_acpt=%u bwm_fail=%u bwm_inv=%u sn_req=%u rng_req=%u (all clear-on-read)\n",
+			   gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT), gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT),
+			   gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV),
+			   GPON_GTC_DS_ACTIVE_SN_REQ(act), GPON_GTC_DS_ACTIVE_RNG_REQ(act));
+	}
 	seq_printf(s, "gem_ds_rx: omcc(f64)=%u f0=%u f1=%u f2(mcast)=%u  (>0 => OLT is sending DS GEM/OMCI)\n",
 		   gpon_gem_ds_rx_cnt(64), gpon_gem_ds_rx_cnt(0),
 		   gpon_gem_ds_rx_cnt(1), gpon_gem_ds_rx_cnt(GPON_MCAST_FLOW));
@@ -8446,10 +8454,104 @@ MODULE_PARM_DESC(core_trace, "1=the core FSM's events are printed (default; need
  *   activation steals from this line, and this line steals from /proc.
  * Compiles out with CONFIG_GPON_PLOAM_DIAG=n (the call is dead code then).
  */
+/*
+ * The reader's own lateness, kept by the poll and the DS-PLOAM drain loop for
+ * the diag line (see the core header for why a line without it misled).
+ */
+static unsigned long luna_poll_prev_jiffies;
+static u32 luna_poll_gap_ms;	/* start of this poll - start of the previous, ms */
+static u8 luna_rx_burst_idx;	/* DS PLOAMs this poll dequeued before the current one */
+
+/*
+ * FAMILY half of the core's gpon_bwcap_diag: the GTC's accepted-grant capture,
+ * armed the vendor's way and harvested EVERY poll while activating (O1..O4), so
+ * the O4 window is covered end to end instead of in one 4 ms slice.  With
+ * CAP_FRAME_NUM=0 the engine captures until read (measured); the 32-entry
+ * buffer holds only what the GTC accepted for us, which while activating is
+ * at most a few grants per poll.  At O5 the OLT grants us every frame and the
+ * buffer would overflow every 4 ms, so harvesting stops there and the engine
+ * is left to /proc/gpon.  Compiles out with CONFIG_GPON_PLOAM_DIAG=n.
+ */
+static struct gpon_bwcap_diag luna_bwcap;
+static bool luna_bwcap_armed;
+
+/* The longest window the 8-bit CAP_FRAME_NUM allows: 255 frames = 32 ms,
+ * longer than the poll period, so the harvest (which re-arms) always comes
+ * first and no frame between two polls goes uncaptured.  A bounded window,
+ * as the vendor arms it (it uses 32), self-clears CAP_EN at its end; the
+ * unbounded 0 was tried first and, re-armed every poll, reported a constant
+ * 12 VALID entries per harvest in O3 and O4 alike while a 20 s userspace
+ * capture of the same engine held ONE -- an artefact, not a grant count. */
+#define LUNA_BWCAP_FRAMES	0xffu
+#define LUNA_BWCAP_RAW_N	6	/* raw entries shown per point */
+
+static u32 luna_bwcap_raw[2 * LUNA_BWCAP_RAW_N];	/* the first VALID entries since the last point */
+static unsigned int luna_bwcap_raw_n;
+
+static void luna_bwcap_arm(void)
+{
+	gpon_wr(GPON_BWMAP_CTRL, 0);
+	gpon_wr(GPON_BWMAP_CTRL, GPON_BWMAP_CAP_CLR | LUNA_BWCAP_FRAMES);
+	gpon_wr(GPON_BWMAP_CTRL, GPON_BWMAP_CAP_EN | LUNA_BWCAP_FRAMES);
+}
+
+/* Empty the capture into the accumulator.  Does not re-arm. */
+static void luna_bwcap_harvest(void)
+{
+	unsigned int i, found = 0;
+
+	if (gpon_rd(GPON_BWMAP_STS) & GPON_BWMAP_CAP_OVERFL)
+		luna_bwcap.overfl++;
+	for (i = 0; i < GPON_BWMAP_ENTRIES; i++) {
+		u32 w0 = gpon_rd(BWMAP_DATA(2 * i));
+		u32 w1 = gpon_rd(BWMAP_DATA(2 * i + 1));
+		u8 tc = w0 & GPON_BWMAP_ENT_TCONT_MASK;
+
+		if (!(w0 & GPON_BWMAP_ENT_VALID))
+			continue;
+		found++;
+		if (luna_bwcap_raw_n < LUNA_BWCAP_RAW_N) {
+			luna_bwcap_raw[2 * luna_bwcap_raw_n] = w0;
+			luna_bwcap_raw[2 * luna_bwcap_raw_n + 1] = w1;
+			luna_bwcap_raw_n++;
+		}
+		luna_bwcap.entries++;
+		luna_bwcap.tconts |= BIT(tc);
+		if (!(w0 & GPON_BWMAP_ENT_PLOAMU))
+			continue;
+		luna_bwcap.ploamu++;
+		if (tc == GPON_OMCC_TCONT) {
+			luna_bwcap.omcc_ploamu++;
+			luna_bwcap.last_raw0 = w0;
+			luna_bwcap.last_raw1 = w1;
+		}
+	}
+	luna_bwcap.harvests++;
+	if (found)
+		luna_bwcap.nonempty++;
+	luna_bwcap.valid = GPON_BWCAP_HAS;
+}
+
+/* Called once per FSM poll, before the DS-PLOAM drain. */
+static void luna_bwcap_poll(void)
+{
+	if (!IS_ENABLED(CONFIG_GPON_PLOAM_DIAG))
+		return;
+	if (gpon_fsm_state >= 5) {
+		luna_bwcap_armed = false;	/* re-armed (with CLR) on the next activation */
+		return;
+	}
+	if (luna_bwcap_armed)
+		luna_bwcap_harvest();
+	luna_bwcap_arm();
+	luna_bwcap_armed = true;
+}
+
 static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 {
 	struct gpon_ploam_diag d;
-	char line[160];
+	char line[256];
+	u32 cpu, auto_;
 
 	if (!IS_ENABLED(CONFIG_GPON_PLOAM_DIAG))
 		return;
@@ -8458,15 +8560,55 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 	d.bwm_acpt   = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT);
 	d.bwm_fail   = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL);
 	d.bwm_inv    = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV);
-	/* US-GTC misc PM: idx 2 = PLOAM_CPU_TX, idx 3 = PLOAM_AUTO_TX (the SN
-	 * template the GTC fires into a grant by itself) -- the mapping at
-	 * gpon_us_misc_cnt().  Together: every upstream PLOAM that actually left. */
-	d.us_ploam_tx = gpon_us_misc_cnt(2) + gpon_us_misc_cnt(3);
+	/* US-GTC misc PM: idx 2 = PLOAM_CPU_TX, idx 3 = PLOAM_AUTO_TX -- the
+	 * mapping at gpon_us_misc_cnt().  ★ EACH IS TWO PACKED 16-BIT COUNTERS
+	 * (the vendor's PM reader splits them so, tier 3): CPU_TX = [15:0]
+	 * normal, [31:16] urgent; AUTO_TX = [15:0] No_message, [31:16] the
+	 * Serial_Number the GTC fires into a grant by itself.  The first night's
+	 * line summed the raw words and printed one auto-fired SN as 65536. */
+	cpu   = gpon_us_misc_cnt(2);
+	auto_ = gpon_us_misc_cnt(3);
+	d.us_ploam_tx = (cpu & 0xffff) + (cpu >> 16) + (auto_ & 0xffff) + (auto_ >> 16);
+	d.us_sn_tx    = auto_ >> 16;
 	d.us_onu_id  = (gpon_rd(GPON_GTC_US_ONU_ID) >> GPON_GTC_US_ONU_ID_SHIFT) & GPON_ONU_ID_MASK;
 	d.ds_onu_id  = (gpon_rd(GPON_GTC_DS_ONU_ID_STATUS) >> GPON_ONU_ID_SHIFT) & GPON_ONU_ID_MASK;
+	d.poll_gap_ms = luna_poll_gap_ms;
+	d.rx_burst_idx = luna_rx_burst_idx;
+	{
+		u32 act = gpon_rd(GPON_GTC_DS_MISC_CNTR_ACTIVE);
+
+		d.sn_req  = GPON_GTC_DS_ACTIVE_SN_REQ(act);
+		d.rng_req = GPON_GTC_DS_ACTIVE_RNG_REQ(act);
+	}
 	gpon_ploam_diag_format(line, sizeof(line), p,
 			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state, &d);
 	pr_info("rtl9602c-gpon: %s\n", line);
+	/* The accepted-grant capture since the previous point, up to this
+	 * instant: empty the engine into the accumulator first, then report,
+	 * then start the next window. */
+	if (luna_bwcap_armed) {
+		luna_bwcap_harvest();
+		luna_bwcap_arm();
+	}
+	gpon_bwcap_diag_format(line, sizeof(line), p,
+			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state,
+			       luna_bwcap_armed ? &luna_bwcap : NULL);
+	pr_info("rtl9602c-gpon: %s\n", line);
+	if (luna_bwcap_raw_n) {
+		/* The first entries since the last point, raw and family-specific
+		 * (layout at GPON_BWMAP_ENT_*), so a human can tell twelve real
+		 * grants from one entry read twelve times. */
+		unsigned int i;
+		int pos = 0;
+
+		for (i = 0; i < luna_bwcap_raw_n && pos < (int)sizeof(line) - 20; i++)
+			pos += scnprintf(line + pos, sizeof(line) - pos, " %08x/%08x",
+					 luna_bwcap_raw[2 * i], luna_bwcap_raw[2 * i + 1]);
+		pr_info("rtl9602c-gpon: bwcap-raw %s first%u=%s\n",
+			gpon_ploam_diag_point_name(p), luna_bwcap_raw_n, line);
+	}
+	memset(&luna_bwcap, 0, sizeof(luna_bwcap));
+	luna_bwcap_raw_n = 0;
 }
 
 static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
@@ -9060,6 +9202,14 @@ static void gpon_fsm_poll(struct timer_list *t)
 	int guard = 0;
 
 	gpon_fsm_ticks++;
+	{
+		unsigned long now = jiffies;
+
+		luna_poll_gap_ms = luna_poll_prev_jiffies ?
+			jiffies_to_msecs(now - luna_poll_prev_jiffies) : 0;
+		luna_poll_prev_jiffies = now;
+	}
+	luna_bwcap_poll();
 	/*
 	 * ★★ STAGE 2 OF THE A/B: the PERIODIC half, behind the same `core_fsm`
 	 * switch that already selects the downstream dispatch.  With it clear --
@@ -9123,6 +9273,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		 * away; it is the ask a TABLE-fed caller would need.  The DEQ below
 		 * still advances the queue on a refusal: the queue discipline is
 		 * this loop's, never the reader's. */
+		luna_rx_burst_idx = (u8)(guard - 1);	/* 0 = the first this poll */
 		if (gpon_gtc_ds_ploam_read(&gpon_io, GPON_GTC_DS_PLOAM_MSG, m))
 			gpon_fsm_handle(m);
 		gpon_ds_rx++;					/* DS-lock liveness */

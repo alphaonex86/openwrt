@@ -79,5 +79,54 @@ int gpon_ploam_diag_format(char *out, size_t sz, enum gpon_ploam_diag_point p,
 		  !!(d->valid & GPON_PDIAG_HAS_US_ONU_ID), d->us_onu_id);
 	field_u32(out, sz, &pos, "ds_onu_id",
 		  !!(d->valid & GPON_PDIAG_HAS_DS_ONU_ID), d->ds_onu_id);
+	/* Appended after the original seven so a reader keyed on the 2026-09-06
+	 * line still finds every field where it was. */
+	field_u32(out, sz, &pos, "us_sn_tx",
+		  !!(d->valid & GPON_PDIAG_HAS_US_SN_TX), d->us_sn_tx);
+	field_u32(out, sz, &pos, "poll_gap_ms",
+		  !!(d->valid & GPON_PDIAG_HAS_POLL_GAP), d->poll_gap_ms);
+	field_u32(out, sz, &pos, "rx_burst",
+		  !!(d->valid & GPON_PDIAG_HAS_RX_BURST), d->rx_burst_idx);
+	field_u32(out, sz, &pos, "sn_req",
+		  !!(d->valid & GPON_PDIAG_HAS_SN_REQ), d->sn_req);
+	field_u32(out, sz, &pos, "rng_req",
+		  !!(d->valid & GPON_PDIAG_HAS_RNG_REQ), d->rng_req);
+	return pos;
+}
+
+int gpon_bwcap_diag_format(char *out, size_t sz, enum gpon_ploam_diag_point p,
+			   u32 t_ms, u8 ostate, const struct gpon_bwcap_diag *b)
+{
+	int pos;
+	bool has;
+
+	if (!out || !sz)
+		return 0;
+	pos = scnprintf(out, sz, "bwcap-diag %s t=%ums O%u",
+			gpon_ploam_diag_point_name(p), t_ms, ostate);
+	if (!b) {
+		static const struct gpon_bwcap_diag none = { .valid = 0 };
+
+		b = &none;
+	}
+	has = !!(b->valid & GPON_BWCAP_HAS);
+	field_u32(out, sz, &pos, "harvests", has, b->harvests);
+	field_u32(out, sz, &pos, "nonempty", has, b->nonempty);
+	field_u32(out, sz, &pos, "entries", has, b->entries);
+	field_u32(out, sz, &pos, "ploamu", has, b->ploamu);
+	field_u32(out, sz, &pos, "omcc_ploamu", has, b->omcc_ploamu);
+	if ((size_t)pos < sz)
+		pos += has ? scnprintf(out + pos, sz - pos, " tconts=0x%x", b->tconts)
+			   : scnprintf(out + pos, sz - pos, " tconts=n/a");
+	field_u32(out, sz, &pos, "overfl", has, b->overfl);
+	if ((size_t)pos < sz) {
+		if (!has)
+			pos += scnprintf(out + pos, sz - pos, " last=n/a");
+		else if (!b->omcc_ploamu)
+			pos += scnprintf(out + pos, sz - pos, " last=-");
+		else
+			pos += scnprintf(out + pos, sz - pos, " last=%08x/%08x",
+					 b->last_raw0, b->last_raw1);
+	}
 	return pos;
 }

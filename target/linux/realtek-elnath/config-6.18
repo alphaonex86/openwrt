@@ -121,6 +121,7 @@ CONFIG_GPIO_CDEV=y
 # kmod-gpio-button-hotplug package (already a target DEFAULT_PACKAGE), which
 # binds the gpio-keys-polled node directly and needs no INPUT subsystem.
 CONFIG_GPIO_CORTINA_CA77XX=y
+# CONFIG_GPON_PLOAM_DIAG is not set
 CONFIG_HARDIRQS_SW_RESEND=y
 CONFIG_HAS_DMA=y
 CONFIG_HAS_IOMEM=y

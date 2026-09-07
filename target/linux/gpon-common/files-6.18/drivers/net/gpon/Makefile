@@ -205,6 +205,14 @@ obj-y += gpon_omci_me.o
 # because how chatty a board may be on its console is that board's fact.
 obj-y += gpon_omci_trace.o
 
+# ITU-T G.984.3 ACTIVATION diagnostics: the grant-acceptance counters and the two
+# ONU-ID readbacks at Assign_ONU-ID / Ranging_Time / Deactivate_ONU-ID -- the
+# read that split the O4 wall on 2026-09-06, promoted from a hand-added probe
+# so no board has to re-derive it.  Formats INTO A BUFFER only; the family reads
+# its own registers and owns the level.  Gated so a footprint-bound build can
+# drop it (CONFIG_GPON_PLOAM_DIAG, default y: see the Kconfig help).
+obj-$(CONFIG_GPON_PLOAM_DIAG) += gpon_ploam_diag.o
+
 # ITU-T G.984.3 PLOAM activation state machine (O1..O7) and message builders.
 # ONE kernel consumer today (realtek-luna): the Elnath PON-MAC runs activation
 # in silicon, so there is no second copy this de-duplicates.  It is here for the

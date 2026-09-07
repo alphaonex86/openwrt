@@ -85,3 +85,25 @@ config GPON_FLOW_OFFLOAD
 	  net/flow_offload.h at all, so building it there is a fatal error and
 	  not a wasted object.  That is how this gate came to exist -- an
 	  unconditional obj-y broke both Luna boards on 2026-08-28.
+
+config GPON_PLOAM_DIAG
+	bool "GPON activation diagnostics (grant acceptance at Assign/Ranging/Deactivate)"
+	depends on GPON_CORE
+	default y
+	help
+	  One log line at each PLOAM activation transition -- Assign_ONU-ID,
+	  Ranging_Time, Deactivate_ONU-ID -- carrying the family's BWmap
+	  acceptance counters and the upstream/downstream ONU-ID readbacks.  It
+	  is EVENT-driven: a handful of lines per activation attempt and none at
+	  a settled O5, so it cannot flood.  A counter the silicon does not
+	  establish prints as n/a, never as 0.
+
+	  ★ WHY default y.  This tree's rule is that the protocol spy/dump
+	  capability is first-class and is not stripped for production; the
+	  footprint rule (<= 64 MB RAM, small flash) is what this symbol exists
+	  to honour -- a build that must shed every byte sets it to n and the
+	  facility is ABSENT, not silenced.  MEASURED 2026-09-06 (mipsel-BE,
+	  -Os): see the size line recorded beside this symbol's introduction in
+	  dev/ (the formatter object plus the Luna call sites).  The default is
+	  the operator's to flip.
+

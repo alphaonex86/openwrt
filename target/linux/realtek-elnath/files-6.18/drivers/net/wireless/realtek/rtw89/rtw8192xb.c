@@ -340,8 +340,34 @@ static void rtw8192xb_sps_default_voltages(struct rtw89_dev *rtwdev)
 	}
 }
 
+/* A WARM reboot leaves the RTL8192XB PERST-reset while it was RUNNING firmware,
+ * and its MAC power-on handshake then answers later than the 20 ms polls below
+ * (values inherited from the 8852C sequence) allow.  MEASURED on the X400AXF,
+ * 2026-09-06 (tier 1, the board's own dmesg): 80 ms after `enabling device`
+ * the probe ended `failed to power on` / -ETIMEDOUT through BOTH of
+ * rtw89_mac_pwr_on()'s attempts (on -> off -> on, no pause), while the SAME
+ * probe re-bound 670 s later on the same chip state succeeded (fw 0.27.56.0,
+ * rfe_type 50).  Every earlier boot of this board had been COLD (the bench
+ * relay cut power until that day), which is why it had never been seen -- and
+ * on a rig whose relay does not cut power every boot is warm, so the one
+ * timeout refused a whole certification campaign at the startup gate.
+ *
+ * So the handshake is RETRIED with a growing settle, bounded in COUNT by this
+ * table and in TIME by its sum (1.5 s): a dead chip still fails within
+ * seconds, and a healthy cold boot pays nothing (its first attempt succeeds).
+ * The witness logged on a retry makes the boot log itself measure the settle a
+ * warm reset costs.  Guarded by dev/rtl9607c-test Step 27
+ * (elnath_wifi2g_pwron_retry_test), mutation-proven.
+ * ⚠ OWED, named rather than guessed: the VENDOR's own poll bound for this
+ *   handshake (mac_pwr_on_ap_pcie_8192xb).  This schedule is a software
+ *   robustness bound, not a claim about the vendor's timing.
+ */
+static const unsigned int pwron_settle_ms[] = { 100, 200, 400, 800 };
+
 static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 {
+	const char *slow = "";
+	unsigned int attempt;
 	u32 val32;
 	int ret;
 
@@ -350,27 +376,51 @@ static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 	 * The 8852C-only steps of the earlier clone (PD_REGU_L on USB-sel,
 	 * OCP_L1, the CMAC1 iso/AFE block, EESK BT-log pinmux) are gone:
 	 * 8192XB has no CMAC1 and the vendor never does them on this chip.
+	 *
+	 * The register ORDER is the vendor's, unchanged; what the loop adds is
+	 * only a bounded re-run of the handshake after a settle when a poll
+	 * times out (see pwron_settle_ms above).  Every write here is a config
+	 * bit, idempotent on a re-run.
 	 */
-	rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_AFSM_WLSUS_EN |
-						    B_AX_AFSM_PCIE_SUS_EN);
-	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_DIS_WLBT_PDNSUSEN_SOPC);
-	rtw89_write32_set(rtwdev, R_AX_WLLPS_CTRL, B_AX_DIS_WLBT_LPSEN_LOPC);
-	rtw89_write32_set(rtwdev, R_AX_AFE_ON_CTRL1_XB, B_AX_REG_VCO_KVCO_XB);
-	rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APDM_HPDN);
-	rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFM_SWLPS);
+	for (attempt = 0; ; attempt++) {
+		rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_AFSM_WLSUS_EN |
+							    B_AX_AFSM_PCIE_SUS_EN);
+		rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_DIS_WLBT_PDNSUSEN_SOPC);
+		rtw89_write32_set(rtwdev, R_AX_WLLPS_CTRL, B_AX_DIS_WLBT_LPSEN_LOPC);
+		rtw89_write32_set(rtwdev, R_AX_AFE_ON_CTRL1_XB, B_AX_REG_VCO_KVCO_XB);
+		rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APDM_HPDN);
+		rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFM_SWLPS);
 
-	ret = read_poll_timeout(rtw89_read32, val32, val32 & B_AX_RDY_SYSPWR,
-				1000, 20000, false, rtwdev, R_AX_SYS_PW_CTRL);
-	if (ret)
-		return ret;
+		slow = "RDY_SYSPWR";
+		ret = read_poll_timeout(rtw89_read32, val32, val32 & B_AX_RDY_SYSPWR,
+					1000, 20000, false, rtwdev, R_AX_SYS_PW_CTRL);
+		if (!ret) {
+			rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_EN_WLON);
+			rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFN_ONMAC);
 
-	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_EN_WLON);
-	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFN_ONMAC);
-
-	ret = read_poll_timeout(rtw89_read32, val32, !(val32 & B_AX_APFN_ONMAC),
-				1000, 20000, false, rtwdev, R_AX_SYS_PW_CTRL);
-	if (ret)
-		return ret;
+			slow = "APFN_ONMAC";
+			ret = read_poll_timeout(rtw89_read32, val32,
+						!(val32 & B_AX_APFN_ONMAC),
+						1000, 20000, false, rtwdev,
+						R_AX_SYS_PW_CTRL);
+		}
+		if (!ret)
+			break;
+		/* Only a TIMEOUT is retried, and only while the settle table has
+		 * an entry left: any other error, or the table exhausted, is the
+		 * vendor sequence's own verdict and is returned as-is.
+		 */
+		if (ret != -ETIMEDOUT || attempt >= ARRAY_SIZE(pwron_settle_ms))
+			return ret;
+		rtw89_warn(rtwdev,
+			   "power-on handshake (%s) timed out on attempt %u -- settling %u ms before retrying (a warm reset leaves the chip busy)\n",
+			   slow, attempt + 1, pwron_settle_ms[attempt]);
+		fsleep(pwron_settle_ms[attempt] * 1000);
+	}
+	if (attempt)
+		rtw89_info(rtwdev,
+			   "power-on handshake succeeded on attempt %u after a warm-reset settle\n",
+			   attempt + 1);
 
 	/* Power the a-die port LDOs and release the port0/port1 power-domain
 	 * isolation (WLR write-mask guarded), per the vendor 8192XB sequence.

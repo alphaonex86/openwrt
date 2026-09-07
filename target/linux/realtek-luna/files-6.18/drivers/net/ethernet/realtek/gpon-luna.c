@@ -59,6 +59,7 @@
 #include <linux/delay.h>
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
 #include "gpon_ploam.h"	/* the core PLOAM FSM + its shell contract */
+#include "gpon_ploam_diag.h"	/* the core's activation diagnostic: WHAT to read at Assign/Ranging/Deact */
 #include "gpon_gem_us.h"	/* GPON_GEM_US_RANGE_OK: the core's own bound predicate */
 #include "gpon_rtl9602c_logic.h"	/* hoisted logic */
 #include "hwio.h"	/* flowcore: the ONE canonical field-mask RMW */
@@ -1215,6 +1216,16 @@ MODULE_PARM_DESC(serdes_cmu_settle_ms, "ms TX-CMU-lock settle between 125M ref f
 static bool serdes_txpll_relock = true;
 module_param(serdes_txpll_relock, bool, 0644);
 MODULE_PARM_DESC(serdes_txpll_relock, "1=re-lock the TX CMU PLL (toggle CMU enable + FIFO re-sync) at O3 entry before the first US burst — fixes the ~50% cold-start lock-to-wrong-rate (default on); 0=skip");
+/* The periodic US-TX interface reset-B pulse while un-ranged (poll loop, every 200
+ * ticks).  MEASURED 2026-09-06 on the X111W: of ~85 activation cycles on our image,
+ * the ONLY one that ranged had spent 48 ms in O3 before Assign_ONU-ID; every cycle
+ * that the OLT deactivated had spent ~8 s there -- long enough for at least one of
+ * these pulses to land AFTER the O3-entry TX-PLL relock.  Writable at runtime
+ * (/sys/module/gpon_luna/parameters/unranged_reseat) so the A/B is one echo on a
+ * cycling board, no rebuild.  Default = the behaviour that shipped. */
+static bool unranged_reseat = true;
+module_param(unranged_reseat, bool, 0644);
+MODULE_PARM_DESC(unranged_reseat, "pulse the US-TX SerDes interface reset-B every ~200 ticks while un-ranged (default 1 = as shipped; 0 = the O4-wall A/B)");
 /* optical_poll: periodic ANI-G DDM optical read. DEFAULT OFF — the periodic BOSA I2C
  * read (in any context) transiently disturbs the optical path and provokes the OLT
  * op=0xff dealloc/DEACT churn (no WAN); proven by A/B (poll on=churn, off=clean WAN).
@@ -8423,11 +8434,49 @@ static bool core_trace = true;
 module_param(core_trace, bool, 0644);
 MODULE_PARM_DESC(core_trace, "1=the core FSM's events are printed (default; needed to diagnose it). 0=silent, for measuring whether the printing itself perturbs activation");
 
+/*
+ * FAMILY half of the core's gpon_ploam_diag: read THIS silicon's counters and
+ * print the core-formatted line.  The offsets are luna_gpon_regs.h's -- named
+ * identically in the rtl9602c and rtl9603cvd chipdefs (bare_offset_chip_audit),
+ * so they are family facts and no per-chip table is needed for them; a chip that
+ * lacked one would clear its GPON_PDIAG_HAS_* bit and the line would say n/a.
+ * ⚠ CLEAR-ON-READ, measured 2026-09-06 (ploam_acpt 30 -> 6 -> 0 across three
+ *   reads 60 ms apart): each value is "since the previous read", and /proc/gpon's
+ *   ds_cntr/us_tx lines read the same words -- a human reading /proc during an
+ *   activation steals from this line, and this line steals from /proc.
+ * Compiles out with CONFIG_GPON_PLOAM_DIAG=n (the call is dead code then).
+ */
+static void luna_ploam_diag(enum gpon_ploam_diag_point p)
+{
+	struct gpon_ploam_diag d;
+	char line[160];
+
+	if (!IS_ENABLED(CONFIG_GPON_PLOAM_DIAG))
+		return;
+	d.valid      = GPON_PDIAG_HAS_ALL;
+	d.ploam_acpt = gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT);
+	d.bwm_acpt   = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT);
+	d.bwm_fail   = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL);
+	d.bwm_inv    = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV);
+	/* US-GTC misc PM: idx 2 = PLOAM_CPU_TX, idx 3 = PLOAM_AUTO_TX (the SN
+	 * template the GTC fires into a grant by itself) -- the mapping at
+	 * gpon_us_misc_cnt().  Together: every upstream PLOAM that actually left. */
+	d.us_ploam_tx = gpon_us_misc_cnt(2) + gpon_us_misc_cnt(3);
+	d.us_onu_id  = (gpon_rd(GPON_GTC_US_ONU_ID) >> GPON_GTC_US_ONU_ID_SHIFT) & GPON_ONU_ID_MASK;
+	d.ds_onu_id  = (gpon_rd(GPON_GTC_DS_ONU_ID_STATUS) >> GPON_ONU_ID_SHIFT) & GPON_ONU_ID_MASK;
+	gpon_ploam_diag_format(line, sizeof(line), p,
+			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state, &d);
+	pr_info("rtl9602c-gpon: %s\n", line);
+}
+
 static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
 {
 	const char *nm = NULL;
+	enum gpon_ploam_diag_point p = gpon_ploam_diag_point_of(ev);
 
 	(void)sh;
+	if (p != GPON_PDIAG_NONE)	/* the core FSM path: the WHEN is the core's event */
+		luna_ploam_diag(p);
 	if (!core_trace)
 		return;
 	if (!luna_ev_is_decisive(ev) && !trace)
@@ -8643,6 +8692,7 @@ static void gpon_fsm_handle(const u8 *m)
 				gpon_fsm_onu_id, tcont16_alloc,
 				(gpon_omcc_alloc != 0 && !gpon_tcont_installed) ?
 				"re-range: previously-known OMCC alloc" : "placeholder");
+			luna_ploam_diag(GPON_PDIAG_ASSIGN);
 			gpon_fsm_set_state(4);
 		}
 		break;
@@ -8666,6 +8716,7 @@ static void gpon_fsm_handle(const u8 *m)
 			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);	/* PLM_FLUSH_BUF = 0 */
 			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);	/* 0->1 edge: flush */
 			pr_info("rtl9602c-gpon: Ranging_Time EqD=0x%x -> O5 (us-ploam flushed)\n", eqd);
+			luna_ploam_diag(GPON_PDIAG_RANGING_TIME);	/* still O4: the window that WORKED */
 			gpon_fsm_set_state(5);
 		}
 		break;
@@ -8690,6 +8741,7 @@ static void gpon_fsm_handle(const u8 *m)
 				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
 				gpon_us_misc_cnt(2), gpon_us_misc_cnt(4),
 				gpon_rd(GEM_US_STAT(64)), gpon_rd(TCONT_IDLE_STAT(16)));
+			luna_ploam_diag(GPON_PDIAG_DEACT);
 			gpon_fsm_onu_id = 0xff;
 			/* FULL reset to O1 — mirror the SN-reprovision path (≈line 3068).
 			 * Previously only the SW onu-id/key were cleared, leaving the
@@ -9358,7 +9410,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * locked RX downstream framer is undisturbed. Short udelay only (softirq). The
 	 * old version wrote WRONG ModeV2 values (0x225ac/0x225d8) and corrupted the rev-A
 	 * ModeV1 TX config — that is removed; this toggles only the reset-B. */
-	if (gpon_fsm_state >= 3 && gpon_fsm_onu_id == 0xff &&
+	if (unranged_reseat && gpon_fsm_state >= 3 && gpon_fsm_onu_id == 0xff &&
 	    (gpon_fsm_ticks % 200) == 0) {
 		gpon_cdr_reseat();
 		gpon_sds_synced++;

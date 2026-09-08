@@ -8258,9 +8258,24 @@ static void luna_op_us_ploam_flush(void *sh)
 {
 	(void)sh;
 	/* PLM_FLUSH_BUF is edge-triggered: 0 THEN 1.  Read-modify-write, because
-	 * CRC_GEN_EN|ONUID_OVRD live in the same word and must survive. */
+	 * CRC_GEN_EN|ONUID_OVRD live in the same word and must survive.
+	 *
+	 * ★★★ AND IT MUST RETURN TO 0 (2026-09-08).  We used to leave the bit
+	 * ASSERTED after the edge, which put US_PLOAM_CFG at 0x13 where this
+	 * board's own stock rests at 0x03 -- the ONLY GTC upstream word that
+	 * differed from stock (US_CFG, US_LASER, BOH, MIN_DELAY and SD_TH all
+	 * match byte for byte).  A flush level left standing on the UPSTREAM
+	 * PLOAM buffer is exactly the shape of this board's symptom: the MAC
+	 * reports it transmitted (bwm_acpt=1, a valid PLOAMu / T-CONT-16 grant
+	 * every ~8 s) while the OLT reports "Laser out" and never assigns an
+	 * ONU-ID.
+	 * ⚠ THE EDGE IS THE OPERATION; THE LEVEL IS NOT.  Restoring 0 keeps the
+	 * resting word identical to stock's and cannot lose the flush, which has
+	 * already happened on the 0->1 transition above.
+	 */
 	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);
 	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);
+	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);
 }
 
 static void luna_op_set_hw_state(void *sh, enum gpon_ostate st)
@@ -9006,6 +9021,7 @@ static void gpon_fsm_handle(const u8 *m)
 			 * 0->1). Use gpon_field RMW so CRC_GEN_EN|ONUID_OVRD are preserved. */
 			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);	/* PLM_FLUSH_BUF = 0 */
 			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);	/* 0->1 edge: flush */
+			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);	/* rest at 0, as stock does */
 			pr_info("rtl9602c-gpon: Ranging_Time EqD=0x%x -> O5 (us-ploam flushed)\n", eqd);
 			luna_ploam_diag(GPON_PDIAG_RANGING_TIME);	/* still O4: the window that WORKED */
 			gpon_fsm_set_state(5);

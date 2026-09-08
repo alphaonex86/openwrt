@@ -1458,9 +1458,73 @@ static void rtw89_mac_power_switch_boot_mode(struct rtw89_dev *rtwdev)
 	rtw89_write32_clr(rtwdev, R_AX_RSV_CTRL, B_AX_R_DIS_PRST);
 }
 
+/* ★★★ STOCK DOES NOT REFUSE A MAC THAT IS ALREADY ON -- IT FORCES IT OFF AND
+ * CARRIES ON, AND MAINLINE'S REFUSAL IS WHAT COSTS THE RTL8192XB EVERY WARM
+ * BOOT (established 2026-09-08).
+ *
+ * WHAT MAINLINE DOES.  rtw89_mac_power_switch() below returns -EBUSY when
+ * B_AX_WLMAC_PWR_STE reads active, and rtw89_mac_pwr_on() then recovers by
+ * running the chip's FULL power-off and powering on again.  On a warm reboot
+ * the WL MAC is still on from the previous kernel (PERST# does not reset it),
+ * so that recovery is the ONLY path a warm boot ever takes.
+ *
+ * WHAT STOCK DOES -- tier 2, THIS board's own unstripped rtk_wifi6.ko,
+ * mac_pwr_switch (.text 0x26d660), disassembled here 2026-09-08:
+ *     0x26d774  read32(0x03F0)                  R_AX_IC_PWR_STATE
+ *     0x26d784  tst   x0, #0x300                B_AX_WLMAC_PWR_STE (bits 9:8)
+ *     0x26d788  b.eq  0x26d9f0                  MAC already off -> skip
+ *     0x26d7a4  0x0004 |= 0x10000               B_AX_EN_WLON
+ *     0x26d7c8  0x0004 |= 0x200                 B_AX_APFM_OFFMAC
+ *     0x26d7d8  w21 = 1999, w27 = 1000          the poll bound
+ *     0x26d7e4  loop: read32(0x0004)
+ *     0x26d7f4  tbz w0,#9 -> exit               until APFM_OFFMAC self-clears
+ *     0x26d808  delay(1000 us); 0x26d80c subs/b.ne
+ *     0x26d9f0  0x0004 &= ~0x10000              then the chip sequence
+ * i.e. a LIGHT forced MAC-off with a ~2 s bound, and the loop simply ENDS on
+ * expiry -- stock proceeds either way.  It never calls its own
+ * mac_pwr_off_ap_pcie_8192xb here.
+ *
+ * WHY THE DIFFERENCE IS THE FAULT -- tier 1, this board's own console log,
+ * same driver, same four entry registers, opposite outcome:
+ *     2026-09-07 20:43:18  entry PW_CTRL=0x50070082  no preceding power-off
+ *                          -> APFN_ONMAC clears, fw loads, rfe_type 50
+ *     2026-09-08 09:xx     entry PW_CTRL=0x50070082  "MAC has already powered
+ *                          on" 7 ms earlier, i.e. the full pwr_off_func ran
+ *                          -> APFN_ONMAC latched at 0x50070182 on all 5
+ *                             attempts, probe -110
+ * The chip's own power-off tears the WL a-die down on its way out (xtal_si
+ * SHDN_WL / GND_SHDN_WL cleared, both R_AX_SYS_ADIE_PAD_PWR_CTRL[6:5] pad
+ * supplies cleared) and the power-on only restores those AFTER the MAC-on
+ * handshake, so the off->on pair asks the MAC to come up with its a-die down.
+ * Stock never forms that pair.
+ *
+ * SCOPE: gated on RTL8192XB, so every other chip keeps mainline's -EBUSY
+ * exactly.  The RTL8852C on this same board powers on through the mainline
+ * path today and must not be disturbed by a repair to its sibling.
+ */
+static void rtw89_mac_force_mac_off_ax(struct rtw89_dev *rtwdev)
+{
+	u32 val32;
+	int ret;
+
+	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_EN_WLON);
+	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFM_OFFMAC);
+
+	ret = read_poll_timeout(rtw89_read32, val32, !(val32 & B_AX_APFM_OFFMAC),
+				1000, 2000000, false, rtwdev, R_AX_SYS_PW_CTRL);
+	if (ret)
+		rtw89_warn(rtwdev,
+			   "MAC was already on: the forced MAC-off did not complete (R_AX_SYS_PW_CTRL=%08x) -- continuing, as the vendor does\n",
+			   val32);
+	else
+		rtw89_info(rtwdev,
+			   "MAC was already on -- forced it off (vendor mac_pwr_switch block) instead of refusing\n");
+}
+
 static int rtw89_mac_power_switch(struct rtw89_dev *rtwdev, bool on)
 {
 #define PWR_ACT 1
+#define PWR_MAC_OFF 0
 	const struct rtw89_mac_gen_def *mac = rtwdev->chip->mac_def;
 	const struct rtw89_chip_info *chip = rtwdev->chip;
 	const struct rtw89_pwr_cfg * const *cfg_seq;
@@ -1482,7 +1546,13 @@ static int rtw89_mac_power_switch(struct rtw89_dev *rtwdev, bool on)
 		__rtw89_leave_ps_mode(rtwdev);
 
 	val = rtw89_read32_mask(rtwdev, R_AX_IC_PWR_STATE, B_AX_WLMAC_PWR_STE_MASK);
-	if (on && val == PWR_ACT) {
+	/* The 8192XB takes the vendor's own answer to this state (see
+	 * rtw89_mac_force_mac_off_ax): stock tests the WHOLE field against
+	 * MAC-OFF, not against one value, so this arm does too.
+	 */
+	if (on && val != PWR_MAC_OFF && chip->chip_id == RTL8192XB) {
+		rtw89_mac_force_mac_off_ax(rtwdev);
+	} else if (on && val == PWR_ACT) {
 		rtw89_err(rtwdev, "MAC has already powered on\n");
 		return -EBUSY;
 	}
@@ -1511,6 +1581,7 @@ static int rtw89_mac_power_switch(struct rtw89_dev *rtwdev, bool on)
 	}
 
 	return 0;
+#undef PWR_MAC_OFF
 #undef PWR_ACT
 }
 

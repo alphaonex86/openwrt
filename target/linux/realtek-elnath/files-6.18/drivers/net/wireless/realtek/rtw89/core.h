@@ -5972,6 +5972,15 @@ struct rtw89_dev {
 	struct device *dev;
 	const struct ieee80211_ops *ops;
 
+	/* Entry on the module-wide list of probed rtw89 devices, so one radio can
+	 * ask about ANOTHER radio driven by this same module.  Needed because on
+	 * a dual-band board the two parts are separate PCIe devices with separate
+	 * rtw89_dev instances, and the RTL8192XB has a documented ordering
+	 * requirement against its RTL8852C sibling (see rtw8192xb.c).
+	 * Manipulated only under rtw89_dev_list_mutex in core.c.
+	 */
+	struct list_head sibling_entry;
+
 	bool dbcc_en;
 	bool support_mlo;
 	enum rtw89_mlo_dbcc_mode mlo_dbcc_mode;
@@ -7542,6 +7551,10 @@ void rtw89_check_quirks(struct rtw89_dev *rtwdev, const struct dmi_system_id *qu
 int rtw89_core_init(struct rtw89_dev *rtwdev);
 void rtw89_core_deinit(struct rtw89_dev *rtwdev);
 int rtw89_core_register(struct rtw89_dev *rtwdev);
+struct rtw89_dev *rtw89_core_sibling_lock(struct rtw89_dev *self,
+					 enum rtw89_core_chip_id chip_id);
+void rtw89_core_sibling_unlock(struct rtw89_dev *sibling);
+bool rtw89_core_sibling_present(enum rtw89_core_chip_id chip_id);
 void rtw89_core_unregister(struct rtw89_dev *rtwdev);
 struct rtw89_dev *rtw89_alloc_ieee80211_hw(struct device *device,
 					   u32 bus_data_size,

@@ -273,11 +273,15 @@ static void cortina_pcie_long_cal(struct cortina_pcie *cp, void __iomem *s,
  */
 static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool cmu)
 {
+	u32 l1_bit4 = 0;
 	u32 c;
 	int i;
 
-	if (cmu)						/* L1 shared-CMU */
-		{ writel(readl(s + b + 0x24) & ~0x10, s + b + 0x24);	usleep_range(10, 20); }
+	if (cmu) {						/* L1 shared-CMU */
+		l1_bit4 = readl(s + b + 0x24) & 0x10;	/* saved so L15 can truly undo */
+		writel(readl(s + b + 0x24) & ~0x10, s + b + 0x24);
+		usleep_range(10, 20);
+	}
 	writel(readl(s + b + 0x34) | 0x2000, s + b + 0x34);	usleep_range(10, 20);	/* L2 held-A */
 	if (cmu) {						/* L3/L4 shared-CMU strobe 1->0->1 */
 		writel(readl(s + b + 0x24) & ~0x200, s + b + 0x24);	usleep_range(10, 20);
@@ -299,8 +303,21 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	c = readl(s + b + CORTINA_SERDES_BER_STAT);						/* R1 (load-bearing) */
 	writel((readl(s + b + 0x0c) & ~0x3e) | ((c & 0x1f) << 1), s + b + 0x0c);
 	usleep_range(10, 20);
-	if (cmu)						/* L15 undo L1 */
-		{ writel(readl(s + b + 0x24) | 0x10, s + b + 0x24);	usleep_range(10, 20); }
+	if (cmu) {
+		/* ★ L15 UNDO L1 -- AND IT MUST ACTUALLY UNDO IT (fixed 2026-09-07).
+		 * This unconditionally SET bit4, but L1 above only CLEARS it.  On
+		 * this board the pcie2 SerDes table ships 0x24 = 0x520c, whose bit4
+		 * is ALREADY 0, so L1 is a no-op and this "undo" was not undoing
+		 * anything -- it was setting a bit the sequence never touched,
+		 * leaving 0x521c where stock's own locked state reads 0x520c
+		 * (tier 1, dev/x400axf/stock/stock_serdes_locked.txt; corroborated
+		 * tier 2 by a Unicorn execution of the stock kernel, which writes
+		 * 0x24 = 0x520c and never 0x521c).
+		 * An undo of a no-op is a no-op: restore what L1 saved.
+		 */
+		writel((readl(s + b + 0x24) & ~0x10) | l1_bit4, s + b + 0x24);
+		usleep_range(10, 20);
+	}
 	writel(readl(s + b + 0x34) & ~0x40, s + b + 0x34);	usleep_range(10, 20);	/* L16 rel-B */
 	writel(readl(s + b + 0xbc) & ~0x400, s + b + 0xbc);	usleep_range(10, 20);	/* L17 rel-D */
 	writel(readl(s + b + 0x6c) & ~0x60, s + b + 0x6c);	usleep_range(10, 20);	/* L18 */
@@ -810,14 +827,13 @@ static void cortina_pcie0_precondition(struct cortina_pcie *cp)
  * exactly as proven (the generic per-lane-stride DT apply would also write
  * lane1, diverging from the golden trace).
  */
-static void cortina_pcie0_host_reset(struct cortina_pcie *cp)
+static bool cortina_pcie0_host_reset(struct cortina_pcie *cp)
 {
 	cortina_pcie0_bringup_seq(cp, cp->serdes);
 
 	msleep(150);						/* endpoint powers up (PCIe Tpvperl) */
 
-	if (!cortina_pcie_serdes_ber_notify(cp))
-		dev_err(cp->pci.dev, "SerDes BER-notify (CMU lock) not asserted\n");
+	return cortina_pcie_serdes_ber_notify(cp);
 }
 
 /*
@@ -825,18 +841,21 @@ static void cortina_pcie0_host_reset(struct cortina_pcie *cp)
  * requirements: the SerDes is reprogrammed while PHY+core are held in reset, PHY
  * reset releases before core, and BER-notify must be seen before PERST# releases.
  */
-static void cortina_pcie_host_reset(struct cortina_pcie *cp)
+static bool cortina_pcie_host_reset(struct cortina_pcie *cp)
 {
-	if (cp->idx == 0) {
-		cortina_pcie0_host_reset(cp);
-		return;
-	}
+	if (cp->idx == 0)
+		return cortina_pcie0_host_reset(cp);
 
 	/* pcie2/S2 (2.4 GHz) below; other ids have no reset sequence yet. */
 	if (cp->idx != 2) {
 		dev_warn(cp->pci.dev, "reset seq only implemented for pcie0/pcie2 (id=%u)\n",
 			 cp->idx);
-		return;
+		/* Nothing was attempted, so there is no lock to wait for: say so
+		 * rather than making the caller retry a sequence that does not
+		 * exist.  "not implemented" and "tried and failed" are different
+		 * answers and only the second is worth a retry.
+		 */
+		return true;
 	}
 
 	/* Stock brings pcie0/S0 up FIRST; its 2-lane LONG RX-cal preconditions the
@@ -860,6 +879,19 @@ static void cortina_pcie_host_reset(struct cortina_pcie *cp)
 	ca_rmw(cp->rstmgr, CA_GLB_GPIO_MUX4, 0, S2_PERST);	/* GLB pinmux: route PERST2 pad -> GPIO */
 	ca_rmw(cp->gpio, CA_GPIO_B4_CFG, S2_PERST, 0);		/* dir = output */
 	ca_rmw(cp->gpio, CA_GPIO_B4_OUT, S2_PERST, 0);		/* drive low (assert) */
+
+	/* ⚠ RECOVERY ATTEMPT, 2026-09-07 -- keep or drop on the next boot's evidence.
+	 * PERST# used to be low for only the ~30 ms the sequence below takes.  That
+	 * is far past the PCIe minimum (100 us) for a healthy part, but this board
+	 * can reach a state where the endpoint's a-die crystal was switched off by
+	 * a previous driver (see rtw8192xb_pwr_off_func) and a short PERST# does
+	 * not restart it: measured tier 1, three consecutive warm boots -- two of
+	 * ours and one of the VENDOR image -- all lost the link with
+	 * "Link Fail!!!(ltssm = 0x3)".  An analog restart is not instant, so hold
+	 * the endpoint in reset long enough for one.  It costs every boot 200 ms
+	 * and it costs a healthy board nothing else.
+	 */
+	msleep(200);
 
 	ca_rmw(cp->rstmgr, CA_RST_BLOCK, 0, S2_CORE_RST);	/* core_reset assert */
 	usleep_range(1000, 2000);
@@ -895,8 +927,7 @@ static void cortina_pcie_host_reset(struct cortina_pcie *cp)
 	ca_rmw(cp->gpio, CA_GPIO_B4_OUT, 0, S2_PERST);		/* PERST# deassert (high) */
 	msleep(150);						/* endpoint powers up (PCIe Tpvperl) */
 
-	if (!cortina_pcie_serdes_ber_notify(cp))
-		dev_err(cp->pci.dev, "SerDes BER-notify (bit0) not asserted\n");
+	return cortina_pcie_serdes_ber_notify(cp);
 }
 
 /* Point the glue address decoder at the DBI/config and iATU windows. */
@@ -1242,7 +1273,25 @@ static int cortina_pcie_host_init(struct dw_pcie_rp *pp)
 	/* Keep the shared line quiet until MSI/INTx are wired up. */
 	cortina_glbl_writel(cp, 0, CA_PCIE_GLBL_INT_EN0);
 
-	cortina_pcie_host_reset(cp);
+	/* ★ WHY THIS IS ONE SHOT AGAIN, AND WHAT WAS TRIED (2026-09-07).
+	 * pcie2 loses the link on most warm boots of this board -- "No BER
+	 * Notify!", "Link Fail!!!(ltssm = 0x3 - POLL_COMPLIANCE)", endpoint
+	 * 10ec:0192 absent -- and the same failure was reproduced on the VENDOR
+	 * firmware on the same board the same night, so it is not our bring-up
+	 * that is wrong.
+	 * A bounded re-run of this whole sequence was built and MEASURED: 8
+	 * re-runs across two boots, every one of them ending with the CMU still
+	 * not locked, at a cost of ~4 s of boot each.  It bought nothing, so it
+	 * is gone rather than left in as a comfort.  What DID recover a dead
+	 * endpoint is the longer PERST# hold above.
+	 * ⚠ pcie0 reports "not asserted" on EVERY boot and links up Gen.2 x1 every
+	 * time -- on that controller this poll is a FALSE NEGATIVE, which is why
+	 * only pcie2's result is worth a message at all.
+	 */
+	if (!cortina_pcie_host_reset(cp) && cp->idx == 2)
+		dev_err(pci->dev,
+			"SerDes BER-notify not asserted -- the link is unlikely to train\n");
+
 	cortina_pcie_setup_windows(cp);
 
 	ret = cortina_pcie_init_intx(cp);

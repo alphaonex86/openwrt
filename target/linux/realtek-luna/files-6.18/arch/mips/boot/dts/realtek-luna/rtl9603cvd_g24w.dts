@@ -69,7 +69,19 @@
 		 * base turns out to be wrong.
 		 */
 		stdout-path = "serial0:115200n8";
-		bootargs = "console=ttyS0,115200 earlycon ignore_loglevel keep_bootcon";
+		/* ★★★ keep_bootcon REMOVED 2026-09-07 -- the same defect measured on the
+		 * X111W, where it was the O4 wall itself.  `earlycon` and `console=`
+		 * are the SAME 16550 at 115200 here; keep_bootcon never releases the
+		 * boot console, so every printk is shifted out MORE THAN ONCE and
+		 * printk blocks in console_unlock().  Measured on the X111W: boots
+		 * with it emit 2.91-3.00 copies per message and the PLOAM FSM tick
+		 * stretches 4 ms -> 12 ms; the one boot without it emitted 1.00 and
+		 * went O4 -> O5 in 48 ms.  The FSM polls BETWEEN prints, so this is
+		 * not a logging nicety -- it is the ranging deadline.
+		 * `earlycon` and `ignore_loglevel` STAY: readability was never the
+		 * cost, duplication was, and the boot that ranged had both.
+		 */
+		bootargs = "console=ttyS0,115200 earlycon ignore_loglevel";
 	};
 
 	/*

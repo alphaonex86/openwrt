@@ -1231,14 +1231,51 @@ MODULE_PARM_DESC(coldstart_wd, "stuck-O1 recovery watchdog: re-roll the SerDes/l
  * flipping this on is the right next experiment but must be run WITH a LAN
  * health check in the same window, not as a shipping default.
  */
-/* Default ON since 2026-07-25: routing the downstream data GEM into the L3FE
- * (instead of CPU_0 + FE_BYPASS) is what lets the DS HW-flow leg be hit at all.
- * Measured with it on: DS 956.2 Mbps at 0.4% ONU CPU (was 642 Mbps with a core
- * pegged), upstream unchanged at 956.3 Mbps.  Set cortina_gpon.hw_l3_ds=0 to
- * fall back to the CPU punt path. */
-static bool cg_hw_l3_ds = true;
+/*
+ * ★★★ DEFAULT BACK TO OFF, 2026-09-08 - THE PUNT WINDOW WARNED ABOUT DIRECTLY
+ * ABOVE IS REAL, AND WITH IT ON THE DOWNSTREAM IS DEAD, NOT MERELY SLOW.
+ *
+ * MEASURED ON THE BOARD (tier 1, RTL9607F/HSGQ/X400AXF, live at O5 with the
+ * OLT reporting Online/normal and the static FDB entry HIT):
+ *
+ *   hw_l3_ds=1 (PDC[8].DATA0 = 0x00000ec0, LDPID=L3_WAN|LSPID=PON)
+ *       host-side tcpdump: 29/29 ARP replies delivered to 98:c7:a4:6c:af:cc
+ *       board-side:        gpon0 rx +0, ds_wan_pon +0, ds_wan_l3 +0
+ *       => ping gateway 0/10, no DHCP lease, WAN unusable.
+ *   hw_l3_ds=0 (PDC[8].DATA0 = 0x80008e80, CPU_0|PON|FE_BYPASS|NO_DROP)
+ *       ping gateway 10/10 0%, 8.8.8.8 10/10 0% @65 ms, DNS OK,
+ *       a real DHCP lease from `ifdown wan; ifup wan`.
+ *
+ * The two routes were A/B'd by writing that ONE word live (the rest of the
+ * boot untouched), so nothing else can account for the difference.
+ *
+ * WHY it is dead rather than slow: every DS frame that is not an already
+ * offloaded 5-tuple - ARP, DHCP, ICMP, and the first packet of EVERY flow -
+ * must come back through the L3FE hash MISS and be punted to CPU_0.  That punt
+ * does not happen here: with ds_flows=0 the engine consults the miss action and
+ * the frame is never seen at the CPU.  REFUTED as the cause while chasing it:
+ * the DEF_REG entry-0 miss action (making it identical to the entry-1 action
+ * that LAN uses changed nothing), and PDPID_MAP[0x18], which reads the stock
+ * 0x0a in every {my_mac,dbuf} index variant.  So the drop is inside the engine,
+ * upstream of the action - a STAGE A/B problem, still open.
+ *
+ * ⇒ routing DS into the L3FE buys nothing until a DS flow can actually be
+ * installed, and today none can: /sys/kernel/debug/cortina-l3fe/state reports
+ * `ds_flows=0 ds_installed=0 hw_hits=0` and `ds_verdict: STAGE 0: no DS entry
+ * in silicon - every reply rule was REFUSED`.  With zero DS entries the L3FE
+ * route is pure loss: it can only ever punt, and the punt is what is broken.
+ *
+ * ★ THE PRICE OF THIS DEFAULT, STATED AND NOT HIDDEN (operator decides):
+ * the 2026-07-25 note recorded DS 956.2 Mbps at 0.4% ONU CPU with the L3FE
+ * route vs 642 Mbps with a core pegged on the CPU route.  That trade is only
+ * real once the DS leg can be hit; measured against TODAY's behaviour the
+ * comparison is 642 Mbps vs ZERO.  Re-enable with cortina_gpon.hw_l3_ds=1 to
+ * resume the DS-into-L3FE bring-up - and per the warning above, run a LAN
+ * health check in the same window.
+ */
+static bool cg_hw_l3_ds = false;
 module_param_named(hw_l3_ds, cg_hw_l3_ds, bool, 0644);
-MODULE_PARM_DESC(hw_l3_ds, "route the DS data GEM into the L3FE under hw_l3_fwd (default OFF = CPU_0 + FE_BYPASS). ★ REQUIRED for cortina_ni.hw_ds_offload to do anything: with it off, DS frames bypass both forwarding engines and no DS hash entry is reachable. Watch the wired LAN when enabling (the DS punt window once broke it)");
+MODULE_PARM_DESC(hw_l3_ds, "route the DS data GEM into the L3FE under hw_l3_fwd (default OFF = CPU_0 + FE_BYPASS, the route measured to deliver; =1 black-holes ALL downstream while ds_flows=0). ★ REQUIRED for cortina_ni.hw_ds_offload to do anything: with it off, DS frames bypass both forwarding engines and no DS hash entry is reachable. Watch the wired LAN when enabling (the DS punt window once broke it)");
 
 /*
  * Enable the upstream laser.

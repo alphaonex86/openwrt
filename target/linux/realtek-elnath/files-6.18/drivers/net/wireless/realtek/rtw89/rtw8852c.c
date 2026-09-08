@@ -331,6 +331,13 @@ static int rtw8852c_pwr_on_func(struct rtw89_dev *rtwdev)
 	return 0;
 }
 
+/* R_AX_WLLPS_CTRL bit 8, the vendor's B_AX_LPSOP_DSWR: the one write the vendor
+ * 8852C AP-PCIe power-off makes after its APFM_OFFMAC poll.  Defined locally
+ * because reg.h is a kernel-tree file this overlay does not carry; the 2.4 GHz
+ * sibling defines the same bit as B_AX_LPSOP_DSWR_XB for the same reason.
+ */
+#define B_AX_LPSOP_DSWR_8852C		BIT(8)
+
 static int rtw8852c_pwr_off_func(struct rtw89_dev *rtwdev)
 {
 	u32 val32;
@@ -387,12 +394,62 @@ static int rtw8852c_pwr_off_func(struct rtw89_dev *rtwdev)
 	if (ret)
 		return ret;
 
-	rtw89_write32(rtwdev, R_AX_WLLPS_CTRL, SW_LPS_OPTION);
-	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_XTAL_OFF_A_DIE);
-	rtw89_write32_set(rtwdev, R_AX_SYS_SWR_CTRL1, B_AX_SYM_CTRL_SPS_PWMFREQ);
-	rtw89_write32_mask(rtwdev, R_AX_SPS_DIG_ON_CTRL0,
-			   B_AX_REG_ZCDC_H_MASK, 0x3);
-	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFM_SWLPS);
+	/* ★★★ THE AP-PLATFORM PCIe POWER-OFF, AND ON THIS BOARD IT IS THE OTHER
+	 * RADIO'S POWER-ON THAT PAYS FOR THE WRONG ONE (2026-09-08).
+	 *
+	 * What used to stand here was mainline's NIC-PCIe tail: park in SW-LPS,
+	 * switch the a-die crystal OFF, and set two 8852C SPS values.  The
+	 * vendor ships FOUR power-off variants per chip and installs one per
+	 * platform; an ONU is an AP platform.
+	 *   tier 3, the chip's own SDK (mac_8852c/pwr_seq_func_8852c.c):
+	 *     mac_pwr_off_sdio / _usb / _nic_pcie_8852c each write
+	 *     B_AX_XTAL_OFF_A_DIE; mac_pwr_off_ap_pcie_8852c does NOT, and its
+	 *     B_AX_APFM_SWLPS write is COMMENTED OUT in the vendor source.  Its
+	 *     tail is: clear B_AX_SYM_PADPDN_WL_RFC_1P3 -> xtal_si -> clear
+	 *     B_AX_SYM_PADPDN_WL_PTA_1P3 -> xtal_si -> set B_AX_APFM_OFFMAC,
+	 *     poll 0x04[9]==0 -> R_AX_WLLPS_CTRL &= ~B_AX_LPSOP_DSWR.  That is
+	 *     the SAME shape as mac_pwr_off_ap_pcie_8192xb, which this tree
+	 *     already follows for the 2.4 GHz chip.
+	 *
+	 * WHY IT MATTERS HERE, and it is not about this radio at all.  MEASURED
+	 * on the X400AXF 2026-09-08 (tier 1, its own dmesg), driver bound
+	 * throughout, the 5 GHz AP the only thing changed:
+	 *     8852C AP UP   -> binding rtw89_8192xbe SUCCEEDS (3/3 solo binds at
+	 *                      146 s, 184 s -- one under a 4x CPU hog -- and
+	 *                      340/358/377 s)
+	 *     8852C AP DOWN -> binding rtw89_8192xbe FAILS: B_AX_APFN_ONMAC is
+	 *                      written (0x50070082 -> 0x50070182) and the
+	 *                      hardware never clears it, all attempts
+	 *     8852C UNBOUND -> same failure
+	 *     8852C mid bring-up (bind + 2/5/20/30/45 s) -> same failure;
+	 *                      bind + 60 s, by which time its AP is up -> PASS
+	 * `wifi down` takes this chip through rtw89_enter_ips() ->
+	 * rtw89_core_stop() -> rtw89_mac_pwr_off(), i.e. exactly this function,
+	 * so "AP down" and "crystal off" were the same event.
+	 *
+	 * ⚠ WHY THIS CHANGE IS HERE, AND WHAT IT IS *NOT*.  It was made to test a
+	 * hypothesis -- that the RTL8192XB takes its reference clock from THIS
+	 * chip's a-die crystal, so switching the crystal off would leave the
+	 * 2.4 GHz part clockless (its MAC power-on state machine dead while its
+	 * always-on register interface still answers, which is exactly the
+	 * observed signature).  THAT HYPOTHESIS IS REFUTED, measured 2026-09-08
+	 * on this board: with this write removed, `wifi down` on the 5 GHz radio
+	 * STILL makes the 2.4 GHz power-on fail, identically.  The dependency is
+	 * real and reproducible; the a-die crystal is not its mechanism, and
+	 * nobody should re-chase it.
+	 *
+	 * WHAT KEEPS THE CHANGE IS THE VENDOR VARIANT ABOVE, on its own merit:
+	 * this is an AP platform and mac_pwr_off_ap_pcie_8852c is the power-off
+	 * the vendor installs for it.  There is also a MEASURED precedent for the
+	 * specific write: when our 8192XB power-off set B_AX_XTAL_OFF_A_DIE, pcie2
+	 * stopped training on later boots INCLUDING under the vendor firmware --
+	 * a crystal left off across PERST# can take the endpoint away entirely.
+	 *
+	 * COST: this chip's a-die crystal keeps running while the 5 GHz radio is
+	 * idle instead of being switched off -- idle power on a mains-powered ONU,
+	 * and the vendor's own choice for this platform.  Revertible on its own.
+	 */
+	rtw89_write32_clr(rtwdev, R_AX_WLLPS_CTRL, B_AX_LPSOP_DSWR_8852C);
 
 	return 0;
 }

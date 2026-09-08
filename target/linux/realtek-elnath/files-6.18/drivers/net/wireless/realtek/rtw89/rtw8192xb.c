@@ -238,34 +238,52 @@ static void rtw8192xb_ctrl_tx_path_tmac(struct rtw89_dev *rtwdev, u8 tx_path,
 #define R_AX_SPS_ANALDO_ON_CTRL_XB	0x0238
 #define B_AX_VOL_ANALDO_XB_MASK		GENMASK(5, 2)
 
-/* ★ LPS-EXIT (FLR) REGISTERS -- 8192XB only, absent from upstream rtw89 reg.h.
- * The vendor ALWAYS applies this patch on this silicon: its own gate
- * (chk_patch_flr_lps) answers ENABLE for every cut of the 8192XB -- CAV, CBV,
- * CCV and default -- while answering DISABLE for the 8852C.  That asymmetry is
- * exactly why the 5 GHz sibling on this board powers on and the 2.4 GHz part
- * does not.
+/* ★★★ SW-LPS EXIT -- AND THE STATE THAT MATTERS IS THE *WHOLE SYSTEM'S*, NOT
+ * THE MAC'S (established 2026-09-08).
+ *
+ * R_AX_IC_PWR_STATE holds FIVE power-state fields; upstream rtw89 names only
+ * one of them.  From the chip's own register map (tier 3):
+ *     B_AX_WHOLE_SYS_PWR_STE    bits 25:16
+ *     B_AX_WLMAC_PWR_STE        bits  9:8  (upstream B_AX_WLMAC_PWR_STE_MASK)
+ *     B_AX_UART_HCISYS_PWR_STE  bits  7:6
+ *     B_AX_SDIO_HCISYS_PWR_STE  bits  5:4
+ *     B_AX_USB_HCISYS_PWR_STE   bits  3:2
+ *     B_AX_PCIE_HCISYS_PWR_STE  bits  1:0
+ * and the whole-system field is an ENUMERATED state, not a bitmap:
+ *     ACT 0x220 · LPS 0x224 (the same encoding as SUS) · PDN 0x228.
+ *
+ * That decoding is what the failing boots had been saying all along and
+ * nobody had read: the entry line printed IC_PWR_STATE = 0x02240003, i.e.
+ * whole-system = 0x224 = LPS and PCIe HCI-sys = 3, while EVERY power-on that
+ * ever succeeded on this board printed 0x220 (ACT) or a transient 0x2f9, with
+ * PCIe HCI-sys = 1.
  */
-#define R_AX_GPIO_INTM_XB		0x0048
-#define B_AX_GPIOA_INT_MD_XB		BIT(10)	/* R_AX_GPIO_INTM_XB */
-#define R_AX_FWS0IMR_XB			0x0190
-#define B_AX_FS_GPIOA_INT_EN_XB		BIT(10)	/* R_AX_FWS0IMR_XB */
-#define R_AX_GPIO_PULL_HIGH_EN_XB	0x02E0	/* pairs with the upstream _PULL_LOW_EN 0x02E4 */
-#define B_AX_GPIO10_PULL_HIGH_EN_XB	BIT(10)	/* R_AX_GPIO_PULL_HIGH_EN_XB */
-/* Two bits of R_AX_GPIO_EXT_CTRL the vendor drives around the wake pulse.  Only
- * their POSITIONS are established (from the sequence itself); the vendor header
- * gives them no name, so none is invented here.
+#define B_AX_WHOLE_SYS_PWR_STE_XB_MASK	GENMASK(25, 16)
+#define B_AX_PCIE_HCISYS_PWR_STE_XB_MASK	GENMASK(1, 0)
+#define RTW8192XB_SYS_PWR_ACT		0x220
+#define RTW8192XB_SYS_PWR_LPS		0x224	/* the same encoding as SUS */
+#define RTW8192XB_SYS_PWR_PDN		0x228
+/* R_AX_RPWM (0x01E4) bit 15, the vendor's B_AX_RPWM_TOGGLE.  The wake is
+ * WRITTEN through the PCIe alias (rtwdev->hci.rpwm_addr, 0x30C0 on this part)
+ * and READ BACK on the MAC side, which is what proves it was taken.
  */
-#define B_AX_GPIO_EXT_B18_XB		BIT(18)	/* cleared before arming */
-#define B_AX_GPIO_EXT_B26_XB		BIT(26)	/* set to arm the GPIOA interrupt */
-/* GPIO10 -> software-IO pinmux, from the 8192XB pin list. */
-#define R_AX_PINMUX_SW_IO_SEL_XB	0x0040
-#define B_AX_PINMUX_SW_IO_SEL_XB_MASK	(BIT(1) | BIT(0))
-#define R_AX_PINMUX_GPIO10_EN_XB	0x02D5
-#define B_AX_PINMUX_GPIO10_EN_XB_MASK	GENMASK(3, 0)
-/* WLMAC power state, read from the upstream R_AX_IC_PWR_STATE/B_AX_WLMAC_PWR_STE_MASK. */
-#define RTW8192XB_MAC_PWR_STE_LPS	2
-#define RTW8192XB_LPS_POLL_CNT		10000
-#define RTW8192XB_LPS_POLL_DLY_US	50
+#define B_AX_RPWM_TOGGLE_XB		BIT(15)
+#define RTW8192XB_RPWM_POLL_DLY_US	1000
+#define RTW8192XB_RPWM_POLL_US		20000
+/* After the wake is taken the vendor waits 319 x 50 us -- its own comment
+ * reads "delay 0x10 ms" -- before it touches the analog side again.
+ */
+#define RTW8192XB_LPS_EXIT_SETTLE_US	16000
+/* R_AX_WLLPS_CTRL bit 8, the vendor's B_AX_LPSOP_DSWR: the one write the vendor
+ * 8192XB AP-PCIe power-off makes after its APFM_OFFMAC poll.
+ * ★ RENAMED 2026-09-08.  It used to be called ..._B8_XB with a comment saying
+ * the vendor header names no bit here -- and that was simply not checked: the
+ * chip's own register map names every field of 0x0090 (LPSOP_BBOFF, _MACOFF,
+ * _MEM_DS, _XTALM_LPS, _XTAL, _ACLK_DIV_2, _ACLK_SEL, _ASWRM, _ASWR,
+ * _DSWR_ADJ, _DSWRSD, _DSWRM, _DSWR, _OLD_ADJ, FORCE_LEAVE_LPS, _OLDSD,
+ * WL_LPS_EN).  A position standing in for a name that exists is a defect.
+ */
+#define B_AX_LPSOP_DSWR_XB		BIT(8)
 
 /* Physical (hidden-zone) WiFi-efuse bytes checked by the vendor power-on:
  * 0x5E9 == 0xAA marks a factory power calibration; 0x5EA identifies the
@@ -392,8 +410,9 @@ static void rtw8192xb_sps_default_voltages(struct rtw89_dev *rtwdev)
  *   MAC_AX_PWR_POLL_MS 1 with a BUSY delay, i.e. ~19 ms, and NOTHING retries
  *   it.  Our 20 ms poll is already faithful to that.  So this ladder is
  *   ADDITIVE robustness, never a correction of a wrong bound -- and it does
- *   NOT fix the warm-reset failure, which is an LPS state the vendor clears
- *   before the sequence (rtw8192xb_leave_lps_flr).
+ *   NOT fix the failure it was written for, which is a WHOLE-SYSTEM SW-LPS
+ *   state the vendor leaves with an RPWM wake, not with a settle and not by
+ *   clearing B_AX_APFM_SWLPS (see rtw8192xb_leave_sw_lps).
  */
 /* ★★★ MEASURED 2026-09-07, and it is a SETTLE problem, not a sequence problem.
  * The power-on sequence itself is correct: run at RUNTIME it succeeds 12 times
@@ -423,103 +442,254 @@ static void rtw8192xb_sps_default_voltages(struct rtw89_dev *rtwdev)
 static const unsigned int pwron_settle_ms[] = { 100, 200, 400, 800 };
 
 /*
- * Bring the WLMAC out of LOW-POWER STATE before the power-on sequence runs.
+ * Bring the WHOLE SYSTEM out of software low-power state before the power-on
+ * sequence runs.
  *
- * ★★ WHY THIS EXISTS.  G.988 has nothing to do with it: this is a silicon
- * erratum the vendor patches unconditionally on the 8192XB and never on the
- * 8852C.  After a WARM reset -- a reboot that re-asserts PERST# while the part
- * is still running its firmware -- the MAC can be left in LPS.  The power-on
- * sequence assumes it is in OFF, so it programs a MAC that is asleep and
- * RDY_SYSPWR never asserts: the boot log then says "power-on handshake
- * (RDY_SYSPWR) timed out" and probe fails -110.  Waiting longer cannot help,
- * which is why the settle ladder above does not fix it.
+ * ★★★ THE PREVIOUS PORT HERE WAS AIMED AT A STATE THIS BOARD IS NEVER IN, AND
+ * IT WAS TAKEN FROM A FIRMWARE THIS BOARD DOES NOT RUN (replaced 2026-09-08).
  *
- * The wake is an edge, not a register write: GPIO10 is routed to software IO
- * and pulsed high -> low -> high, and the falling edge raises the AON GPIOA
- * interrupt that walks the MAC out of LPS.  Then we wait for the state to
- * actually leave LPS -- an edge that was sent is not a state that changed.
+ * What used to sit here was the vendor's `_patch_flr_lps` -- an AON GPIO10
+ * pulse whose closing poll waits for B_AX_WLMAC_PWR_STE to leave LPS.  Two
+ * separate reasons it could never have helped, both tier 2, i.e. THIS board's
+ * own stock rtk_wifi6.ko, which outranks the SDK revision it was ported from:
+ *   - `chk_patch_flr_lps` is present as a symbol but has ZERO callers in the
+ *     shipped module.  The control that makes that mean something: of the 62
+ *     `chk_patch_*` symbols, most DO have 1-3 `bl` call sites, so the search
+ *     can find callers; this one has none.  The GPIO wake is not compiled into
+ *     the firmware that runs on this board.  Its shipped `mac_pwr_switch`
+ *     instead handles a MAC that is not OFF by setting B_AX_EN_WLON and
+ *     B_AX_APFM_OFFMAC and polling OFFMAC clear (.text 0x26d78c-0x26d818).
+ *   - the state it polls for is already satisfied: B_AX_WLMAC_PWR_STE reads 0
+ *     (MAC_OFF) on every recorded power-on of this board, so the poll returned
+ *     immediately and the pulse was a no-op with side effects -- it armed
+ *     R_AX_FWS0IMR's GPIOA interrupt and nothing ever disarmed it (the SDK
+ *     pairs that patch with a `clr_aon_int()` this port never had).
  *
- * ⚠ THIS IS A CANDIDATE, NOT YET A PROVEN DIAGNOSIS, and it is written to stay
- * useful either way.  The state is READ AND LOGGED before the pulse, once per
- * power-on: on the next boot that one line settles it.  Reading 2 (LPS) at
- * probe time confirms the mechanism; reading 0 (OFF) refutes it and costs us
- * nothing but a log line.  An earlier read of this register found 0 -- but it
- * was taken ~50 min after boot, after failed probes and re-binds, so it says
- * nothing about the state at probe time.
+ * WHAT THE CHIP IS ACTUALLY IN.  R_AX_IC_PWR_STATE's WHOLE-SYSTEM field reads
+ * 0x224 = LPS on the failing boots and 0x220 = ACT on every one that worked
+ * (tier 1, the board's own console log; the field and its values are tier 3,
+ * the chip's own register map -- see the defines above).  So the part is
+ * parked in SW-LPS as a SYSTEM, which is why B_AX_RDY_SYSPWR never asserts:
+ * the system power was never asked to come back.
+ *
+ * AND CLEARING B_AX_APFM_SWLPS IS NOT THAT REQUEST.  The vendor's only PCIe
+ * LPS exit (mac_leave_lps_pcie_8192xb, tier 3) does not touch R_AX_SYS_PW_CTRL
+ * at all: it writes B_AX_RPWM_TOGGLE through the PCIe RPWM alias, waits for it
+ * to appear on the MAC side, settles ~16 ms and drops it again.  Clearing
+ * B_AX_APFM_SWLPS only CANCELS A PENDING request -- which is exactly why a
+ * hand bind at 05:57 on 2026-09-08 succeeded from the very same
+ * PW_CTRL=0x50050482: its whole-system field read 0x2f9, still in transit, not
+ * 0x224.  Same PW_CTRL, different chip, different outcome.
+ *
+ * The analog half of the vendor's exit (a-die port LDOs, the port0/port1
+ * isolation release, the pad supplies and the XTAL_SI ramp) is deliberately
+ * NOT duplicated here: rtw8192xb_pwr_on_func performs the power-on-correct
+ * form of every one of those steps a few lines later.  What is ported is the
+ * part that changes the SYSTEM POWER STATE, and nothing else.
+ *
+ * ⚠ IT IS GATED, AND THE GATE IS NOT THE MISTAKE THE OLD ONE MADE.  The dead
+ * gate this file used to carry tested B_AX_WLMAC_PWR_STE, which reads 0 here,
+ * so the body never ran.  This one tests the WHOLE-SYSTEM field, which reads
+ * exactly the LPS value in the failing case -- and it LOGS what it read either
+ * way, so one boot log says whether the gate fired and whether it worked.
  */
-static void rtw8192xb_leave_lps_flr(struct rtw89_dev *rtwdev)
+static void rtw8192xb_leave_sw_lps(struct rtw89_dev *rtwdev)
 {
-	u32 state;
+	u32 sys_ste, val32;
 	int ret;
 
-	state = rtw89_read32_mask(rtwdev, R_AX_IC_PWR_STATE,
-				  B_AX_WLMAC_PWR_STE_MASK);
-	rtw89_info(rtwdev, "8192xb: WLMAC power state on entry: %u%s\n", state,
-		   state == RTW8192XB_MAC_PWR_STE_LPS ? " (LPS -- waking it)" : "");
+	sys_ste = rtw89_read32_mask(rtwdev, R_AX_IC_PWR_STATE,
+				    B_AX_WHOLE_SYS_PWR_STE_XB_MASK);
+	if (sys_ste != RTW8192XB_SYS_PWR_LPS)
+		return;
 
-	/* ★★★ NO STATE GATE HERE -- AND MY FIRST PORT ADDED ONE, WHICH MADE THIS
-	 * WHOLE FUNCTION DEAD CODE (fixed 2026-09-07).  I returned early unless the
-	 * MAC read LPS; the board reads MAC_OFF at probe, so the wake never ran and
-	 * three later hypotheses were tested against a no-op.
-	 * The vendor gates ONLY on its erratum check (always enabled for this
-	 * silicon) and then performs the GPIO wake unconditionally -- it is LPS the
-	 * final poll waits to LEAVE, not a precondition for acting.  Reading a
-	 * sequence's guard off its poll is how a faithful-looking port becomes an
-	 * expensive nothing.
-	 */
+	rtw89_info(rtwdev,
+		   "8192xb: whole-system power state is SW-LPS (0x%03x) -- running the vendor PCIe RPWM wake\n",
+		   sys_ste);
 
-	/* The vendor clears the firmware-control word first; on this chip that is
-	 * the whole of its restore step (its other branch is 8852A/B/8851B only).
-	 */
-	rtw89_write32(rtwdev, R_AX_WCPU_FW_CTRL, 0);
+	rtw89_write32_set(rtwdev, rtwdev->hci.rpwm_addr, B_AX_RPWM_TOGGLE_XB);
+	ret = read_poll_timeout(rtw89_read32, val32, val32 & B_AX_RPWM_TOGGLE_XB,
+				RTW8192XB_RPWM_POLL_DLY_US, RTW8192XB_RPWM_POLL_US,
+				false, rtwdev, R_AX_RPWM);
+	if (ret) {
+		rtw89_warn(rtwdev,
+			   "8192xb: the SW-LPS wake was not taken (R_AX_RPWM=%08x)\n",
+			   val32);
+		return;
+	}
 
-	rtw89_write32_set(rtwdev, R_AX_FWS0IMR_XB, B_AX_FS_GPIOA_INT_EN_XB);
+	fsleep(RTW8192XB_LPS_EXIT_SETTLE_US);
+	rtw89_write32_clr(rtwdev, rtwdev->hci.rpwm_addr, B_AX_RPWM_TOGGLE_XB);
 
-	/* Route GPIO10 to software IO. */
-	rtw89_write8_mask(rtwdev, R_AX_PINMUX_SW_IO_SEL_XB,
-			  B_AX_PINMUX_SW_IO_SEL_XB_MASK, 0);
-	rtw89_write8_mask(rtwdev, R_AX_PINMUX_GPIO10_EN_XB,
-			  B_AX_PINMUX_GPIO10_EN_XB_MASK,
-			  B_AX_PINMUX_GPIO10_EN_XB_MASK);
+	sys_ste = rtw89_read32_mask(rtwdev, R_AX_IC_PWR_STATE,
+				    B_AX_WHOLE_SYS_PWR_STE_XB_MASK);
+	rtw89_info(rtwdev,
+		   "8192xb: whole-system power state after the wake: 0x%03x%s\n",
+		   sys_ste,
+		   sys_ste == RTW8192XB_SYS_PWR_ACT ? " (ACT)" :
+		   sys_ste == RTW8192XB_SYS_PWR_LPS ? " (STILL LPS -- the wake did not take)" :
+		   sys_ste == RTW8192XB_SYS_PWR_PDN ? " (PDN)" : "");
+}
 
-	rtw89_write32_clr(rtwdev, R_AX_GPIO_EXT_CTRL, B_AX_GPIO_EXT_B18_XB);
+/* ★★★ THE VENDOR CLEARS A STALE POWER-ON REQUEST BEFORE THE SEQUENCE RUNS, AND
+ * ON PCIe MAINLINE DOES NOT (2026-09-08).
+ *
+ * rtw89_mac_power_switch_boot_mode() (mac.c) returns immediately unless
+ * rtwdev->hci.type == RTW89_HCI_TYPE_USB, so on this PCIe radio the block has
+ * never executed.  The vendor's own mac_pwr_switch() has NO interface test at
+ * all: it reads R_AX_GPIO_MUXCFG, branches on B_AX_BOOT_MODE alone, and then
+ * clears B_AX_APFN_ONMAC, B_AX_AUTO_WLPON, B_AX_BOOT_MODE and B_AX_R_DIS_PRST
+ * -- the same four writes, in the same order, as mainline's USB-only copy.
+ *   tier 2, THIS board's stock rtk_wifi6.ko, mac_pwr_switch (.text 0x26d660):
+ *     0x26d68c  read32(0x0040)
+ *     0x26d694  tbz w0,#19  -> the ONLY test; no HCI type is consulted
+ *     0x26d6ac  0x0004 &= ~0x100      (B_AX_APFN_ONMAC)
+ *     0x26d6d0  0x00f4 &= ~0x400      (B_AX_AUTO_WLPON)
+ *     0x26d6f4  0x0040 &= ~0x80000    (B_AX_BOOT_MODE)
+ *     0x26d718  0x001c &= ~0x40       (B_AX_R_DIS_PRST)
+ *
+ * Why it matters here: B_AX_APFN_ONMAC is a REQUEST bit that the sequencer
+ * consumes on a 0->1 edge.  Setting it while it already reads 1 is not an
+ * edge, so nothing starts and the poll for it to self-clear can only expire.
+ */
+static void rtw8192xb_pwr_switch_boot_mode(struct rtw89_dev *rtwdev)
+{
+	if (!rtw89_read32_mask(rtwdev, R_AX_GPIO_MUXCFG, B_AX_BOOT_MODE))
+		return;
 
-	/* Idle the pin high, arm the interrupt, then pulse it low and back. */
-	rtw89_write32_clr(rtwdev, R_AX_GPIO0_15_EECS_EESK_LED1_PULL_LOW_EN,
-			  B_AX_GPIO10_PULL_LOW_EN);
-	rtw89_write32_set(rtwdev, R_AX_GPIO_PULL_HIGH_EN_XB,
-			  B_AX_GPIO10_PULL_HIGH_EN_XB);
-	rtw89_write32_set(rtwdev, R_AX_GPIO_INTM_XB, B_AX_GPIOA_INT_MD_XB);
-	rtw89_write32_set(rtwdev, R_AX_GPIO_EXT_CTRL, B_AX_GPIO_EXT_B26_XB);
+	rtw89_info(rtwdev,
+		   "8192xb: BOOT_MODE set at power-on -- clearing the stale power request (vendor mac_pwr_switch block)\n");
 
-	rtw89_write32_set(rtwdev, R_AX_GPIO0_15_EECS_EESK_LED1_PULL_LOW_EN,
-			  B_AX_GPIO10_PULL_LOW_EN);
-	rtw89_write32_clr(rtwdev, R_AX_GPIO_PULL_HIGH_EN_XB,
-			  B_AX_GPIO10_PULL_HIGH_EN_XB);	/* the falling edge */
+	rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFN_ONMAC);
+	rtw89_write32_clr(rtwdev, R_AX_SYS_STATUS1, B_AX_AUTO_WLPON);
+	rtw89_write32_clr(rtwdev, R_AX_GPIO_MUXCFG, B_AX_BOOT_MODE);
+	rtw89_write32_clr(rtwdev, R_AX_RSV_CTRL, B_AX_R_DIS_PRST);
+}
 
-	rtw89_write32_clr(rtwdev, R_AX_GPIO0_15_EECS_EESK_LED1_PULL_LOW_EN,
-			  B_AX_GPIO10_PULL_LOW_EN);
-	rtw89_write32_set(rtwdev, R_AX_GPIO_PULL_HIGH_EN_XB,
-			  B_AX_GPIO10_PULL_HIGH_EN_XB);
+/* ★★★ THIS CHIP CANNOT POWER ITS MAC ON WHILE ITS 5 GHz SIBLING IS DARK, AND
+ * THAT IS A MEASUREMENT, NOT A THEORY (established 2026-09-08, tier 1, the
+ * X400AXF).  Every power-on taken while the board's RTL8852C was RUNNING
+ * passed; every power-on taken while it was unbound, in IPS, or mid-bring-up
+ * failed with -110.  The failure signature never varies: B_AX_APFN_ONMAC is
+ * written (R_AX_SYS_PW_CTRL 0x50070082 -> 0x50070182), the hardware never
+ * clears it, and NO other register moves.
+ *
+ *   8852C state                          8192XB power-on   at uptime
+ *   AP up, idle                          PASS x5           146 .. 377 s
+ *   AP up, idle, under a 4x CPU hog      PASS              184 s
+ *   bind + 60 s (its AP has finished)    PASS              ~570 s
+ *   bind + 1/2/5/20/30/45 s              FAIL x6           207 .. 500 s
+ *   driver UNBOUND                       FAIL              ~300 s
+ *   bound, `wifi down` (IPS)             FAIL              ~400 s
+ *   boot probe (8852C mid-probe)         FAIL every boot   8.3 / 9.9 s
+ *   `wifi up` (both radios restart)      FAIL              267 s
+ *
+ * Neither elapsed time (a 377 s solo PASS against a 207 s concurrent FAIL) nor
+ * CPU load separates the two sets; the sibling's state does, on every row.
+ *
+ * ⚠ THE PHYSICAL MECHANISM IS NOT ESTABLISHED AND IS NOT GUESSED AT HERE.  A
+ * supply sag is the obvious story and the data refutes it -- the PASS rows are
+ * exactly the ones where the sibling draws the MOST power.  What IS established
+ * is the ordering, and an ordering is enough to sequence correctly.  Ruled out
+ * already, so that nobody re-chases them: the SPS latch (SWR_CTRL1 bit 10 /
+ * SPS_DIG_ON_CTRL0[18:17]) reads identically on the PASS and FAIL rows;
+ * whole-system SW-LPS (entry reads 0x220 ACT, not 0x224); an ONMAC "edge"
+ * model; B_AX_XTAL_OFF_A_DIE; the pwr_off->pwr_on pair; and sharing the a-die
+ * crystal from the 8852C, which was implemented and re-tested and still failed
+ * with the sibling's AP down.
+ *
+ * WHAT THIS DOES.  Before the power-on sequence runs, put the sibling into the
+ * state the measurement says is required, and hold it there until the sequence
+ * is done:
+ *   - sibling already RUNNING  -> hold its wiphy lock so it stays that way.
+ *   - sibling idle, no vifs    -> BORROW it: rtw89_core_start(), then
+ *                                 rtw89_core_stop() afterwards.  This is
+ *                                 exactly the pair ieee80211_ops.start/.stop
+ *                                 use, and mac80211 calls .start with zero
+ *                                 vifs too, so it is not a novel state.
+ *   - sibling has vifs but is not running -> somebody else is bringing it up.
+ *                                 Wait, bounded, and say so either way.
+ * The borrow is what makes the fix work AT PROBE, where userspace does not
+ * exist yet: the 2.4 GHz phy therefore registers during boot, before
+ * /sbin/wifi config runs, so the ordinary uci/board.d path configures it with
+ * no hotplug, no init script and nothing per-board on our side.
+ *
+ * ★ IT NEVER POLLS, AND THAT IS A CORRECTION MEASURED ON THE BOARD (2026-09-08).
+ * The first version borrowed only a sibling with NO interfaces and otherwise
+ * WAITED, bounded, for somebody else to start it.  On a `wifi` reload that arm
+ * fired and burnt its whole 5 s budget: between mac80211 adding the AP vif and
+ * hostapd starting it, the 8852C sits in IPS *with* a vif -- not a transient
+ * somebody else is about to end, but a state that ends only when the AP starts.
+ * Waiting for it made the outcome a race (it happened to pass; that is luck,
+ * not sequencing).  Starting it is exactly what rtw89_leave_ips() does from
+ * that same state, and we hold its wiphy lock throughout, so there is nobody
+ * to race.  ⇒ not RUNNING means BORROW, full stop: no loop, no deadline,
+ * nothing to cap, and one less way to be almost right.
+ */
 
-	ret = read_poll_timeout(rtw89_read32_mask, state,
-				state != RTW8192XB_MAC_PWR_STE_LPS,
-				RTW8192XB_LPS_POLL_DLY_US,
-				RTW8192XB_LPS_POLL_CNT * RTW8192XB_LPS_POLL_DLY_US,
-				false, rtwdev, R_AX_IC_PWR_STATE,
-				B_AX_WLMAC_PWR_STE_MASK);
-	if (ret)
-		rtw89_err(rtwdev,
-			  "8192xb: MAC stayed in LPS after the wake pulse (state %u)\n",
-			  state);
-	else
-		rtw89_info(rtwdev, "8192xb: post-wake WLMAC power state %u\n", state);
+struct rtw8192xb_sibling {
+	struct rtw89_dev *rtwdev;	/* NULL: powering on without one */
+	bool borrowed;			/* we started it, so we must stop it */
+};
+
+static void rtw8192xb_sibling_hold(struct rtw89_dev *rtwdev,
+				   struct rtw8192xb_sibling *hold)
+{
+	struct rtw89_dev *sib;
+	int ret;
+
+	memset(hold, 0, sizeof(*hold));
+
+	sib = rtw89_core_sibling_lock(rtwdev, RTL8852C);
+	if (!sib) {
+		rtw89_info(rtwdev,
+			   "8192xb: no 5 GHz RTL8852C sibling is registered -- powering on alone\n");
+		return;
+	}
+
+	if (test_bit(RTW89_FLAG_RUNNING, sib->flags)) {
+		hold->rtwdev = sib;
+		rtw89_info(rtwdev,
+			   "8192xb: the 5 GHz sibling is running -- holding it there across the power-on\n");
+		return;
+	}
+
+	ret = rtw89_core_start(sib);
+	if (ret) {
+		rtw89_warn(rtwdev,
+			   "8192xb: could not start the 5 GHz sibling (%d) -- powering on without it\n",
+			   ret);
+		rtw89_core_sibling_unlock(sib);
+		return;
+	}
+
+	hold->rtwdev = sib;
+	hold->borrowed = true;
+	rtw89_info(rtwdev,
+		   "8192xb: started the idle 5 GHz sibling for the power-on (it is put back afterwards)\n");
+}
+
+static void rtw8192xb_sibling_release(struct rtw89_dev *rtwdev,
+				      struct rtw8192xb_sibling *hold)
+{
+	if (!hold->rtwdev)
+		return;
+
+	if (hold->borrowed) {
+		rtw89_core_stop(hold->rtwdev);
+		rtw89_info(rtwdev,
+			   "8192xb: put the 5 GHz sibling back to idle\n");
+	}
+
+	rtw89_core_sibling_unlock(hold->rtwdev);
+	hold->rtwdev = NULL;
 }
 
 static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 {
 	const char *slow = "";
 	unsigned int attempt;
+	u32 ic_pwr, sys_ste;
 	u32 val32;
 	int ret;
 
@@ -530,28 +700,46 @@ static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 	 * reads, one line) and it rides on every power-on, so the boot log
 	 * always carries the "before" of whatever happens next.
 	 */
+	ic_pwr = rtw89_read32(rtwdev, R_AX_IC_PWR_STATE);
+	sys_ste = u32_get_bits(ic_pwr, B_AX_WHOLE_SYS_PWR_STE_XB_MASK);
 	rtw89_info(rtwdev,
-		   "8192xb: pwr_on entry: PW_CTRL(0x0004)=%08x CLK/EFUSE(0x0008)=%08x IC_PWR_STATE(0x03f0)=%08x\n",
+		   "8192xb: pwr_on entry: PW_CTRL(0x0004)=%08x CLK/EFUSE(0x0008)=%08x IC_PWR_STATE(0x03f0)=%08x GPIO_MUXCFG(0x0040)=%08x\n",
 		   rtw89_read32(rtwdev, R_AX_SYS_PW_CTRL),
 		   rtw89_read32(rtwdev, R_AX_SYS_CLK_CTRL),
-		   rtw89_read32(rtwdev, R_AX_IC_PWR_STATE));
+		   ic_pwr,
+		   rtw89_read32(rtwdev, R_AX_GPIO_MUXCFG));
 
-	/* ★ DIAGNOSTIC READ, to be removed once it has answered (2026-09-07).
-	 * The vendor's mac_pwr_switch() clears B_AX_APFN_ONMAC, B_AX_AUTO_WLPON,
-	 * B_AX_BOOT_MODE and B_AX_R_DIS_PRST whenever GPIO_MUXCFG bit 19
-	 * (B_AX_BOOT_MODE) reads 1 -- on EVERY interface, with no HCI-type test
-	 * (established twice: the chip's own SDK mac_ax/pwr.c, and this board's
-	 * stock rtk_wifi6.ko at mac_pwr_switch+0x28, which branches only on
-	 * `tbz w0,#19`).  Our rtw89_mac_power_switch_boot_mode() runs that block
-	 * for USB only, so on this PCIe radio it never runs.  Whether that
-	 * matters here turns on ONE datum nobody has read: is BOOT_MODE set on
-	 * THIS board at probe?  These two reads answer it on the next boot; they
-	 * change no state.
+	/* ★ AND THE SAME WORD, DECODED -- because 0x02240003 vs 0x02200001 is the
+	 * whole answer and it is invisible as hex.  ONE read, decoded from it: this
+	 * is a state machine, so four reads could disagree with each other.
+	 * The two analog registers beside it are the ones the 8852C-derived
+	 * power-off used to write with 8852C values (the SPS PWM frequency and the
+	 * digital rail's zero-crossing detect) and then leave behind in the
+	 * always-on domain -- printing them lets one boot log settle whether they
+	 * are still carrying those values, without asking the board again.
+	 * ★ AND R_AX_SYS_ADIE_PAD_PWR_CTRL (0x0018) BESIDE THEM, because that is
+	 * the register the CURRENT model is about: bits 6:5 are the two a-die pad
+	 * supplies (B_AX_SYM_PADPDN_WL_RFC_1P3 / _PTA_1P3) that the chip's own
+	 * power-off clears on its way out and this power-on only restores AFTER
+	 * the MAC-on handshake.  One read, and it makes the off->on pair visible
+	 * in the boot log instead of inferred from the order of two messages.
 	 */
 	rtw89_info(rtwdev,
-		   "8192xb: pwr_on entry: GPIO_MUXCFG(0x0040)=%08x SYS_STATUS1(0x00f4)=%08x\n",
-		   rtw89_read32(rtwdev, R_AX_GPIO_MUXCFG),
-		   rtw89_read32(rtwdev, R_AX_SYS_STATUS1));
+		   "8192xb: pwr_on entry: whole-system pwr state 0x%03x%s, PCIe HCI-sys %u, WLMAC %u; ADIE_PAD(0x0018)=%08x SWR_CTRL1(0x0010)=%08x SPS_DIG_ON_CTRL0(0x0200)=%08x\n",
+		   sys_ste,
+		   sys_ste == RTW8192XB_SYS_PWR_ACT ? " (ACT)" :
+		   sys_ste == RTW8192XB_SYS_PWR_LPS ? " (LPS/SUS)" :
+		   sys_ste == RTW8192XB_SYS_PWR_PDN ? " (PDN)" : "",
+		   u32_get_bits(ic_pwr, B_AX_PCIE_HCISYS_PWR_STE_XB_MASK),
+		   u32_get_bits(ic_pwr, B_AX_WLMAC_PWR_STE_MASK),
+		   rtw89_read32(rtwdev, R_AX_SYS_ADIE_PAD_PWR_CTRL),
+		   rtw89_read32(rtwdev, R_AX_SYS_SWR_CTRL1),
+		   rtw89_read32(rtwdev, R_AX_SPS_DIG_ON_CTRL0));
+
+	/* The vendor runs this on EVERY interface; mainline runs it on USB only,
+	 * so on this PCIe radio it had never run (see the function).
+	 */
+	rtw8192xb_pwr_switch_boot_mode(rtwdev);
 
 	/* Vendor 8192XB AP-PCIe power-on order (mac_pwr_on_ap_pcie_8192xb,
 	 * verified insn-by-insn against the stock rtk_wifi6.ko disasm).
@@ -565,25 +753,47 @@ static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 	 * bit, idempotent on a re-run.
 	 */
 	for (attempt = 0; ; attempt++) {
-		/* ★★★ THE LPS WAKE IS INSIDE THE LOOP, AND THAT PLACEMENT IS THE FIX
-		 * (measured 2026-09-07, tier 1, this board).  It used to run once,
-		 * before the loop.  What the boot log then showed, over and over:
-		 *
-		 *   entry PW_CTRL=0x...0482  (APFM_SWLPS set, RDY_SYSPWR clear)
-		 *        -> RDY_SYSPWR never asserts, on every attempt, for 54 s
-		 *   entry PW_CTRL=0x...0082  (APFM_SWLPS clear, RDY_SYSPWR set)
-		 *        -> the handshake completes on the FIRST attempt
-		 *
-		 * and the second state is precisely what a FAILED run of this
-		 * sequence leaves behind: a hand bind at 139 s of uptime, entering
-		 * at 0x50070082 because the boot probe had just failed from
-		 * 0x50050482, powered the chip on first try and registered the phy.
-		 * So the chip does come out of SW-LPS -- it just does not do it
-		 * within one pass, and the wake pulse was the one step the retry
-		 * never repeated.  Pulsing it per attempt costs a healthy boot
-		 * nothing (attempt 1 still succeeds) and is what the retry was for.
+		/* ★★★ AND THE WHOLE-SYSTEM SW-LPS EXIT COMES FIRST, because a chip
+		 * parked there answers no power-on request at all (see
+		 * rtw8192xb_leave_sw_lps).  It is a no-op -- one register read -- on a
+		 * chip that is not in LPS, which is every healthy boot.
 		 */
-		rtw8192xb_leave_lps_flr(rtwdev);
+		rtw8192xb_leave_sw_lps(rtwdev);
+
+		/* ★★★ EVERY ATTEMPT STARTS FROM CLEARED REQUEST BITS -- INCLUDING THE
+		 * FIRST, WHICH IS THE ONE THAT USED TO INHERIT A DIRTY CHIP.
+		 * R_AX_SYS_PW_CTRL is in the always-on domain: its contents survive a
+		 * warm reboot AND the PCIe PERST#, so this pass begins in whatever
+		 * state the PREVIOUS driver instance left -- ours, an older build of
+		 * ours, or the vendor's.  MEASURED on this board (tier 1, its own
+		 * console log, 2026-09-07/08), first pwr_on of a boot, everything else
+		 * in the entry state identical (IC_PWR_STATE=0x02200001,
+		 * CLK/EFUSE=0xc0202021):
+		 *     entry 0x50070382 (APFM_OFFMAC|APFN_ONMAC set) -> APFN_ONMAC never
+		 *       clears; 20:28:22 and 20:28:49, 8 attempts each, probe -110
+		 *     entry 0x50070082 (both clear)                 -> succeeds on
+		 *       attempt 1; 20:43:18, and again 0x...0482 at 05:57:08
+		 * The clear used to sit in the retry tail only, so attempt 1 always
+		 * paid a guaranteed 20 ms timeout and a warning on a chip that had
+		 * merely been left dirty.  Two writes' worth of hygiene, on a register
+		 * this function writes six more times anyway.
+		 */
+		rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL,
+				  B_AX_APFN_ONMAC | B_AX_APFM_OFFMAC);
+		/* ★ AND B_AX_EN_WLON TOO, WHICH MAINLINE NEVER CLEARS ON ANY PATH.
+		 * The vendor's mac_pwr_switch clears it on EVERY power-on immediately
+		 * before it calls the chip sequence (tier 2, this board's own stock
+		 * rtk_wifi6.ko, .text 0x26d9f0: 0x0004 &= ~0x10000, then
+		 * 0x0004 &= ~0x400), so the `set B_AX_EN_WLON` after the RDY_SYSPWR
+		 * poll below is a real 0->1 edge for stock and, until this line, was
+		 * not one for us: our own power-off sets the bit and nothing ever
+		 * cleared it, and R_AX_SYS_PW_CTRL is always-on.
+		 * ⚠ THIS IS PARITY, NOT THE DIAGNOSIS.  EN_WLON was set at entry on
+		 * power-ons that SUCCEEDED too (0x50050482, 2026-09-08 05:57), so it
+		 * cannot be what stops RDY_SYSPWR; it is one unexplained difference
+		 * from stock, removed for the price of one write.
+		 */
+		rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL, B_AX_EN_WLON);
 
 		/* ★★★ THE A-DIE CRYSTAL FIRST, AND NOTHING ELSE WORKS UNTIL IT RUNS.
 		 * B_AX_XTAL_OFF_A_DIE lives in the always-on domain: it survives a
@@ -632,9 +842,16 @@ static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 		 */
 		if (ret != -ETIMEDOUT || attempt >= ARRAY_SIZE(pwron_settle_ms))
 			return ret;
+		/* ★ AND THE WHOLE-SYSTEM STATE ON EVERY RETRY, not only at entry: a
+		 * ladder whose register value never moves says the chip is in a STATE,
+		 * and this is the field that names which one.
+		 */
 		rtw89_warn(rtwdev,
-			   "power-on handshake (%s) timed out on attempt %u, PW_CTRL=%08x -- settling %u ms before retrying (a warm reset leaves the chip busy)\n",
-			   slow, attempt + 1, val32, pwron_settle_ms[attempt]);
+			   "power-on handshake (%s) timed out on attempt %u, PW_CTRL=%08x, whole-system pwr state 0x%03x -- settling %u ms before retrying\n",
+			   slow, attempt + 1, val32,
+			   rtw89_read32_mask(rtwdev, R_AX_IC_PWR_STATE,
+					     B_AX_WHOLE_SYS_PWR_STE_XB_MASK),
+			   pwron_settle_ms[attempt]);
 		/* ★★★ MEASURED 2026-09-07 -- AND THE POWER-DOWN THAT USED TO SIT HERE
 		 * WAS DESTROYING THE VERY CHANCE IT WAS ADDED TO CREATE.
 		 * Calling rtw8192xb_pwr_off_func() between attempts looks like "start
@@ -649,9 +866,9 @@ static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 		 * ⇒ clear both REQUEST bits instead.  That is exactly the state a fresh
 		 * probe starts from (0x...0082), which is the state this chip powered on
 		 * from 2 times out of 2 by hand on the live board.
+		 * That clear now lives at the HEAD of the loop, so it covers attempt 1
+		 * as well; nothing is needed here.
 		 */
-		rtw89_write32_clr(rtwdev, R_AX_SYS_PW_CTRL,
-				  B_AX_APFN_ONMAC | B_AX_APFM_OFFMAC);
 
 		/* ⚠ WHAT USED TO BE WRITTEN HERE WAS WRONG, AND THE CORRECTION IS THE
 		 * POINT: an earlier note read "take the chip DOWN before trying again,
@@ -773,6 +990,23 @@ static int rtw8192xb_pwr_on_func(struct rtw89_dev *rtwdev)
 	return 0;
 }
 
+/* The sibling gate wraps the WHOLE sequence, retry ladder included, so a chip
+ * that needs several attempts keeps the sibling for all of them -- and so the
+ * one entry point covers both callers: rtw89_chip_info_setup() at probe and
+ * rtw89_mac_init() on every `wifi up` / IPS exit.
+ */
+static int rtw8192xb_pwr_on_gated(struct rtw89_dev *rtwdev)
+{
+	struct rtw8192xb_sibling hold;
+	int ret;
+
+	rtw8192xb_sibling_hold(rtwdev, &hold);
+	ret = rtw8192xb_pwr_on_func(rtwdev);
+	rtw8192xb_sibling_release(rtwdev, &hold);
+
+	return ret;
+}
+
 static int rtw8192xb_pwr_off_func(struct rtw89_dev *rtwdev)
 {
 	u32 val32;
@@ -829,7 +1063,24 @@ static int rtw8192xb_pwr_off_func(struct rtw89_dev *rtwdev)
 	if (ret)
 		return ret;
 
-	rtw89_write32(rtwdev, R_AX_WLLPS_CTRL, SW_LPS_OPTION);
+	/* ★★★ AND NO SW-LPS PARK EITHER (2026-09-08).  What followed the
+	 * APFM_OFFMAC poll used to be the 8852C's four-write tail --
+	 * WLLPS_CTRL = SW_LPS_OPTION, SYS_SWR_CTRL1 |= SYM_CTRL_SPS_PWMFREQ,
+	 * SPS_DIG_ON_CTRL0 ZCDC_H = 3, and SYS_PW_CTRL |= B_AX_APFM_SWLPS.
+	 * tier 2, THIS board's stock rtk_wifi6.ko: after its OFFMAC poll returns,
+	 * mac_pwr_off_ap_pcie_8192xb (.text 0x2bcb1c) performs exactly ONE more
+	 * write and returns --
+	 *     0x2bcf5c  read32(0x0090)
+	 *     0x2bcf64  and w2, w0, #0xfffffeff   (clear R_AX_WLLPS_CTRL bit 8)
+	 *     0x2bcf70  write32(0x0090)
+	 * It never writes SW_LPS_OPTION, never touches 0x0010 or 0x0200, and never
+	 * sets B_AX_APFM_SWLPS.  Parking the part in SW-LPS is what left
+	 * R_AX_SYS_PW_CTRL reading 0x...0482 for the NEXT driver instance to
+	 * inherit -- the same always-on-domain carry-over as the crystal bit below.
+	 * Only bit 8's POSITION is established (from the sequence); the vendor
+	 * header gives it no name, so none is invented.
+	 */
+	rtw89_write32_clr(rtwdev, R_AX_WLLPS_CTRL, B_AX_LPSOP_DSWR_XB);
 	/* ★★★ NO B_AX_XTAL_OFF_A_DIE HERE, AND THAT IS THE WHOLE POINT (2026-09-07).
 	 * The 8852C clone this file grew from ends its power-off by switching the
 	 * a-die crystal OFF (rtw8852c.c).  The 8192XB's own vendor power-off does
@@ -855,11 +1106,6 @@ static int rtw8192xb_pwr_off_func(struct rtw89_dev *rtwdev)
 	 *   without losing power, which is what an ONU does.  The vendor does not
 	 *   walk through it and neither do we.
 	 */
-	rtw89_write32_set(rtwdev, R_AX_SYS_SWR_CTRL1, B_AX_SYM_CTRL_SPS_PWMFREQ);
-	rtw89_write32_mask(rtwdev, R_AX_SPS_DIG_ON_CTRL0,
-			   B_AX_REG_ZCDC_H_MASK, 0x3);
-	rtw89_write32_set(rtwdev, R_AX_SYS_PW_CTRL, B_AX_APFM_SWLPS);
-
 	return 0;
 }
 
@@ -3487,7 +3733,7 @@ static const struct rtw89_chip_ops rtw8192xb_chip_ops = {
 	.cfg_txrx_path		= rtw8192xb_bb_cfg_txrx_path,
 	.set_txpwr_ul_tb_offset	= rtw8192xb_set_txpwr_ul_tb_offset,
 	.digital_pwr_comp	= NULL,
-	.pwr_on_func		= rtw8192xb_pwr_on_func,
+	.pwr_on_func		= rtw8192xb_pwr_on_gated,
 	.pwr_off_func		= rtw8192xb_pwr_off_func,
 	.query_rxdesc		= rtw89_core_query_rxdesc,
 	.fill_txdesc		= rtw89_core_fill_txdesc_v1,

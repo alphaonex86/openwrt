@@ -5801,6 +5801,7 @@ int rtw89_core_init(struct rtw89_dev *rtwdev)
 	struct rtw89_btc *btc = &rtwdev->btc;
 	u8 band;
 
+	INIT_LIST_HEAD(&rtwdev->sibling_entry);
 	INIT_LIST_HEAD(&rtwdev->ba_list);
 	INIT_LIST_HEAD(&rtwdev->forbid_ba_list);
 	INIT_LIST_HEAD(&rtwdev->rtwvifs_list);
@@ -6421,6 +6422,94 @@ static void rtw89_core_unregister_hw(struct rtw89_dev *rtwdev)
 	rtw89_led_deinit(rtwdev);
 }
 
+/* ★★★ THE RADIOS ON A DUAL-BAND BOARD ARE SEPARATE DEVICES, AND ONE OF THEM
+ * HAS TO BE ABLE TO ASK ABOUT THE OTHER (added 2026-09-08).
+ *
+ * WHY THIS EXISTS, and it is a MEASURED hardware fact, not a convenience:
+ * on the X400AXF the RTL8192XB's MAC power-on handshake completes only while
+ * its RTL8852C sibling's radio is running.  Tier 1, this board, 2026-09-08:
+ * five power-ons taken with the 5 GHz AP up all PASSED (146 s .. 377 s of
+ * uptime, one of them under a 4x CPU hog); every power-on taken with the
+ * sibling unbound, in IPS, or mid-bring-up FAILED (-110), with an identical
+ * signature -- B_AX_APFN_ONMAC written and never cleared by the hardware, and
+ * no other register moving.  Neither elapsed time nor CPU load discriminates
+ * between the two sets.
+ *
+ * The dependency is therefore between two rtw89_dev instances, and rtw89 had
+ * no way to express that: each PCIe function probes independently and the
+ * driver kept no list.  This is the whole mechanism -- a list, a mutex, and a
+ * lookup that hands the caller the sibling ALREADY LOCKED.
+ *
+ * ★ IT IS CHIP-AGNOSTIC ON PURPOSE.  The core learns "find me a device whose
+ * chip_id is X"; WHICH chip must be running, and why, is stated once in the
+ * chip file that owns the erratum (rtw8192xb.c).  A second board that pairs
+ * different parts costs a constant there, never a change here.
+ *
+ * ★ THE LOOKUP RETURNS HOLDING THE SIBLING'S WIPHY LOCK, and that is what
+ * makes the pointer safe rather than a race: rtw89_core_unregister() takes
+ * the same list mutex to remove itself, so a device found under that mutex is
+ * still registered, and ieee80211_unregister_hw() cannot proceed past the
+ * wiphy lock we are holding.  Handing back an unlocked pointer would have
+ * been a use-after-free waiting for the first unbind.
+ *
+ * ⚠ SINGLE_DEPTH_NESTING is not decoration.  The caller may already hold its
+ * OWN wiphy lock (the runtime path enters through ieee80211_ops.start), and
+ * two wiphy mutexes share a lock class, so lockdep would report recursive
+ * locking.  The order is one-way by construction -- only the 8192XB reaches
+ * for a sibling, and the 8852C never reaches back -- so the annotation states
+ * a fact rather than hiding one.
+ */
+static DEFINE_MUTEX(rtw89_dev_list_mutex);
+static LIST_HEAD(rtw89_dev_list);
+
+struct rtw89_dev *rtw89_core_sibling_lock(struct rtw89_dev *self,
+					  enum rtw89_core_chip_id chip_id)
+{
+	struct rtw89_dev *iter, *sibling = NULL;
+
+	mutex_lock(&rtw89_dev_list_mutex);
+	list_for_each_entry(iter, &rtw89_dev_list, sibling_entry) {
+		if (iter == self || iter->chip->chip_id != chip_id)
+			continue;
+		sibling = iter;
+		mutex_lock_nested(&sibling->hw->wiphy->mtx, SINGLE_DEPTH_NESTING);
+		break;
+	}
+	mutex_unlock(&rtw89_dev_list_mutex);
+
+	return sibling;
+}
+EXPORT_SYMBOL(rtw89_core_sibling_lock);
+
+void rtw89_core_sibling_unlock(struct rtw89_dev *sibling)
+{
+	if (sibling)
+		mutex_unlock(&sibling->hw->wiphy->mtx);
+}
+EXPORT_SYMBOL(rtw89_core_sibling_unlock);
+
+/* Has a device with this chip finished probing?  Asked by a bus glue that must
+ * decide whether to DEFER its own probe, so it deliberately takes no wiphy
+ * lock: the answer is a yes/no about registration, not a claim on the device.
+ */
+bool rtw89_core_sibling_present(enum rtw89_core_chip_id chip_id)
+{
+	struct rtw89_dev *iter;
+	bool present = false;
+
+	mutex_lock(&rtw89_dev_list_mutex);
+	list_for_each_entry(iter, &rtw89_dev_list, sibling_entry) {
+		if (iter->chip->chip_id == chip_id) {
+			present = true;
+			break;
+		}
+	}
+	mutex_unlock(&rtw89_dev_list_mutex);
+
+	return present;
+}
+EXPORT_SYMBOL(rtw89_core_sibling_present);
+
 int rtw89_core_register(struct rtw89_dev *rtwdev)
 {
 	int ret;
@@ -6434,12 +6523,27 @@ int rtw89_core_register(struct rtw89_dev *rtwdev)
 	rtw89_phy_dm_init_data(rtwdev);
 	rtw89_debugfs_init(rtwdev);
 
+	/* Last, so a sibling that finds this device also finds it usable: the hw
+	 * is registered and its wiphy lock is meaningful.
+	 */
+	mutex_lock(&rtw89_dev_list_mutex);
+	list_add_tail(&rtwdev->sibling_entry, &rtw89_dev_list);
+	mutex_unlock(&rtw89_dev_list_mutex);
+
 	return 0;
 }
 EXPORT_SYMBOL(rtw89_core_register);
 
 void rtw89_core_unregister(struct rtw89_dev *rtwdev)
 {
+	/* First, and BEFORE any wiphy lock is taken below: a lookup in flight
+	 * either found us (and holds our wiphy lock, which now blocks the
+	 * unregister that follows) or will not find us at all.
+	 */
+	mutex_lock(&rtw89_dev_list_mutex);
+	list_del_init(&rtwdev->sibling_entry);
+	mutex_unlock(&rtw89_dev_list_mutex);
+
 	rtw89_core_unregister_hw(rtwdev);
 
 	rtw89_debugfs_deinit(rtwdev);

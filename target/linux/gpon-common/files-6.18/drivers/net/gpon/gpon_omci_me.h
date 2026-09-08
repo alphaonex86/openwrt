@@ -244,6 +244,31 @@ static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
 	o->anig_live = true;
 }
 
+/* Re-provision the G.984.3 ONU serial after init.
+ *
+ * ★ WHY A SETTER AND NOT A SECOND COPY IN THE SHELL.  omci_onu_init() takes the
+ * serial, but a shell may only learn the real one from PLOAM AFTER probe, and
+ * re-running init to deliver it would ZERO the whole MIB mid-session -- created
+ * instances, MDS and all.  The one reader (OMCI_SRC_SN) serves these bytes at
+ * GET time, so writing them is complete: no row needs rebuilding.
+ *
+ * ⚠ IT EXISTS BECAUSE THE ALTERNATIVE ALREADY WENT WRONG ONCE.  The Luna 9602C
+ * shell's set_omci_identity() copies the serial into a PRIVATE omci_sn[8] that
+ * nothing but a /proc line has read since the responder was rebased onto this
+ * core -- an orphaned consumer of the same shape as the ME 268 snoop that was
+ * found orphaned by the same rebase.  ONU-G there still answers whatever probe
+ * happened to seed.  One owner, one reader.
+ */
+static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
+{
+	unsigned int i;	/* a loop, not memcpy(): this header includes only
+			 * <linux/types.h>, the same declared deviation the
+			 * flowcore tier already takes for ether_addr_copy */
+
+	for (i = 0; i < 8; i++)
+		o->sn[i] = sn[i];
+}
+
 /* ME class IDs presented in the MIB upload (G.988 + the HSGQ OLT's set).
  * ONU_DATA and VEIP are also defined identically by gpon_omci_core.h, which
  * reasons about those two itself; a repeated object-like #define with the

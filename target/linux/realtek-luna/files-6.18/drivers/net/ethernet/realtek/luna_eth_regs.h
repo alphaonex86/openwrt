@@ -87,6 +87,7 @@
 #define D_EOR			BIT(30)	/* end of ring (wrap) */
 #define D_FS			BIT(29)	/* first segment */
 #define D_LS			BIT(28)	/* last segment */
+#define D_IPCS			BIT(27)	/* TX: insert IPv4 checksum */
 #define D_TXCRC			BIT(23)	/* TX: append FCS */
 #define RXD_CRCERR		BIT(27)	/* RX: CRC error */
 #define RXD_RCDF		BIT(24)	/* RX: DMA error.  RCDF is the SILICON's own
@@ -207,6 +208,17 @@
  * @bc_flood:         broadcast flood, one bit per port
  * @unkn_mc_flood:    unknown-multicast flood, one bit per port
  * @unkn_uc_flood:    unknown-unicast flood, one bit per port
+ * @omci_cpu_reason:  the CPU-tag RX `reason` code (rx opts2[28:21]) the switch
+ *                    stamps on a DOWNSTREAM OMCI frame it traps to the CPU
+ *                    port.  PER CHIP AND NOT GUESSABLE: the vendor's own NIC
+ *                    RX hook switches on the chip id and picks 246 for the
+ *                    RTL9602C but 229 for the RTL9607C and the RTL9603CVD
+ *                    (rtl86900/sdk/src/module/gpon/gponapi.c,
+ *                    rtk_gponapp_omci_rx_wrapper -- tier 3).  Reading the
+ *                    9602C's 246 on this die matches a reason nothing ever
+ *                    carries, so the trap stays silent and the log reads as
+ *                    `the OLT sent no OMCI` -- the same shape as the eighteen
+ *                    PON-IP offsets that were written with 9602C literals.
  *
  * A new chip adds ONE instance here and nothing else.  Every field is an
  * absolute offset within the switch core, never a delta from a sibling: a
@@ -258,6 +270,13 @@ struct luna_sw_map {
 	u32 bc_flood;
 	u32 unkn_mc_flood;
 	u32 unkn_uc_flood;
+	/* ★ THE DS-OMCI CPU-TAG REASON, and it lives beside the port numbers for
+	 * the same reason they do: BOTH Ethernet shells classify a trapped OMCI
+	 * frame by it, so a second home is how the two come to disagree.  It was
+	 * a bare 246 in flowcore (rtl9602c_l34_logic.h) named for one chip while
+	 * being read as a family fact -- the exact spelling that makes a sibling's
+	 * literal look portable. */
+	u8  omci_cpu_reason;
 };
 
 static const struct luna_sw_map rtl9602c_sw_map = {
@@ -280,6 +299,7 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.bc_flood	= 0x1C020,
 	.unkn_mc_flood	= 0x1C024,
 	.unkn_uc_flood	= 0x1C028,
+	.omci_cpu_reason = 246,	/* RTL9602C_CHIP_ID -> omciRsn 246 [tier 3, gponapi.c] */
 };
 
 static const struct luna_sw_map rtl9603cvd_sw_map = {
@@ -302,6 +322,7 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.bc_flood	= 0x1C028,
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
+	.omci_cpu_reason = 229,	/* RTL9603CVD_CHIP_ID -> omciRsn 229 [tier 3, gponapi.c] */
 };
 
 /* The RTL9607C's eight LUT offsets were CROSS-READ from its own chipdef on
@@ -341,6 +362,7 @@ static const struct luna_sw_map rtl9607c_sw_map = {
 	.bc_flood	= 0x1C028,
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
+	.omci_cpu_reason = 229,	/* RTL9607C_CHIP_ID -> omciRsn 229 [tier 3, gponapi.c] */
 };
 
 

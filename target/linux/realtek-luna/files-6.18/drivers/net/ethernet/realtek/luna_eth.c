@@ -66,6 +66,10 @@
 #include <linux/timer.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "luna_gmac_logic.h"	/* family GMAC ring packings + this shell's hoisted RX verdicts (flowcore) */
+#include "rtl9602c_gpon_nic.h"	/* the GPON<->NIC glue -- this shell now IMPLEMENTS it */
+#include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN, the OMCI_MT_* codes */
+#include "gpon_omci_me.h"	/* struct omci_onu, omci_onu_init, the common ME store */
+#include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the board-side log */
 
 /* ---- bring-up knobs (live-tunable; the datapath framing is HW-uncertain on
  * first contact, so expose the few values most likely to need a tweak) ------ */
@@ -76,6 +80,15 @@ MODULE_PARM_DESC(rx_prefix, "bytes the CPU-port prepends ahead of each RX frame 
 static unsigned int backstop_ms = 10;
 module_param(backstop_ms, uint, 0644);
 MODULE_PARM_DESC(backstop_ms, "RX/TX drain backstop poll period (catches a missed IRQ)");
+
+/* OMCI ME2 MIB-Data-Sync boot seed.  Same value and same purpose as the
+ * sibling shell's: this ONU holds no persistent MIB, so a seed in 1..30
+ * deliberately FAILS the OLT's ME2 audit (its gate reads rsync<31 as
+ * not-in-sync) and makes a warm re-admit re-provision us from scratch. */
+static unsigned int omci_mds_seed = OMCI_MDS_POISON_SEED;
+module_param(omci_mds_seed, uint, 0644);
+MODULE_PARM_DESC(omci_mds_seed,
+		 "OMCI ME2 MIB-Data-Sync boot seed (1..30 forces the OLT to re-provision)");
 
 static bool sw_cpu_tag;
 module_param(sw_cpu_tag, bool, 0644);
@@ -298,7 +311,25 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
  * the rest selects tag sizes, the 0x04 protocol and the 0x8899 match. Clearing
  * CTEN_RX leaves the raw in-band tag in the delivered frame. */
 #define CPUTAGCR_INIT	0x9022FF04
-#define CPUTAG1CR_INIT	0x00004000	/* CPU-tag SID base (64 << 8)		*/
+/* ⚠ A SIBLING LITERAL, RECORDED RATHER THAN CHANGED (2026-09-08).  The 64 is
+ * the RTL9602C's OMCC stream id; this chip's is 127 (GPON_OMCC_FLOW_9603CVD),
+ * so if [14:8] really did select the trapped DS stream here, we would be asking
+ * for a stream the OLT never uses.
+ *
+ * IT IS LEFT ALONE BECAUSE THE EVIDENCE SAYS THE FIELD IS NOT THIS DIE'S TRAP
+ * SELECTOR AT ALL: the sibling shell's own note records CPUTAG1CR bit1 as "not
+ * present in the 9607C register map", the vendor's 9607C-generation NIC driver
+ * writes NEITHER 0x48 NOR 0x50 anywhere, and on this generation the SWITCH
+ * decides what is OMCI (PON_OMCI_CFG.CFG_OMCI_SID) while the NIC only reads the
+ * reason back.  Changing it would be a second variable in the same experiment,
+ * on a register we cannot name.
+ *
+ * ⇒ IF THE DS-OMCI TRAP NEVER REACHES THE CPU, THIS IS SUSPECT NUMBER ONE, and
+ * the RX cpu-tag reason census in eth_rx() is what tells the two apart: a NEW
+ * reason code appearing exactly when the OLT sends OMCI means the trap works
+ * and only the code was wrong; NOTHING new appearing means no OMCI frame is
+ * being handed to the CPU at all, and then this line is where to look. */
+#define CPUTAG1CR_INIT	0x00004000	/* [14:8] = 64: see the warning above	*/
 #define ABLTY_CPU_FORCE	0xBFFF		/* CPU-port forced-ability mode (keep)	*/
 
 
@@ -611,7 +642,41 @@ struct luna_eth {
 
 	int			rx_dumped;
 	int			tx_dumped;
+
+	/* ---- CPU-side OMCI (OMCC) ---------------------------------------
+	 * @closing is taken under tx_lock by ndo_stop BEFORE the rings are
+	 * freed.  The GPON driver calls the OMCI transmit from ITS OWN timer,
+	 * so an inject can land mid ndo_stop while netifd cycles eth0 at boot;
+	 * the sibling shell recorded that exact race as a NULL-deref panic in
+	 * interrupt context, and this flag is the barrier that answers it. */
+	bool			closing;
+	bool			omci_trap_on;	/* armed at Configure_Port-ID */
+	unsigned int		omci_sid;	/* the OMCC stream id the OLT gave us */
+	u32			dbg_omci_rx;	/* DS OMCI frames trapped to the CPU */
+	u32			dbg_omci_rxlen;
+	u32			dbg_omci_tx;	/* US OMCI responses queued */
+	u32			dbg_omci_tx_drop;
+	u32			dbg_omci_unhandled;
+	/* ★ THE CPU-TAG REASON CENSUS -- one log line per DISTINCT reason code
+	 * this die has ever stamped on a frame handed to the CPU, and never a
+	 * second for the same one.  It is bounded by construction (256 lines in
+	 * the life of a boot, two or three in practice) and it is here because
+	 * the alternative cost a boot: the OMCI reason is PER CHIP, a wrong one
+	 * matches nothing, and a trap that matches nothing is indistinguishable
+	 * from an OLT that sent nothing.  This makes the silicon say which codes
+	 * it actually uses instead of us inferring it from a silence. */
+	u32			rx_reason_seen[8];
 };
+
+/* The single instance, for the exported glue the GPON driver calls.  Same
+ * shape as the sibling shell: this SoC has exactly one CPU-port GMAC. */
+static struct luna_eth *g_ep;
+
+/* The G.988 ONU model.  ★ THE PROTOCOL IS THE CORE'S AND IS NOT RE-WRITTEN
+ * HERE: every byte of state lives in this struct and every decision in
+ * gpon_omci_core.c, which the Cortina family and the sibling Luna shell
+ * already drive.  A third responder is what this tier exists to prevent. */
+static struct omci_onu luna_eth_onu;
 
 static inline u32 ep_rd(struct luna_eth *ep, u32 r) { return ioread32(ep->base + r); }
 static inline void ep_wr(struct luna_eth *ep, u32 r, u32 v) { iowrite32(v, ep->base + r); }
@@ -1442,6 +1507,190 @@ static void eth_hw_program(struct luna_eth *ep)
 }
 
 /* ---- RX / TX datapath ----------------------------------------------------- */
+
+/* ---- CPU-side OMCI (OMCC) datapath ---------------------------------------
+ *
+ * ★ WHAT THIS IS, AND WHY IT IS A PORT RATHER THAN A REGISTER FIX.  Until now
+ * this shell implemented NO OMCI path at all: the six glue entry points at the
+ * bottom of the file were empty stubs, so downstream OMCI reached the PON-IP
+ * (its own OMCI_RX_PKT_CNT proving it) and stopped there, and the ONU answered
+ * the OLT nothing -- which is why the OLT walked ranging, Configure_Port-ID and
+ * Request_Password and then timed its configuration out.
+ *
+ * THE SHAPE, and each half is in the tier that owns it:
+ *   core   gpon_omci_core.c   decides WHAT to answer (G.988) and returns bytes
+ *   family luna_gmac_logic.c  decides WHICH frame is OMCI and how to steer one
+ *   chip   luna_sw_map        the reason code and the port numbers, as a table
+ *   shell  here               the ring, the DMA, the log and the responder call
+ *
+ * ⚠ NOTHING IN THIS BLOCK MAY BE READ ACROSS FROM rtl9602c_eth.c.  Both the RX
+ * reason (229 here, 246 there) and the TX descriptor field placement differ
+ * between the two generations; the values live in the table and in
+ * luna_gmac_omci_txd_word2/3(), each carrying its tier-3 citation.
+ */
+
+static void eth_tx_reclaim(struct luna_eth *ep);	/* defined with the TX path */
+
+/* How many ring slots LAN transmit keeps in hand so a (sparse, control-rate)
+ * OMCI response is never dropped for want of one.  This is the @reserve
+ * argument luna_gmac_tx_ring_full() documents as the caller's ROLE: the LAN
+ * producer passes it, the OMCI injector passes 0.  ⚠ THE WAKE TEST IN
+ * eth_tx_reclaim() PASSES THE SAME VALUE -- a queue woken at a threshold the
+ * xmit path still refuses spins on NETDEV_TX_BUSY. */
+#define LUNA_OMCI_RESV	2
+
+/*
+ * Transmit one OMCI PDU upstream on the OMCC.
+ *
+ * ★ THE FRAME IS THE BARE 48-BYTE G.988 PDU AND IS NOT PADDED.  The vendor's
+ * own transmit hands re8686_tx_with_Info() exactly
+ * RTK_GPON_OMCI_BASELINE_MSG_LEN_TX == 48 bytes (tier 3, gpon_omci.c); padding
+ * it to the 60-byte Ethernet minimum would put 12 bytes of nothing inside the
+ * GEM frame the OLT parses.  eth_xmit()'s runt pad is therefore NOT reused --
+ * this is not an Ethernet frame and has no Ethernet header.
+ *
+ * ★ D_TXCRC IS REQUIRED.  The GMAC generates and appends the FCS; without it
+ * the PDU leaves with no valid FCS and the fabric MAC drops it before any
+ * counter moves -- the sibling shell paid a long debug for that exact silence.
+ *
+ * Runs in the GPON driver's softirq/timer context.  Never blocks and never
+ * stops the LAN queue: a full ring drops the response and the OLT retransmits.
+ */
+static int luna_eth_omci_xmit(struct luna_eth *ep, const u8 *omci,
+			      unsigned int len)
+{
+	unsigned long flags;
+	unsigned int i;
+	dma_addr_t da;
+	void *buf;
+	u32 opts1;
+
+	if (!ep || !len || len > RX_BUF_SIZE)
+		return -EINVAL;
+
+	spin_lock_irqsave(&ep->tx_lock, flags);
+	if (ep->closing || !ep->tx_ring) {
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+		return -ENODEV;
+	}
+	eth_tx_reclaim(ep);
+	/* reserve 0: this IS the producer the LAN path holds slots back for. */
+	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty, TX_RING_SIZE, 0)) {
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+		ep->dbg_omci_tx_drop++;
+		return -EBUSY;
+	}
+	i = tx_slot(ep->tx_head);
+	buf = ep->tx_buf[i];
+	if (!buf) {
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+		ep->dbg_omci_tx_drop++;
+		return -ENODEV;
+	}
+	memcpy(buf, omci, len);
+
+	da = dma_map_single(ep->dev, buf, len, DMA_TO_DEVICE);
+	if (dma_mapping_error(ep->dev, da)) {
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+		ep->dbg_omci_tx_drop++;
+		return -ENOMEM;
+	}
+	ep->tx_buf_dma[i] = da;
+	ep->tx_buf_len[i] = len;
+	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
+	ep->tx_ring[i].opts2 = luna_gmac_omci_txd_word2(ep->c->sw_map->pon_port);
+	ep->tx_ring[i].opts3 = luna_gmac_omci_txd_word3(ep->omci_sid);
+	ep->tx_ring[i].opts4 = 0;
+	/* ★ D_IPCS IS HERE AND NOT ON THE LAN PATH, and both halves of that are
+	 * deliberate.  The vendor's submit ORs a FIXED flag set into opts1 for
+	 * every frame, OMCI included -- `eor|len|DescOwn|FirstFrag|LastFrag|
+	 * TxCRC|IPCS` (tier 3, re8686_rtl9607c.c) -- and the sibling Luna shell's
+	 * OMCI descriptor carries the same pair after a long debug that proved
+	 * D_TXCRC load-bearing (without it the 48-byte PDU leaves with no valid
+	 * FCS and the fabric drops it pre-MAC, every counter reading zero).
+	 * Matching the oracle EXACTLY removes the last divergence between our
+	 * descriptor and the one that is known to work on this silicon.
+	 * The LAN path is left alone: it works, and changing what works to match
+	 * a frame type it does not carry is how a repair becomes a regression. */
+	opts1 = luna_gmac_txd_word0(D_FS | D_LS | D_TXCRC | D_IPCS, len,
+				    TXD_LEN_MASK,
+				    luna_gmac_slot_is_eor(i, TX_RING_SIZE),
+				    D_EOR);
+	wmb();				/* descriptor body before ownership */
+	ep->tx_ring[i].opts1 = D_OWN | opts1;
+	wmb();
+	ep->tx_head++;
+	ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | BIT(0));	/* kick ring 0 */
+	spin_unlock_irqrestore(&ep->tx_lock, flags);
+
+	ep->dbg_omci_tx++;
+	/* ⚠ THE FIRST FOUR ONLY -- AND THAT IS A TRAP THIS COMMENT EXISTS TO
+	 * DISARM.  On the port's first boot the log showed `US OMCI #1..#4` and
+	 * then silence while downstream Gets kept arriving, and I read the
+	 * silence as "the responder stopped answering".  It had not: the CAP IS
+	 * ON THE PRINT, not on the transmit.  The running totals are in
+	 * /proc/gpon (omci_pi ... cpu_tx/cpu_drop), which is where a count
+	 * belongs; a log line is a sample, never a counter. */
+	if (ep->dbg_omci_tx <= 4)
+		netdev_info(ep->ndev,
+			    "US OMCI #%u: %u B sid=%u opts2=%08x opts3=%08x\n",
+			    ep->dbg_omci_tx, len, ep->omci_sid,
+			    luna_gmac_omci_txd_word2(ep->c->sw_map->pon_port),
+			    luna_gmac_omci_txd_word3(ep->omci_sid));
+	return 0;
+}
+
+/*
+ * Downstream OMCI -> upstream response.  @msg is the raw baseline PDU with the
+ * CPU prefix already stripped.
+ *
+ * ★ THE DECISION IS THE CORE'S AND THE TRANSMIT IS THIS SHELL'S -- the
+ * established boundary: omci_onu_input() returns a LENGTH and never touches
+ * hardware.  The log line and the ME268 query below are the SHELL's, for the
+ * same reasons they are in the sibling: what the OLT sent is a fact about THIS
+ * link, and the core may not print.
+ */
+static void luna_eth_omci_input(struct luna_eth *ep, const u8 *msg,
+				unsigned int len)
+{
+	u8 resp[OMCI_LEN];
+	int n;
+
+	if (len < 8)
+		return;
+
+	/* Rate-limit only the BULK types, so a Create or an Alarm is never
+	 * dropped from the log while a MIB upload cannot flood it. */
+	if (((msg[2] & 0x1f) != OMCI_MT_GET &&
+	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD_NX &&
+	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD) || net_ratelimit()) {
+		char det[96];
+
+		gpon_omci_describe(msg, len, det, sizeof(det));
+		netdev_info(ep->ndev, "OMCI DS: %s\n", det);
+	}
+
+	n = omci_onu_input(&luna_eth_onu, msg, len, resp);
+	if (n > 0)
+		luna_eth_omci_xmit(ep, resp, n);
+	else
+		ep->dbg_omci_unhandled++;
+
+	/* The WAN data GEM: ASK the responder which Port-ID the OLT created
+	 * (it already stores every Create body), never re-parse the PDU here.
+	 * Idempotent and edge-free on purpose -- the core clears its store on an
+	 * on-wire MIB-Reset without this shell being told, so a "already
+	 * reported" latch here would hold a stale port for ever.  Identical
+	 * reasoning, and identical call, to the sibling shell. */
+	{
+		u16 gem = 0;
+
+		if (omci_data_gem_port(&luna_eth_onu, gpon_omcc_gem(),
+				       GPON_MCAST_GEM, &gem))
+			gpon_omci_note_gem_create(gem);
+	}
+}
+
 static int eth_rx(struct luna_eth *ep, int budget)
 {
 	struct net_device *ndev = ep->ndev;
@@ -1498,11 +1747,38 @@ static int eth_rx(struct luna_eth *ep, int budget)
 				       16, 1, skb->data, min_t(u32, len, 32), false);
 		}
 
-		/* Bad-frame verdict hoisted to luna_gmac_rx_frame_bad()
-		 * (flowcore): the error mask and the header floor are passed,
-		 * not re-spelled; the deliberately-lax floor (vs the 9602C
-		 * shell's min-Ethernet-frame bound) is documented there. */
-		if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF, len,
+		/* One line per DISTINCT cpu-tag reason, ever.  See the field. */
+		{
+			unsigned int rsn = (ep->rx_ring[i].opts2 >> 21) & 0xff;
+
+			if (!(ep->rx_reason_seen[rsn >> 5] & BIT(rsn & 31))) {
+				ep->rx_reason_seen[rsn >> 5] |= BIT(rsn & 31);
+				netdev_info(ndev,
+					    "rx cpu-tag reason %u seen (opts2=%08x opts3=%08x len=%u); this chip traps DS OMCI as %u\n",
+					    rsn, ep->rx_ring[i].opts2,
+					    ep->rx_ring[i].opts3, len,
+					    ep->c->sw_map->omci_cpu_reason);
+			}
+		}
+
+		/* ★ DS OMCI FIRST, BEFORE THE ETHERNET VERDICTS.  An OMCI PDU is
+		 * not an Ethernet frame -- it has no DA, no SA and no ethertype
+		 * -- so every test below it would judge it as one: the length
+		 * floor would pass it, eth_type_trans() would invent a protocol
+		 * from bytes 12-13 of a G.988 header, and the bridge would drop
+		 * it without a word.  That is what happened on this board while
+		 * the PON-IP's own counter proved the frames were arriving. */
+		if (luna_gmac_rx_is_ds_omci(ep->omci_trap_on,
+					    ep->rx_ring[i].opts2, len,
+					    ep->c->sw_map->omci_cpu_reason,
+					    (unsigned int)rx_prefix,
+					    RX_BUF_SIZE)) {
+			ep->dbg_omci_rx++;
+			ep->dbg_omci_rxlen = len - (u32)rx_prefix;
+			luna_eth_omci_input(ep, skb->data + rx_prefix,
+					    len - (u32)rx_prefix);
+			dev_kfree_skb_any(skb);
+		} else if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF, len,
 					   (u32)rx_prefix + ETH_HLEN,
 					   RX_BUF_SIZE)) {
 			ndev->stats.rx_errors++;
@@ -1567,9 +1843,12 @@ static void eth_tx_reclaim(struct luna_eth *ep)
 				 DMA_TO_DEVICE);
 		ep->tx_dirty++;
 	}
+	/* ⚠ THE SAME RESERVE AS eth_xmit(), and it is not cosmetic: waking the
+	 * queue at a threshold the transmit path still refuses spins the stack
+	 * on NETDEV_TX_BUSY.  The two directions of one decision. */
 	if (netif_queue_stopped(ep->ndev) &&
 	    !luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
-				     TX_RING_SIZE, 0))
+				     TX_RING_SIZE, LUNA_OMCI_RESV))
 		netif_wake_queue(ep->ndev);
 }
 
@@ -1645,7 +1924,8 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	 * eth_tx_reclaim() is still spelled by hand and INVERTED; converting it
 	 * is the point of the helper and is left to the pass that may touch that
 	 * function. */
-	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty, TX_RING_SIZE, 0)) {
+	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty, TX_RING_SIZE,
+				   LUNA_OMCI_RESV)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		netif_stop_queue(ndev);
 		return NETDEV_TX_BUSY;
@@ -1749,6 +2029,7 @@ static int eth_open(struct net_device *ndev)
 		eth_free_rings(ep);
 		return ret;
 	}
+	ep->closing = false;
 
 	eth_hw_stop(ep);
 	eth_ipsel_cycle();
@@ -1784,8 +2065,18 @@ static int eth_stop(struct net_device *ndev)
 {
 	struct luna_eth *ep = netdev_priv(ndev);
 
+	unsigned long flags;
+
 	netif_stop_queue(ndev);
 	netif_carrier_off(ndev);
+	/* Close the door on the OMCI injector BEFORE anything is torn down: it
+	 * is called from the GPON driver's own timer and takes this same lock,
+	 * so setting the flag under it is the barrier that makes the free below
+	 * safe.  (The sibling shell reached this through a NULL-deref panic in
+	 * interrupt context while netifd cycled eth0 at boot.) */
+	spin_lock_irqsave(&ep->tx_lock, flags);
+	ep->closing = true;
+	spin_unlock_irqrestore(&ep->tx_lock, flags);
 	timer_delete_sync(&ep->diag);
 	timer_delete_sync(&ep->backstop);
 	napi_disable(&ep->napi);
@@ -1904,6 +2195,16 @@ static int luna_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	g_ep = ep;
+	{
+		/* The identity is the PLOAM layer's, not a second copy here --
+		 * see gpon_onu_sn().  ONU-G (ME 256) must answer the same
+		 * Vendor-ID/Serial the OLT ranged. */
+		u8 sn[8];
+
+		gpon_onu_sn(sn);
+		omci_onu_init(&luna_eth_onu, sn, (u8)omci_mds_seed);
+	}
 	dev_info(dev, "%s NIC at %pR, MAC %pM, irq %d\n", ep->c->name,
 		 platform_get_resource(pdev, IORESOURCE_MEM, 0),
 		 ndev->dev_addr, ep->irq);
@@ -1927,33 +2228,178 @@ static struct platform_driver luna_eth_driver = {
 module_platform_driver(luna_eth_driver);
 
 /*
- * GPON OMCI glue stubs — the shared GPON FSM (gpon-rtl960x.c) references these
- * symbols declared in rtl9602c_gpon_nic.h. On the 9602C the real implementations
- * live in rtl9602c_eth.c; on the 9607C the OMCI datapath is M4 and these are
- * minimal no-ops so the kernel links. They are enough for M3 (reach O5 + DS).
+ * GPON <-> NIC glue: the entry points the shared GPON FSM (gpon-luna.c) calls,
+ * declared in rtl9602c_gpon_nic.h.
+ *
+ * ★★ THESE WERE SIX EMPTY STUBS UNTIL 2026-09-08, and the comment that stood
+ * here said they were "enough for M3 (reach O5 + DS)".  They were not: with no
+ * CPU-side OMCI datapath the ONU reaches O5, receives the OLT's OMCI, answers
+ * nothing, and the OLT times its configuration out -- which is exactly what the
+ * G24W did.  One of them, omci_rx_count(), returned a literal 0 and printed
+ * `omcirx=0` into every activation log, which reads as "the OLT sent us no
+ * OMCI"; it was read that way during the investigation while the PON-IP's own
+ * counter was proving otherwise.  A shell with no path must say COULD NOT ASK,
+ * never zero -- and the repair is to give it a path.
  */
-#include "rtl9602c_gpon_nic.h"
 
-void rtl9602c_eth_set_omci_sid(unsigned int sid) { }
+/*
+ * Arm the OMCI trap for the OMCC stream the OLT just assigned.
+ *
+ * ★ THERE IS NOTHING TO PROGRAM IN THE GMAC HERE, and that is a chip fact, not
+ * an omission.  On this generation the switch decides which stream is OMCI from
+ * PON_OMCI_CFG.CFG_OMCI_SID (the GPON driver's ponmac init sets it) and stamps
+ * the trapped frame with this chip's OMCI cpu-tag reason; the NIC's only job is
+ * to recognise that reason.  The sibling chip needs a CPUTAG1CR write because
+ * its GMAC selects the trapped SID itself.  What is stored is the SID the
+ * RESPONSE must be steered back onto (opts3 tx_dst_stream_id).
+ */
+void rtl9602c_eth_set_omci_sid(unsigned int sid)
+{
+	struct luna_eth *ep = g_ep;
+
+	if (!ep)
+		return;
+	ep->omci_sid = sid;
+	ep->omci_trap_on = true;
+	netdev_info(ep->ndev,
+		    "OMCI trap armed: OMCC sid %u, DS cpu-tag reason %u, PON port %u\n",
+		    sid, ep->c->sw_map->omci_cpu_reason, ep->c->sw_map->pon_port);
+}
 EXPORT_SYMBOL(rtl9602c_eth_set_omci_sid);
 
-void rtl9602c_eth_set_omci_identity(const u8 *sn8) { }
+/*
+ * Provision the ONU identity into the responder's ME 256 (ONU-G).
+ *
+ * ⚠ IT WRITES THE CORE'S STORE AND KEEPS NO COPY.  probe() already seeded the
+ * model from gpon_onu_sn(), but the PLOAM layer may only learn the real serial
+ * later; re-seeding is how ONU-G comes to answer what the OLT actually ranged.
+ * A second `omci_sn[8]` in this shell would be a third copy of one serial
+ * number, which this tree has already paid for once.
+ */
+void rtl9602c_eth_set_omci_identity(const u8 *sn8)
+{
+	if (sn8)
+		omci_onu_set_sn(&luna_eth_onu, sn8);
+}
 EXPORT_SYMBOL(rtl9602c_eth_set_omci_identity);
 
-u32 rtl9602c_eth_omci_rx_count(void) { return 0; }
+/* DS OMCI frames that reached the CPU ring.  Now a real count: this shell HAS
+ * a path, so GPON_OMCI_RX_UNAVAIL ("could not ask") would itself be a lie. */
+u32 rtl9602c_eth_omci_rx_count(void)
+{
+	struct luna_eth *ep = g_ep;
+
+	return ep ? ep->dbg_omci_rx : GPON_OMCI_RX_UNAVAIL;
+}
 EXPORT_SYMBOL(rtl9602c_eth_omci_rx_count);
 
-u32 rtl9602c_eth_wan_rx_count(void) { return 0; }
+/*
+ * gpon0 (WAN) RX packet count.
+ *
+ * ⚠ STILL "COULD NOT ASK", AND DELIBERATELY SO.  This shell has no WAN netdev
+ * and no PON-port demux yet, so it counts no downstream user data.  Returning 0
+ * would tell the GPON driver's provisioning watchdog "the OLT has forwarded us
+ * nothing", which is a DEVICE finding drawn from an absent instrument -- the
+ * same defect the omci_rx_count() stub committed.  It returns the unavailable
+ * sentinel until the WAN datapath lands on this shell; the watchdog's own
+ * `== 0` test therefore cannot fire on it.
+ */
+u32 rtl9602c_eth_wan_rx_count(void)
+{
+	return GPON_OMCI_RX_UNAVAIL;
+}
 EXPORT_SYMBOL(rtl9602c_eth_wan_rx_count);
 
-u32 rtl9602c_eth_omci_tx_dirty(void) { return 0; }
+/* US-OMCI responses the ring has actually accepted.  This shell shares the LAN
+ * ring rather than owning a dedicated OMCC ring, so the honest answer to "is
+ * the OMCC TX ring being fetched" is how many injects were queued. */
+u32 rtl9602c_eth_omci_tx_dirty(void)
+{
+	struct luna_eth *ep = g_ep;
+
+	return ep ? ep->dbg_omci_tx : 0;
+}
 EXPORT_SYMBOL(rtl9602c_eth_omci_tx_dirty);
 
-void rtl9602c_eth_omci_selftest(void) { }
+/* US-OMCI responses the ring REFUSED (full / closing / no buffer).
+ *
+ * ★ IT IS A SEPARATE NUMBER FROM THE QUEUED COUNT ON PURPOSE.  "we queued N"
+ * and "the PON-IP transmitted 0" only becomes a diagnosis once you know
+ * whether anything was dropped between them; folding the two would hide
+ * exactly the case the reader needs. */
+u32 rtl9602c_eth_omci_tx_dropped(void)
+{
+	struct luna_eth *ep = g_ep;
+
+	return ep ? ep->dbg_omci_tx_drop : 0;
+}
+EXPORT_SYMBOL(rtl9602c_eth_omci_tx_dropped);
+
+/*
+ * OLT-independent US-OMCI STEERING self-test: push one synthetic PDU through
+ * the whole transmit path so the US-NIC's per-SID RX counters can be read at O5
+ * without waiting for the OLT to send anything.
+ *
+ * ★ SYNTHETIC ON PURPOSE, AND NOT A PROTOCOL ACTION.  The US-NIC classifies by
+ * the descriptor's stream id, never by content, so the payload is irrelevant to
+ * what this measures -- and its caller is a DIAGNOSTIC (the trace-gated FSM
+ * tick).  Emitting a real autonomous AVC from here would make a diagnostic
+ * change what the OLT is told, which is a different thing from measuring the
+ * datapath; report_oper_up() below is where a real AVC belongs.  Same shape and
+ * same reasoning as the sibling shell's.
+ */
+void rtl9602c_eth_omci_selftest(void)
+{
+	struct luna_eth *ep = g_ep;
+	u8 frame[OMCI_LEN];
+
+	if (!ep || !ep->omci_trap_on)
+		return;
+	memset(frame, 0, sizeof(frame));
+	frame[0] = 0x00; frame[1] = 0x01;	/* TID				*/
+	frame[2] = 0x29;			/* MT = Get-response (0x09|AK)	*/
+	frame[3] = 0x0a;			/* DevID = baseline		*/
+	frame[4] = 0x01; frame[5] = 0x00;	/* ME class 256 (ONU-G)		*/
+	luna_eth_omci_xmit(ep, frame, sizeof(frame));
+}
 EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
 
-void rtl9602c_eth_omci_report_oper_up(void) { }
+/*
+ * Report the HGU WAN egress (VEIP, ME 329) operational.
+ *
+ * WHY IT EXISTS: the OLT never GETs the data-plane MEs after creating them; its
+ * per-class handlers wait for this autonomous AVC and gate DOWNSTREAM user data
+ * on it.  A purely reactive responder leaves the OLT filling our downstream
+ * with idle GEM.  The frame is the CORE's (TID 0 marks it autonomous); the
+ * transmit is ours.
+ */
+void rtl9602c_eth_omci_report_oper_up(void)
+{
+	struct luna_eth *ep = g_ep;
+	u8 msg[OMCI_LEN];
+	int n;
+
+	if (!ep || !ep->omci_trap_on)
+		return;
+	n = omci_onu_emit_veip_up_avc(&luna_eth_onu, msg);
+	if (n > 0)
+		luna_eth_omci_xmit(ep, msg, n);
+}
 EXPORT_SYMBOL(rtl9602c_eth_omci_report_oper_up);
+
+/*
+ * Publish the live DDM optical levels into ME 263 (ANI-G) #10/#14.
+ *
+ * ★ THIS CLOSES A HOLE rtl9602c_gpon_nic.h NAMED IN ADVANCE: while this shell
+ * had no responder the header supplied a no-op inline, with the note that the
+ * day the board gained one, the stub "becomes a silent hole".  It has, so it is
+ * a real function now and the header's gate admits this config.
+ */
+void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)
+{
+	omci_onu_set_optical(&luna_eth_onu, (u16)rx_level, (u16)tx_level);
+}
+EXPORT_SYMBOL(rtl9602c_eth_omci_set_optical);
 
 MODULE_DESCRIPTION("Realtek Luna (RTL9607C / RTL9603CVD) GMAC0 + switch Ethernet driver");
 MODULE_LICENSE("GPL");

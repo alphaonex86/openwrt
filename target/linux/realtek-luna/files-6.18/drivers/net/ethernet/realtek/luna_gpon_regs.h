@@ -137,6 +137,22 @@
 #define GPON_GTC_US_PLOAM_CFG	0x5100		/* US PLOAM buffer control     */
 #define   GPON_US_PLM_CRC_GEN_EN BIT(1)		/* HW computes US PLOAM CRC    */
 #define   GPON_US_PLM_ONUID_OVRD BIT(0)		/* override ONU-ID field       */
+#define   GPON_US_PLM_FLUSH_BUF	BIT(4)		/* ★ THE RESTING LEVEL IS 1, NOT 0.
+						 * The chipdef calls it PLM_FLUSH_BUF
+						 * (lsp 4, len 1).  The vendor's
+						 * usPloamBuf_flush() writes 0 THEN 1
+						 * and stops, and this board's own
+						 * stock reads US_PLOAM_CFG = 0x13
+						 * live at O5 -- so 1 is the operating
+						 * level and the 1->0->1 dip is the
+						 * flush.  Resting at 0 leaves the
+						 * transmit buffer permanently
+						 * flushing: MEASURED 2026-09-08,
+						 * every CPU PLOAM cleared ENQ in 0us
+						 * and PLOAM_CPU_TX stayed 0. */
+#define   GPON_US_PLM_CFG_REST	(GPON_US_PLM_ONUID_OVRD | \
+				 GPON_US_PLM_CRC_GEN_EN | \
+				 GPON_US_PLM_FLUSH_BUF)	/* = 0x13, stock's word */
 
 #define GPON_TEST_SCRATCH	0x12345678u
 #define GPON_RST_POLL_MAX	1000		/* bounded RST_DONE poll      */
@@ -434,12 +450,13 @@
 #define PI_PON_DSC_CFG_DS	0x0a0cc		/* [14:13] PAGE_SIZE             */
 #define PI_DSCRUNOUT_US		0x020e0		/* [28:16] DRAM [12:0] SRAM out  */
 #define PI_IP_MSTBASE_US	0x020e8		/* CFG_PON_MSTBASE: phys base of the US PBO DRAM packet pool */
+#define PI_IP_MSTBASE_DS	0x0a0b8u	/* the DS twin -- see gpon_swc_map.ds_dram_order */
 /* US PBO DRAM pool. ROOT CAUSE of "US-NIC RX never receives" (2026-06-12, found
  * via the stock memory-usage init behavior + live devmem): the US-NIC RX path
  * is a PBO that DMAs received US packets into a DRAM pool at IP_MSTBASE_US. Stock
  * sets IP_MSTBASE_US=0x07eff000, RAM_NO=0x1fff, DRAM_RUNOUT=0x1f58 (a 1MB / 8192x
- * 128B-page DRAM pool); DS is SRAM-only (IP_MSTBASE_DS=0). Our driver did US
- * SRAM-only too (copying DS) -> the US-NIC RX had no DRAM pool to land frames in,
+ * 128B-page DRAM pool).  Our driver did US SRAM-only too (copying DS) -> the
+ * US-NIC RX had no DRAM pool to land frames in,
  * so EVERY US OMCI frame was dropped at descriptor-fetch BEFORE the MAC, leaving
  * PKT_OK/ERR/MISS all 0 (the exact symptom). Allocate the pool and point the HW
  * at it. Stock memory-usage init math (usPageSize=128, us_mem_size=1MB): SRAM_NO=0x7f,
@@ -447,6 +464,22 @@
 #define PI_US_DRAM_PAGES	0x1fffu		/* RAM_NO: total US PBO pages-1 (SRAM+DRAM) */
 #define PI_US_DRAM_RUNOUT	0x1f58u		/* DSCRUNOUT_US DRAM portion (size/128-168) */
 #define PI_US_DRAM_ORDER	8		/* __get_free_pages order: 2^8 * 4KB = 1MB */
+/* ★★★ AND "DS IS SRAM-ONLY" IS AN RTL9602C FACT, NOT A FAMILY ONE (2026-09-08).
+ * The note above said so flatly; the G24W's OWN stock, read live at O5 while the
+ * OLT listed it Online, disagrees on the RTL9603CVD:
+ *     IP_MSTBASE_DS  (0x0a0d0) = 0x06c00000   ours 0
+ *     PON_DSC_CFG_DS (0x0a0e4) = 0x1fff8007   ours 0x001f001f
+ *     DSCRUNOUT_DS   (0x0a0cc) = 0x1fcb0006   ours 0x0000001e
+ *     PON_FC_CONFIG_DS(0x0a110)= 0x1f950036   ours 0x00020016
+ * i.e. stock gives the DOWNSTREAM PBO the same 8192-page pool it gives the
+ * upstream one, and we gave it 31 SRAM pages.  MEASURED consequence on this
+ * board: the OLT sent 13 DS OMCI frames on the OMCC flow right after
+ * Configure_Port-ID, RX_DROP_CNT_DS (0x0a060) went to 12 where stock's is 0, and
+ * PON_DSC_USAGE_DS / PON_DS_PBO_PAGE_Q0 never left 0 -- so the OMCI reached the
+ * GEM layer, found no descriptor page, and was dropped before the trap.  The
+ * geometry is therefore a PER-CHIP TABLE entry (gpon_swc_map.ds_dram_*): a chip
+ * that declares order 0 keeps the SRAM-only path byte for byte. */
+#define PI_DS_DRAM_ORDER	8		/* 2^8 * 4KB = 1MB, as for the US pool */
 #define PI_DSCRUNOUT_DS		0x0a0b4
 #define PI_PON_SID_STOP_TH	0x02450		/* [12:0] global stop-all page threshold */
 #define PI_PON_SID_GLB_TH	0x02454		/* [28:16] ON_TH [12:0] OFF_TH (global) */
@@ -701,6 +734,58 @@ static const struct gpon_chip luna_gpon_chip = {
  * written out as one constant, which is 0x20f8 + 16*4 flattened; no per-address
  * table can translate that, because the address it must translate is the BASE. */
 #define PI_SID2QID_STRIDE	4u
+
+/* ★★★ ADDED 2026-09-08 -- THE WHOLE UPSTREAM-SCHEDULER CLUSTER WAS STILL BARE.
+ * The two passes above caught the literals `bare_offset_chip_audit` could see;
+ * it audits only the functions it declares as SUBJECTS, so every literal in
+ * gpon_pbo_init / gpon_install_tcont / the /proc dump stayed invisible and the
+ * PON-IP move table -- which is GENERATED from the PI_* names in THIS header --
+ * could not contain a register this header never named.  A generator whose
+ * population is a header is blind to whatever the driver spells as a number.
+ *
+ * MEASURED on the G24W (RTL9603CVD), 2026-09-08, ours vs its own stock at O5:
+ *   PON_TCONT_EN   0x025fc   stock 0x00010001, ours 0x00000000
+ *   PON_SCH_QMAP   0x025e8   stock 0x0000000f, ours 0x00000000
+ * ...while OUR values sat at the RTL9602C addresses (0x023e4 = 0x00010001,
+ * 0x023a0 = 0x0000000f), which on this die are UNDECLARED holes.  The upstream
+ * T-CONT enable -- the register that lets the PON-IP scheduler drain T-CONT 16
+ * at all -- had never reached the silicon.  Right value, wrong register, and a
+ * read-back that agrees with itself because it reads the same wrong register.
+ *
+ * Names and RTL9602C addresses are the vendor chipdef's own (tier 3); the
+ * RTL9603CVD side is that chip's own chipdef, and the two live reads above are
+ * tier 1 on both firmwares. */
+#define PI_PON_BW_THRES		0x02150u	/* [29:16] last [13:0] runt          */
+#define PI_PON_DSC_STS_US	0x02158u	/* [12:0] SRAM [28:16] DRAM used     */
+#define PI_MOCIR_FRC_MD		0x02170u	/* per-flow CIR force mask           */
+#define PI_MOCIR_FRC_VAL	0x02174u	/* per-flow CIR force value          */
+#define PI_MOCIR_TH_H		0x02184u	/* request/grant credit threshold hi */
+#define PI_MOCIR_TH_L		0x02188u	/* ... lo                            */
+#define PI_PON_TB_CTRL		0x02190u	/* token bucket tick [15:8]/[7:0]    */
+#define PI_PON_SCH_CTRL		0x02194u	/* [18] PIR_DROP + METER_OP + burst  */
+#define PI_PON_QID_CIR_RATE	0x02198u	/* [17:0] per-qid, one word per qid  */
+#define PI_PON_QID_PIR_RATE	0x0229cu	/* [17:0] per-qid, one word per qid  */
+#define PI_QID_RATE_STRIDE	4u		/* 18b field, 32/18 = 1 entry/word   */
+#define PI_PON_SCH_QMAP		0x023a0u	/* T-CONT -> logical queue (packed)  */
+#define PI_PON_TCONT_EN		0x023e4u	/* 1 bit per T-CONT: US scheduler on */
+#define PI_PON_WFQ_WEIGHT	0x023f8u	/* packed 10b/qid                    */
+#define PI_PONIP_DBG_CTRL_US	0x0255cu	/* [17] DBG_IGNORE_TAG               */
+#define PI_PONIP_TOTAL_PAGE_CNT_US 0x02560u	/* [12:0] US pages staged       */
+#define PI_PONIP_SID_USED_PAGE_CNT_US 0x02564u	/* [12:0] used [28:16] max   */
+#define PI_GPON_DPRU_RPT_PRD	0x02568u	/* DBA block size + report period    */
+#define PI_PONIP_SID_OVER_STS	0x0256cu	/* per-SID page-overflow status      */
+#define PI_PONIP_SID_OVER_LATCH_STS 0x02578u	/* ... latched twin (NOT +0x14:
+						 * it is a REGISTER, and the gap to it
+						 * differs per chip -- 3 status words on
+						 * the RTL9602C's 65 SIDs, 4 on the
+						 * RTL9603CVD's 128) */
+#define PI_PON_SCH_OPT		0x025d8u	/* [19] scheduler option bit         */
+#define PI_PON_DS_PBO_PAGE_Q0	0x0a100u	/* [12:0] cur [25:13] max, DS q0     */
+/* ★ PACKING, NOT JUST ADDRESS: PON_SCH_QMAP is 32 bits per entry on the
+ * RTL9602C and 8 bits per entry on the RTL9603CVD (chipdef "array offset"),
+ * so `base + tcont * 4` is a RTL9602C fact too.  The per-chip width lives in
+ * gpon_swc_map.sch_qmap_bits; entries_per_word = 32 / width, the same rule
+ * pi_packed_locate() already implements for SID2QID/SIDVALID. */
 
 #define PI_PON_SIDVALID		0x0213c		/* packed 1b/SID */
 #define PI_PON_OMCI_CFG		0x02154		/* [6:0] OMCI SID */

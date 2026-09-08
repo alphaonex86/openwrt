@@ -155,7 +155,29 @@
 /* Compile-time guard: the stride must stay 4 (see above); catch any regression. */
 static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
 	      "GEM_US_PORT_MAP stride MUST be 4 (32-bit words) per chipdef array-offset 32");
-#define GPON_OMCC_FLOW		64		/* RTL9602C fixed OMCI flow/SID */
+/* Each die's own GPON_OMCI_FLOW_ID (vendor chipdef, tier 3; confirmed live on
+ * the G24W's stock at O5).  Named per chip so the range assertions below stay
+ * COMPILE-TIME -- a runtime table value cannot be static_assert'ed, and a guard
+ * that cannot fail is not a guard. */
+#define GPON_OMCC_FLOW_9602C	64u
+#define GPON_OMCC_FLOW_9603CVD	127u
+#define GPON_OMCC_FLOW_9607C	127u
+/* The live one, from the selected chip's table. `swc` is assigned before any
+ * GPON register is touched (gpon_swc_select() at probe), and every use of this
+ * macro sits after that. */
+#define GPON_OMCC_FLOW		((unsigned int)swc->omcc_flow)
+/* The OMCC's PHYSICAL queue id.  Defined HERE, above its first user (the US-NIC
+ * pre-arm), which used to spell it as a bare 64 because this definition sat
+ * further down the file.  The value is the same on both dies.
+ *  = OMCC physical qid = TCONT_QUEUE_MAX(32)*(T-CONT 16 / 8) + q0 = 64
+ * (stock physical-queue-id mapping, GPON branch: srl>>3 then <<5).  The prior
+ * "63" was a misread: with the WRONG contiguous packing, the readback of
+ * SID2QID[64] actually read SID 56's slot (a data flow legitimately at qid 63).
+ * The fixed packing (entries_per_word = 32/bits) addresses the OMCC SID
+ * correctly, so the true stock value 64 applies.  Used for SID2QID + the
+ * scheduler qid. */
+#define GPON_OMCC_PHYS_QID	64
+#define GPON_OMCC_TCONT		16	/* the OMCC's T-CONT index; same on both dies */
 
 /*
  * PLOAM message path (ITU-T G.984.3 management channel that drives the ONU
@@ -386,6 +408,39 @@ static bool is_9603cvd;
  */
 struct gpon_swc_map {
 	const char *chip;
+	/* ★ THE OMCI FLOW/SID INDEX IS A PER-CHIP FACT, AND IT IS NOT THE SAME
+	 * NUMBER ON THE TWO LUNA DIES (measured + RE'd 2026-09-08).  The vendor
+	 * chipdef names it GPON_OMCI_FLOW_ID and declares 64 on the RTL9602C but
+	 * 127 on the RTL9603CVD (and on the RTL9607C).  The G24W's own stock
+	 * agrees, live at O5: `gpon show us-flow`/`ds-flow` report
+	 * "Flow 127 | GEM 0 | OMCI | TCont 16".  This driver carried the RTL9602C
+	 * literal for every chip, so on the RTL9603CVD the OMCC was installed at
+	 * flow 64 while the OLT's downstream OMCI arrived on the flow the OMCI
+	 * block watches -- 127 -- and OMCI_RX stayed 0 through a whole O5 window
+	 * until the OLT's configuration timed out and it sent Deactivate_ONU-ID.
+	 * The T-CONT (16) and the physical queue (0) are the SAME on both dies;
+	 * only this index moves, which is why a table entry is the right shape. */
+	u8  omcc_flow;		/* GPON_OMCI_FLOW_ID -- per-chip, never shared */
+	/* ★ PON_SCH_QMAP's ENTRY WIDTH, and it is a WIDTH, not an address.  The
+	 * vendor chipdef's "array offset" for PON_SCH_QMAP is 32 on the RTL9602C
+	 * and 8 on the RTL9603CVD, so `base + tcont * 4` -- the shape this driver
+	 * used everywhere -- addresses entry `tcont` on one die and entry
+	 * `tcont * 4` on the other, four entries past the end of a 17-entry array
+	 * for the OMCC's T-CONT 16.  entries_per_word = 32 / width is the rule
+	 * pi_packed_locate() already implements.  32 is the identity case, so the
+	 * chips that declare no different packing behave exactly as before. */
+	u8  sch_qmap_bits;	/* PON_SCH_QMAP array-offset (bits per T-CONT entry) */
+	/* ★ THE DOWNSTREAM PBO's PAGE POOL, per chip.  0 = SRAM-only, which is
+	 * what the RTL9602C's stock does and what this driver has always done;
+	 * non-zero is the __get_free_pages order of a DRAM pool the DS PBO DMAs
+	 * into, plus the three geometry words that describe it.  The RTL9603CVD's
+	 * own stock runs the DRAM pool (see luna_gpon_regs.h), and without it the
+	 * OLT's DS OMCI is dropped at descriptor-fetch with RX_DROP_CNT_DS
+	 * climbing -- OMCI_RX and the trap stay 0 and the ONU looks silent. */
+	u8  ds_dram_order;	/* pool order; 0 = keep the SRAM-only DS path       */
+	u32 ds_dsc_cfg;		/* PON_DSC_CFG_DS   word, from that chip's stock     */
+	u32 ds_dscrunout;	/* DSCRUNOUT_DS     word                            */
+	u32 ds_fc_config;	/* PON_FC_CONFIG_DS word                            */
 	u32 io_mode_en;		/* IO_MODE_EN                                  */
 	u8  io_i2c_en_bus0;	/* IO_MODE_EN.I2C_EN low bit == I2C bus 0      */
 	u8  io_oem_en;		/* IO_MODE_EN.OEM_EN bit (optical e-mode pads) */
@@ -474,6 +529,9 @@ extern const struct luna_pi_move luna_pi_moves_9603cvd[];
 
 static const struct gpon_swc_map gpon_swc_9602c = {
 	.chip = "RTL9602C",
+	.omcc_flow = GPON_OMCC_FLOW_9602C,
+	.ds_dram_order = 0,	/* SRAM-only DS, as this chip's stock does */
+	.sch_qmap_bits = 32,	/* chipdef array offset 32 */
 	.io_mode_en = 0x23018, .io_i2c_en_bus0 = 13, .io_oem_en = 19,
 	.io_gpio_en = 0x00048,
 	.sds_fib_status = 0x001e4,
@@ -511,6 +569,12 @@ static const struct gpon_swc_map gpon_swc_9602c = {
 
 static const struct gpon_swc_map gpon_swc_9603cvd = {
 	.chip = "RTL9603CVD",
+	.omcc_flow = GPON_OMCC_FLOW_9603CVD,
+	/* the DS PBO DRAM pool, from the G24W's own stock live at O5 */
+	.ds_dram_order = PI_DS_DRAM_ORDER,
+	.ds_dsc_cfg = 0x1fff8007u, .ds_dscrunout = 0x1fcb0006u,
+	.ds_fc_config = 0x1f950036u,
+	.sch_qmap_bits = 8,	/* chipdef array offset 8 -- 4 entries per word */
 	.io_mode_en = 0x23014, .io_i2c_en_bus0 = 11, .io_oem_en = 16,
 	.io_gpio_en = 0x0003c,
 	.sds_fib_status = 0x00214,
@@ -552,6 +616,9 @@ static const struct gpon_swc_map gpon_swc_9603cvd = {
 
 static const struct gpon_swc_map gpon_swc_9607c = {
 	.chip = "RTL9607C",
+	.omcc_flow = GPON_OMCC_FLOW_9607C,
+	.ds_dram_order = 0,	/* not measured on this chip -- SRAM-only, unchanged */
+	.sch_qmap_bits = 32,	/* no PON-IP block in this chipdef; keep the identity packing */
 	.io_mode_en = 0x23014, .io_i2c_en_bus0 = 13, .io_oem_en = 19,
 	/* IO_GPIO_EN is 0x38 here, but this chip's optical front-end is internal
 	 * and none of the 9602C pad recipe applies, so it is left undeclared:
@@ -696,27 +763,49 @@ const struct luna_pi_move luna_pi_moves_9603cvd[] = {
 	{ 0x020e4, 0x020f8 },	/* PI_DRN_CMD */
 	{ 0x0a0b4, 0x0a0cc },	/* PI_DSCRUNOUT_DS */
 	{ 0x020e0, 0x020f4 },	/* PI_DSCRUNOUT_US */
+	{ 0x02568, 0x026f4 },	/* PI_GPON_DPRU_RPT_PRD */
+	{ 0x0a0b8, 0x0a0d0 },	/* PI_IP_MSTBASE_DS */
 	{ 0x020e8, 0x020fc },	/* PI_IP_MSTBASE_US */
+	{ 0x02170, 0x021c0 },	/* PI_MOCIR_FRC_MD */
+	{ 0x02174, 0x021c4 },	/* PI_MOCIR_FRC_VAL */
+	{ 0x02184, 0x021d4 },	/* PI_MOCIR_TH_H */
+	{ 0x02188, 0x021d8 },	/* PI_MOCIR_TH_L */
 	{ 0x0a0ac, 0x0a0c0 },	/* PI_PONIP_CTL_DS */
 	{ 0x020d8, 0x020ec },	/* PI_PONIP_CTL_US */
+	{ 0x0255c, 0x026e8 },	/* PI_PONIP_DBG_CTRL_US */
+	{ 0x02578, 0x02708 },	/* PI_PONIP_SID_OVER_LATCH_STS */
+	{ 0x0256c, 0x026f8 },	/* PI_PONIP_SID_OVER_STS */
+	{ 0x02564, 0x026f0 },	/* PI_PONIP_SID_USED_PAGE_CNT_US */
+	{ 0x02560, 0x026ec },	/* PI_PONIP_TOTAL_PAGE_CNT_US */
+	{ 0x02150, 0x021a0 },	/* PI_PON_BW_THRES */
 	{ 0x0a0cc, 0x0a0e4 },	/* PI_PON_DSC_CFG_DS */
 	{ 0x0215c, 0x021ac },	/* PI_PON_DSC_CFG_US */
 	{ 0x0a0c8, 0x0a0e0 },	/* PI_PON_DSC_STS_DS */
+	{ 0x02158, 0x021a8 },	/* PI_PON_DSC_STS_US */
 	{ 0x0a0bc, 0x0a0d4 },	/* PI_PON_DSC_USAGE_DS */
 	{ 0x020ec, 0x02100 },	/* PI_PON_DSC_USAGE_US */
+	{ 0x0a100, 0x0a114 },	/* PI_PON_DS_PBO_PAGE_Q0 */
 	{ 0x0a0fc, 0x0a110 },	/* PI_PON_FC_CONFIG_DS */
 	{ 0x0a0c0, 0x0a0d8 },	/* PI_PON_IPSTS_DS */
 	{ 0x020f4, 0x02108 },	/* PI_PON_IPSTS_US */
 	{ 0x0218c, 0x021dc },	/* PI_PON_OLT_BW_MTR_FULL */
 	{ 0x02154, 0x021a4 },	/* PI_PON_OMCI_CFG */
+	{ 0x02198, 0x021e8 },	/* PI_PON_QID_CIR_RATE */
+	{ 0x0229c, 0x023e8 },	/* PI_PON_QID_PIR_RATE */
+	{ 0x02194, 0x021e4 },	/* PI_PON_SCH_CTRL */
+	{ 0x025d8, 0x0276c },	/* PI_PON_SCH_OPT */
+	{ 0x023a0, 0x025e8 },	/* PI_PON_SCH_QMAP */
 	{ 0x020f8, 0x0210c },	/* PI_PON_SID2QID */
 	{ 0x0213c, 0x0218c },	/* PI_PON_SIDVALID */
 	{ 0x02454, 0x026c4 },	/* PI_PON_SID_GLB_TH */
 	{ 0x0a0e4, 0x0a0ec },	/* PI_PON_SID_Q_MAP_DS */
 	{ 0x02458, 0x026c8 },	/* PI_PON_SID_RPV_TH */
 	{ 0x02450, 0x026c0 },	/* PI_PON_SID_STOP_TH */
+	{ 0x02190, 0x021e0 },	/* PI_PON_TB_CTRL */
+	{ 0x023e4, 0x025fc },	/* PI_PON_TCONT_EN */
 	{ 0x020f0, 0x02104 },	/* PI_PON_US_FIFO_CTL */
 	{ 0x023e8, 0x02600 },	/* PI_PON_WFQ_TYPE */
+	{ 0x023f8, 0x02614 },	/* PI_PON_WFQ_WEIGHT */
 	{ 0x0a10c, 0x0a130 },	/* PI_RSVD_PONIP_DS */
 	{ 0, 0 },
 };
@@ -747,6 +836,7 @@ enum {
 	PI_A_DSCRUNOUT_DS = PI_DSCRUNOUT_DS,
 	PI_A_DSCRUNOUT_US = PI_DSCRUNOUT_US,
 	PI_A_IP_MSTBASE_US = PI_IP_MSTBASE_US,
+	PI_A_IP_MSTBASE_DS = PI_IP_MSTBASE_DS,
 	PI_A_PONIP_CTL_DS = PI_PONIP_CTL_DS,
 	PI_A_PONIP_CTL_US = PI_PONIP_CTL_US,
 	PI_A_PON_DSC_CFG_DS = PI_PON_DSC_CFG_DS,
@@ -769,6 +859,27 @@ enum {
 	PI_A_PON_SID_RPV_TH = PI_PON_SID_RPV_TH,
 	PI_A_PON_SID_STOP_TH = PI_PON_SID_STOP_TH,
 	PI_A_PON_US_FIFO_CTL = PI_PON_US_FIFO_CTL,
+	PI_A_PON_BW_THRES = PI_PON_BW_THRES,
+	PI_A_PON_DSC_STS_US = PI_PON_DSC_STS_US,
+	PI_A_MOCIR_FRC_MD = PI_MOCIR_FRC_MD,
+	PI_A_MOCIR_FRC_VAL = PI_MOCIR_FRC_VAL,
+	PI_A_MOCIR_TH_H = PI_MOCIR_TH_H,
+	PI_A_MOCIR_TH_L = PI_MOCIR_TH_L,
+	PI_A_PON_TB_CTRL = PI_PON_TB_CTRL,
+	PI_A_PON_SCH_CTRL = PI_PON_SCH_CTRL,
+	PI_A_PON_QID_CIR_RATE = PI_PON_QID_CIR_RATE,
+	PI_A_PON_QID_PIR_RATE = PI_PON_QID_PIR_RATE,
+	PI_A_PON_SCH_QMAP = PI_PON_SCH_QMAP,
+	PI_A_PON_TCONT_EN = PI_PON_TCONT_EN,
+	PI_A_PON_WFQ_WEIGHT = PI_PON_WFQ_WEIGHT,
+	PI_A_PONIP_DBG_CTRL_US = PI_PONIP_DBG_CTRL_US,
+	PI_A_PONIP_TOTAL_PAGE_CNT_US = PI_PONIP_TOTAL_PAGE_CNT_US,
+	PI_A_PONIP_SID_USED_PAGE_CNT_US = PI_PONIP_SID_USED_PAGE_CNT_US,
+	PI_A_GPON_DPRU_RPT_PRD = PI_GPON_DPRU_RPT_PRD,
+	PI_A_PONIP_SID_OVER_STS = PI_PONIP_SID_OVER_STS,
+	PI_A_PON_SCH_OPT = PI_PON_SCH_OPT,
+	PI_A_PON_DS_PBO_PAGE_Q0 = PI_PON_DS_PBO_PAGE_Q0,
+	PI_A_PONIP_SID_OVER_LATCH_STS = PI_PONIP_SID_OVER_LATCH_STS,
 };
 
 #undef  PI_DSCRUNOUT_DS
@@ -777,6 +888,8 @@ enum {
 #define PI_DSCRUNOUT_US	PI_X(PI_A_DSCRUNOUT_US)
 #undef  PI_IP_MSTBASE_US
 #define PI_IP_MSTBASE_US	PI_X(PI_A_IP_MSTBASE_US)
+#undef  PI_IP_MSTBASE_DS
+#define PI_IP_MSTBASE_DS	PI_X(PI_A_IP_MSTBASE_DS)
 #undef  PI_PONIP_CTL_DS
 #define PI_PONIP_CTL_DS	PI_X(PI_A_PONIP_CTL_DS)
 #undef  PI_PONIP_CTL_US
@@ -821,6 +934,48 @@ enum {
 #define PI_PON_SID_STOP_TH	PI_X(PI_A_PON_SID_STOP_TH)
 #undef  PI_PON_US_FIFO_CTL
 #define PI_PON_US_FIFO_CTL	PI_X(PI_A_PON_US_FIFO_CTL)
+#undef  PI_PON_BW_THRES
+#define PI_PON_BW_THRES	PI_X(PI_A_PON_BW_THRES)
+#undef  PI_PON_DSC_STS_US
+#define PI_PON_DSC_STS_US	PI_X(PI_A_PON_DSC_STS_US)
+#undef  PI_MOCIR_FRC_MD
+#define PI_MOCIR_FRC_MD	PI_X(PI_A_MOCIR_FRC_MD)
+#undef  PI_MOCIR_FRC_VAL
+#define PI_MOCIR_FRC_VAL	PI_X(PI_A_MOCIR_FRC_VAL)
+#undef  PI_MOCIR_TH_H
+#define PI_MOCIR_TH_H	PI_X(PI_A_MOCIR_TH_H)
+#undef  PI_MOCIR_TH_L
+#define PI_MOCIR_TH_L	PI_X(PI_A_MOCIR_TH_L)
+#undef  PI_PON_TB_CTRL
+#define PI_PON_TB_CTRL	PI_X(PI_A_PON_TB_CTRL)
+#undef  PI_PON_SCH_CTRL
+#define PI_PON_SCH_CTRL	PI_X(PI_A_PON_SCH_CTRL)
+#undef  PI_PON_QID_CIR_RATE
+#define PI_PON_QID_CIR_RATE	PI_X(PI_A_PON_QID_CIR_RATE)
+#undef  PI_PON_QID_PIR_RATE
+#define PI_PON_QID_PIR_RATE	PI_X(PI_A_PON_QID_PIR_RATE)
+#undef  PI_PON_SCH_QMAP
+#define PI_PON_SCH_QMAP	PI_X(PI_A_PON_SCH_QMAP)
+#undef  PI_PON_TCONT_EN
+#define PI_PON_TCONT_EN	PI_X(PI_A_PON_TCONT_EN)
+#undef  PI_PON_WFQ_WEIGHT
+#define PI_PON_WFQ_WEIGHT	PI_X(PI_A_PON_WFQ_WEIGHT)
+#undef  PI_PONIP_DBG_CTRL_US
+#define PI_PONIP_DBG_CTRL_US	PI_X(PI_A_PONIP_DBG_CTRL_US)
+#undef  PI_PONIP_TOTAL_PAGE_CNT_US
+#define PI_PONIP_TOTAL_PAGE_CNT_US	PI_X(PI_A_PONIP_TOTAL_PAGE_CNT_US)
+#undef  PI_PONIP_SID_USED_PAGE_CNT_US
+#define PI_PONIP_SID_USED_PAGE_CNT_US	PI_X(PI_A_PONIP_SID_USED_PAGE_CNT_US)
+#undef  PI_GPON_DPRU_RPT_PRD
+#define PI_GPON_DPRU_RPT_PRD	PI_X(PI_A_GPON_DPRU_RPT_PRD)
+#undef  PI_PONIP_SID_OVER_STS
+#define PI_PONIP_SID_OVER_STS	PI_X(PI_A_PONIP_SID_OVER_STS)
+#undef  PI_PON_SCH_OPT
+#define PI_PON_SCH_OPT	PI_X(PI_A_PON_SCH_OPT)
+#undef  PI_PON_DS_PBO_PAGE_Q0
+#define PI_PON_DS_PBO_PAGE_Q0	PI_X(PI_A_PON_DS_PBO_PAGE_Q0)
+#undef  PI_PONIP_SID_OVER_LATCH_STS
+#define PI_PONIP_SID_OVER_LATCH_STS	PI_X(PI_A_PONIP_SID_OVER_LATCH_STS)
 
 
 #undef  SDS_ANA_COM_REG03
@@ -1515,18 +1670,42 @@ static u16 gpon_omcc_alloc;	/* OMCC Alloc-ID override; 0 (default) = bind the LI
 module_param(gpon_omcc_alloc, ushort, 0644);
 MODULE_PARM_DESC(gpon_omcc_alloc, "OMCC Alloc-ID override (0=auto, 1=ONU-ID+1 for OLTs that grant T-CONT 1 not 0)");
 static u16 gpon_data_alloc;		/* the OLT's data Alloc-ID, on T-CONT 8 */
-/* data_tcont: bind the OLT's separate DATA Alloc-ID to its OWN data T-CONT 8 (and route the
- * data GEM US to GPON_DATA_PHYS_QID 32) instead of riding the OMCC T-CONT 16's grants. The OLT's
- * DBA grants the data Alloc separately; with no live T-CONT reporting occupancy on it, the OLT
- * reclaims it (Assign_Alloc-ID op=0xFF), reallocs, churns, and escalates to Deactivate_ONU-ID
- * (0x05) ~4min in -> WAN data path torn down. Binding it like stock (one physical T-CONT per
- * Alloc-ID) keeps the OLT happy. ⚠ ONLY for OLTs that grant a SEPARATE data Alloc-ID — THIS lab
- * OLT (HSGQ-G008) uses a SINGLE Alloc-ID 0x100 for both OMCC + data (T-CONT 16), so routing data
- * to T-CONT 8 leaves it grantless. DEFAULT off (data rides T-CONT 16, correct for single-alloc);
- * gpon_luna.data_tcont=1 enables the per-data-alloc T-CONT 8 bind for multi-alloc OLTs. */
-static bool data_tcont;		/* default off: single-alloc OLT (this lab) -> data rides T-CONT 16 */
+/* data_tcont: route the WAN data GEM's upstream to the DATA T-CONT 8's queue
+ * (GPON_DATA_PHYS_QID 32) instead of riding the OMCC T-CONT 16's grants.
+ * It gates ONLY the SID2QID classify; the T-CONT-8 <- data-Alloc bind itself is
+ * driven by the OLT's Assign_Alloc-ID and happens either way.
+ *
+ * ★★ DEFAULT CHANGED TO ON, 2026-09-08, ON A MEASUREMENT (X111W on HSGQ-G008).
+ * The previous default was OFF, and its stated reason -- "THIS lab OLT uses a
+ * SINGLE Alloc-ID for both OMCC + data, so routing data to T-CONT 8 leaves it
+ * grantless" -- is REFUTED by the board's own registers, which say the opposite:
+ *
+ *   fiber:      alloc=0x101 tcont_bound=1     the OLT DID assign a data Alloc-ID
+ *   bwmap:      every captured allocation carries T-CONT 8 in w0[4:0]
+ *   us_gtc:     idle8 (TCONT_IDLE_BYTE_STAT[8]) climbed ~8.1e8 bytes / 7 s
+ *               = ~930 Mbps of T-CONT 8 grants FILLED WITH GTC IDLE
+ *   us_gtc:     idle16 moved 96 bytes in the same window (T-CONT 16 gets ~nothing)
+ *   data1:      s2q[1] = 64  -> the WAN data SID was classified to the OMCC queue
+ *
+ * i.e. the OLT was granting the data T-CONT at line rate while the data sat
+ * behind the management T-CONT's allocation. Measured end to end, ONU as the
+ * endpoint over gpon0 (no LAN leg, no NAT), 20 s TCP each way:
+ *
+ *   SID2QID[1]=64 (T-CONT 16, the old default):  US 0.205 Mbps   DS  8.49 Mbps
+ *   SID2QID[1]=32 (T-CONT  8, this default)   :  US 29.4  Mbps   DS 106.7  Mbps
+ *
+ * and routed transit (netns LAN client -> ONU -> host on the WAN L2), iperf3 TCP:
+ *   OFF: US 0.26 Mbps / DS 8.76 Mbps      ON: US 106.3 Mbps / DS 53.5 Mbps
+ *
+ * The downstream figure is a CONSEQUENCE of the upstream one, not a second bug:
+ * DS TCP is ACK-limited, and ~8.5 Mbps of DS needs ~0.17 Mbps of upstream ACKs,
+ * which is the whole of the old US ceiling.
+ *
+ * =0 restores the OMCC-T-CONT routing for an OLT that really does grant a single
+ * Alloc-ID for both; it is an A/B knob, no longer a claim about this lab. */
+static bool data_tcont = true;	/* default ON: data US rides the DATA T-CONT 8's grants */
 module_param(data_tcont, bool, 0644);
-MODULE_PARM_DESC(data_tcont, "bind the OLT data Alloc-ID to its own T-CONT 8 (default OFF -- single-alloc OLT like this lab rides data on T-CONT 16; =1 ONLY for multi-alloc OLTs: on a single-alloc OLT =1 routes data to a grant-less T-CONT 8 and PROVOKES the op=0xFF reclaim -> deact churn)");
+MODULE_PARM_DESC(data_tcont, "route the WAN data GEM US to the data T-CONT 8 queue 32 (default ON: measured 0.2 -> 106 Mbps upstream on HSGQ-G008; =0 rides the OMCC T-CONT 16 for an OLT that grants one Alloc-ID for both)");
 
 static inline u32 gpon_rd(u32 off) { return ioread32(gpon_base + off); }
 static inline void gpon_wr(u32 off, u32 v) { iowrite32(v, gpon_base + off); }
@@ -1702,6 +1881,7 @@ static void pi_field(u32 off, unsigned int msb, unsigned int lsb, u32 val)
  * declared so the early scheduler init writes WFQ_TYPE through the SAME
  * addressing as everything else. */
 static void pi_packed_set(u32 base, unsigned int idx, unsigned int bits, u32 val);
+static u32 pi_packed_get(u32 base, unsigned int idx, unsigned int bits);
 
 /*
  * Front-panel PON/LOS LEDs. The stock unit lights the green PON LED once it
@@ -4777,8 +4957,8 @@ void rtl9602c_datapath_tables_init(void)
 	/* 1) switch_init -------------------------------------------------- */
 	writel(readl(sw_en) | SW_EN_BIT, sw_en);	/* see the naming note in
 							 * luna_eth_regs.h    */
-	pi_field(0x2190, 7, 0, 0x6e);			/* PON_TB_CTRL tick      */
-	pi_field(0x2190, 15, 8, 0x95);
+	pi_field(PI_PON_TB_CTRL, 7, 0, 0x6e);			/* PON_TB_CTRL tick      */
+	pi_field(PI_PON_TB_CTRL, 15, 8, 0x95);
 	sw_field(SW_METER_TB_CTRL, 7, 0, 43);			/* METER_TB_CTRL tick    */
 	sw_field(SW_METER_TB_CTRL, 15, 8, 189);
 	sw_field(SW_SCH_WFQ_TKN_CTRL, 0, 0, 1);		/* SCH_WFQ_TKN_CTRL      */
@@ -4898,17 +5078,17 @@ void rtl9602c_datapath_tables_init(void)
 	} else {
 		sw_field(SDS(0x22584), 0, 0, 1);		/* legacy SDS_ANA REG_BEN_TTL_OUT = 1 */
 	}
-	pi_field(0x02150, 29, 16, 5);			/* PON_BW_THRES last     */
-	pi_field(0x02150, 13, 0, 5);			/* PON_BW_THRES runt     */
+	pi_field(PI_PON_BW_THRES, 29, 16, 5);			/* PON_BW_THRES last     */
+	pi_field(PI_PON_BW_THRES, 13, 0, 5);			/* PON_BW_THRES runt     */
 	if (sch_ctrl_stock)
 		/* Match LIVE STOCK exactly: PIR_DROP(b18)=1 | METER_OP(b17)=1 |
 		 * WFQ_BURSTSIZE[15:0]=0x6000. See sch_ctrl_stock param comment. */
-		pi_wr(0x02194, 0x00066000u);
+		pi_wr(PI_PON_SCH_CTRL, 0x00066000u);
 	else
-		pi_field(0x02194, 18, 18, pir_drop ? 1 : 0);	/* legacy bit18-only A/B */
+		pi_field(PI_PON_SCH_CTRL, 18, 18, pir_drop ? 1 : 0);	/* legacy bit18-only A/B */
 	for (idx = 0; idx < 8; idx++) {
 		pi_packed_set(PI_PON_WFQ_TYPE, idx, 1, 0);	/* WFQ_TYPE = STRICT (1b packed) */
-		pi_field(0x02198 + idx * 4, 31, 0, 0);	/* QID_CIR_RATE = 0      */
+		pi_field(PI_PON_QID_CIR_RATE + idx * PI_QID_RATE_STRIDE, 31, 0, 0);	/* QID_CIR_RATE = 0      */
 	}
 	sw_field(PON_TRAP_CFG, 2, 0, 7);			/* PON_TRAP_CFG OMCI_MPCP_PRIORITY=7 -> steer OMCI egress to PON queue 7 */
 	/* PIR_DROP (0x2194 bit18) is cleared for rev-A above (pir_drop param, default 0).
@@ -4980,13 +5160,37 @@ void gpon_pbo_init(void)
 			pr_warn("rtl9602c-gpon: US PBO DRAM pool alloc failed; US-NIC RX may not work\n");
 	}
 	pi_field(PI_PON_DSC_CFG_US, 12, 0, PI_US_SRAM_NO);
-	pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
 	pi_field(PI_PON_DSC_CFG_US, 28, 16, PI_US_DRAM_PAGES);	/* RAM_NO = SRAM+DRAM (0x1fff) */
-	pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
 	pi_field(PI_DSCRUNOUT_US, 12, 0, PI_US_SRAM_RUNOUT);
-	pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
 	pi_field(PI_DSCRUNOUT_US, 28, 16, PI_US_DRAM_RUNOUT);	/* DRAM runout (0x1f58) */
-	pi_field(PI_DSCRUNOUT_DS, 28, 16, 0);
+	/* The DS twin. A chip that declares no DS pool keeps the SRAM-only words
+	 * this driver has always written -- same fields, same values, same order. */
+	if (!swc->ds_dram_order) {
+		pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
+		pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
+		pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
+		pi_field(PI_DSCRUNOUT_DS, 28, 16, 0);
+	} else {
+		static unsigned long ds_pool;
+
+		if (!ds_pool)
+			ds_pool = __get_free_pages(GFP_KERNEL, swc->ds_dram_order);
+		if (ds_pool) {
+			pi_wr(PI_IP_MSTBASE_DS,
+			      (u32)virt_to_phys((void *)ds_pool));
+			pi_wr(PI_PON_DSC_CFG_DS, swc->ds_dsc_cfg);
+			pi_wr(PI_DSCRUNOUT_DS, swc->ds_dscrunout);
+		} else {
+			/* ★ NO POOL ⇒ KEEP THE SMALL SRAM GEOMETRY. Writing the
+			 * DRAM-scale page counts with no pool behind them would
+			 * point the PBO at physical address 0. */
+			pr_warn("rtl9602c-gpon: DS PBO DRAM pool alloc failed; DS stays SRAM-only and DS OMCI may be dropped\n");
+			pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
+			pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
+			pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
+			pi_field(PI_DSCRUNOUT_DS, 28, 16, 0);
+		}
+	}
 
 	/* PBO backpressure thresholds (SRAM-only, 128B pages). Without these every
 	 * threshold field reads 0, so the PBO treats the small DS SRAM pool as
@@ -5013,8 +5217,15 @@ void gpon_pbo_init(void)
 			pi_field(off, 12, 0, 130);
 		}
 	}
-	pi_field(PI_PON_FC_CONFIG_DS, 12, 0, 22);
-	pi_field(PI_PON_FC_CONFIG_DS, 28, 16, 2);
+	/* DS flow-control thresholds: on the SRAM-only geometry they are 2/22
+	 * pages; a chip running the DRAM pool needs its own stock's scale, or the
+	 * PBO sits permanently over-threshold against an 8192-page pool. */
+	if (swc->ds_dram_order && swc->ds_fc_config)
+		pi_wr(PI_PON_FC_CONFIG_DS, swc->ds_fc_config);
+	else {
+		pi_field(PI_PON_FC_CONFIG_DS, 12, 0, 22);
+		pi_field(PI_PON_FC_CONFIG_DS, 28, 16, 2);
+	}
 
 	/* 3. GPON mode (not EPON) + upstream RXC stop + US FIFO thresholds. */
 	pi_field(PI_PONIP_CTL_US, 2, 2, 0);		/* CFG_EPON_MODE = 0      */
@@ -5053,7 +5264,7 @@ void gpon_pbo_init(void)
 	 * over the internal MII into GMAC0's GMII-RX. The GMAC's CPUtag1CR SID-64 trap only
 	 * fires (and the GMAC only accepts the on-wire cpu-tag) when this SID = 64. Reset
 	 * default is 0x40 but the pbo MAC reset can clear it; set it explicitly. */
-	pi_field(PI_CFG_DS, 6, 0, 64);			/* RX_SID = 64 (OMCC SID) */
+	pi_field(PI_CFG_DS, 6, 0, GPON_OMCC_FLOW);	/* RX_SID = this chip's OMCC SID */
 	/* CFG_US[6:0] = RX_SID for the US-NIC, symmetric to the DS stamp above. The
 	 * US-NIC stamps this stream-id on frames it receives from the switch (the
 	 * CPU's US OMCI), so they classify to SID 64 -> GEM port 2 -> physical queue
@@ -5061,7 +5272,7 @@ void gpon_pbo_init(void)
 	 * (the switch strips our software cpu-tag at the PON-port egress) so it never
 	 * enqueues to qid 64 and the OMCC US GEM stays empty (gem2=0, idle16 high).
 	 * The DS stamp alone is not enough — this is the US half that was missing. */
-	pi_field(PI_CFG_US, 6, 0, 64);			/* US-NIC RX_SID = 64 (OMCC SID) */
+	pi_field(PI_CFG_US, 6, 0, GPON_OMCC_FLOW);	/* US-NIC RX_SID = this chip's OMCC SID */
 
 	/* 6. PONNIC TX framing (IFG, preamble, padding) + RX accept-CRC-error. */
 	pi_field(PI_TX_CFG_US, 12, 10, 3);		/* IFG                    */
@@ -5155,8 +5366,23 @@ void gpon_pbo_init(void)
 	 * flow-to-queue / physical-queue-id / SID-to-queue-map mapping).
 	 * NOTE: SIDVALID(1b)/SID_Q_MAP_DS(2b) are unaffected (32/width divides evenly so
 	 * 4-per-word == contiguous for them); only the 7-bit SID2QID diverges. */
-	pi_field(PI_PON_SID2QID + 16 * PI_SID2QID_STRIDE, 6, 0, 64);	/* SID2QID[64] = OMCC phys qid 64 (TCONT16/q0); 4-per-word packing -> 0x20f8+16*4 */
-	pi_field(0x2144, 0, 0, 1);	/* SIDVALID[64] = 1 (1b, 0x213c+64/32*4 = 0x2144 bit0) */
+	/* ★ THE INDEX IS THE CHIP'S, NOT A LITERAL (2026-09-08).  These two lines
+	 * spelled SID 64 three ways -- word 16, the bare address 0x2144, and the
+	 * shift 0 -- all of them the RTL9602C's OMCI flow.  On the RTL9603CVD the
+	 * OMCI flow is 127, so the pre-arm armed a SID the OMCI block does not
+	 * watch and left the real one invalid.  Derive all three from
+	 * GPON_OMCC_FLOW, with the SAME packing arithmetic pi_packed_set() uses
+	 * (that helper is defined further down this file, which is why the
+	 * arithmetic is written out here rather than called). */
+	{
+		unsigned int f = GPON_OMCC_FLOW;
+		unsigned int q2_lsb = (f % 4u) * 7u;	/* SID2QID: 7 bits, 4/word  */
+		unsigned int v_bit  = f % 32u;		/* SIDVALID: 1 bit, 32/word */
+
+		pi_field(PI_PON_SID2QID + (f / 4u) * PI_SID2QID_STRIDE,
+			 q2_lsb + 6u, q2_lsb, GPON_OMCC_PHYS_QID & 0x7f);
+		pi_field(PI_PON_SIDVALID + (f / 32u) * 4u, v_bit, v_bit, 1);
+	}
 	/* PON_OMCI_CFG[6:0] = OMCC SID 64 — the THIRD member of the US-NIC ingress
 	 * classification triple (SID2QID + SIDVALID + OMCI_CFG). The two writes above
 	 * were baked pre-edge, but OMCI_CFG was left for gpon_install_omcc (O5, AFTER
@@ -5171,7 +5397,7 @@ void gpon_pbo_init(void)
 	 *   9603CVD silicon, so the OMCC SID never reached PON_OMCI_CFG there.
 	 *   pi_x() is identity on every chip that declares no moves, so this is
 	 *   unchanged on the RTL9602C and the RTL9607C. */
-	pi_field(PI_PON_OMCI_CFG, 6, 0, 64);	/* [6:0] = OMCC SID 64 */
+	pi_field(PI_PON_OMCI_CFG, 6, 0, GPON_OMCC_FLOW);	/* [6:0] = this chip's OMCC SID */
 
 	/* Pre-arm the WAN DATA flow (SID 1) classify here too, alongside the SID-64
 	 * pre-arm, so this boot/ifup GMII edge (the final pi_wr(0x90101070) below) ALSO
@@ -5199,8 +5425,8 @@ void gpon_pbo_init(void)
 	 * flow and silently discard the OMCI frame BEFORE the MAC counts it (the exact
 	 * RX_OK/ERR/MISS-all-0 symptom = a pre-MAC discard). Our minimal init omitted it. */
 	if (!usnic_strip) {
-		pi_wr(0x2170, 0x0001ffffu);	/* MOCIR_FRC_MD  = 0x1FFFF (all flows forced)   */
-		pi_wr(0x2174, 0x0001ffffu);	/* MOCIR_FRC_VAL = 0x1FFFF (forced CIR = max)   */
+		pi_wr(PI_MOCIR_FRC_MD, 0x0001ffffu);	/* MOCIR_FRC_MD  = 0x1FFFF (all flows forced)   */
+		pi_wr(PI_MOCIR_FRC_VAL, 0x0001ffffu);	/* MOCIR_FRC_VAL = 0x1FFFF (forced CIR = max)   */
 	}
 
 	/* Stock PON-MAC US-NIC datapath credit/threshold cluster (from the working
@@ -5215,7 +5441,7 @@ void gpon_pbo_init(void)
 	 * The "5 written twice" register resolves to 0x2150 on the live stock (0x00050005),
 	 * NOT 0x20f4 (off-by-4, disambiguated by the live stock register read). */
 	if (!usnic_strip) {
-		pi_wr(0x2150, 0x00050005u);	/* PON US-NIC IP-status/BW threshold (reg924, 5+5)  */
+		pi_wr(PI_PON_BW_THRES, 0x00050005u);	/* PON US-NIC IP-status/BW threshold (reg924, 5+5)  */
 		pi_wr(PI_PON_US_FIFO_CTL, 0x00000013u);	/* US-NIC datapath cfg                              */
 		/* PONIP_DBG_CTRL_US (0x255c): MUST be 0x00086000 to match live stock.
 		 *
@@ -5239,9 +5465,9 @@ void gpon_pbo_init(void)
 		 * is pi_sid_page_cnt() above, which ORs in this same stock base.
 		 * (It used to be two open-coded pi_wr(0x255c, ...) in the handler;
 		 * naming the helper keeps this pointer able to find its subject.) */
-		pi_wr(0x255c, 0x00086000u);	/* PONIP_DBG_CTRL_US = stock value (DBG_IGNORE_TAG=1) */
+		pi_wr(PI_PONIP_DBG_CTRL_US, 0x00086000u);	/* stock value (DBG_IGNORE_TAG=1) */
 		if (dbru_blksize)
-			pi_wr(0x2568, 0x00003002u);	/* DPRU_RPT_PRD: DBA_BLKSIZE=48 (0x30 in [15:8]) +
+			pi_wr(PI_GPON_DPRU_RPT_PRD, 0x00003002u);	/* DPRU_RPT_PRD: DBA_BLKSIZE=48 (0x30 in [15:8]) +
 							 * report period 2 [7:0] = live-stock 0x3002. The HW DBA/DBRu
 							 * engine uses this byte->block divisor to ENCODE per-SID/T-CONT
 							 * queued-occupancy into the DBRu status report the OLT reads to
@@ -5253,12 +5479,12 @@ void gpon_pbo_init(void)
 		/* 0x20f4 = PON_IPSTS_US, a READ-ONLY init-ready status reg (bit0=PONIC_INITRDY);
 		 * stock never writes it. The old pi_wr(0x20f4,1) was a no-op write to a reserved
 		 * bit -> removed. It is POLLED before the GMII latch edge below (usnic_initrdy_poll). */
-		pi_wr(0x2184, 0x00001000u);	/* MOCIR_TH_H (request/grant credit threshold)      */
-		pi_wr(0x2188, 0x00001000u);	/* MOCIR_TH_L                                       */
+		pi_wr(PI_MOCIR_TH_H, 0x00001000u);	/* MOCIR_TH_H (request/grant credit threshold)      */
+		pi_wr(PI_MOCIR_TH_L, 0x00001000u);	/* MOCIR_TH_L                                       */
 		pi_wr(PI_PON_OLT_BW_MTR_FULL, 0x0003ffffu);	/* PON_OLT_BW_MTR_FULL (maxFlow)                    */
-		pi_wr(0x2190, 0x0000956eu);	/* PON_TB_CTRL (token bucket)                       */
-		pi_wr(0x23a0, 0x0000000fu);	/* PON_SCH_QMAP                                     */
-		pi_wr(0x23e4, 0x00010001u);	/* PON US T-CONT enable                             */
+		pi_wr(PI_PON_TB_CTRL, 0x0000956eu);	/* PON_TB_CTRL (token bucket)                       */
+		pi_wr(PI_PON_SCH_QMAP, 0x0000000fu);	/* PON_SCH_QMAP                                     */
+		pi_wr(PI_PON_TCONT_EN, 0x00010001u);	/* PON US T-CONT enable                             */
 	}
 
 	/* === GMAC0<->US-NIC INTERNAL link FORCE — the long-missing step ===
@@ -5724,7 +5950,15 @@ static void gpon_ds_cam_clear_all(void)
 	for (f = 0; f < 128; f++) {
 		int rc;
 
-		if (f == 64)		/* never disturb the OMCC flow (its CAM+TRAFFIC_CFG are
+		/* ★ THE OMCC FLOW IS THE CHIP'S, AND SPELLING IT 64 HERE INVERTED
+		 * THE GUARD ON THE RTL9603CVD (2026-09-08): this loop then SKIPPED
+		 * the harmless flow 64 and CLEANED flow 127 -- the real OMCC on that
+		 * die -- zeroing the very CAM entry and TRAFFIC_CFG the caller was
+		 * about to rely on, while leaving the stale flow-64 entry that can
+		 * shadow the OMCC's GEM port.  Exactly the shadowing this function
+		 * exists to prevent, aimed at the wrong flow. */
+		if (f == (int)GPON_OMCC_FLOW)
+					/* never disturb the OMCC flow (its CAM+TRAFFIC_CFG are
 					 * written right after; the CLEAN op also zeroes the
 					 * entry's TRAFFIC_CFG and races our isOMCI write). */
 			continue;
@@ -6145,8 +6379,14 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 			   gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV),
 			   GPON_GTC_DS_ACTIVE_SN_REQ(act), GPON_GTC_DS_ACTIVE_RNG_REQ(act));
 	}
-	seq_printf(s, "gem_ds_rx: omcc(f64)=%u f0=%u f1=%u f2(mcast)=%u  (>0 => OLT is sending DS GEM/OMCI)\n",
-		   gpon_gem_ds_rx_cnt(64), gpon_gem_ds_rx_cnt(0),
+	/* ★ THE FLOW IS THE CHIP'S, AND THE LABEL PRINTS IT (2026-09-08).  This read
+	 * and its label both said 64 -- the RTL9602C's OMCI flow -- so on the
+	 * RTL9603CVD (whose OMCI flow is 127) the decisive "is the OLT sending us
+	 * DS OMCI" witness was reading a flow nothing is bound to and reporting 0.
+	 * A witness pinned to the wrong index reads as a DEVICE finding. */
+	seq_printf(s, "gem_ds_rx: omcc(f%u)=%u f0=%u f1=%u f2(mcast)=%u  (>0 => OLT is sending DS GEM/OMCI)\n",
+		   GPON_OMCC_FLOW, gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW),
+		   gpon_gem_ds_rx_cnt(0),
 		   gpon_gem_ds_rx_cnt(1), gpon_gem_ds_rx_cnt(GPON_MCAST_FLOW));
 	/* GLOBAL CAM-independent de-assembly counters (the decisive OMCI detector):
 	 * UC_RX>0 => DS unicast GEM reaches the de-assembler; OMCI_RX>0 => it de-encapped
@@ -6165,12 +6405,13 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 	 * C=DS SRAM pool used/peak; D=PON-IP->NIC RX_OK/MISS/ERR + init-ready.
 	 * Walk A->D: first 0 (or non-zero-meets-zero boundary) = the stall stage. */
 	{
-		u32 a = gpon_gem_flow_cnt(64, 0);
-		u32 q0 = pi_rd(0xa100), us = pi_rd(PI_PON_DSC_USAGE_DS), sts = pi_rd(PI_PON_DSC_STS_DS);
+		u32 a = gpon_gem_flow_cnt(GPON_OMCC_FLOW, 0);
+		u32 q0 = pi_rd(PI_PON_DS_PBO_PAGE_Q0), us = pi_rd(PI_PON_DSC_USAGE_DS),
+		    sts = pi_rd(PI_PON_DSC_STS_DS);
 		u32 ok = pi_rd(PI_PKT_OK_CNT_DS), ms = pi_rd(PI_PKT_MISS_CNT_DS), er = pi_rd(PI_PKT_ERR_CNT_DS);
 
-		seq_printf(s, "ds_pipe: A_deenc(f64)=%u nonidle=%u | B_q0cur=%u q0max=%u | C_sram=%u peak=%u | D_rxok=%u miss=%u err=%u initrdy=%u\n",
-			   a, gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_NON_IDLE),
+		seq_printf(s, "ds_pipe: A_deenc(f%u)=%u nonidle=%u | B_q0cur=%u q0max=%u | C_sram=%u peak=%u | D_rxok=%u miss=%u err=%u initrdy=%u\n",
+			   GPON_OMCC_FLOW, a, gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_NON_IDLE),
 			   q0 & 0x1fff, (q0 >> 13) & 0x1fff,
 			   us & 0x1fff, sts & 0x1fff,
 			   ok & 0xffff, (ms >> 16) & 0xffff, er & 0xffff,
@@ -6179,8 +6420,9 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * PON-IP (0x404c/0x4050) vs A_deenc(=de-encap'd). media_sts(0x1bf0c058) bit18
 		 * = internal DS-GMII FORCELINK (stock ~0x106e8400). de-encap>FWD => GTC drops;
 		 * FWD>0 & C_sram flat => PON-IP rejects (descriptor base or DS-GMII down). */
-		seq_printf(s, "ds_fwd: FWD(f64)=%u FWD(f0)=%u | media_sts=0x%08x (bit18 link=%u) gmii_en=%u\n",
-			   gpon_gem_ds_fwd_cnt(64), gpon_gem_ds_fwd_cnt(0),
+		seq_printf(s, "ds_fwd: FWD(f%u)=%u FWD(f0)=%u | media_sts=0x%08x (bit18 link=%u) gmii_en=%u\n",
+			   GPON_OMCC_FLOW, gpon_gem_ds_fwd_cnt(GPON_OMCC_FLOW),
+			   gpon_gem_ds_fwd_cnt(0),
 			   pi_rd(PI_MEDIA_STS_DS), (pi_rd(PI_MEDIA_STS_DS) >> 18) & 1,
 			   (pi_rd(PI_IO_CMD_0_DS) >> 5) & 1);
 		/* Read-back the DS-engine enables (a later reset may have cleared them):
@@ -6206,7 +6448,12 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * RX_SID_GOOD_CNT_US @ SoC 0xF0203C = PON-IP off 0x203c, 5 groups at
 		 * 4-byte stride; RX_SID_BAD_CNT_US @ 0xF02054 = off 0x2054). good>0
 		 * confirms a CPU-injected US OMCI frame reached the US-NIC and matched
-		 * SID 64; bad>0 = SID mismatch. (These read cleanly in the PON-IP window
+		 * THIS CHIP'S OMCC SID (GPON_OMCC_FLOW -- 64 on the RTL9602C, 127 here;
+		 * the old comment said "SID 64" flatly, which is the sibling's value and
+		 * was read as this board's during the OMCI port); bad>0 = SID mismatch.
+		 * ⚠ THESE COUNT ONLY MASK-ENROLLED SIDs -- see the CNT_MASK_US write in
+		 * the OMCC install; before that write was made SID-derived they were
+		 * structurally zero here. (These read cleanly in the PON-IP window
 		 * — unlike the 0xc010 DS pkt counter which bus-aborts.) */
 		seq_printf(s, "us_rxsid: good=%u/%u/%u/%u/%u bad=%u\n",
 			   pi_rd(PI_RX_SID_GOOD_CNT_US), pi_rd(0x2040), pi_rd(0x2044),
@@ -6226,10 +6473,21 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * 16*4 = 0x2138, shift (64%4)*7 = 0 -> read 0x2138[6:0]. Should read 64
 		 * (GPON_OMCC_PHYS_QID). The 0x2130 word (SID 56's slot under this packing) is kept
 		 * alongside as the value the OLD contiguous-packing bug mistakenly wrote/read. */
-		seq_printf(s, "us_arm: media_us(0x4058)=0x%08x io0_us(0x5434)=0x%08x gemus_map64(0x6500)=0x%08x sidvld(0x2144)=0x%08x s2q(0x2138/0x2130)=0x%08x/0x%08x s2q64=%lu omcicfg(0x2154)=0x%08x\n",
-			   pi_rd(PI_MEDIA_STS_US), pi_rd(PI_IO_CMD_0_US), gpon_rd(GPON_GEM_US_PORT_MAP + GPON_OMCC_FLOW * GEM_US_PORT_MAP_STRIDE),
-			   pi_rd(0x2144), pi_rd(0x2138), pi_rd(0x2130),
-			   pi_rd(0x2138) & 0x7fUL, pi_rd(PI_PON_OMCI_CFG));
+		/* ★ EVERY INDEX HERE IS THE OMCC FLOW'S, DERIVED (2026-09-08).  The
+		 * SIDVALID/SID2QID words were bare literals (0x2144 / 0x2138) chosen
+		 * for SID 64: wrong flow on the RTL9603CVD, AND a bare PI literal
+		 * bypasses the per-chip pi_x() relocation, which is a defect class
+		 * this tree already records.  The label now prints the flow it read. */
+		seq_printf(s, "us_arm: media_us(0x4058)=0x%08x io0_us(0x5434)=0x%08x gemus_map%u=0x%08x sidvld=0x%08x s2q=0x%08x s2q%u=%lu omcicfg=0x%08x\n",
+			   pi_rd(PI_MEDIA_STS_US), pi_rd(PI_IO_CMD_0_US),
+			   GPON_OMCC_FLOW,
+			   gpon_rd(GPON_GEM_US_PORT_MAP + GPON_OMCC_FLOW * GEM_US_PORT_MAP_STRIDE),
+			   pi_rd(PI_PON_SIDVALID + (GPON_OMCC_FLOW / 32u) * 4u),
+			   pi_rd(PI_PON_SID2QID + (GPON_OMCC_FLOW / 4u) * PI_SID2QID_STRIDE),
+			   GPON_OMCC_FLOW,
+			   (pi_rd(PI_PON_SID2QID + (GPON_OMCC_FLOW / 4u) * PI_SID2QID_STRIDE)
+			    >> ((GPON_OMCC_FLOW % 4u) * 7u)) & 0x7fUL,
+			   pi_rd(PI_PON_OMCI_CFG));
 		/* sched64: US queue-64 (OMCI T-CONT 16) drain-side witnesses on one line.
 		 *   total_pg   = PONIP_TOTAL_PAGE_CNT_US[12:0] (0x2560) = US pages staged in
 		 *                on-chip SRAM. This IS the raw occupancy the DBRu reports to
@@ -6250,14 +6508,29 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * PASS/FAIL = gemus64 climbing + total_pg draining + the OLT resuming grants,
 		 * NEVER over_sts64. All direct reads (no DBG_CTRL_US strobe -> no 0x86000
 		 * encap hazard); raw words included to disambiguate the bitmap packing on HW. */
-		seq_printf(s, "sched64: total_pg=%u over_sts64=%u over_latch64=%u bank_underfl=%u dis_dbru_latch=%u [over 0x256c/70/74=%08x/%08x/%08x latch80=%08x schopt=%08x gemintr=%08x]\n",
-			   pi_rd(0x2560) & 0x1fffu,
-			   pi_rd(0x2574) & 1u,
-			   pi_rd(0x2580) & 1u,
-			   gpon_rd(GPON_GEM_US_INTR_STS) & 1u,
-			   (pi_rd(0x25d8) >> 19) & 1u,
-			   pi_rd(0x256c), pi_rd(0x2570), pi_rd(0x2574),
-			   pi_rd(0x2580), pi_rd(0x25d8), gpon_rd(GPON_GEM_US_INTR_STS));
+		{
+			/* ★ THE WORD IS THE OMCC SID'S, AND THE LATCH IS ITS OWN
+			 * REGISTER (2026-09-08). This dump used SID 64's word (+8)
+			 * and reached the latch as OVER_STS+0x14 -- both RTL9602C
+			 * facts: the OMCC SID is 127 on the RTL9603CVD (word 3), and
+			 * the gap from status to latch is 3 words there and 4 here,
+			 * because the two dies carry 65 and 128 SIDs. */
+			unsigned int ow = (GPON_OMCC_FLOW / 32u) * 4u;
+			unsigned int ob = GPON_OMCC_FLOW % 32u;
+
+			seq_printf(s, "sched64: total_pg=%u over_sts%u=%u over_latch%u=%u bank_underfl=%u dis_dbru_latch=%u [over w0/1/2=%08x/%08x/%08x latch=%08x schopt=%08x gemintr=%08x]\n",
+				   pi_rd(PI_PONIP_TOTAL_PAGE_CNT_US) & 0x1fffu,
+				   GPON_OMCC_FLOW,
+				   (pi_rd(PI_PONIP_SID_OVER_STS + ow) >> ob) & 1u,
+				   GPON_OMCC_FLOW,
+				   (pi_rd(PI_PONIP_SID_OVER_LATCH_STS + ow) >> ob) & 1u,
+				   gpon_rd(GPON_GEM_US_INTR_STS) & 1u,
+				   (pi_rd(PI_PON_SCH_OPT) >> 19) & 1u,
+				   pi_rd(PI_PONIP_SID_OVER_STS), pi_rd(PI_PONIP_SID_OVER_STS + 4),
+				   pi_rd(PI_PONIP_SID_OVER_STS + 8),
+				   pi_rd(PI_PONIP_SID_OVER_LATCH_STS + ow), pi_rd(PI_PON_SCH_OPT),
+				   gpon_rd(GPON_GEM_US_INTR_STS));
+		}
 		/* feed64: the US-feed / framer witnesses (drain-path stage 3/4).
 		 * dsc_sts = PON_DSC_STS_US (0x2158): SRAM_USED[12:0] pages staged in on-chip
 		 * SRAM, DRAM_USED[28:16] pages the PON-IP has handed toward the GTC US path.
@@ -6266,8 +6539,9 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * feed_cnt = US-feed re-arm count (pre-FSM + O5 + any O3). If pages are staged
 		 * (total_pg>0) but the framer emits nothing (gemus64=0, bank_underfl=0), check
 		 * whether sstart=1 and whether dram_used advances (feed handing pages to GTC). */
-		seq_printf(s, "feed64: dsc_sts(0x2158)=0x%08x[sram_used=%u dram_used=%u] sstart(0x5200)=%u feed_cnt=%u\n",
-			   pi_rd(0x2158), pi_rd(0x2158) & 0x1fffu, (pi_rd(0x2158) >> 16) & 0x1fffu,
+		seq_printf(s, "feed64: dsc_sts=0x%08x[sram_used=%u dram_used=%u] sstart(0x5200)=%u feed_cnt=%u\n",
+			   pi_rd(PI_PON_DSC_STS_US), pi_rd(PI_PON_DSC_STS_US) & 0x1fffu,
+			   (pi_rd(PI_PON_DSC_STS_US) >> 16) & 0x1fffu,
 			   gpon_rd(GPON_GTC_US_PROC_MODE) & 1u, gpon_us_feed_rearm_cnt);
 		/* usdram: the AUTHORITATIVE US SRAM->DRAM staging state (tier-3: the drain is HW-
 		 * autonomous, so a stalled staging = a DRAM-config fault, not a missing kick). The
@@ -6301,9 +6575,19 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 * US_TX 0x329bc; PON_TRAP_CFG 0x111f8 [2:0]=OMCI_MPCP_PRIORITY. DECODER:
 		 * rx>0 & NIC filled=0 => de-encap OK but trap-to-CPU gap; drop>0 =>
 		 * SID/queue/PBO mapping rejecting the OMCI before it traps. */
-		seq_printf(s, "omci_pi: rx(0x329c0)=%u drop(0x329b8)=%u crcerr(0x329cc)=%u ustx(0x329bc)=%u trapcfg(0x111f8)=0x%08x\n",
+		/* ★ THE CPU SIDE IS PRINTED BESIDE THE PON-IP SIDE, and the pair is
+		 * the diagnosis: cpu_tx counts responses the Ethernet shell QUEUED,
+		 * cpu_drop the ones its ring REFUSED, ustx what the PON-IP actually
+		 * TRANSMITTED.  cpu_tx>0 & cpu_drop=0 & ustx=0 means the frames left
+		 * the MAC and the fabric swallowed them -- which is a different fault
+		 * from a ring that would not take them, and neither number alone can
+		 * tell the two apart.  cpu_tx=-1 is a shell with no OMCI datapath
+		 * ("could not ask"), never a zero. */
+		seq_printf(s, "omci_pi: rx=%u drop=%u crcerr=%u ustx=%u trapcfg=0x%08x cpu_tx=%u cpu_drop=%u  (swcore OMCI block @0x%05x, PON_TRAP_CFG @0x%05x -- PER-CHIP)\n",
 			   sw_rd(OMCI_RX_PKT_CNT), sw_rd(OMCI_DROP_PKT_CNT), sw_rd(OMCI_CRC_ERROR_PKT_CNT),
-			   sw_rd(OMCI_TX_PKT_CNT), sw_rd(PON_TRAP_CFG));
+			   sw_rd(OMCI_TX_PKT_CNT), sw_rd(PON_TRAP_CFG),
+			   rtl9602c_eth_omci_tx_dirty(), rtl9602c_eth_omci_tx_dropped(),
+			   swc->omci_cnt, swc->pon_trap_cfg);
 		/* US packet-engine TX counters (PI_PKT_OK_CNT_US 0x04010 / ERR 0x04014 /
 		 * MISS 0x04018). If the ONU transmits ANY upstream GEM on the OLT's BWMAP
 		 * grants these climb; us_tx_ok=0 => the ONU never fills its grants (US PLOAM
@@ -6376,7 +6660,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		 *   fault EARLIER, while it can still be prevented; this one confirms
 		 *   it from the grant side. */
 		{
-			u32 en = pi_rd(0x23e4);
+			u32 en = pi_rd(PI_PON_TCONT_EN);
 			int i, nvalid = 0;
 
 			gpon_wr(GPON_BWMAP_CTRL, gpon_rd(GPON_BWMAP_CTRL) | (1u << 15));	/* CAP_EN arm */
@@ -6444,7 +6728,8 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 			   gpon_us_misc_cnt(4), gpon_us_misc_cnt(1),
 			   gpon_rd(TCONT_IDLE_STAT(16)), gpon_rd(TCONT_IDLE_STAT(16) + 4),
 			   gpon_rd(TCONT_IDLE_STAT(8)),
-			   gpon_rd(GEM_US_STAT(64)), gpon_rd(GEM_US_STAT(64) + 4),
+			   gpon_rd(GEM_US_STAT(GPON_OMCC_FLOW)),
+			   gpon_rd(GEM_US_STAT(GPON_OMCC_FLOW) + 4),
 			   gpon_rd(GEM_US_STAT(2)),
 			   gpon_rd(GPON_GTC_US_CFG), gpon_rd(GPON_GEM_US_PTI_CFG));
 		/* GEM_US_BYTE_STAT full scan (base 0x6800, stride 8): which flow does the
@@ -6461,12 +6746,27 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		}
 		/* US-scheduler readback: did the gpon_install_tcont writes for qid 64 /
 		 * T-CONT 16 actually LAND (vs being write-protected or wrong-offset)?
-		 * Expect pir64/cir64 = 0x3ffff, tcont_en bit16=1, qmap16=1, wfqtype bit0=0,
-		 * wfqwt bits[19:10]=1, drn bit0=0 (idle). */
-		seq_printf(s, "us_sched: pir64(0x239c)=0x%08x cir64(0x2298)=0x%08x tcont_en(0x23e4)=0x%08x qmap16(0x23e0)=0x%08x wfqtype(0x23f0)=0x%08x wfqwt(0x244c)=0x%08x drn(0x20e4)=0x%08x sch_ctrl(0x2194)=0x%08x[PIR_DROP=%lu]\n",
-			   pi_rd(0x239c), pi_rd(0x2298), pi_rd(0x23e4), pi_rd(0x23e0),
-			   pi_rd(0x23f0), pi_rd(0x244c), pi_rd(PI_DRN_CMD),
-			   pi_rd(0x2194), (pi_rd(0x2194) >> 18) & 1UL);
+		 * Expect pirQ/cirQ = 0x3ffff, tcont_en bit16=1, qmap16=1, wfqtype=0,
+		 * wfqwt=1, drn bit0=0 (idle).
+		 * ★ THE LABELS NO LONGER CARRY AN ADDRESS (2026-09-08): every one of them
+		 * printed the RTL9602C offset while the read now goes to this chip's own,
+		 * and a label that names a register the read did not touch is exactly the
+		 * evidence-pointing-the-wrong-way this dump exists to avoid.  The ENTRY
+		 * INDEX is what a reader needs, so that is what is printed. */
+		seq_printf(s, "us_sched: pirQ%u=0x%08x cirQ%u=0x%08x tcont_en=0x%08x qmapT%u=0x%08x wfqtypeQ%u=0x%08x wfqwtQ%u=0x%08x drn=0x%08x sch_ctrl=0x%08x[PIR_DROP=%lu]\n",
+			   (unsigned int)GPON_OMCC_PHYS_QID,
+			   pi_rd(PI_PON_QID_PIR_RATE + GPON_OMCC_PHYS_QID * PI_QID_RATE_STRIDE),
+			   (unsigned int)GPON_OMCC_PHYS_QID,
+			   pi_rd(PI_PON_QID_CIR_RATE + GPON_OMCC_PHYS_QID * PI_QID_RATE_STRIDE),
+			   pi_rd(PI_PON_TCONT_EN),
+			   (unsigned int)GPON_OMCC_TCONT,
+			   pi_packed_get(PI_PON_SCH_QMAP, GPON_OMCC_TCONT, swc->sch_qmap_bits),
+			   (unsigned int)GPON_OMCC_PHYS_QID,
+			   pi_packed_get(PI_PON_WFQ_TYPE, GPON_OMCC_PHYS_QID, 1),
+			   (unsigned int)GPON_OMCC_PHYS_QID,
+			   pi_packed_get(PI_PON_WFQ_WEIGHT, GPON_OMCC_PHYS_QID, 10),
+			   pi_rd(PI_DRN_CMD),
+			   pi_rd(PI_PON_SCH_CTRL), (pi_rd(PI_PON_SCH_CTRL) >> 18) & 1UL);
 		/* ★ SID-64 page-occupancy probe (OLT-INDEPENDENT verify of the descriptor-
 		 * sideband OMCI fix): MAX_PAGE_CNT high-water for SID 64 is NON-ZERO iff an
 		 * OMCI frame was ever classified+enqueued to physical queue 64. This latches
@@ -6495,7 +6795,7 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 			int prc = pi_sid_page_cnt(GPON_OMCC_FLOW, &pc);
 
 			seq_printf(s, "sidpage64: used=%u max=%u (max>0 = OMCI ENQUEUED to queue 64) [r255c=0x%08x r2564=0x%08x poll=%d]\n",
-				   pc & 0x1fff, (pc >> 16) & 0x1fff, pi_rd(0x255c), pc, prc);
+				   pc & 0x1fff, (pc >> 16) & 0x1fff, pi_rd(PI_PONIP_DBG_CTRL_US), pc, prc);
 		}
 		/* ★2026-07-04 flow-1 (WAN data) US datapath witness — the sustained-data-US dig.
 		 * The data flow (SID GPON_DATA_FLOW=1, gem 193) rides qid 64's grants but keeps its
@@ -6528,16 +6828,17 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		/* CAM read-back: does the DS GEM CAM actually map gem->flow 64 at runtime?
 		 * e64 should read gem=2 (the OMCC) HIT=1; traffic_cfg[64] should be 0x4. */
 		{
-			int c64 = gpon_ds_cam_read(64), c0 = gpon_ds_cam_read(0);
+			int c64 = gpon_ds_cam_read(GPON_OMCC_FLOW), c0 = gpon_ds_cam_read(0);
 			int c1 = gpon_ds_cam_read(GPON_DATA_FLOW);
 
 			if (c64 < 0 || c0 < 0 || c1 < 0)
-				seq_printf(s, "ds_cam: READ-FAILED e64=%d e0=%d e%u=%d\n",
-					   c64, c0, GPON_DATA_FLOW, c1);
+				seq_printf(s, "ds_cam: READ-FAILED e%u=%d e0=%d e%u=%d\n",
+					   GPON_OMCC_FLOW, c64, c0, GPON_DATA_FLOW, c1);
 			else
-				seq_printf(s, "ds_cam: e64=gem%u hit%u tcfg64=0x%x | e0=gem%u hit%u | e%u(data)=gem%u hit%u tcfg=0x%x\n",
-					   c64 & 0xfff, !!(c64 & BIT(16)),
-					   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + 64 * 4) & 0x1f,
+				seq_printf(s, "ds_cam: e%u=gem%u hit%u tcfg=0x%x | e0=gem%u hit%u | e%u(data)=gem%u hit%u tcfg=0x%x\n",
+					   GPON_OMCC_FLOW, c64 & 0xfff, !!(c64 & BIT(16)),
+					   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG +
+						   GPON_OMCC_FLOW * DS_TRAFFIC_CFG_STRIDE) & 0x1f,
 					   c0 & 0xfff, !!(c0 & BIT(16)),
 					   GPON_DATA_FLOW, c1 & 0xfff, !!(c1 & BIT(16)),
 					   gpon_rd(GPON_GTC_DS_TRAFFIC_CFG + GPON_DATA_FLOW * 4) & 0x1f);
@@ -6970,8 +7271,16 @@ static void gpon_send_cpu_ploam(u8 queue, const u8 m[12])
 	for (i = 0; i < 6; i++)
 		gpon_wr(GPON_GTC_US_PLOAM_DATA + i * 4,
 			((u32)m[2 * i] << 8) | m[2 * i + 1]);
-	gpon_wr(GPON_GTC_US_PLOAM_CFG,
-		GPON_US_PLM_CRC_GEN_EN | GPON_US_PLM_ONUID_OVRD);	/* = 0x13 */
+	/* ★ THE COMMENT SAID 0x13 AND THE EXPRESSION MADE 0x03 (fixed 2026-09-08).
+	 * CRC_GEN_EN|ONUID_OVRD is bits 1|0; the word stock rests at is 0x13, and
+	 * the missing bit is PLM_FLUSH_BUF.  So this write -- issued immediately
+	 * before every ENQ edge -- put the transmit buffer back into the flushing
+	 * state on EVERY CPU PLOAM.  MEASURED on the G24W: `PLM_TX ...
+	 * enq_cleared=1(0us) ... cputx=0` on every send, i.e. the HW took the
+	 * message and dropped it instead of holding it for the next granted PLOAM
+	 * slot, so the OLT never received our Password or any Acknowledge and
+	 * marked the ONT `Config State: fail`. */
+	gpon_wr(GPON_GTC_US_PLOAM_CFG, GPON_US_PLM_CFG_REST);	/* 0x13, as stock rests */
 
 	ind |= GPON_US_PLM_ENQ;			/* ENQ 0->1 edge: transmit */
 	gpon_wr(GPON_GTC_US_PLOAM_IND, ind);
@@ -7147,19 +7456,24 @@ static void gpon_send_key(void)
  * same predicate the Cortina shell uses, so one family cannot drift into a
  * private idea of what "in range" means; count is 1 because Luna stamps single
  * named flows and owns no slot RANGE. */
-static_assert(GPON_GEM_US_RANGE_OK(GPON_OMCC_FLOW, 1u, GEM_US_PORT_MAP_IDX_MAX),
-	      "the OMCC flow index runs past the US port-map array");
+/* ★ ONE ASSERTION PER DECLARED CHIP, not one on "the" OMCC flow: the index is a
+ * table field now, and a static_assert on a table field does not compile. Each
+ * die's own constant is checked, so adding a chip whose OMCI flow runs past the
+ * array is caught at build time exactly as before. */
+static_assert(GPON_GEM_US_RANGE_OK(GPON_OMCC_FLOW_9602C, 1u, GEM_US_PORT_MAP_IDX_MAX),
+	      "the RTL9602C OMCC flow index runs past the US port-map array");
+static_assert(GPON_GEM_US_RANGE_OK(GPON_OMCC_FLOW_9603CVD, 1u, GEM_US_PORT_MAP_IDX_MAX),
+	      "the RTL9603CVD OMCC flow index runs past the US port-map array");
+static_assert(GPON_GEM_US_RANGE_OK(GPON_OMCC_FLOW_9607C, 1u, GEM_US_PORT_MAP_IDX_MAX),
+	      "the RTL9607C OMCC flow index runs past the US port-map array");
 static_assert(GPON_GEM_US_RANGE_OK(GPON_DATA_FLOW, 1u, GEM_US_PORT_MAP_IDX_MAX),
 	      "the data flow index runs past the US port-map array");
 /* GPON_DATA_FLOW(1) / the OLT's gem-port-id — the WAN data GEM (clean-room nas0-equivalent) —
  * are defined in rtl9602c_gpon_nic.h (shared with the eth driver's gpon0 TX descriptor). */
-#define GPON_OMCC_PHYS_QID	64		/* OMCC physical qid = TCONT_QUEUE_MAX(32)*(TCONT16/8)+q0 = 64
-						 * (stock physical-queue-id mapping, GPON branch:
-						 * srl>>3 then <<5). The prior "63" was a misread: with the WRONG
-						 * contiguous packing, the readback of SID2QID[64] actually read
-						 * SID 56's slot (a data flow legitimately at qid 63). Fixed packing
-						 * (entries_per_word = 32/bits) below now addresses SID 64 correctly,
-						 * so the true stock value 64 applies. Used for SID2QID + scheduler qid. */
+/* ★ GPON_OMCC_PHYS_QID MOVED TO THE TOP OF THIS FILE (2026-09-08), beside the
+ * per-chip OMCC flow constants: the US-NIC pre-arm needs it and had been
+ * spelling it as a bare 64 because this definition sat below the pre-arm.  Its
+ * measured rationale travelled WITH it, unchanged. */
 #define GPON_OMCC_DSQ_HIGH	2
 
 /* Dedicated DATA T-CONT for the WAN data GEM (193). STOCK rides gem 193 on its own data
@@ -7171,6 +7485,16 @@ static_assert(GPON_GEM_US_RANGE_OK(GPON_DATA_FLOW, 1u, GEM_US_PORT_MAP_IDX_MAX),
 #define GPON_DATA_ALLOC		256u	/* OLT data Alloc-ID for THIS OLT (consistent; from ME262) */
 #define GPON_DATA_PHYS_QID	32	/* = 32*(GPON_DATA_TCONT/8) */
 static int gpon_install_tcont(u8 tcont, u16 alloc);	/* fwd: data-GEM install binds the data T-CONT */
+
+/* The CPU-side DS-OMCI count, or -1 when this board's Ethernet shell has no
+ * OMCI datapath.  See GPON_OMCI_RX_UNAVAIL: an unported path must not print as
+ * a device that received nothing. */
+static int gpon_omci_rx_cnt(void)
+{
+	u32 v = rtl9602c_eth_omci_rx_count();
+
+	return v == GPON_OMCI_RX_UNAVAIL ? -1 : (int)v;
+}
 
 /* Set a `bits`-wide entry at index `idx` in the packed pi-register array based
  * at `base` (driver-relative). The 32/bits-entries-per-word addressing -- the
@@ -7368,7 +7692,7 @@ static int gpon_install_omcc(u16 gem)
 	 * -> gemus64=0 on re-range (confirmed: first O5 has gemus64>0, but
 	 * after DEACT+re-range gemus64 drops to 0). Re-write it here so every
 	 * re-range re-arms the tag strip. */
-	pi_wr(0x255c, 0x00086000u);	/* PONIP_DBG_CTRL_US = stock (DBG_IGNORE_TAG=1) */
+	pi_wr(PI_PONIP_DBG_CTRL_US, 0x00086000u);	/* stock (DBG_IGNORE_TAG=1) */
 
 	/* PON-IP: SID-valid + OMCI-SID. CONFIRMED against LIVE stock O5: SIDVALID[64]=1,
 	 * OMCI_CFG=0x40. SID_Q_MAP_DS[64] is 0 on stock (NOT the HIGH queue 2 I set
@@ -7379,13 +7703,32 @@ static int gpon_install_omcc(u16 gem)
 	pi_packed_set(PI_PON_SIDVALID, GPON_OMCC_FLOW, 1, 1);
 	pi_field(PI_PON_OMCI_CFG, 6, 0, GPON_OMCC_FLOW);
 	pi_packed_set(PI_PON_SID_Q_MAP_DS, GPON_OMCC_FLOW, 2, 0);
-	/* Enroll SID 64 in US counter-mask group 0 (CNT_MASK_US 0x20a8 + g*12 +
-	 * word; SID64 -> 0x20b0 bit0). RX_SID_GOOD/BAD_CNT_US count ONLY
-	 * mask-enrolled SIDs (the stock PBO US counter-group member-add step) —
-	 * without this every us_rxsid readout is structurally zero and proves
-	 * nothing. The UNGATED ingest counter is PKT_OK_CNT_US (PI 0x4010,
-	 * RX_OK[15:0]). */
-	pi_wr(0x20b0, pi_rd(0x20b0) | 1);
+	/* Enrol THIS CHIP's OMCC SID in US counter-mask group 0.  RX_SID_GOOD/BAD_
+	 * CNT_US count ONLY mask-enrolled SIDs (the stock PBO US counter-group
+	 * member-add step); the UNGATED ingest counter is PKT_OK_CNT_US (PI
+	 * 0x4010, RX_OK[15:0]).
+	 *
+	 * GEOMETRY [tier 3, the RTL9603CVD chipdef]: CNT_MASK_US (PI 0x20a8) is
+	 * ONE BIT PER SID -- `array offset 1` (bits), `array index 0..127`,
+	 * `port index 0..3` -- i.e. FOUR groups of a 128-bit mask.  So group g's
+	 * word for SID s is 0x20a8 + g*16 + (s/32)*4, bit s%32.  The arithmetic
+	 * cross-checks itself: four 16-byte groups end at 0x20e8, which is
+	 * exactly where the chipdef puts RX_DROP_CNT_US.
+	 *
+	 * ⚠⚠ THIS WAS A LITERAL `pi_wr(0x20b0, ... | 1)` -- SID 64, hardcoded,
+	 * with the group stride mis-documented as 12 bytes.  SID 64 is the
+	 * RTL9602C's OMCC; this chip's is 127.  So on the G24W it enrolled a
+	 * stream that carries nothing, every us_rxsid readout was structurally
+	 * zero WHATEVER the upstream OMCI did, and the old comment's own warning
+	 * ("proves nothing") came true unnoticed.  MEASURED 2026-09-08: read as
+	 * "the US OMCI never reached the US-NIC" during the CPU-side OMCI port,
+	 * on a board where the counter could not have moved.  A witness that
+	 * cannot fire is worse than no witness -- it answers. */
+	{
+		u32 mask_w = 0x20a8 + (GPON_OMCC_FLOW / 32) * 4;
+
+		pi_wr(mask_w, pi_rd(mask_w) | BIT(GPON_OMCC_FLOW % 32));
+	}
 
 	/* Read the packed entries back through pi_packed_get (the contiguous-bit-pack
 	 * mirror of pi_packed_set) to confirm SID2QID[64] landed at the TRUE word
@@ -7671,7 +8014,10 @@ int gpon_install_data_gem(void)
 	return 0;
 }
 
-#define GPON_OMCC_TCONT		16
+/* GPON_OMCC_TCONT moved to the top of this file (2026-09-08) beside
+ * GPON_OMCC_PHYS_QID: /proc's us_sched line needs it and sat above this
+ * point, which is the same "defined below its first user" hazard that had
+ * the US-NIC pre-arm spelling the OMCC queue as a bare 64. */
 
 /*
  * Bind an OLT-assigned Alloc-ID to a T-CONT in the GTC alloc CAM (Assign_Alloc-ID
@@ -7750,9 +8096,12 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 				(1u << 2) | ((qid & 0x7f) << 3) | (1u << 1),
 				1u, 10000, pi_pause_1us) < 0)
 			pr_warn("rtl9602c-gpon: qid %u drain-out timeout\n", qid);
-		pi_wr(0x023a0 + tcont * 4, 0x1);		/* PON_SCH_QMAP[tcont] = logical-q0 */
-		pi_field(0x0229c + qid * 4, 17, 0, 0x3ffff);	/* PON_QID_PIR_RATE[qid] = MAX (1 word/qid) */
-		pi_field(0x02198 + qid * 4, 17, 0, 0);		/* PON_QID_CIR_RATE[qid] = 0 (live-stock; STRICT uses PIR only) */
+		pi_packed_set(PI_PON_SCH_QMAP, tcont, swc->sch_qmap_bits, 0x1);
+						/* PON_SCH_QMAP[tcont] = logical-q0; the entry is 32b
+						 * wide on the RTL9602C and 8b on the RTL9603CVD, so
+						 * `base + tcont * 4` was a per-chip fact too. */
+		pi_field(PI_PON_QID_PIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, 0x3ffff);	/* PON_QID_PIR_RATE[qid] = MAX (1 word/qid) */
+		pi_field(PI_PON_QID_CIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, 0);		/* PON_QID_CIR_RATE[qid] = 0 (live-stock; STRICT uses PIR only) */
 		pi_packed_set(PI_PON_WFQ_TYPE, qid, 1, 0);	/* PON_WFQ_TYPE[qid] = STRICT (1b packed) */
 		/* PON_WFQ_WEIGHT[qid] = 1 (10 bits/entry, 3 entries per 32-bit word --
 		 * exactly pi_packed_locate's 32/bits packing, top 2 bits of each word
@@ -7783,8 +8132,8 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 			 * again — warn on the console so it is caught on boot #1, not weeks
 			 * later. */
 			u32 en   = pi_packed_get(0x023e4, tcont, 1);	/* PON_TCONT_EN[tcont] */
-			u32 qmap = pi_rd(0x023a0 + tcont * 4) & 0x3u;
-			u32 pir  = pi_rd(0x0229c + qid * 4) & 0x3ffffu;
+			u32 qmap = pi_packed_get(PI_PON_SCH_QMAP, tcont, swc->sch_qmap_bits) & 0x3u;
+			u32 pir  = pi_rd(PI_PON_QID_PIR_RATE + qid * PI_QID_RATE_STRIDE) & 0x3ffffu;
 
 			if (en && qmap && pir)
 				pr_info("rtl9602c-gpon: SIDVALID[%u] arm_ctx OK (tcont_en=1 sch_qmap=%u pir=0x%x) -> re-issuing on armed queue\n",
@@ -8260,22 +8609,29 @@ static void luna_op_us_ploam_flush(void *sh)
 	/* PLM_FLUSH_BUF is edge-triggered: 0 THEN 1.  Read-modify-write, because
 	 * CRC_GEN_EN|ONUID_OVRD live in the same word and must survive.
 	 *
-	 * ★★★ AND IT MUST RETURN TO 0 (2026-09-08).  We used to leave the bit
-	 * ASSERTED after the edge, which put US_PLOAM_CFG at 0x13 where this
-	 * board's own stock rests at 0x03 -- the ONLY GTC upstream word that
-	 * differed from stock (US_CFG, US_LASER, BOH, MIN_DELAY and SD_TH all
-	 * match byte for byte).  A flush level left standing on the UPSTREAM
-	 * PLOAM buffer is exactly the shape of this board's symptom: the MAC
-	 * reports it transmitted (bwm_acpt=1, a valid PLOAMu / T-CONT-16 grant
-	 * every ~8 s) while the OLT reports "Laser out" and never assigns an
-	 * ONU-ID.
-	 * ⚠ THE EDGE IS THE OPERATION; THE LEVEL IS NOT.  Restoring 0 keeps the
-	 * resting word identical to stock's and cannot lose the flush, which has
-	 * already happened on the 0->1 transition above.
+	 * ★★★ AND IT RESTS AT 1, NOT 0 (settled 2026-09-08, three tiers).
+	 *   tier 1  the G24W's OWN stock, read live at O5 while the OLT listed it
+	 *           Online -- GPON_GTC_US_PLOAM_CFG (0x5100) = 0x00000013, bit 4 SET
+	 *           (results/stock_firmware/RTL9603CVD/LANLY/G24W/gpon-oracle/
+	 *            2026-09-06.2/gtc-regs.json)
+	 *   tier 3  the vendor's flush for this exact die,
+	 *           dal_rtl9603cvd_gpon_usPloamBuf_flush(): it writes 0, then 1,
+	 *           and STOPS.  Nothing clears bit 4 again for the life of the box.
+	 *   tier 1  OURS, measured with ploam_tx_dbg on this board: resting at 0,
+	 *           EVERY CPU PLOAM reported `enq_cleared=1(0us) ... cputx=0` --
+	 *           the HW accepted the enqueue and discarded it in the same
+	 *           instant, so the Password and every Acknowledge were never
+	 *           transmitted and the OLT marked the ONT `Config State: fail`.
+	 * ⇒ THE LEVEL 1 IS THE OPERATING STATE AND THE 1->0->1 DIP IS THE FLUSH.
+	 * A third write back to 0 leaves the transmit buffer permanently flushing,
+	 * which is why this ONU could hold O5 and still say nothing the OLT heard.
+	 * ⚠ The earlier justification for that third write -- "it moved this board
+	 * off an O3 stall" -- was already recorded as WEAK, and the O3/O4 stall it
+	 * was credited with has since been traced to PON_TCONT_EN being written at
+	 * the RTL9602C address.  Nothing is left supporting it.
 	 */
 	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);
 	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);
-	gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);
 }
 
 static void luna_op_set_hw_state(void *sh, enum gpon_ostate st)
@@ -9019,9 +9375,18 @@ static void gpon_fsm_handle(const u8 *m)
 			 * of boots, grant-timing dependent). Stock does
 			 * exactly this at this O4-EqD edge (US-PLOAM-buffer flush: PLM_FLUSH_BUF
 			 * 0->1). Use gpon_field RMW so CRC_GEN_EN|ONUID_OVRD are preserved. */
+			/* ⚠ DELIBERATELY THE RAW WRITES, NOT A CALL TO
+			 * luna_op_us_ploam_flush() (2026-09-08).  Collapsing them onto
+			 * the op looks like the obvious de-duplication and it removes
+			 * the differential's teeth: ploam_fsm_diff_test compares this
+			 * FSM's RAW register vocabulary against the core's OP calls, and
+			 * FOLDS this sequence into the op's meaning.  If both sides
+			 * called the op there would be nothing left to compare here.
+			 * The single source of truth is the FOLD RULE in
+			 * rtl9607c-test/ploam_fsm_diff_test.c, which must mirror the
+			 * luna_op_us_ploam_flush() body exactly -- keep the two in step. */
 			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);	/* PLM_FLUSH_BUF = 0 */
-			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);	/* 0->1 edge: flush */
-			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 0);	/* rest at 0, as stock does */
+			gpon_field(GPON_GTC_US_PLOAM_CFG, 4, 4, 1);	/* 0->1 edge: flush, and REST here */
 			pr_info("rtl9602c-gpon: Ranging_Time EqD=0x%x -> O5 (us-ploam flushed)\n", eqd);
 			luna_ploam_diag(GPON_PDIAG_RANGING_TIME);	/* still O4: the window that WORKED */
 			gpon_fsm_set_state(5);
@@ -9043,11 +9408,11 @@ static void gpon_fsm_handle(const u8 *m)
 		fallthrough;
 	case PLM_DS_DEACTIVATE_ONU:
 		if (onu_id == gpon_fsm_onu_id || onu_id == 0xff) {
-			pr_info("rtl9602c-gpon: EVT t=%u DEACT(0x05) onu=%u | dsrx64=%u pirx=%u omcirx=%u | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
+			pr_info("rtl9602c-gpon: EVT t=%u DEACT(0x05) onu=%u | dsrx64=%u pirx=%u omcirx=%d | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
 				gpon_fsm_ticks, gpon_fsm_onu_id,
-				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
+				gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW), sw_rd(OMCI_RX_PKT_CNT), gpon_omci_rx_cnt(),
 				gpon_us_misc_cnt(2), gpon_us_misc_cnt(4),
-				gpon_rd(GEM_US_STAT(64)), gpon_rd(TCONT_IDLE_STAT(16)));
+				gpon_rd(GEM_US_STAT(GPON_OMCC_FLOW)), gpon_rd(TCONT_IDLE_STAT(16)));
 			luna_ploam_diag(GPON_PDIAG_DEACT);
 			gpon_fsm_onu_id = 0xff;
 			/* FULL reset to O1 — mirror the SN-reprovision path (≈line 3068).
@@ -9250,9 +9615,9 @@ static void gpon_fsm_handle(const u8 *m)
 		/* OLT requests a downstream AES key; reply with Encryption_Key (US 0x05). */
 		if (onu_id == gpon_fsm_onu_id) {
 			gpon_send_key();
-			pr_info("rtl9602c-gpon: EVT t=%u REQ_KEY(0x0d) dsrx64=%u pirx=%u omcirx=%u\n",
-				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT),
-				rtl9602c_eth_omci_rx_count());
+			pr_info("rtl9602c-gpon: EVT t=%u REQ_KEY(0x0d) dsrx64=%u pirx=%u omcirx=%d\n",
+				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW), sw_rd(OMCI_RX_PKT_CNT),
+				gpon_omci_rx_cnt());
 		}
 		break;
 	case PLM_DS_REQUEST_PASSWORD:
@@ -9262,9 +9627,9 @@ static void gpon_fsm_handle(const u8 *m)
 		 * is ignored but the message is required to advance activation. */
 		if (onu_id == gpon_fsm_onu_id || onu_id == 0xff) {
 			gpon_send_password();
-			pr_info("rtl9602c-gpon: EVT t=%u REQ_PW(0x09) -> sent Password dsrx64=%u pirx=%u omcirx=%u\n",
-				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT),
-				rtl9602c_eth_omci_rx_count());
+			pr_info("rtl9602c-gpon: EVT t=%u REQ_PW(0x09) -> sent Password dsrx64=%u pirx=%u omcirx=%d\n",
+				gpon_fsm_ticks, gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW), sw_rd(OMCI_RX_PKT_CNT),
+				gpon_omci_rx_cnt());
 		}
 		break;
 	case PLM_DS_KEY_SWITCH:
@@ -9288,10 +9653,11 @@ static void gpon_fsm_handle(const u8 *m)
 					fc);
 			}
 			gpon_send_ack(m);
-			pr_info("rtl9602c-gpon: EVT t=%u KEY_SW(0x13) staged=%d arm@%u hwswt=%u dsrx64=%u pirx=%u omcirx=%u\n",
+			pr_info("rtl9602c-gpon: EVT t=%u KEY_SW(0x13) staged=%d arm@%u hwswt=%u dsrx64=%u pirx=%u omcirx=%d\n",
 				gpon_fsm_ticks, gpon_key_staged, gpon_aes_switch_time,
 				gpon_rd(GPON_AES_KEY_SWITCH_TIME) & 0x3fffffff,
-				gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count());
+				gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW), sw_rd(OMCI_RX_PKT_CNT),
+				gpon_omci_rx_cnt());
 		}
 		break;
 	case PLM_DS_ENCRYPT_PORT:
@@ -9486,10 +9852,10 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * the framer emits nothing on the grant. Re-strobe the feed each tick while staged-
 	 * but-not-draining so it is live when grants land; auto-stops once gemus64 advances. */
 	if (feed_rekick && gpon_fsm_state == 5 && gpon_omcc_installed) {
-		u32 dsc = pi_rd(0x02158);
+		u32 dsc = pi_rd(PI_PON_DSC_STS_US);
 
 		if ((dsc & 0x1fffu) > 0 && ((dsc >> 16) & 0x1fffu) == 0 &&
-		    gpon_rd(GEM_US_STAT(64)) == 0)
+		    gpon_rd(GEM_US_STAT(GPON_OMCC_FLOW)) == 0)
 			gpon_us_feed_rearm_light();
 	}
 
@@ -9660,12 +10026,13 @@ static void gpon_fsm_poll(struct timer_list *t)
 		 * polled PON-IP access — unsafe here, unlike sw_rd/gpon_rd. Read
 		 * us_rxsid (groups [0..4], 0x203c..0x204c) and ustx (0x329bc) via /proc
 		 * instead (process context, already exposed there, safe). */
-		pr_info("rtl9602c-gpon: O5 t=%u last=0x%02x onu=%u hwst=%u eqd=0x%08x | dsrx64=%u pirx=%u omcirx=%u | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
+		pr_info("rtl9602c-gpon: O5 t=%u last=0x%02x onu=%u hwst=%u eqd=0x%08x | dsrx64=%u pirx=%u omcirx=%d | ploam_cpu=%u gem_byte=%u gemus64=%u idle16=%u\n",
 			gpon_fsm_ticks, gpon_last_ds_type, gpon_fsm_onu_id,
 			gpon_rd(GPON_GTC_DS_ONU_ID_STATUS) & 0xf, gpon_rd(GPON_GTC_US_EQD),
-			gpon_gem_ds_rx_cnt(64), sw_rd(OMCI_RX_PKT_CNT), rtl9602c_eth_omci_rx_count(),
+			gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW), sw_rd(OMCI_RX_PKT_CNT),
+			gpon_omci_rx_cnt(),
 			gpon_us_misc_cnt(2), gpon_us_misc_cnt(4),
-			gpon_rd(GEM_US_STAT(64)), gpon_rd(TCONT_IDLE_STAT(16)));
+			gpon_rd(GEM_US_STAT(GPON_OMCC_FLOW)), gpon_rd(TCONT_IDLE_STAT(16)));
 	/* US-OMCI EGRESS STALL LOCALIZER (SAFE reads only — sw_rd/gpon_rd, NO pi_rd and
 	 * NO cross-driver accessor; both were the suspected hang sources). Diagnosis:
 	 * the US OMCI is queued to qid64 but gemus64 (0x6a00) stays 0 (no OMCC GEM
@@ -9708,12 +10075,13 @@ static void gpon_fsm_poll(struct timer_list *t)
 		 * f0/f1/f2=low flows. Localizes whether OMCI de-encaps ANYWHERE
 		 * (mapping issue) vs nowhere (OLT not sending OMCI). */
 		pr_emerg("DSPIPE deenc f64=%u f3=%u f2=%u f1=%u f0=%u | nonidle=%u idle=%u los=%u hec=%u | sram=%u q0=%u rxok=%u\n",
-			 gpon_gem_flow_cnt(64, 0), gpon_gem_flow_cnt(3, 0),
+			 gpon_gem_flow_cnt(GPON_OMCC_FLOW, 0), gpon_gem_flow_cnt(3, 0),
 			 gpon_gem_flow_cnt(2, 0), gpon_gem_flow_cnt(1, 0),
 			 gpon_gem_flow_cnt(0, 0),
 			 gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_NON_IDLE), gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_IDLE), gpon_rd(GPON_GTC_DS_MISC_CNTR_GEM_LOS),
 			 gpon_rd(GPON_GTC_DS_MISC_CNTR_HEC_CORRECT),
-			 pi_rd(PI_PON_DSC_USAGE_DS) & 0x1fff, pi_rd(0xa100) & 0x1fff,
+			 pi_rd(PI_PON_DSC_USAGE_DS) & 0x1fff,
+			 pi_rd(PI_PON_DS_PBO_PAGE_Q0) & 0x1fff,
 			 pi_rd(PI_PKT_OK_CNT_DS) & 0xffff);
 	}
 	/* Periodic SerDes-TX re-sync while UN-RANGED. The upstream-burst serializer
@@ -10599,6 +10967,14 @@ skip_bosa_init:
 	 */
 	gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 15, 8, 0xff);	/* DS ONU-ID = broadcast */
 	gpon_field(GPON_GTC_US_ONU_ID, 15, 8, 0xff);		/* US ONU-ID = broadcast */
+	/* ★ DS_CFG's FEC DETECTION THRESHOLD, WRITTEN DELIBERATELY (2026-09-08).
+	 * Reset/bootloader left this board at FEC_DET_THRSH=1 (DS_CFG 0x622) while
+	 * its own stock rests at 0 (0x620, read live at O5), and the vendor sets it
+	 * from configuration through dsFecThrd_set in its init path -- so ours was
+	 * an inherited default nobody had asserted, which is the porting gap the
+	 * tree already records for this register. Not a BWmap acceptance gate (all
+	 * four of those already matched); asserted so the word matches stock. */
+	gpon_field(0x1014, 3, 1, 0);				/* DS_CFG FEC_DET_THRSH = 0 (stock) */
 	gpon_field(0x1014, 11, 11, 0);				/* DS_CFG BWM_NO_FLT = 0 (stock value; the
 								 * bring-up =1 "accept all grants" left bwm_acpt=0
 								 * (vs stock 130k+), i.e. it broke the BWMAP parser
@@ -10627,11 +11003,19 @@ skip_bosa_init:
 	gpon_field(0x5200, 0, 0, 1);				/* US_PROC_MODE AUTO_PROC_SSTART */
 	gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_LOCK);
 	gpon_field(GPON_GTC_DS_PLOAM_CFG, 9, 9, 1);		/* DS PLOAM BC_ACCEPT */
-	gpon_field(GPON_GTC_DS_PLOAM_CFG, 8, 8, 0);		/* DS PLOAM ONUID_FILTER OFF
-		* (bring-up): accept ALL DS PLOAMs regardless of ONU-ID, so an Assign_ONU-ID
-		* sent non-broadcast (directed to the assigned id) is still delivered to the
-		* FSM. The OLT authorizes our SN but the FSM never saw a type-0x03 PLOAM with
-		* the filter on. */
+	gpon_field(GPON_GTC_DS_PLOAM_CFG, 8, 8, 1);		/* DS PLOAM ONUID_FILTER ON
+		* ★ STOCK PARITY, AND THE BRING-UP REASON FOR TURNING IT OFF WAS WRONG
+		* (2026-09-08).  It was disabled so a "non-broadcast Assign_ONU-ID" would
+		* still reach the FSM.  Measured on this board with the filter OFF and a
+		* PLOAM trace: EVERY Assign_ONU-ID the OLT sends is BROADCAST --
+		* `DS PLOAM onu_id=0xff type=0x03 d=00 58504f4e23b3ce..` -- so BC_ACC_EN
+		* (bit 9, set above) already delivers it and the filter costs nothing.
+		* What the filter DOES buy is real: this bench puts two ONUs on one
+		* splitter, and with it off we also accepted the OTHER unit's PLOAMs
+		* (its own Assign_ONU-ID for XPON39013867 was in our trace).  This
+		* board's own stock, live at O5, reads GPON_GTC_DS_PLOAM_CFG = 0x70b
+		* with the bit SET, and the vendor sets it through
+		* dsPloamFilterOnuIdState_set in its init path -- two tiers agreeing. */
 	/* (6) DS_INTR_MASK = 0x070f, the O5 operating value. At reset it is 0x00000000
 	 * (all GTC interrupts off); the O5 value 0x070f = LOS/LOF/FEC/LOM (b0-3) +
 	 * **SN_REQ(b8)/RNG_REQ(b9)/PLM_BUF(b10)**.

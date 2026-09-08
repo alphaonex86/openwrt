@@ -20,6 +20,14 @@ void rtl9602c_eth_set_omci_sid(unsigned int sid);
 void rtl9602c_eth_set_omci_identity(const u8 *sn8);
 
 /* DS OMCI frames that reached the CPU NIC ring (defined in rtl9602c_eth.c). */
+/* ★★ "COULD NOT ASK" IS NOT ZERO (2026-09-08).  The Ethernet shell that serves
+ * the RTL9603CVD implements no CPU-side OMCI datapath yet -- its whole OMCI glue
+ * is empty stubs -- and this counter returned a literal 0.  Every activation log
+ * therefore printed `omcirx=0`, which reads as "the OLT sent us no OMCI", and it
+ * was read that way during this very investigation while the PON-IP's own OMCI
+ * counter was proving 12 frames had arrived.  A shell with no path returns
+ * GPON_OMCI_RX_UNAVAIL and the printers render it `-1`. */
+#define GPON_OMCI_RX_UNAVAIL	0xffffffffu
 u32 rtl9602c_eth_omci_rx_count(void);
 
 /* gpon0 (WAN) RX packet count; 0 => OLT forwarded us no downstream data (not
@@ -30,6 +38,18 @@ u32 rtl9602c_eth_wan_rx_count(void);
  * consumed (OWN cleared). Non-zero => the OMCC TX ring is being fetched. Defined
  * in rtl9602c_eth.c; surfaced for the periodic O5 serial diagnostic. */
 u32 rtl9602c_eth_omci_tx_dirty(void);
+
+/* US-OMCI responses the shell's TX ring REFUSED.  Read beside the queued count
+ * and the PON-IP's own OMCI_TX_PKT_CNT: queued>0 & dropped=0 & pi_ustx=0 means
+ * the frames left the MAC and the fabric swallowed them, which is a different
+ * fault from a ring that would not take them.  Defined by whichever Ethernet
+ * shell this board builds; the LUNA_ETH one returns a real count, the 9602C one
+ * does not implement it. */
+#if IS_ENABLED(CONFIG_LUNA_ETH)
+u32 rtl9602c_eth_omci_tx_dropped(void);
+#else
+static inline u32 rtl9602c_eth_omci_tx_dropped(void) { return 0; }
+#endif
 
 /* OLT-INDEPENDENT US-OMCI datapath self-test: inject a synthetic OMCI frame
  * through the US-OMCI TX path so RX_SID_GOOD_CNT_US[4] can be checked at O5
@@ -111,7 +131,12 @@ u16 gpon_omcc_gem(void);
  *     `weak` symbol: a link error is how this was found, and a stub that hides
  *     the next one would be worse than the bug.
  */
-#if IS_ENABLED(CONFIG_RTL9602C_ETH)
+/* ★ THE HOLE THIS COMMENT PREDICTED IS CLOSED (2026-09-08).  luna_eth.c gained
+ * the common OMCI responder, so CONFIG_LUNA_ETH now has an ANI-G instance to
+ * publish into and defines this symbol too.  The inline no-op survives for a
+ * config that builds NEITHER Ethernet shell -- and it is still deliberately not
+ * a `weak` symbol, because a link error is how the first hole was found. */
+#if IS_ENABLED(CONFIG_RTL9602C_ETH) || IS_ENABLED(CONFIG_LUNA_ETH)
 void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level);
 #else
 static inline void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)

@@ -285,11 +285,12 @@ void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add)
  */
 bool rtl9602c_rx_is_ds_omci(bool trap_on, u32 opts2, u32 opts3,
 			    const u8 *data, u32 len, unsigned int pon_port,
+			    unsigned int omci_reason,
 			    unsigned int cpu_prefix, u32 buf_size)
 {
 	if (!trap_on || len < cpu_prefix + 8 || len > buf_size)
 		return false;
-	if (((opts2 >> 21) & 0xff) == RTL9602C_OMCI_REASON &&
+	if (((opts2 >> 21) & 0xff) == omci_reason &&
 	    ((opts3 >> 16) & 0xf) == pon_port)
 		return true;
 	return (data[cpu_prefix + 3] == 0x0a || data[cpu_prefix + 3] == 0x0b) &&

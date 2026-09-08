@@ -541,8 +541,11 @@ static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
 /* OMCI (OMCC) trap. The GTC de-encapsulates DS OMCI GEM frames and delivers them
  * to the CPU port tagged with rx-reason OMCI from the PON port; CPUTAG1CR[14:8]
  * selects which DS stream-id the GMAC traps to the CPU. */
-/* RTL9602C_OMCI_REASON (rx-reason 246 = OMCI) moved to rtl9602c_l34_logic.h
- * with the DS-OMCI classifier that consumes it (hoisted logic). */
+/* The rx-reason that marks a trapped DS OMCI frame is PER CHIP (246 here, 229
+ * on the RTL9607C/RTL9603CVD -- tier 3, the vendor NIC RX hook) and now travels
+ * from the per-chip switch map as ep->swm->omci_cpu_reason.  It used to be a
+ * `#define RTL9602C_OMCI_REASON 246` in rtl9602c_l34_logic.h, i.e. one chip's
+ * number in a file BOTH Ethernet shells include. */
 #define CPUTAG1_OMCI_SID(s)	(((s) & 0x7f) << 8)	/* R_CPUTAG1CR[14:8] */
 #define CPUTAG1_B1		0x2	/* bit1: live 9602C stock reads CPUTAG1CR=0x4002; not present in the 9607C register map */
 /* Stock NIC init writes CPUTAG1CR = (SID<<8) | 0x70 (bits 4/5/6 = the
@@ -2429,6 +2432,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 					   ep->rx_ring[i].opts2,
 					   ep->rx_ring[i].opts3,
 					   skb->data, len, ep->swm->pon_port,
+					   ep->swm->omci_cpu_reason,
 					   RX_CPU_PREFIX, RX_BUF_SIZE)) {
 			/* DS OMCI on the OMCC. Capture for /proc, then hand the raw G.988
 			 * message (prefix stripped) to the responder. */

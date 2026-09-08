@@ -80,3 +80,97 @@ bool luna_gmac_rx_cpu_tag_present(const u8 *data, u32 len,
 	return len > 12 + tag_len &&	/* 12 = 2 * ETH_ALEN (DA + SA) */
 	       data[12] == 0x88 && data[13] == 0x99;
 }
+
+/*
+ * ─── CPU-side OMCI (OMCC) datapath, family tier ────────────────────────────
+ *
+ * WHY THESE THREE ARE HERE AND NOT IN luna_eth.c: they are the whole DECISION
+ * of the OMCI datapath -- which trapped frame is an OMCI frame, and how a
+ * response is steered back onto the OMCC -- expressed as pure bit arithmetic
+ * over the family's GMAC descriptor.  The shell keeps the ring, the DMA and
+ * the responder call; nothing here reads a register.  That split is what lets
+ * the encoders be exercised on x86 with no board.
+ */
+
+/*
+ * Is this returned RX descriptor a DOWNSTREAM OMCI frame trapped to the CPU?
+ *
+ * ★ ONE CONDITION, DELIBERATELY: the reason code, exactly as the vendor's own
+ * NIC RX hook decides it (`GMAC_RXINFO_REASON(pRxInfo) == omciRsn`, tier 3,
+ * rtl86900/sdk/src/module/gpon/gponapi.c rtk_gponapp_omci_rx_wrapper).  The
+ * reason lives at opts2[28:21] on every chip of this family -- the field is
+ * `reason:8;//21~28` in both descriptor headers -- but its OMCI VALUE does not
+ * (246 on the RTL9602C, 229 on the RTL9607C and RTL9603CVD), which is why it
+ * arrives as @omci_reason from the per-chip table and is not spelled here.
+ *
+ * ★★ NOT MERGED WITH rtl9602c_rx_is_ds_omci(), and refusing to merge them is a
+ * safety decision, not tidiness.  That verdict ORs in a CONTENT heuristic --
+ * "byte 3 is 0x0a or 0x0b and byte 2 has bit7 clear" -- which its own shell
+ * needs because on that die a trapped frame and a switch-routed one carry
+ * different descriptor shapes.  On a die whose OMCI reason is a DIFFERENT
+ * number, that same heuristic promotes ordinary LAN frames: any frame whose
+ * fourth byte happens to be 0x0a would be handed to the G.988 responder and
+ * dropped from the bridge.  A predicate that can only be right when its
+ * neighbours are is not a shared predicate.
+ *
+ * @len is the DESCRIPTOR length, prefix included, and the bound pair is the
+ * OOB guard the sibling verdict already carries: a caller must never index
+ * into a buffer this says nothing about.
+ */
+bool luna_gmac_rx_is_ds_omci(bool trap_on, u32 opts2, u32 len,
+			     unsigned int omci_reason,
+			     unsigned int cpu_prefix, u32 buf_size)
+{
+	if (!trap_on || len < cpu_prefix + 8 || len > buf_size)
+		return false;
+	return ((opts2 >> 21) & 0xff) == omci_reason;
+}
+
+/*
+ * US-OMCI TX steering, word2 (opts2): CPUTAG + the egress port mask.
+ *
+ * Tier 3, and the source is the vendor's OWN OMCI transmit
+ * (rtl86900/sdk/src/module/gpon/gpon_omci.c, gpon_omci_tx): it memsets a
+ * tx_info to zero and sets exactly CPUTAG_PSEL, DISLRN, KEEP, CPUTAG,
+ * TX_PMASK = (1 << ponPort) and TX_DST_STREAM_ID = omcc_flow -- nothing else.
+ *
+ * ⚠ THE FIELD PLACEMENT IS THE RTL9607C GENERATION'S, WHICH IS NOT THE
+ * RTL9602C'S, and reading across the two is the defect this family keeps
+ * paying for.  Here (rtl86900/nicDriver/re8686_rtl9607c.h struct tx_info):
+ *   opts2  cputag:31 | tx_portmask:16~26
+ *   opts3  cputag_pri:24~26 | keep:23 | dislrn:21 | cputag_psel:20 |
+ *          l34_keep:17 | extspa:13~15 | tx_dst_stream_id:0~6
+ * On the RTL9602C keep/dislrn/psel live in OPTS1 and the stream id at
+ * opts3[22:16] -- see TXD3_OMCI_9602C in rtl9602c_l34_logic.h, which is that
+ * chip's and must never be reached for from this shell.
+ *
+ * ⚠ AND THERE IS NO EFID BIT ON THIS GENERATION.  The RTL9602C's proven stock
+ * word2 is 0x80080000 = cputag|efid; the vendor's own transmit puts the EFID
+ * pair behind `#if !(CONFIG_SDK_RTL9607C || CONFIG_SDK_RTL9603CVD)`, so the
+ * word here is cputag|portmask and nothing more.  Copying the sibling's
+ * 0x00080000 would set opts2 bit19, which is inside cvlan_vidl on this layout.
+ */
+u32 luna_gmac_omci_txd_word2(unsigned int pon_port)
+{
+	return 0x80000000u |				/* opts2[31] cputag	*/
+	       ((1u << pon_port) & 0x7ffu) << 16;	/* opts2[26:16] pmask	*/
+}
+
+/*
+ * US-OMCI TX steering, word3 (opts3): the cpu-tag behaviour bits + the OMCC
+ * stream id.  Same source and same generation caveat as word2 above.
+ *
+ * cputag_psel (bit20) is the load-bearing one: it makes the GMAC DIRECT-TX the
+ * cpu-tagged frame at the selected port instead of handing it to the L2
+ * lookup, which is how an OMCI PDU -- a frame with no meaningful Ethernet
+ * header at all -- reaches the PON port.  keep (bit23) stops the switch
+ * rewriting it and dislrn (bit21) stops the OMCI PDU's first six bytes being
+ * learned into the L2 table as if they were a source MAC.
+ */
+u32 luna_gmac_omci_txd_word3(unsigned int omcc_flow)
+{
+	return (1u << 23) |		/* opts3[23] keep		*/
+	       (1u << 21) |		/* opts3[21] dislrn		*/
+	       (1u << 20) |		/* opts3[20] cputag_psel	*/
+	       (omcc_flow & 0x7fu);	/* opts3[6:0] tx_dst_stream_id	*/
+}

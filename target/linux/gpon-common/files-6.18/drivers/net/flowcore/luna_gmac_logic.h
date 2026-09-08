@@ -41,6 +41,16 @@ bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
 bool luna_gmac_rx_cpu_tag_present(const u8 *data, u32 len,
 				  unsigned int tag_len);
 
+/* CPU-side OMCI (OMCC) datapath -- the family's descriptor decisions.  Every
+ * one of them is documented at its definition in luna_gmac_logic.c, including
+ * why the RX verdict is NOT merged with rtl9602c_rx_is_ds_omci() and why the
+ * TX words may not be copied from that chip's. */
+bool luna_gmac_rx_is_ds_omci(bool trap_on, u32 opts2, u32 len,
+			     unsigned int omci_reason,
+			     unsigned int cpu_prefix, u32 buf_size);
+u32 luna_gmac_omci_txd_word2(unsigned int pon_port);
+u32 luna_gmac_omci_txd_word3(unsigned int omcc_flow);
+
 
 /* ── family GMAC RING arithmetic (folded in from luna_gmac_ring.h,
  *    2026-09-04) ─────────────────────────────────────────────────────

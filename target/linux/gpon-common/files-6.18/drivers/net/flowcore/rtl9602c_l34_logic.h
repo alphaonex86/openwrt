@@ -179,9 +179,17 @@ int l34_l2uc_sts_index(u32 sts);
 
 /* ---- hoisted from rtl9602c_eth.c (same shell TU) ---------------------- */
 
-/* RX cpu-tag reason code = OMCI (opts2[28:21]); consumed by the DS-OMCI
- * classifier below.  Moved here from rtl9602c_eth.c with that classifier. */
-#define RTL9602C_OMCI_REASON	246
+/* ★ THE DS-OMCI RX REASON IS NO LONGER A CONSTANT HERE, AND IT NEVER SHOULD
+ * HAVE BEEN.  This file carried `#define RTL9602C_OMCI_REASON 246` and the
+ * classifier below read it directly.  246 is the RTL9602C's value ALONE: the
+ * vendor's own NIC RX hook switches on the chip id and picks 229 for the
+ * RTL9607C and the RTL9603CVD (rtl86900/sdk/src/module/gpon/gponapi.c,
+ * rtk_gponapp_omci_rx_wrapper -- tier 3).  A constant named for one chip, in a
+ * file both shells include, is exactly how a sibling's literal comes to look
+ * portable; the value now travels from the per-chip table
+ * (luna_sw_map.omci_cpu_reason, luna_eth_regs.h) as an ARGUMENT, the same shape
+ * this file already uses for @err_mask.
+ */
 
 /*
  * 9602C GMAC TX steering-descriptor facts, moved here from rtl9602c_eth.c so
@@ -230,6 +238,7 @@ int l34_l2uc_sts_index(u32 sts);
 void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add);
 bool rtl9602c_rx_is_ds_omci(bool trap_on, u32 opts2, u32 opts3,
 			    const u8 *data, u32 len, unsigned int pon_port,
+			    unsigned int omci_reason,
 			    unsigned int cpu_prefix, u32 buf_size);
 bool rtl9602c_rx_wan_demux(u32 opts3, const u8 *dst, const u8 *wan_mac,
 			   unsigned int pon_port);

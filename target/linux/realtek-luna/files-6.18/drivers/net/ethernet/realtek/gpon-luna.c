@@ -1911,11 +1911,85 @@ static int bosa_ctrl2 __ro_after_init = -1;
 static int bosa_status2 __ro_after_init = -1;
 
 /*
+ * Does this board HAVE an RTL8290B register interface to read?  A POSITIVE
+ * identification, the same bar bosa_i2c_write8() already applies to writes.
+ *
+ * ★★ A REGISTER NOBODY COULD ASK RENDERS n/a, NEVER A NUMBER.  On the G24W the
+ * module answers only its SFF-8472 pages (slaves 0x50/0x51); slaves 0x54/0x55
+ * NACK every register (measured 2026-09-07).  Printing a byte for them turned
+ * the previous read's data into "bias=0x20 mod=0x20 apc_done=0", which reads as
+ * a DEVICE finding -- a laser that is not biased -- and that phantom is what an
+ * investigation of this board's ranging failure was built on.
+ */
+static bool bosa_regs_live(void)
+{
+	return bosa_id_num == 0x8290 && !bosa_not_8290b;
+}
+
+/*
  * Read one 8-bit register from an I2C slave via the SoC hardware I2C master on
  * bus 0. Returns the byte (0..0xff), or negative on NACK/timeout. This is a
  * read-only path — nothing is written to the BOSA — so it is safe to run
  * unconditionally during bring-up.
  */
+/*
+ * Wait for ONE indirect I2C transaction to COMPLETE. -> 0, or a negative errno.
+ * `cmd_out` (optional) receives the last command word read.
+ *
+ * ★★★ POLL CMD_EN, NOT BUSY ALONE -- MEASURED ON THE G24W 2026-09-07 (tier 1),
+ *     AND IT IS WHY EVERY RTL8290B REGISTER THIS DRIVER PRINTS ON THAT BOARD IS
+ *     A PHANTOM.
+ *
+ * The three loops that this helper replaces tested only I2C_CMD_BUSY, and read
+ * it in the instruction right after writing CMD_EN.  At that instant the
+ * controller has not raised BUSY yet and NACK still carries the PREVIOUS
+ * transaction's value, so the test "not busy" passes on a transaction that has
+ * not started and the accessor returns whatever I2C_IND_RD still holds -- the
+ * byte the PREVIOUS read left there -- as a valid value.
+ *
+ * Measured side by side, seconds apart, driving this same master by hand:
+ * slaves 0x54 and 0x55 (the RTL8290B register pages) NACK EVERY register on the
+ * G24W, while /proc/gpon reported 0x20 for each of them.  0x20 is an ASCII space
+ * out of the module's padded identity strings -- the byte the immediately
+ * preceding slave-0x50 read had left in I2C_IND_RD.  `bosa: num=0x0000`,
+ * `bosa_tx: bias=0x20 mod=0x20 apc_done=0`, `optic_txchain`, `optic_rxchain` and
+ * the `optic_dbg 0x30c..0x312 = 0xf4` run (0xf4 being the low byte of the RX
+ * power word read just before them) are all the same artefact.
+ *
+ * CMD_EN SELF-CLEARS when the transaction ends: the by-hand read measured
+ * 0x00000000 after an ACKed read and 0x00000008 (NACK set, CMD_EN clear) after a
+ * NACKed one.  So "CMD_EN still set" is the one unambiguous "not finished yet",
+ * and running out of budget on it is COULD-NOT-ASK, never a value.
+ *
+ * ★ AND THE STATUS IS NOT READ BEFORE THE TRANSACTION CAN HAVE HAPPENED.
+ *   Testing CMD_EN as well as BUSY was not enough on its own -- measured on the
+ *   board: the chip ID still read 0x0000 instead of -EIO -- because BOTH bits
+ *   read back 0 in the instruction after the command write.  The controller has
+ *   not started, so there is nothing to see, and the stale NACK bit says "fine".
+ *   One 8-bit-address read at I2C_CLKDIV_100K is start + addr + reg + restart +
+ *   addr + data + stop, ~38 bit times, ~380 us; I2C_XACT_SETTLE_US covers that
+ *   with margin BEFORE the first status read.  This is a probe/diagnostic path
+ *   (probe, /proc, the optical poll) and never a packet path, so the wait costs
+ *   nothing that matters.
+ */
+#define I2C_XACT_SETTLE_US	600u
+static int i2c_wait_done(u32 ind_cmd, u32 *cmd_out)
+{
+	int i;
+
+	udelay(I2C_XACT_SETTLE_US);
+	for (i = 0; i < I2C_BUSY_POLL_MAX; i++) {
+		u32 cmd = sw_rd(ind_cmd);
+
+		if (cmd_out)
+			*cmd_out = cmd;
+		if (!(cmd & (I2C_CMD_EN | I2C_CMD_BUSY)))
+			return (cmd & I2C_CMD_NACK) ? -EIO : 0;
+		udelay(10);
+	}
+	return -ETIMEDOUT;
+}
+
 static int bosa_i2c_read8(u8 slave, u8 reg)
 {
 	u32 cfg, pad_off = SOC_IO_MODE_EN;	/* per-chip: gpon_swc_map */
@@ -1925,7 +1999,7 @@ static int bosa_i2c_read8(u8 slave, u8 reg)
 	u32 ind_adr = I2C_IND_ADR;
 	u32 ind_cmd = I2C_IND_CMD;
 	u32 ind_rd  = I2C_IND_RD;
-	int i, ret = -ETIMEDOUT;
+	int ret;
 
 	/* Route I2C bus 0 to its pads. I2C_EN is a 2-bit field (one bit per bus)
 	 * whose position MOVES: [14:13] on the 9602C/9607C, [12:11] on the
@@ -1945,16 +2019,9 @@ static int bosa_i2c_read8(u8 slave, u8 reg)
 	sw_wr(ind_adr, reg);
 	sw_wr(ind_cmd, I2C_CMD_EN);			/* RW_EN=0 -> read */
 
-	for (i = 0; i < I2C_BUSY_POLL_MAX; i++) {
-		u32 cmd = sw_rd(ind_cmd);
-
-		if (!(cmd & I2C_CMD_BUSY)) {
-			ret = (cmd & I2C_CMD_NACK) ? -EIO :
-				(int)(sw_rd(ind_rd) & 0xff);
-			break;
-		}
-		udelay(10);
-	}
+	ret = i2c_wait_done(ind_cmd, NULL);
+	if (!ret)
+		ret = (int)(sw_rd(ind_rd) & 0xff);
 
 	/* Reconnect the shared optical-SD pad so optic_los stays live (see
 	 * bosa_i2c_restore_pad). */
@@ -2025,7 +2092,7 @@ static int i2c_rd_bus(int bus, u8 slave, u8 reg, u32 *cmd_out)
 	u32 ind_adr = I2C_IND_ADR + bus * I2C_BUS_STRIDE;
 	u32 ind_cmd = I2C_IND_CMD + bus * I2C_BUS_STRIDE;
 	u32 ind_rd  = I2C_IND_RD  + bus * I2C_BUS_STRIDE;
-	int i, ret = -ETIMEDOUT;
+	int ret;
 	u32 cfg, cmd = 0;
 
 	sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0 + bus, IO_I2C_EN_BUS0 + bus, 1);
@@ -2038,15 +2105,9 @@ static int i2c_rd_bus(int bus, u8 slave, u8 reg, u32 *cmd_out)
 	sw_wr(cfg_off, cfg);
 	sw_wr(ind_adr, reg);
 	sw_wr(ind_cmd, I2C_CMD_EN);				/* read */
-	for (i = 0; i < I2C_BUSY_POLL_MAX; i++) {
-		cmd = sw_rd(ind_cmd);
-		if (!(cmd & I2C_CMD_BUSY)) {
-			ret = (cmd & I2C_CMD_NACK) ? -EIO :
-				(int)(sw_rd(ind_rd) & 0xff);
-			break;
-		}
-		udelay(10);
-	}
+	ret = i2c_wait_done(ind_cmd, &cmd);
+	if (!ret)
+		ret = (int)(sw_rd(ind_rd) & 0xff);
 	if (cmd_out)
 		*cmd_out = cmd;
 	return ret;
@@ -2214,7 +2275,7 @@ static void gpon_optical_work_fn(struct work_struct *w)
 static int bosa_i2c_write8(u8 slave, u8 reg, u8 val)
 {
 	u32 cfg;
-	int i, ret = -ETIMEDOUT;
+	int ret;
 
 	/* Refuse to write RTL8290B registers into a module that is not one -- see
 	 * the note at bosa_not_8290b. Reads are still allowed and still useful.
@@ -2263,15 +2324,7 @@ static int bosa_i2c_write8(u8 slave, u8 reg, u8 val)
 	sw_wr(I2C_IND_WD, val);
 	sw_wr(I2C_IND_CMD, I2C_CMD_EN | I2C_CMD_RW_WR);
 
-	for (i = 0; i < I2C_BUSY_POLL_MAX; i++) {
-		u32 cmd = sw_rd(I2C_IND_CMD);
-
-		if (!(cmd & I2C_CMD_BUSY)) {
-			ret = (cmd & I2C_CMD_NACK) ? -EIO : 0;
-			break;
-		}
-		udelay(10);
-	}
+	ret = i2c_wait_done(I2C_IND_CMD, NULL);
 
 	/* Reconnect the shared optical-SD pad so optic_los stays live (see
 	 * bosa_i2c_restore_pad). */
@@ -5238,10 +5291,33 @@ void gpon_pbo_init(void)
 			sw_field(0x000f4, 5, 5, 1);	/* CFG_FE_POLL_WD_1[5]=1 — front-end GMII poll/watchdog */
 		mdelay(10);			/* settle the forced internal link before PCS enables+edge */
 		sw_field(SDS(0x22a70), 11, 11, 0);	/* SDS_EXT_REG28[11]=0 — release non-GPON SerDes-select    */
-		sw_field(SDS(0x220e0), 9, 8, 1);	/* WSDS_DIG_2C[9:8]=1 — WAN-PCS digital enable            */
+		/* ★★ THE TWO WAN-PCS DIGITAL-ENABLE WRITES ARE THE RTL9602C's,
+		 * AND THE RTL9603CVD's OWN STOCK DOES NOT MAKE THEM (measured
+		 * 2026-09-07, tier 1 on BOTH firmwares of the G24W, SWCORE
+		 * capture stock-vs-ours):
+		 *
+		 *     0x40080 WSDS_DIG_14   stock 0x00000000   ours 0x00001000
+		 *     0x400e0 WSDS_DIG_2C   stock 0x0000ffff   ours 0x0000fdff
+		 *
+		 * Those are EXACTLY the two bits written here (bit 12, and
+		 * [9:8] driven from stock's 0b11 to 0b01), and nothing else in
+		 * this driver touches either address -- so the divergence is
+		 * attributable to these two lines and to nothing else.  They
+		 * were decoded from the RTL9602C's stock PON-MAC GPON mode-set
+		 * and applied to every chip; SDS() then relocates them into the
+		 * RTL9603CVD's own SerDes window, where that board's own vendor
+		 * firmware leaves both alone while running GPON at O5.
+		 *
+		 * The guard is the same shape, and for the same reason, as the
+		 * `if (!is_9603cvd)` three lines above: a value that is right on
+		 * one chip is not a value at all on another.  No-op on the
+		 * RTL9602C and the RTL9607C by construction. */
+		if (!is_9603cvd)
+			sw_field(SDS(0x220e0), 9, 8, 1);	/* WSDS_DIG_2C[9:8]=1 — WAN-PCS digital enable */
 		pi_field(PI_RSVD_PONIP_DS, 13, 13, 1);	/* RSVD_PONIP_DS[13]=1 — DS-side datapath enable           */
 		pi_field(PI_RSVD_PONIP_DS, 12, 12, 1);	/* RSVD_PONIP_DS[12]=1                                     */
-		sw_field(SDS(0x22080), 12, 12, 1);	/* WSDS_DIG_14[12]=1 — WAN-PCS digital enable             */
+		if (!is_9603cvd)
+			sw_field(SDS(0x22080), 12, 12, 1);	/* WSDS_DIG_14[12]=1 — WAN-PCS digital enable */
 	}
 
 	/* CF_CFG.CF_US_PERMIT is set to its stock value (0 = NORMAL/permit) by
@@ -6546,14 +6622,33 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		seq_printf(s, "sds: fib_status=n/a (%s declares no SDS_FIB_STATUS in this driver)\n",
 			   swc->chip);
 	}
-	seq_printf(s, "bosa: rtl8290b num=0x%04x vid=0x%02x w41=0x%02x ctrl2=0x%02x status2=0x%02x\n",
-		   bosa_id_num, bosa_id_vid, bosa_w41, bosa_ctrl2, bosa_status2);
+	/* ★ THE PROBE'S OWN CACHE IS SUBJECT TO THE SAME RULE AS THE LIVE READS.
+	 * These five come from bosa_probe(), which reads the RTL8290B pages -- so
+	 * on a module that does not carry them they are the same phantom, and
+	 * printing them was the ONE line the first pass of this repair missed.
+	 * The live case caught it (test_bosa_i2c_census: "0x54, 0x55 NACK every
+	 * register, yet /proc/gpon still names byte values from them"). */
+	if (bosa_regs_live())
+		seq_printf(s, "bosa: rtl8290b num=0x%04x vid=0x%02x w41=0x%02x ctrl2=0x%02x status2=0x%02x\n",
+			   bosa_id_num, bosa_id_vid, bosa_w41, bosa_ctrl2,
+			   bosa_status2);
+	else
+		seq_puts(s, "bosa: n/a -- the RTL8290B chip-ID read did not complete, so nothing this driver holds about that device is a reading\n");
 	seq_printf(s, "fsm: state=O%u onu_id=%u sn_tx=%u ds_rx=%u sds_sync=%u ticks=%u sn=%*phN\n",
 		   gpon_fsm_state, gpon_fsm_onu_id, gpon_fsm_sn_tx, gpon_ds_rx,
 		   gpon_sds_synced, gpon_fsm_ticks, 8, gpon_sn_bytes);
 	/* Live BOSA laser-emission status: R30 (txsd/valid/apc-done/mpd-fault),
 	 * R33 bias-DAC readback (nonzero => bias driven), R32 mod, FAULT_STATUS. */
-	{
+	if (!bosa_regs_live()) {
+		char idbuf[16];
+
+		if (bosa_id_num < 0)
+			strscpy(idbuf, "COULD NOT ASK", sizeof(idbuf));
+		else
+			scnprintf(idbuf, sizeof(idbuf), "0x%04x", bosa_id_num);
+		seq_printf(s, "bosa_regs: n/a -- this module exposes no RTL8290B register interface (chip id %s, want 0x8290; I2C slaves 0x54/0x55 do not answer). The RTL8290B-derived lines are SUPPRESSED rather than printed as values.\n",
+			   idbuf);
+	} else {
 		int r30 = bosa_read_reg(0x31e), r33 = bosa_read_reg(0x321);
 		int r32 = bosa_read_reg(0x320), fault = bosa_read_reg(0x389);
 
@@ -6589,10 +6684,12 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		else
 			scnprintf(cdbm_s, sizeof(cdbm_s), "%d",
 				  bosa_code_to_cdbm(rx_code));
-		seq_printf(s, "optic_rx_raw: 0x%02x optic_rx_cdbm: %s optic_tx_raw: 0x%04x\n",
-			   rxc, cdbm_s, txw & 0xffff);
-		seq_printf(s, "optic_env:   temp_dc=%d bias_ua=%u tx_cdbm=%d\n",
-			   bosa_temp_dc(), bosa_bias_ua(), bosa_tx_power_cdbm());
+		if (bosa_regs_live()) {
+			seq_printf(s, "optic_rx_raw: 0x%02x optic_rx_cdbm: %s optic_tx_raw: 0x%04x\n",
+				   rxc, cdbm_s, txw & 0xffff);
+			seq_printf(s, "optic_env:   temp_dc=%d bias_ua=%u tx_cdbm=%d\n",
+				   bosa_temp_dc(), bosa_bias_ua(), bosa_tx_power_cdbm());
+		}
 		/* ★ The module's OWN optical monitor, raw, beside the derived dBm --
 		 * the witness that is independent of the SoC pad mux and the SerDes.
 		 * Printed unconditionally so the raw words are visible even when the
@@ -6611,8 +6708,31 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 			seq_printf(s, "optic_a2:    rx_pwr_raw=%02x%02x (0.1uW) -> %s  [SFF-8472 A2 slave 0x51 b104/105 -- the MODULE's own monitor]\n",
 				   a2h < 0 ? 0xff : a2h & 0xff,
 				   a2l < 0 ? 0xff : a2l & 0xff, a2s);
+			/* ★ THE REST OF THE SAME PAGE, AND ON A MODULE WITH NO
+			 * RTL8290B REGISTER INTERFACE IT IS THE ONLY OPTICAL
+			 * WITNESS THERE IS.  b96/97 temperature (1/256 C),
+			 * b98/99 Vcc (100 uV), b100/101 TX bias (2 uA),
+			 * b102/103 TX power (0.1 uW).  Each word prints n/a
+			 * when its own read failed -- never 0, which on the TX
+			 * pair would read as "the laser is dark" (and a burst-
+			 * mode ONU that is not ranged legitimately averages to
+			 * zero there, so the zero is not a fault by itself). */
+			{
+				int k, b[8];
+				char t[8][8];
+
+				for (k = 0; k < 8; k++) {
+					b[k] = bosa_i2c_read8(0x51, 96 + k);
+					if (b[k] < 0)
+						strscpy(t[k], "n/a", sizeof(t[k]));
+					else
+						scnprintf(t[k], sizeof(t[k]), "%02x", b[k]);
+				}
+				seq_printf(s, "optic_a2_env: temp=%s%s vcc=%s%s tx_bias=%s%s tx_pwr=%s%s  [b96..b103, raw]\n",
+					   t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+			}
 		}
-		{
+		if (bosa_regs_live()) {
 			s32 v = bosa_vmpd_mv(0x3B3);	/* one live MPD sample -> latch its taps */
 
 			seq_printf(s, "optic_txchain: dark=%d vmpd=%d code=%u hi=%d zero=%d iavg=%02x range=%d\n",
@@ -6622,9 +6742,11 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		}
 		/* Full RX chain intermediates: a HW read at a known attenuation pins the exact
 		 * ref-tap roles + rx_thr against the -14 dBm anchor (code 398 = 0.1uW at -14 dBm). */
-		seq_printf(s, "optic_rxchain: rssi_uv=%u code=%u cdbm=%s | adcA=%06x ref305=%06x ref314=%06x\n",
-			   rssi_uv, rx_code, cdbm_s, bosa_read24(0x30e), bosa_read24(0x305), bosa_read24(0x314));
-		seq_printf(s, "optic_dbg: 30c=%02x 30d=%02x 30e=%02x 30f=%02x 310=%02x 311=%02x 312=%02x | 166=%02x 167=%02x 168=%02x 169=%02x\n",
+		if (bosa_regs_live())
+			seq_printf(s, "optic_rxchain: rssi_uv=%u code=%u cdbm=%s | adcA=%06x ref305=%06x ref314=%06x\n",
+				   rssi_uv, rx_code, cdbm_s, bosa_read24(0x30e), bosa_read24(0x305), bosa_read24(0x314));
+		if (bosa_regs_live())
+			seq_printf(s, "optic_dbg: 30c=%02x 30d=%02x 30e=%02x 30f=%02x 310=%02x 311=%02x 312=%02x | 166=%02x 167=%02x 168=%02x 169=%02x\n",
 			   bosa_read_reg(0x30c) & 0xff, bosa_read_reg(0x30d) & 0xff,
 			   bosa_read_reg(0x30e) & 0xff, bosa_read_reg(0x30f) & 0xff,
 			   bosa_read_reg(0x310) & 0xff, bosa_read_reg(0x311) & 0xff,
@@ -6646,17 +6768,19 @@ static int gpon_proc_show(struct seq_file *s, void *v)
 		   bosa_read_reg(0x08) & 0xff, bosa_read_reg(0x0c) & 0xff,
 		   bosa_read_reg(0x10) & 0xff, bosa_read_reg(0x14) & 0xff,
 		   bosa_read_reg(0x18) & 0xff, bosa_read_reg(0x1c) & 0xff);
-	seq_printf(s, "bosa_p3: 31c=%02x 31d=%02x 31f=%02x 322=%02x 323=%02x (O5 00 33 00 da 00)\n",
-		   bosa_read_reg(0x31c) & 0xff, bosa_read_reg(0x31d) & 0xff,
-		   bosa_read_reg(0x31f) & 0xff, bosa_read_reg(0x322) & 0xff,
-		   bosa_read_reg(0x323) & 0xff);
-	seq_printf(s, "bosa_p2: W54_236=%02x W56_238=%02x W57_239=%02x W61_24d=%02x W88_284=%02x (O5 19 22 2d b0 76)\n",
-		   bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x238) & 0xff,
-		   bosa_read_reg(0x239) & 0xff, bosa_read_reg(0x24d) & 0xff,
-		   bosa_read_reg(0x284) & 0xff);
-	seq_printf(s, "bosa_apc: W69_245=%02x(loopmode) W58_23a=%02x(iavg) W72_248=%02x(biasmax) W73_249=%02x(biasmin 0x2a)\n",
-		   bosa_read_reg(0x245) & 0xff, bosa_read_reg(0x23a) & 0xff,
-		   bosa_read_reg(0x248) & 0xff, bosa_read_reg(0x249) & 0xff);
+	if (bosa_regs_live()) {
+		seq_printf(s, "bosa_p3: 31c=%02x 31d=%02x 31f=%02x 322=%02x 323=%02x (O5 00 33 00 da 00)\n",
+			   bosa_read_reg(0x31c) & 0xff, bosa_read_reg(0x31d) & 0xff,
+			   bosa_read_reg(0x31f) & 0xff, bosa_read_reg(0x322) & 0xff,
+			   bosa_read_reg(0x323) & 0xff);
+		seq_printf(s, "bosa_p2: W54_236=%02x W56_238=%02x W57_239=%02x W61_24d=%02x W88_284=%02x (O5 19 22 2d b0 76)\n",
+			   bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x238) & 0xff,
+			   bosa_read_reg(0x239) & 0xff, bosa_read_reg(0x24d) & 0xff,
+			   bosa_read_reg(0x284) & 0xff);
+		seq_printf(s, "bosa_apc: W69_245=%02x(loopmode) W58_23a=%02x(iavg) W72_248=%02x(biasmax) W73_249=%02x(biasmin 0x2a)\n",
+			   bosa_read_reg(0x245) & 0xff, bosa_read_reg(0x23a) & 0xff,
+			   bosa_read_reg(0x248) & 0xff, bosa_read_reg(0x249) & 0xff);
+	}
 	/* SerDes/serializer run-state vs LIVE working-stock O5 (stock_usburst.txt
 	 * golden in [..]). Decisive good-vs-bad-boot diff for the cold-start US-TX
 	 * serializer lock: any reg that DIVERGES from the [stock] value on a

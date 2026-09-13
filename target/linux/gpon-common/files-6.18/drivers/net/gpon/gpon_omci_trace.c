@@ -69,7 +69,39 @@ const char *gpon_omci_mt_name(u8 msg_type)
 
 bool gpon_omci_is_get(const u8 *pdu, unsigned int len)
 {
-	return pdu && len >= 3 && (pdu[2] & 0x1f) == 9;
+	return pdu && len >= 3 && (pdu[2] & 0x1f) == OMCI_MT_GET;
+}
+
+bool gpon_omci_is_set(const u8 *pdu, unsigned int len)
+{
+	return pdu && len >= 3 && (pdu[2] & 0x1f) == OMCI_MT_SET;
+}
+
+bool gpon_omci_has_result_code(const u8 *pdu, unsigned int len)
+{
+	u8 mt;
+
+	if (!pdu || len < 3)
+		return false;		/* unclassifiable: render nothing */
+
+	mt = pdu[2] & 0x1f;
+	return mt != OMCI_MT_GET_ALL_ALARMS &&
+	       mt != OMCI_MT_GET_ALL_ALRM_NX &&
+	       mt != OMCI_MT_MIB_UPLOAD &&
+	       mt != OMCI_MT_MIB_UPLOAD_NX;
+}
+
+bool gpon_omci_is_bulk(const u8 *pdu, unsigned int len)
+{
+	u8 mt;
+
+	if (!pdu || len < 3)
+		return false;			/* unclassifiable: never bulk */
+
+	mt = pdu[2] & 0x1f;
+	return mt == OMCI_MT_GET ||
+	       mt == OMCI_MT_MIB_UPLOAD ||
+	       mt == OMCI_MT_MIB_UPLOAD_NX;
 }
 
 int gpon_omci_describe(const u8 *pdu, unsigned int len, char *out, size_t sz)
@@ -92,36 +124,22 @@ int gpon_omci_describe(const u8 *pdu, unsigned int len, char *out, size_t sz)
 			 ((u16)pdu[6] << 8) | pdu[7]);
 }
 
-int gpon_omci_describe_get(const u8 *pdu, unsigned int len,
-			   const u8 *resp, int resp_len, char *out, size_t sz)
+bool gpon_omci_is_create_of(const u8 *pdu, unsigned int len, u16 me_class)
 {
-	if (!out || !sz)
-		return 0;
-	out[0] = '\0';
+	return pdu && len >= GPON_OMCI_MIN_HDR &&
+	       (pdu[2] & 0x1f) == OMCI_MT_CREATE &&
+	       (((u16)pdu[4] << 8) | pdu[5]) == me_class;
+}
 
-	if (!gpon_omci_is_get(pdu, len))
-		return 0;
+const u8 *gpon_omci_body(const u8 *pdu, unsigned int len, u8 *blen)
+{
+	unsigned int bounded = len > OMCI_LEN ?
+			       OMCI_LEN : len;
 
-	/*
-	 * ⚠ The response is described only when it is a WHOLE baseline PDU.  A
-	 * short one is not a Get response with missing fields, it is something
-	 * else entirely, and reading masks out of it would print four confident
-	 * numbers taken from whatever the buffer happened to hold.
-	 */
-	if (!resp || resp_len < 40)
-		return scnprintf(out, sz, " noresp");
-
-	if (len < 10)
-		return 0;
-
-	/* [8:9] the requested attribute mask; in the response, [9:10] the mask
-	 * actually answered, [36:37] the unsupported attributes, [38:39] the
-	 * ones that failed, and [8] the result/reason code. */
-	return scnprintf(out, sz,
-			 " mask=0x%04x rmask=0x%04x unsup=0x%04x failed=0x%04x rc=%u",
-			 ((u16)pdu[8] << 8) | pdu[9],
-			 ((u16)resp[9] << 8) | resp[10],
-			 ((u16)resp[36] << 8) | resp[37],
-			 ((u16)resp[38] << 8) | resp[39],
-			 resp[8]);
+	if (blen)
+		*blen = bounded > GPON_OMCI_MIN_HDR ?
+			(u8)(bounded - GPON_OMCI_MIN_HDR) : 0;
+	if (!pdu || bounded <= GPON_OMCI_MIN_HDR)
+		return NULL;
+	return pdu + GPON_OMCI_MIN_HDR;
 }

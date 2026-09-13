@@ -190,6 +190,15 @@ ccflags-y += -O2
 obj-y += gpon_ddm.o
 obj-y += gpon_sn.o
 
+# The netdev station-address ladder. Four consumers: luna_eth.c, rtl9602c_eth.c,
+# cortina-ni-tx.c, cortina-gpon.c.
+obj-y += gpon_hwaddr.o
+# May this ONU transmit, and what must change if not. Pure policy, no MMIO --
+# both families ask it, and the LIVE re-provision path is where its four
+# defects lived, so it is decided once and walked exhaustively on x86
+# (dev/rtl9607c-test/gpon_range_gate_test.c).
+obj-y += gpon_range_gate.o
+
 obj-y += gpon_gem_us.o
 
 # ITU-T G.988 OMCI baseline MESSAGE layer: parse, dispatch, response, MIC.
@@ -212,6 +221,22 @@ obj-y += gpon_omci_trace.o
 # its own registers and owns the level.  Gated so a footprint-bound build can
 # drop it (CONFIG_GPON_PLOAM_DIAG, default y: see the Kconfig help).
 obj-$(CONFIG_GPON_PLOAM_DIAG) += gpon_ploam_diag.o
+
+# ITU-T G.988 per-message OMCI diagnostics: the ONE trace line every family
+# emits.  It is the LINE that stayed behind when the DECODE was promoted on
+# 2026-09-10 -- two spellings of one idea, and the suite could read only the
+# Cortina one, so every Luna board's OMCI trace was invisible with the lines in
+# dmesg.  Formats INTO A BUFFER only; the family owns the rate limit and the
+# level.  Gated so a footprint-bound build can drop it (CONFIG_GPON_OMCI_DIAG,
+# default y: see the Kconfig help).
+obj-$(CONFIG_GPON_OMCI_DIAG) += gpon_omci_diag.o
+
+# The WAN DATA PATH's own line: what the OLT provisioned, what is armed, the
+# plan, and WHICH precondition is missing.  The third member of the
+# GPON_<SUBSYSTEM>_DIAG family; the verdicts come from the pure functions in
+# gpon_data_plan.h so the line cannot disagree with the behaviour.  Formats
+# INTO A BUFFER only; the family owns the rate limit and the level.
+obj-$(CONFIG_GPON_GEM_DIAG) += gpon_gem_diag.o
 
 # ITU-T G.984.3 PLOAM activation state machine (O1..O7) and message builders.
 # ONE kernel consumer today (realtek-luna): the Elnath PON-MAC runs activation
@@ -267,3 +292,9 @@ obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow.o
 # supplies five ops and writes none of this; a family without one compiles
 # neither object.
 obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow_offload.o
+
+# gpon_edge.o -- the router EDGE (WAN address/MAC, next hop, LAN subnet) read
+# out of the LIVE kernel, once for every family.  Gated with the lifecycle:
+# only a board with an accelerator has anything to tell, and this tree ships to
+# parts with <= 64 MB of RAM.
+obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_edge.o

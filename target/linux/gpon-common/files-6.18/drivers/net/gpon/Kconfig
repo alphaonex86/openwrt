@@ -58,7 +58,7 @@ config GPON_CORE
 	  cannot occur.
 
 	  It is deliberately a bool and not a tristate: both GPON drivers in this
-	  tree ship built in (CONFIG_CORTINA_GPON=y, CONFIG_RTL9602C_GPON=y), an
+	  tree ship built in (CONFIG_CORTINA_GPON=y, CONFIG_LUNA_GPON=y), an
 	  ONU has <=64 MB RAM and a small NAND, and a separate gpon_core.ko would
 	  cost module-loader overhead and a MODULE_LICENSE translation unit while
 	  buying nothing.  Built in also means the core's entry points are plain
@@ -85,6 +85,64 @@ config GPON_FLOW_OFFLOAD
 	  net/flow_offload.h at all, so building it there is a fatal error and
 	  not a wasted object.  That is how this gate came to exist -- an
 	  unconditional obj-y broke both Luna boards on 2026-08-28.
+
+config GPON_GEM_DIAG
+	bool "GPON data-path diagnostics (what the WAN path is waiting for)"
+	depends on GPON_CORE
+	default y
+	help
+	  The third member of the GPON_<SUBSYSTEM>_DIAG family, and it answers
+	  the question every board in this project has asked in turn: the ONU
+	  reaches O5, the OLT provisions it, and NO DATA GEM APPEARS.  Each time
+	  that was diagnosed by hand-adding prints and reverting them.
+
+	  It renders one line holding the two INPUTS and the two VERDICTS -- what
+	  the OLT provisioned (ME 262 Alloc-ID, ME 268 GEM Port-ID, the live OMCC
+	  binding), what is armed in silicon, the plan, and WHICH precondition is
+	  missing.  That last field is the point: `WAIT` has FIVE causes and one
+	  name, and telling "the OLT never authorised this Alloc-ID over PLOAM"
+	  from "the OMCC transport is down" from "ME 268 never named a GEM port"
+	  is the difference between three unrelated repairs.
+
+	  MEASURED on the X111W 2026-09-13: the OLT completed a whole
+	  provisioning burst, the ONU answered all 109 messages rc=0 including
+	  the ME 262 Set assigning Alloc-ID 0x0100, and ~2 s later the OLT
+	  DEACTIVATED it while /proc/gpon read `admitted=0 alloc_bound=0`.
+	  Nothing in the driver could say which precondition was missing.
+
+	  ★ The plan and the blocker both come from the PURE functions in
+	  gpon_data_plan.h, so this line cannot disagree with the behaviour it
+	  describes -- it reports, it never decides.
+
+	  ★ WHY default y: same reasoning as its two siblings.  The spy/dump
+	  capability is first-class and is not stripped for production; a build
+	  that must shed every byte sets this to n and the facility is ABSENT,
+	  not silenced.
+
+config GPON_OMCI_DIAG
+	bool "GPON OMCI per-message diagnostics (message type, ME, Get masks)"
+	depends on GPON_CORE
+	default y
+	help
+	  The ONE spelling of the per-PDU downstream OMCI trace line: message
+	  type and name, AR/AK, ME class/instance, and for a Get the mask the OLT
+	  asked for against the masks the responder answered, could not model and
+	  could not fit.  `unsup != 0` is the defect that strands an OLT in a Get
+	  audit loop, and no counter can show it -- only the per-message line can.
+
+	  Every family emits the SAME line, so one reader serves the whole fleet.
+	  A shell that cannot report the responder's answer prints `resp=n/a`,
+	  never a zero mask: a mask nobody read must not render as a device
+	  finding.
+
+	  ★ WHY default y.  This tree's rule is that the protocol spy/dump
+	  capability is first-class and is not stripped for production; the
+	  footprint rule (<= 64 MB RAM, small flash) is what this symbol exists to
+	  honour -- a build that must shed every byte sets it to n and the
+	  facility is ABSENT, not silenced.  The SAMPLING policy stays with the
+	  family (the Cortina shell keeps its `omci_trace` module parameter, the
+	  Luna shells rate-limit the bulk types), so =y is not =chatty.  The
+	  default is the operator's to flip.
 
 config GPON_PLOAM_DIAG
 	bool "GPON activation diagnostics (grant acceptance at Assign/Ranging/Deactivate)"

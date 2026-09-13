@@ -170,6 +170,7 @@ bool omci_store_put(struct omci_onu *o, u16 class_id, u16 inst,
 	if (!e)
 		return false;
 
+	memset(e, 0, sizeof(*e));
 	e->used = true;
 	e->class_id = class_id;
 	e->inst = inst;
@@ -304,10 +305,25 @@ enum omci_attr_src {
 	OMCI_SRC_SN,		/* the board serial number (8) */
 	OMCI_SRC_MDS,		/* ME 2 #1 = the live MIB-Data-Sync */
 	OMCI_SRC_DYN,		/* v = enum omci_attr_dyn */
+	OMCI_SRC_STORE,		/* v = dense offset in the dynamic instance */
 };
 
 /* The few attributes whose value is derived from the ME INSTANCE. */
 enum omci_attr_dyn {
+	OMCI_DYN_UNI_ADMIN,	/* ME 11 #5: accepted reported admin state */
+	/* ★★ TWO SELECTORS FOR ONE VALUE, ON PURPOSE.  #1 Expected and #2 Sensed
+	 *    read the SAME declared byte today, and that is correct: the boards'
+	 *    own stock reports them equal on a fixed integrated port.  They get
+	 *    SEPARATE selectors so the day #1 becomes settable -- stock declares
+	 *    it R/W -- the author has to decide what #2 does, instead of
+	 *    inheriting a write silently.  Sensed is what the port IS; an
+	 *    Expected the OLT wrote may not move it. */
+	OMCI_DYN_UNI_EXPECTED,	/* ME 11 #1: the expected plug-in type */
+	OMCI_DYN_UNI_TYPE,	/* ME 11 #2: the SENSED type -- the capability */
+	OMCI_DYN_UNIG_ADMIN,	/* ME 264 #2: the same, for UNI-G */
+	OMCI_DYN_UNIG_CAP,	/* ME 264 #3: management capability, per
+				 * instance -- the extra UNI-G each board
+				 * carries reports 0 where the others report 1 */
 	OMCI_DYN_SW_VER,	/* ME 7 #1: per-bank version field */
 	OMCI_DYN_SW_FLAG,	/* ME 7 #2/#3: bank 0 is the active+committed */
 	OMCI_DYN_TCONT_ALLOC,	/* ME 262 #1: alloc-ID of this T-CONT */
@@ -331,10 +347,31 @@ struct omci_attr {
 	u8	attr;
 	u8	size;
 	u8	src;
+	u8	access;	/* verified dynamic layout: read=1, write=2, create=4 */
 };
 
-#define AT(cls, n, sz, s, arg)	{ (cls), (arg), (n), (sz), (s) }
+/* G.988 calls the attribute writable and this ONU has exactly ONE value it can
+ * realise -- the one it already reports.  A Set asking for that value changes
+ * nothing and is applied by definition; any OTHER value is a real change we do
+ * not implement, and it is REFUSED, never stored and ignored.
+ *
+ * ★ THIS IS WHAT MADE PROVISIONING STOP, and the measurement is why the bit
+ *   exists rather than a blanket "accept what stock declares".  The OLT's own
+ *   Set on this board asks for mask 0x2818 -- #3 auto-detection configuration,
+ *   #5 administrative state, #12 ARC, #13 ARC interval -- and EVERY value in it
+ *   is 0x00, which is the G.988 default for all four (measured twice, artifact
+ *   results/artifacts/me11_set_refusal/RTL9603CVD/LANLY/G24W/).  We modelled
+ *   only #5 as writable, so the whole request came back rc=9 ATTR_FAILED and no
+ *   OMCI followed.  Three of the four attributes asked for no change at all. */
+#define OMCI_ACCESS_WRITE_UNCHANGED	8
+
+#define AT(cls, n, sz, s, arg)	{ (cls), (arg), (n), (sz), (s), 0 }
+#define A_ST(cls, n, sz, off, acc) \
+	{ (cls), (off), (n), (sz), OMCI_SRC_STORE, (acc) }
 #define A_C(cls, n, sz, val)	AT(cls, n, sz, OMCI_SRC_CONST, val)
+/* a constant G.988 declares writable: settable to the value it already serves */
+#define A_CW(cls, n, sz, val)	{ (cls), (val), (n), (sz), OMCI_SRC_CONST,  \
+				  OMCI_ACCESS_WRITE_UNCHANGED }
 /* identity field: the wire size IS the named member's size — one source */
 #define A_ID(cls, n, member)	AT(cls, n, OMCI_ID_SIZEOF(member),	\
 				   OMCI_SRC_ID,				\
@@ -420,21 +457,32 @@ static const struct omci_attr omci_attrs[] = {
 	A_ZERO(7, 6, 16),			/* #6  Image hash */
 
 	/* ---- ME 11 PPTP Ethernet UNI (inst 0x0101) — THE HGU gate ---- */
-	A_C(11,  1, 1, 47),			/* #1  Expected type */
-	A_C(11,  2, 1, 47),			/* #2  Sensed type */
-	A_C(11,  3, 1, 0),			/* #3  Auto-detect config */
-	A_C(11,  4, 1, 0),			/* #4  Eth loopback config */
-	A_C(11,  5, 1, 0),			/* #5  Admin state (unlocked) */
+	A_D(11,  1, 1, OMCI_DYN_UNI_EXPECTED),	/* #1  Expected type */
+	A_D(11,  2, 1, OMCI_DYN_UNI_TYPE),	/* #2  Sensed type */
+	/* ★ THE WRITABLE SET IS STOCK'S OWN, MEASURED: both boards' `mib_EthUni.so`
+	 * registers the class with writable mask 0xb9fe = #1,3,4,5,8..15 (RE'd by
+	 * dev/re-tools/stock_me11_registration.py, identical on the two dies), and
+	 * what stock implements IS the standard here.  #2 sensed type, #6
+	 * operational state and #7 configuration indication are the three G.988
+	 * leaves out, and they stay read-only.  Every writable CONSTANT below is
+	 * A_CW: settable to the value it already serves and refused otherwise, so
+	 * an attribute with a physical side (#4 loopback, #15 power control) can
+	 * never be accepted and then ignored.  #1 expected type is dynamic and
+	 * per-instance and stock has no dedicated setter for it -- OWED, not
+	 * modelled writable here on a guess. */
+	A_CW(11,  3, 1, 0),			/* #3  Auto-detect config */
+	A_CW(11,  4, 1, 0),			/* #4  Eth loopback config */
+	A_D(11,  5, 1, OMCI_DYN_UNI_ADMIN),	/* #5  Admin state */
 	A_C(11,  6, 1, 1),			/* #6  Op state */
 	A_C(11,  7, 1, 0),			/* #7  Config ind */
-	A_C(11,  8, 2, 1518),			/* #8  Max frame size */
-	A_C(11,  9, 1, 0),			/* #9  DTE/DCE ind */
-	A_C(11, 10, 2, 0xffff),			/* #10 Pause time */
-	A_C(11, 11, 1, 2),			/* #11 Bridged/IP ind */
-	A_C(11, 12, 1, 0),			/* #12 ARC */
-	A_C(11, 13, 1, 0),			/* #13 ARC interval */
-	A_C(11, 14, 1, 0),			/* #14 PPPoE filter */
-	A_C(11, 15, 1, 0),			/* #15 Power control */
+	A_CW(11,  8, 2, 1518),			/* #8  Max frame size */
+	A_CW(11,  9, 1, 0),			/* #9  DTE/DCE ind */
+	A_CW(11, 10, 2, 0xffff),		/* #10 Pause time */
+	A_CW(11, 11, 1, 2),			/* #11 Bridged/IP ind */
+	A_CW(11, 12, 1, 0),			/* #12 ARC */
+	A_CW(11, 13, 1, 0),			/* #13 ARC interval */
+	A_CW(11, 14, 1, 0),			/* #14 PPPoE filter */
+	A_CW(11, 15, 1, 0),			/* #15 Power control */
 
 	/* ---- ME 131 OLT-G: known, no modelled attributes (the OLT Sets it) */
 	A_NO_ATTRS(131),
@@ -468,10 +516,25 @@ static const struct omci_attr omci_attrs[] = {
 
 	/* ---- ME 264 UNI-G (inst 0x0101) ---- */
 	A_C(264, 1, 2, 0x0000),			/* #1  Config-option status */
-	A_C(264, 2, 1, 0),			/* #2  Admin state */
-	A_C(264, 3, 1, 1),			/* #3  Management capability */
+	A_D(264, 2, 1, OMCI_DYN_UNIG_ADMIN),	/* #2  Admin state */
+	A_D(264, 3, 1, OMCI_DYN_UNIG_CAP),	/* #3  Management capability */
 	A_C(264, 4, 2, 0x0000),			/* #4  Non-OMCI mgmt ID */
 	A_C(264, 5, 2, 0x0000),			/* #5  Relay-agent options */
+
+	/* ME 268 GEM-port network CTP. Dense values differ from Create after
+	 * attr 5: read-only #6 is absent from SBC, so #7 moves from 9 to 10.
+	 * Width/access facts: own X111W mib_GemPortCtp.so mibTable_init.
+	 * The full 16-byte value fits one baseline Get or Upload row. */
+	A_ST(268,  1, 2,  0, 7),
+	A_ST(268,  2, 2,  2, 7),
+	A_ST(268,  3, 1,  4, 7),
+	A_ST(268,  4, 2,  5, 7),
+	A_ST(268,  5, 2,  7, 7),
+	A_ST(268,  6, 1,  9, 1),
+	A_ST(268,  7, 2, 10, 7),
+	A_ST(268,  8, 1, 12, 1),
+	A_ST(268,  9, 2, 13, 3),
+	A_ST(268, 10, 1, 15, 3),
 
 	/* ---- ME 277 Priority-Queue (inst 0..7) ---- */
 	A_C(277, 1, 1, 1),			/* #1  Queue config option */
@@ -507,7 +570,7 @@ static const struct omci_attr omci_attrs[] = {
 						 * servable, proven) */
 	A_C(65530, 4,  1, 0x01),		/* #4  Auth status = success */
 
-	{ 0, 0, 0, 0, 0 },			/* terminator (class 0 is not a
+	{ 0, 0, 0, 0, 0, 0 },			/* terminator (class 0 is not a
 						 * G.988 class ID) */
 };
 
@@ -540,6 +603,261 @@ static const struct omci_attr *omci_me_find(u16 class_id)
 	return NULL;
 }
 
+/* Which slot of @inv holds @inst, or -1 when this board has no such instance.
+ * The comparison is on the FULL u16: the G24W's fourth PPTP Ethernet UNI is
+ * 0x0401 and its first is 0x0101, so a low-byte port index matches both. */
+int omci_uni_slot(const struct omci_uni_inv *inv, u16 inst)
+{
+	u8 i;
+
+	for (i = 0; i < inv->n; i++)
+		if (inv->inst[i] == inst)
+			return i;
+	return -1;
+}
+
+/* The reported administrative state of @inst.  An instance this board does not
+ * have reads 0 -- G.988 unlocked, and what the model answered for every
+ * instance but one before the inventory existed. */
+static u8 omci_uni_admin(const struct omci_uni_inv *inv, u16 inst)
+{
+	int slot = omci_uni_slot(inv, inst);
+
+	return slot < 0 ? 0 : inv->admin[slot];
+}
+
+/* Record an administrative state the model has accepted, flagging the slot
+ * only when the state actually MOVED: a re-Set of the value already held must
+ * not make the family touch a port that is already where the OLT wants it. */
+static void omci_uni_accept(struct omci_uni_inv *inv, int slot, u8 admin)
+{
+	if (inv->admin[slot] == admin)
+		return;
+	inv->admin[slot] = admin;
+	inv->changed |= (u8)(1u << slot);
+}
+
+u8 omci_uni_take_changed(struct omci_uni_inv *inv)
+{
+	u8 changed = inv->changed;
+
+	inv->changed = 0;
+	return changed;
+}
+
+void omci_uni_mark_changed(struct omci_uni_inv *inv, u8 slot)
+{
+	if (slot < inv->n)
+		inv->changed |= (u8)(1u << slot);
+}
+
+/* A MIB-Reset returns every UNI to unlocked.  ⚠ AND FLAGS THE ONES THAT WERE
+ * LOCKED: a port the OLT held down and then reset the MIB out from under must
+ * come back up, and the changed word is the only thing that says so. */
+static void omci_uni_reset(struct omci_uni_inv *inv)
+{
+	u8 i;
+
+	for (i = 0; i < inv->n; i++) {
+		if (!inv->admin[i])
+			continue;
+		inv->admin[i] = 0;
+		inv->changed |= (u8)(1u << i);
+	}
+}
+
+/* One list's declaration rules.  A duplicate or a zero instance id would put
+ * the MIB and the OLT's copy of it permanently out of step, so the whole
+ * declaration is judged before any of it is installed. */
+static bool omci_uni_list_ok(const u16 *inst, u8 n)
+{
+	u8 i, j;
+
+	if (n > OMCI_UNI_MAX || (n && !inst))
+		return false;
+	for (i = 0; i < n; i++) {
+		if (!inst[i])
+			return false;
+		for (j = 0; j < i; j++)
+			if (inst[j] == inst[i])
+				return false;
+	}
+	return true;
+}
+
+static void omci_uni_install(struct omci_uni_inv *inv, const u16 *inst, u8 n)
+{
+	u8 i;
+
+	memset(inv, 0, sizeof(*inv));
+	for (i = 0; i < n; i++)
+		inv->inst[i] = inst[i];
+	inv->n = n;
+}
+
+/* Only these classes have a verified mutable layout in this model. Other
+ * classes retain their existing compatibility handling in the message layer. */
+bool omci_me_mutable(u16 class_id)
+{
+	return class_id == OMCI_ME_GEM_CTP || class_id == OMCI_ME_PPTP_ETH_UNI ||
+	       class_id == OMCI_ME_TCONT || class_id == OMCI_ME_UNI_G;
+}
+
+void omci_me_reset_values(struct omci_onu *o)
+{
+	u16 i;
+
+	omci_uni_reset(&o->pptp_eth_uni);
+	omci_uni_reset(&o->uni_g);
+	o->tcont_alloc_written = 0;
+	for (i = 0; i < OMCI_TCONT_COUNT; i++)
+		o->tcont_alloc[i] = i ? 0x00ff : 0x0100;
+}
+
+/* Create carries only SBC attributes, with no mask. Keep opaque classes on
+ * their existing path; ME 268 is expanded before committing the instance. */
+bool omci_store_create(struct omci_onu *o, u16 class_id, u16 inst,
+		       const u8 *body, unsigned int blen)
+{
+	const struct omci_attr *a;
+	u8 dense[16] = { 0 };
+	unsigned int pos = 0;
+
+	if (class_id != OMCI_ME_GEM_CTP)
+		return omci_store_put(o, class_id, inst, body,
+				      blen > 26 ? 26 : (int)blen);
+	/* The stock default downstream priority-queue pointer is unassigned. */
+	dense[10] = 0xff;
+	dense[11] = 0xff;
+	for (a = omci_me_find(class_id); a && a->class_id == class_id; a++) {
+		if (!(a->access & 4))
+			continue;
+		if (!body || pos + a->size > blen ||
+		    a->v + a->size > sizeof(dense))
+			return false;
+		memcpy(dense + a->v, body + pos, a->size);
+		pos += a->size;
+	}
+	return omci_store_put(o, class_id, inst, dense, sizeof(dense));
+}
+
+/* Can this ONU actually realise the value the OLT asks for in THIS attribute?
+ * The answer is per attribute and never per request, which is also why the
+ * administrative bound moved here: it used to read values[0], the first octet
+ * of the WHOLE request, and that is the administrative state only while ME 11
+ * has exactly one writable attribute.  The moment a second one precedes it the
+ * bound would have been checked against a stranger's octet. */
+static bool omci_set_value_realisable(const struct omci_attr *a, const u8 *v)
+{
+	u32 want = 0;
+	unsigned int i;
+
+	/* An administrative state is locked or unlocked, and nothing else. */
+	if ((a->class_id == OMCI_ME_PPTP_ETH_UNI && a->attr == 5) ||
+	    (a->class_id == OMCI_ME_UNI_G && a->attr == 2))
+		return v[0] <= 1;
+	if (!(a->access & OMCI_ACCESS_WRITE_UNCHANGED))
+		return true;
+	if (a->size > sizeof(want))
+		return false;		/* wider than we can compare: refuse */
+	for (i = 0; i < a->size; i++)
+		want = (want << 8) | v[i];
+	return want == a->v;
+}
+
+/* Apply ONE already-validated attribute value. */
+static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
+			       u16 inst, int pptp_slot, int unig_slot,
+			       struct omci_me_inst *e, const u8 *v)
+{
+	if (a->access & OMCI_ACCESS_WRITE_UNCHANGED)
+		return;			/* validated equal to what we serve */
+	if (a->src == OMCI_SRC_STORE)
+		memcpy(e->body + a->v, v, a->size);
+	else if (a->class_id == OMCI_ME_PPTP_ETH_UNI)
+		omci_uni_accept(&o->pptp_eth_uni, pptp_slot, v[0]);
+	else if (a->class_id == OMCI_ME_UNI_G)
+		omci_uni_accept(&o->uni_g, unig_slot, v[0]);
+	else {
+		o->tcont_alloc[inst - 0x8000] = ((u16)v[0] << 8) | v[1];
+		o->tcont_alloc_written |= (u16)(1u << (inst - 0x8000));
+	}
+}
+
+/* Atomic masked Set: validate the entire request before changing any value.
+ * Unsupported bits name absent attributes; failed bits name requested known
+ * attributes left unapplied. This also reports the valid part of a rejected
+ * mixed request as failed, rather than claiming partial application. */
+u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
+	       const u8 *values, unsigned int len, u16 *unsupported, u16 *failed)
+{
+	const struct omci_attr *first = omci_me_find(class_id), *a;
+	struct omci_me_inst *e = omci_store_find(o, class_id, inst);
+	/* Which inventory slot this Set addresses, or -1.  Resolved once, on the
+	 * full u16, and it is what makes the attribute writable below. */
+	int pptp_slot = class_id == OMCI_ME_PPTP_ETH_UNI ?
+			omci_uni_slot(&o->pptp_eth_uni, inst) : -1;
+	int unig_slot = class_id == OMCI_ME_UNI_G ?
+			omci_uni_slot(&o->uni_g, inst) : -1;
+	u16 known = 0, writable = 0;
+	unsigned int need = 0, pos = 0;
+
+	for (a = first; a && a->class_id == class_id; a++) {
+		u16 bit;
+
+		if (!a->attr)
+			continue;
+		bit = (u16)OMCI_ATTR_BIT(a->attr);
+		known |= bit;
+		if ((a->access & 2) ||
+		    (a->access & OMCI_ACCESS_WRITE_UNCHANGED) ||
+		    /* ME 11 #5 and ME 264 #2, the administrative states.  Both
+		     * are writable on EVERY instance this board declares, and
+		     * on no other: the two clauses were pinned to the literal
+		     * 0x0101, so a Set on the second, third or fourth UNI of
+		     * either class was refused with the instance present in the
+		     * MIB the OLT had just uploaded from us.
+		     * ⚠ AND ME 264 WAS WORSE BEFORE THAT: until the class was
+		     * modelled as mutable at all the Set never reached here,
+		     * was ACKed, advanced the MIB-Data-Sync and stored
+		     * nothing. */
+		    (pptp_slot >= 0 && a->attr == 5) ||
+		    (unig_slot >= 0 && a->attr == 2) ||
+		    (class_id == OMCI_ME_TCONT && inst >= 0x8000 &&
+		     inst < 0x8000 + OMCI_TCONT_COUNT && a->attr == 1))
+			writable |= bit;
+		if (mask & bit)
+			need += a->size;
+	}
+	*unsupported = (u16)(mask & ~known);
+	*failed = 0;
+	if (*unsupported || (mask & ~writable) || need > len ||
+	    (need && !values) ||
+	    (class_id == OMCI_ME_GEM_CTP && (!e || e->blen != 16))) {
+		*failed = (u16)(mask & known);
+		return OMCI_RC_ATTR_FAILED;
+	}
+	/* EVERY requested value is checked before ANY is applied — the whole
+	 * point of an atomic Set, and the reason this is a separate pass. */
+	for (a = first, pos = 0; a && a->class_id == class_id; a++) {
+		if (!a->attr || !(mask & OMCI_ATTR_BIT(a->attr)))
+			continue;
+		if (!omci_set_value_realisable(a, values + pos)) {
+			*failed = mask;
+			return OMCI_RC_ATTR_FAILED;
+		}
+		pos += a->size;
+	}
+	for (a = first, pos = 0; a && a->class_id == class_id; a++) {
+		if (!a->attr || !(mask & OMCI_ATTR_BIT(a->attr)))
+			continue;
+		omci_set_apply_one(o, a, inst, pptp_slot, unig_slot, e,
+				   values + pos);
+		pos += a->size;
+	}
+	return OMCI_RC_OK;
+}
+
 /* Does the ONU model this class at all (either a descriptor or the vendor
  * range policy)? */
 bool omci_class_modelled(u16 class_id)
@@ -549,13 +867,19 @@ bool omci_class_modelled(u16 class_id)
 
 /* The bytes of one attribute.  Integers are big-endian, right-aligned in
  * @size octets; @scratch must hold 4 bytes. */
-static const u8 *omci_attr_bytes(const struct omci_onu *o,
+static const u8 *omci_attr_bytes(struct omci_onu *o,
 				 const struct omci_attr *a, u16 inst,
 				 u8 *scratch)
 {
 	u32 val;
 
 	switch (a->src) {
+	case OMCI_SRC_STORE: {
+		struct omci_me_inst *e = omci_store_find(o,
+						      a->class_id, inst);
+
+		return e && a->v + a->size <= e->blen ? e->body + a->v : NULL;
+	}
 	case OMCI_SRC_ID:
 		return (const u8 *)&omci_id + a->v;
 	case OMCI_SRC_SN:
@@ -565,6 +889,26 @@ static const u8 *omci_attr_bytes(const struct omci_onu *o,
 		break;
 	case OMCI_SRC_DYN:
 		switch (a->v) {
+		case OMCI_DYN_UNI_ADMIN:
+			val = omci_uni_admin(&o->pptp_eth_uni, inst);
+			break;
+		case OMCI_DYN_UNIG_ADMIN:
+			val = omci_uni_admin(&o->uni_g, inst);
+			break;
+		case OMCI_DYN_UNI_EXPECTED:
+		case OMCI_DYN_UNI_TYPE: {
+			int slot = omci_uni_slot(&o->pptp_eth_uni, inst);
+
+			/* Equal today -- see the note on the selectors above. */
+			val = slot < 0 ? OMCI_UNI_TYPE_DEFAULT : o->uni_type[slot];
+			break;
+		}
+		case OMCI_DYN_UNIG_CAP: {
+			int slot = omci_uni_slot(&o->uni_g, inst);
+
+			val = slot < 0 ? 1 : o->uni_g_mgmt_cap[slot];
+			break;
+		}
 		case OMCI_DYN_SW_VER:
 			return inst ? omci_id.sw_bank1_version :
 				      omci_id.sw_bank0_version;
@@ -572,7 +916,8 @@ static const u8 *omci_attr_bytes(const struct omci_onu *o,
 			val = inst ? 0 : 1;
 			break;
 		case OMCI_DYN_TCONT_ALLOC:
-			val = (inst == 0x8000) ? 0x0100 : 0x00ff;
+			val = inst >= 0x8000 && inst < 0x8000 + OMCI_TCONT_COUNT ?
+				o->tcont_alloc[inst - 0x8000] : 0x00ff;
 			break;
 		case OMCI_DYN_PQ_PORT:
 			val = ((u32)0x0101 << 16) | (7u - (inst & 7));
@@ -627,6 +972,7 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	for (; a->class_id == class_id; a++) {
 		u16 bit;
 		u8 scratch[4];
+		const u8 *bytes;
 
 		if (!a->attr)			/* marker row: no attributes */
 			continue;
@@ -638,7 +984,12 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 			over = true;
 			continue;
 		}
-		memcpy(v, omci_attr_bytes(o, a, inst, scratch), a->size);
+		bytes = omci_attr_bytes(o, a, inst, scratch);
+		if (!bytes) {
+			over = true;
+			continue;
+		}
+		memcpy(v, bytes, a->size);
 		v += a->size;
 		rmask |= bit;
 	}
@@ -658,7 +1009,7 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
  */
 static void omci_build_mib(struct omci_onu *o)
 {
-	u16 n = 0;
+	u16 n = 0, dropped = 0;
 	u16 i;
 
 #define ROW(c, ins, m) do {						\
@@ -667,6 +1018,8 @@ static void omci_build_mib(struct omci_onu *o)
 			o->rows[n].inst = (ins);			\
 			o->rows[n].mask = (m);				\
 			n++;						\
+		} else {						\
+			dropped++;					\
 		}							\
 	} while (0)
 
@@ -716,8 +1069,11 @@ static void omci_build_mib(struct omci_onu *o)
 	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(5));
 	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(6));
 
-	/* ME 11 PPTP Ethernet UNI: #1..#15 = 17B, one row.  THE HGU GATE. */
-	ROW(OMCI_ME_PPTP_ETH_UNI, 0x0101, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
+	/* ME 11 PPTP Ethernet UNI: #1..#15 = 17B, one row per declared
+	 * instance.  THE HGU GATE. */
+	for (i = 0; i < o->pptp_eth_uni.n; i++)
+		ROW(OMCI_ME_PPTP_ETH_UNI, o->pptp_eth_uni.inst[i],
+					  OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
 					  OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
 					  OMCI_ATTR_BIT(5) | OMCI_ATTR_BIT(6) |
 					  OMCI_ATTR_BIT(7) | OMCI_ATTR_BIT(8) |
@@ -740,12 +1096,16 @@ static void omci_build_mib(struct omci_onu *o)
 				   OMCI_ATTR_BIT(16));
 
 	/* ME 262 T-CONT (inst 0x8000..0x800b): 4B each. */
-	for (i = 0; i < 12; i++)
+	for (i = 0; i < OMCI_TCONT_COUNT; i++)
 		ROW(OMCI_ME_TCONT, 0x8000 + i, OMCI_ATTR_BIT(1) |
 					       OMCI_ATTR_BIT(2) |
 					       OMCI_ATTR_BIT(3));
 
-	ROW(OMCI_ME_UNI_G, 0x0101, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
+	/* ME 264 UNI-G, one row per declared instance.  Its inventory is its
+	 * OWN: the X400AXF reports a UNI-G the PPTP list does not carry. */
+	for (i = 0; i < o->uni_g.n; i++)
+		ROW(OMCI_ME_UNI_G, o->uni_g.inst[i],
+				   OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
 				   OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
 				   OMCI_ATTR_BIT(5));
 
@@ -820,12 +1180,162 @@ static void omci_build_mib(struct omci_onu *o)
 
 #undef ROW
 	o->nrows = n;
+	o->rows_dropped = dropped;
+}
+
+bool omci_onu_declare_unis(struct omci_onu *o,
+			   const u16 *pptp_inst, const u8 *pptp_type, u8 pptp_n,
+			   const u16 *unig_inst, const u8 *unig_mgmt_cap,
+			   u8 unig_n)
+{
+	/* The panel as it stands, so a refusal can put it back EXACTLY -- the
+	 * accepted administrative states and the undrained obligations
+	 * included.  Re-declaring the old instance ids would not do: that
+	 * resets both, and "nothing changed" would be false about the half
+	 * that matters to a port.  Three small inventories, ~64 bytes of
+	 * stack; the enclosing model is far too big to copy here. */
+	struct omci_uni_inv was_pptp = o->pptp_eth_uni, was_unig = o->uni_g;
+	u8 was_cap[OMCI_UNI_MAX], was_type[OMCI_UNI_MAX];
+	u8 i;
+
+	if (!omci_uni_list_ok(pptp_inst, pptp_n) ||
+	    !omci_uni_list_ok(unig_inst, unig_n))
+		return false;
+	memcpy(was_cap, o->uni_g_mgmt_cap, sizeof(was_cap));
+	memcpy(was_type, o->uni_type, sizeof(was_type));
+	omci_uni_install(&o->pptp_eth_uni, pptp_inst, pptp_n);
+	omci_uni_install(&o->uni_g, unig_inst, unig_n);
+	for (i = 0; i < OMCI_UNI_MAX; i++) {
+		o->uni_g_mgmt_cap[i] = i < unig_n && unig_mgmt_cap ?
+				       unig_mgmt_cap[i] : 1;
+		o->uni_type[i] = i < pptp_n && pptp_type ?
+				 pptp_type[i] : OMCI_UNI_TYPE_DEFAULT;
+	}
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		/* ⚠ A PANEL THAT DOES NOT FIT IS PUT BACK, NOT LEFT INSTALLED.
+		 * Rows the OLT never uploaded are instances it will never
+		 * provision, so a half-sized panel is worse than the one that
+		 * was there -- and this function's contract, which the family
+		 * wrappers log, is that a refusal changes NOTHING. */
+		o->pptp_eth_uni = was_pptp;
+		o->uni_g = was_unig;
+		memcpy(o->uni_g_mgmt_cap, was_cap, sizeof(was_cap));
+		memcpy(o->uni_type, was_type, sizeof(was_type));
+		omci_build_mib(o);
+		return false;
+	}
+	return true;
+}
+
+/* The inventory every board on the bench has at minimum, and exactly what this
+ * model carried before the inventory existed. */
+static const u16 omci_uni_default[] = { 0x0101 };
+
+/* One declared 16-bit list: even byte count, at most OMCI_UNI_MAX entries,
+ * decoded big-endian.  Empty is legal and means "this board has none". */
+static bool omci_uni_decode_list(const void *be, int len, u16 *out, u8 *n)
+{
+	const u8 *b = be;
+	int i;
+
+	if (len < 0 || (len & 1) || len > 2 * OMCI_UNI_MAX || (len && !b))
+		return false;
+	for (i = 0; i < len / 2; i++)
+		out[i] = (u16)((b[2 * i] << 8) | b[2 * i + 1]);
+	*n = (u8)(len / 2);
+	return true;
+}
+
+enum omci_uni_decl omci_onu_declare_unis_be(struct omci_onu *o,
+					    const void *pptp_be, int pptp_len,
+					    const void *type, int type_len,
+					    const void *unig_be, int unig_len,
+					    const void *cap, int cap_len,
+					    const char **why)
+{
+	u16 pptp[OMCI_UNI_MAX], unig[OMCI_UNI_MAX];
+	u8 caps[OMCI_UNI_MAX], types[OMCI_UNI_MAX];
+	u8 pptp_n = 0, unig_n = 0;
+	const char *unused;
+	int i;
+
+	if (!why)
+		why = &unused;
+	if (pptp_len < 0 && unig_len < 0) {
+		/* ⚠ A CAPABILITY LIST ON ITS OWN IS NOT "nothing declared".  It is
+		 * a node that says something about UNI-Gs it never listed, and
+		 * discarding it silently would accept a panel nobody can read. */
+		if (cap_len >= 0) {
+			*why = "a management-capability list with no UNI-G list";
+			return OMCI_UNI_DECL_BAD;
+		}
+		if (type_len >= 0) {
+			*why = "an Ethernet-UNI type list with no UNI list";
+			return OMCI_UNI_DECL_BAD;
+		}
+		*why = "no panel declared";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	/* Half a declaration is refused rather than completed: a board that
+	 * lists its Ethernet UNIs and not its UNI-Gs has not said it has none,
+	 * it has left one out. */
+	if (pptp_len < 0 || unig_len < 0) {
+		*why = "one UNI class declared and not the other";
+		return OMCI_UNI_DECL_BAD;
+	}
+	if (!omci_uni_decode_list(pptp_be, pptp_len, pptp, &pptp_n)) {
+		*why = "the Ethernet-UNI list is not an even count of 16-bit instances, or holds more than the model does";
+		return OMCI_UNI_DECL_BAD;
+	}
+	if (!omci_uni_decode_list(unig_be, unig_len, unig, &unig_n)) {
+		*why = "the UNI-G list is not an even count of 16-bit instances, or holds more than the model does";
+		return OMCI_UNI_DECL_BAD;
+	}
+	for (i = 0; i < OMCI_UNI_MAX; i++) {
+		caps[i] = 1;
+		types[i] = OMCI_UNI_TYPE_DEFAULT;
+	}
+	if (type_len < 0) {
+		/* absent: every UNI keeps the type this model used to hardcode */
+	} else if (type_len != pptp_n || (type_len && !type)) {
+		*why = "the Ethernet-UNI type list is present and is not one byte per Ethernet UNI";
+		return OMCI_UNI_DECL_BAD;
+	} else {
+		for (i = 0; i < type_len && i < OMCI_UNI_MAX; i++)
+			types[i] = ((const u8 *)type)[i];
+	}
+	if (cap_len < 0) {
+		/* absent: every UNI-G keeps the 1 the model used to hardcode */
+	} else if (cap_len != unig_n || (cap_len && !cap)) {
+		*why = "the management-capability list is present and is not one byte per UNI-G";
+		return OMCI_UNI_DECL_BAD;
+	} else {
+		/* Bounded by the ARRAY as well as by the equality above: a rule
+		 * enforced only somewhere else is one a later edit can remove,
+		 * and this loop writes into a fixed-size object. */
+		for (i = 0; i < cap_len && i < OMCI_UNI_MAX; i++)
+			caps[i] = ((const u8 *)cap)[i];
+	}
+	if (!omci_onu_declare_unis(o, pptp, types, pptp_n, unig, caps, unig_n)) {
+		*why = "a duplicate or zero instance, or more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
 }
 
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 {
+	/* ⚠ THIS READS NOTHING OUT OF @o.  It is a COLD init: callers hand it
+	 * an object that has never been initialised -- several hand it an
+	 * uninitialised stack struct -- so touching a field before the memset
+	 * is an indeterminate read, not a way to keep the inventory.  Carrying
+	 * the inventory across an identity change is omci_onu_reinit()'s job,
+	 * and it is a separate function precisely so the cold path cannot try. */
 	memset(o, 0, sizeof(*o));
 	memcpy(o->sn, sn, 8);
+	omci_me_reset_values(o);
 	o->mds = mds_seed;
 	/* Seed the ANI-G optical levels with the static fallback: a fresh MIB must
 	 * be able to answer an ANI-G GET before the first DDM sample lands (the
@@ -837,7 +1347,44 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->mds_adapt_reads = OMCI_MDS_ADAPT_READS;
 	o->anig_rx_level = OMCI_ANIG_RX_FALLBACK;
 	o->anig_tx_level = OMCI_ANIG_TX_FALLBACK;
-	omci_build_mib(o);
+	omci_onu_declare_unis(o, omci_uni_default, NULL, 1,
+			      omci_uni_default, NULL, 1);
+}
+
+/* Everything the family still owes a port after the model was reset under it:
+ * every slot that WAS locked, because the reset only unlocks the report, plus
+ * anything that was flagged and not yet drained, because a later same-value
+ * Set or a replayed PDU will never recreate a consumed bit. */
+static void omci_uni_carry_obligations(struct omci_uni_inv *now,
+				       const struct omci_uni_inv *was)
+{
+	u8 i;
+
+	now->changed |= was->changed;
+	for (i = 0; i < now->n && i < was->n; i++)
+		if (was->admin[i])
+			now->changed |= (u8)(1u << i);
+}
+
+void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
+{
+	/* Safe to read: @o is LIVE here by this function's contract, which is
+	 * the whole reason it is not the same function as omci_onu_init(). */
+	struct omci_uni_inv pptp = o->pptp_eth_uni, unig = o->uni_g;
+	u8 cap[OMCI_UNI_MAX], type[OMCI_UNI_MAX];
+
+	memcpy(cap, o->uni_g_mgmt_cap, sizeof(cap));
+	/* ★ THE TYPE IS CARRIED TOO.  It is the panel's, not the session's: an
+	 *   identity change does not turn an FE port into a GE one. */
+	memcpy(type, o->uni_type, sizeof(type));
+	omci_onu_init(o, sn, mds_seed);
+	/* ⚠ UNCONDITIONALLY, INCLUDING WITH BOTH LISTS EMPTY.  Guarding this on
+	 * "something was declared" made a board that legally declares no UNI at
+	 * all come back with the default 0x0101 on both classes -- an instance
+	 * the board does not have, invented by the identity change. */
+	omci_onu_declare_unis(o, pptp.inst, type, pptp.n, unig.inst, cap, unig.n);
+	omci_uni_carry_obligations(&o->pptp_eth_uni, &pptp);
+	omci_uni_carry_obligations(&o->uni_g, &unig);
 }
 
 /* Is (class, inst) a MIB instance this ONU holds?  Three sources: the static
@@ -924,23 +1471,48 @@ const char *omci_dgem_name(enum omci_dgem v)
 	return "?";
 }
 
-bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
-			u16 *port_id)
+void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
+				u16 mcast_gem, struct omci_data_binding *binding)
 {
 	u16 i;
 
+	if (!binding)
+		return;
+	memset(binding, 0, sizeof(*binding));
 	if (!o)
-		return false;
+		return;
 	for (i = 0; i < OMCI_STORE_MAX; i++) {
 		const struct omci_me_inst *e = &o->store[i];
+		u16 port_id, tcont;
 
-		if (!e->used || e->class_id != OMCI_ME_GEM_CTP)
+		if (!e->used || e->class_id != OMCI_ME_GEM_CTP ||
+		    omci_dgem_classify(e->body, e->blen, omcc_gem, mcast_gem,
+				       &port_id) != OMCI_DGEM_YES)
 			continue;
-		if (omci_dgem_classify(e->body, e->blen, omcc_gem, mcast_gem,
-				       port_id) == OMCI_DGEM_YES)
-			return true;
+		binding->gem_present = true;
+		binding->gem_inst = e->inst;
+		binding->gem_port = port_id;
+		binding->direction = e->body[4];
+		tcont = ((u16)e->body[2] << 8) | e->body[3];
+		binding->tcont_inst = tcont;
+		if (tcont >= 0x8000 && tcont < 0x8000 + OMCI_TCONT_COUNT &&
+		    (o->tcont_alloc_written & (1u << (tcont - 0x8000)))) {
+			binding->alloc_known = true;
+			binding->alloc_id = o->tcont_alloc[tcont - 0x8000];
+		}
+		return;
 	}
-	return false;
+}
+
+bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
+			u16 *port_id)
+{
+	struct omci_data_binding binding;
+
+	omci_data_binding_snapshot(o, omcc_gem, mcast_gem, &binding);
+	if (binding.gem_present && port_id)
+		*port_id = binding.gem_port;
+	return binding.gem_present;
 }
 
 /* ME 262 T-CONT snoop: the parse (Set-with-mask vs Create SBC layout) and the

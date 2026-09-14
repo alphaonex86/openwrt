@@ -15,6 +15,8 @@ enum gpon_ploam_diag_point gpon_ploam_diag_point_of(enum gpon_ploam_ev ev)
 		return GPON_PDIAG_ASSIGN;
 	case GPON_PLOAM_EV_RANGING_TIME:
 		return GPON_PDIAG_RANGING_TIME;
+	case GPON_PLOAM_EV_EARLY_DWELL:
+		return GPON_PDIAG_EARLY;
 	case GPON_PLOAM_EV_DEACT:
 		return GPON_PDIAG_DEACT;
 	default:
@@ -29,6 +31,8 @@ const char *gpon_ploam_diag_point_name(enum gpon_ploam_diag_point p)
 		return "assign";
 	case GPON_PDIAG_RANGING_TIME:
 		return "ranging_time";
+	case GPON_PDIAG_EARLY:
+		return "early_dwell";
 	case GPON_PDIAG_DEACT:
 		return "deact";
 	default:

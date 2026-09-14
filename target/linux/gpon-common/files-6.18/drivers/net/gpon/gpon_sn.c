@@ -86,14 +86,32 @@ void gpon_sn_format(const u8 sn[GPON_SN_BYTES], char *out)
 	out[GPON_SN_TEXT_LEN] = '\0';
 }
 
-bool gpon_sn_is_set(const u8 sn[GPON_SN_BYTES])
+/* Is the 4-byte half at @p entirely one blank-storage value? An erased NOR/NAND
+ * page and an unburnt efuse row read 0xff; a zeroed EEPROM or a never-written
+ * struct reads 0x00. Neither is a value anybody chose, and the two are the only
+ * patterns a half can carry that mean "nothing was programmed here". */
+static bool sn_half_blank(const u8 *p)
 {
 	int i;
 
+	for (i = 1; i < 4; i++)
+		if (p[i] != p[0])
+			return false;
+	return p[0] == 0x00 || p[0] == 0xff;
+}
+
+bool gpon_sn_is_set(const u8 sn[GPON_SN_BYTES])
+{
 	if (!sn)
 		return false;
-	for (i = 0; i < GPON_SN_BYTES; i++)
-		if (sn[i])
-			return true;
-	return false;
+	/* ★★ EITHER HALF BLANK IS "NOT PROVISIONED", not just both of them.
+	 * The vendor-id half and the vendor-specific half are programmed from
+	 * DIFFERENT places on these boards -- one is a fleet-wide constant a
+	 * driver can hold, the other is the per-unit value that has to be read
+	 * off the board -- so the failure that actually happens is HALF an
+	 * identity: a real-looking vendor id beside a blank VSSN. That is what
+	 * the Elnath placeholder was ("XPON" + ff ff ff ff), and it ranged.
+	 * Testing "any byte non-zero" cannot see it, because four of the eight
+	 * bytes are perfectly good ASCII. */
+	return !sn_half_blank(sn) && !sn_half_blank(sn + 4);
 }

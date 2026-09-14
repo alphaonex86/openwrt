@@ -47,6 +47,12 @@
 enum gpon_ploam_diag_point {
 	GPON_PDIAG_ASSIGN,		/* Assign_ONU-ID accepted -> O4 (one per copy the OLT sends) */
 	GPON_PDIAG_RANGING_TIME,	/* Ranging_Time accepted -> O5: the ranging grant WAS answered */
+	/* ★★★ THE EARLY LADDER: a dwell at O1, O2 or O3 (2026-09-08). Every
+	 * other point here is a TRANSITION, so a board that never leaves O1
+	 * produced no line at all -- the G24W's stall, undiagnosable for that
+	 * reason alone. The O-state rides in the line's `ostate`, so ONE point
+	 * covers O1, O2 and O3 without three near-identical cases. */
+	GPON_PDIAG_EARLY,
 	GPON_PDIAG_DEACT,		/* Deactivate_ONU-ID: the window closed without ranging     */
 	GPON_PDIAG_NONE,		/* not a sample point                                        */
 };

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * gpon_gtc_ploam.h -- the GTC downstream-PLOAM message buffer, read through
- * struct hwio: the word-unpack that gpon-luna.c's gpon_ploam_read() carried
+ * struct hwio: the word-unpack that luna_gpon.c's gpon_ploam_read() carried
  * beside its own MMIO until 2026-09-05.
  *
  * WHAT THE SILICON DOES.  The Luna GTC block latches each received downstream

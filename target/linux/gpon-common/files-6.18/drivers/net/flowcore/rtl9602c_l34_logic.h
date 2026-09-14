@@ -14,6 +14,8 @@
 
 #include <linux/types.h>
 
+struct luna_rx_layout;
+
 void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val);
 u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width);
 u16 l34_hash_out(bool is_tcp, u32 sip, u16 sport, u32 dip, u16 dport);
@@ -86,6 +88,7 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_EXTIP_NHIDX_W	4
 
 /* NETIF (type 3, 4 words, 16 slots): per-interface MAC/VLAN/MTU/IP. */
+#define L34_NETIF_SLOTS		16
 #define L34_NETIF_VALID_LSP	0
 #define L34_NETIF_VALID_W	1
 #define L34_NETIF_VLANID_LSP	1
@@ -98,10 +101,18 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_NETIF_ENRTR_W	1
 #define L34_NETIF_MTU_LSP	65
 #define L34_NETIF_MTU_W		14
+#define L34_NETIF_DSLITE_LSP	79
+#define L34_NETIF_DSLITE_W	1
+#define L34_NETIF_DSLITE_IDX_LSP	80
+#define L34_NETIF_DSLITE_IDX_W	2
 #define L34_NETIF_L34_LSP	82	/* classify this interface into the L34 NAT domain */
 #define L34_NETIF_L34_W		1
 #define L34_NETIF_IP_LSP	83	/* interface IP, spans w2..w3 */
 #define L34_NETIF_IP_W		32
+#define L34_NETIF_CTAG_LSP	115
+#define L34_NETIF_CTAG_W		1
+#define L34_NETIF_IPV6_LSP	116
+#define L34_NETIF_IPV6_W		1
 #define L34_NETIF_DEF_MTU	1500
 #define L34_NETIF_DEF_MACMASK	0x7
 
@@ -177,6 +188,55 @@ void l34_arp_encode(u32 *w, u32 gw_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);
 int l34_l2uc_sts_index(u32 sts);
 
+/* ---- blackhole-safety: an interface program is ALL-OR-NOTHING ------------
+ *
+ * ★ WHY THE CONTRACT LIVES HERE AND NOT IN A SHELL.  The Cortina side already
+ * states it for its own install path -- cortina-ni-flowoffload.c: "the caller
+ * must fully undo (blackhole-safety)"; cortina-l3fe.c: "ours MUST punt to
+ * CPU_0 or gate-on would black-hole LAN management on the first miss".  Luna
+ * had neither.  rtl9602c_l34_lan_setup() wrote NETIF, then the subnet route,
+ * then the CPU self-route, each with its own `goto out`, so a failure AFTER
+ * the NETIF write left the engine CLAIMING the ONU's own LAN MAC with no CPU
+ * route behind it.
+ *
+ * MEASURED on the X111W (2026-09-11, A->B->A with no reboot): with the own MAC
+ * claimed, IPv4 unicast to the ONU is taken by the engine and never delivered
+ * -- 100% loss 4/4, `Icmp InEchos` 34->34 across 40 echoes; rewriting the SAME
+ * NETIF with a foreign MAC restored it, 0% loss 3/3.  ARP and broadcast cross
+ * throughout, so the loss is SELECTIVE and every layer a reader would blame
+ * reads healthy.
+ *
+ * ⚠ THE CLAIM IS STEP 0 BY CONSTRUCTION.  A NETIF entry starts claiming the
+ * instant it is written; every other entry is inert until something points at
+ * it.  So the steps are ORDERED with the claim first and l34_prog_run()
+ * revokes step 0 -- and only step 0 -- on any later failure.  A partial
+ * program that merely stops is the shape that black-holes.
+ */
+#define L34_WORDS_MAX		4	/* NETIF, the widest entry programmed here */
+
+struct l34_prog_step {
+	u8	tbl;			/* table id: TRANSPORT, the shell supplies it */
+	u16	idx;
+	u8	words;
+	u32	w[L34_WORDS_MAX];
+};
+
+/* The shell's indirect-table write, passed in because flowcore holds no MMIO. */
+typedef int (*l34_tbl_wr_fn)(void *ctx, u8 tbl, u16 idx, const u32 *w,
+			     unsigned int words);
+
+int l34_prog_run(const struct l34_prog_step *s, unsigned int n,
+		 l34_tbl_wr_fn wr, void *ctx);
+
+/* The two questions a read-back asks of what actually landed in the silicon:
+ * does this NETIF entry CLAIM routed traffic, and is there a CPU self-route
+ * behind it?  A claiming NETIF whose self-route is absent black-holes
+ * management, which is the fault above expressed as a predicate. */
+bool l34_netif_claims(const u32 *netif);
+bool l34_rt_is_cpu_self(const u32 *rt, u32 ip, u8 netif_idx);
+bool l34_iface_blackholes(const u32 *netif, const u32 *cpu_rt, u32 own_ip,
+			  u8 netif_idx);
+
 /* ---- hoisted from rtl9602c_eth.c (same shell TU) ---------------------- */
 
 /* ★ THE DS-OMCI RX REASON IS NO LONGER A CONSTANT HERE, AND IT NEVER SHOULD
@@ -236,11 +296,13 @@ int l34_l2uc_sts_index(u32 sts);
 				 TXD3_9602C_DST_SID(sid))	/* = 0x08400000 for SID 64 */
 
 void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add);
-bool rtl9602c_rx_is_ds_omci(bool trap_on, u32 opts2, u32 opts3,
+bool rtl9602c_rx_is_ds_omci(const struct luna_rx_layout *rxl,
+			    bool trap_on, u32 opts2, u32 opts3,
 			    const u8 *data, u32 len, unsigned int pon_port,
 			    unsigned int omci_reason,
 			    unsigned int cpu_prefix, u32 buf_size);
-bool rtl9602c_rx_wan_demux(u32 opts3, const u8 *dst, const u8 *wan_mac,
+bool rtl9602c_rx_wan_demux(const struct luna_rx_layout *rxl, u32 opts3,
+			   const u8 *dst, const u8 *wan_mac,
 			   unsigned int pon_port);
 bool rtl9602c_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
 			   unsigned int cpu_prefix, u32 buf_size);

@@ -15,6 +15,8 @@
 /* How many value octets a Set line renders.  Bounded on purpose -- see the
  * note in set_detail(). */
 #define SET_VALUE_OCTETS	8
+/* A Create has no mask: its attribute body starts where a Get puts one. */
+#define CREATE_BODY_START	8
 
 /*
  * The detail a Get exchange carries.  Appended at `*pos`; the buffer is the
@@ -73,6 +75,34 @@ static void get_detail(char *out, size_t sz, int *pos, const u8 *pdu,
  *   held -- the defect the Get path above is shaped to avoid.
  */
 /*
+ * The first SET_VALUE_OCTETS octets at @from, as hex, when the PDU is long
+ * enough to hold them.  ONE renderer for the Set's value area and the Create's
+ * attribute body, because they are the same question asked at two offsets.
+ *
+ * ⚠ SPELLED OUT, NOT `%*phN`.  That is a KERNEL vsnprintf extension and on the
+ *   x86 host the same format renders a POINTER followed by the literal "hN", so
+ *   an offline case judging this line would be judging a shim's emulation
+ *   instead of the shipped code.  gpon_unsup.h states the same finding with the
+ *   footprint numbers behind it.
+ */
+static void append_octets(char *out, size_t sz, int *pos, const char *label,
+			  const u8 *pdu, unsigned int len, unsigned int from)
+{
+	static const char hexd[] = "0123456789abcdef";
+	char hex[2u * SET_VALUE_OCTETS + 1u];
+	unsigned int i;
+
+	if (len < from + SET_VALUE_OCTETS)
+		return;			/* absent is not zero: print nothing */
+	for (i = 0; i < SET_VALUE_OCTETS; i++) {
+		hex[2u * i] = hexd[(pdu[from + i] >> 4) & 0xfu];
+		hex[2u * i + 1u] = hexd[pdu[from + i] & 0xfu];
+	}
+	hex[2u * SET_VALUE_OCTETS] = '\0';
+	*pos += scnprintf(out + *pos, sz - *pos, "%s%s", label, hex);
+}
+
+/*
  * THE RESULT CODE, AND EVERY ANSWERED PDU HAS ONE.
  *
  * ★ IT EXISTS BECAUSE A CREATE WAS THE NEXT WALL AND THE LINE COULD NOT SEE IT.
@@ -103,6 +133,27 @@ static void result_detail(char *out, size_t sz, int *pos,
 	*pos += scnprintf(out + *pos, sz - *pos, " rc=%u", resp[8]);
 }
 
+/*
+ * The detail a CREATE carries: its ATTRIBUTE BODY, and our result code.
+ *
+ * ★ THE BODY IS WHERE THE IDENTITY LIVES.  A Create names the ME in its header
+ *   and everything else in the body -- for ME 268 (GEM Port Network CTP) the
+ *   FIRST TWO OCTETS are attribute #1, the GEM Port-ID.  Rendering only the
+ *   result code says we accepted it and not WHAT we accepted, and that is the
+ *   gap that left the X111W's data path unexplained: the OLT created a GEM,
+ *   we answered rc=0, and nothing in the driver could say which port it was.
+ *   Same shape as the ME 11 Set whose mask was visible and whose VALUES were
+ *   not -- one message further along.
+ */
+static void create_detail(char *out, size_t sz, int *pos, const u8 *pdu,
+			  unsigned int len, const u8 *resp, int resp_len)
+{
+	if ((size_t)*pos >= sz)
+		return;
+	append_octets(out, sz, pos, " body=", pdu, len, CREATE_BODY_START);
+	result_detail(out, sz, pos, pdu, len, resp, resp_len);
+}
+
 static void set_detail(char *out, size_t sz, int *pos, const u8 *pdu,
 		       unsigned int len, const u8 *resp, int resp_len)
 {
@@ -123,24 +174,7 @@ static void set_detail(char *out, size_t sz, int *pos, const u8 *pdu,
 	 *   make every Set a flood.  Sizes are per attribute and live in the
 	 *   ME table, which this tier does not reach, so the octets are printed
 	 *   RAW and the reader applies the mask. */
-	if (len >= GET_MASK_END + SET_VALUE_OCTETS) {
-		/* ⚠ SPELLED OUT, NOT `%*phN`.  That is a KERNEL vsnprintf
-		 *   extension and on the x86 host the same format renders a
-		 *   POINTER followed by the literal "hN", so an offline case
-		 *   judging this line would be judging a shim's emulation
-		 *   instead of the shipped code.  gpon_unsup.h states the same
-		 *   finding with the footprint numbers behind it. */
-		static const char hexd[] = "0123456789abcdef";
-		char hex[2u * SET_VALUE_OCTETS + 1u];
-		unsigned int i;
-
-		for (i = 0; i < SET_VALUE_OCTETS; i++) {
-			hex[2u * i] = hexd[(pdu[GET_MASK_END + i] >> 4) & 0xfu];
-			hex[2u * i + 1u] = hexd[pdu[GET_MASK_END + i] & 0xfu];
-		}
-		hex[2u * SET_VALUE_OCTETS] = '\0';
-		*pos += scnprintf(out + *pos, sz - *pos, " val=%s", hex);
-	}
+	append_octets(out, sz, pos, " val=", pdu, len, GET_MASK_END);
 	result_detail(out, sz, pos, pdu, len, resp, resp_len);
 }
 
@@ -158,6 +192,8 @@ int gpon_omci_diag_line(const u8 *pdu, unsigned int len,
 		get_detail(out, sz, &pos, pdu, len, resp, resp_len);
 	else if (gpon_omci_is_set(pdu, len))
 		set_detail(out, sz, &pos, pdu, len, resp, resp_len);
+	else if (gpon_omci_is_create(pdu, len))
+		create_detail(out, sz, &pos, pdu, len, resp, resp_len);
 	else
 		result_detail(out, sz, &pos, pdu, len, resp, resp_len);
 	return pos;

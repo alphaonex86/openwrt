@@ -68,7 +68,7 @@ config NET
 	bool
 	default y
 config MY_GPON_DRIVER
-	tristate "stand-in for CORTINA_GPON / RTL9602C_GPON"
+	tristate "stand-in for CORTINA_GPON / LUNA_GPON"
 	default y
 $([ "$1" = select ] && printf '\tselect GPON_CORE')
 source "drivers/net/Kconfig"

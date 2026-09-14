@@ -223,7 +223,7 @@ static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
  * The OP_MODE value names are established twice over, independently: the
  * vendor's own op-mode constants say WRITE=1 / READ=2 / CLEAN=3 (the values
  * its DAL drives into PORTID_OP_MODEf / ALLOCID_OP_MODEf), and the
- * pre-conversion call sites in gpon-luna.c spelled the same three beside
+ * pre-conversion call sites in luna_gpon.c spelled the same three beside
  * their raw 1u<<8 / 2u<<8 / 3u<<8 ("OP_MODE=WRITE", "OP_MODE=READ",
  * "OP_MODE=CLEAN").  CLEAN invalidates ONE idx-addressed entry, like READ;
  * a "clear all" is a LOOP and stays at the call site.
@@ -262,7 +262,7 @@ static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
  *            (the gpon_regseq_io precedent), so the same function runs on
  *            x86 under the write-stream differential with a counting fake.
  *
- * The sequence gpon-luna.c spelled by hand at SEVEN sites (four WRITE, two
+ * The sequence luna_gpon.c spelled by hand at SEVEN sites (four WRITE, two
  * READ, one CLEAN loop) until 2026-09-03 -- and had let diverge repeatedly,
  * always in the same direction: the multicast WRITE shipped with NO
  * completion check (a timed-out install fell through to "datapath installed"
@@ -279,10 +279,11 @@ static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
  * count, read count and delay count by
  * dev/rtl9607c-test/gpon_regtable_diff_test.
  */
-static inline int gpon_gtc_cam_xact(const struct hwio *io,
+static inline int gpon_gtc_cam_xact_pending(const struct hwio *io,
 				    u32 ind, u32 op_mode, u32 idx_mask,
 				    u32 idx, u32 wr, u16 val,
-				    void (*delay_us)(unsigned int us))
+				    void (*delay_us)(unsigned int us),
+				    bool *pending)
 {
 	u32 op = op_mode | (idx & idx_mask);
 	unsigned int i;
@@ -297,16 +298,52 @@ static inline int gpon_gtc_cam_xact(const struct hwio *io,
 		return -ENODEV;
 	if (op_mode == GPON_GTC_CAM_OP_WRITE && !reg_has(wr))
 		return -ENODEV;
+	/* The caller serializes this engine through its readback tail. A timed-out
+	 * request remains owned until COMPL is observed, even if REQ falls. Luna
+	 * stock leaves REQ set after completion: REQ-clear is not this protocol. */
+	if (pending) {
+		u32 status = hwio_rd(io, ind);
+
+		if (*pending || ((status & GPON_GTC_CAM_OP_REQ) &&
+				 !(status & GPON_GTC_CAM_OP_COMPL))) {
+			*pending = true;
+			for (i = 0; i < GPON_GTC_CAM_TRIES; i++) {
+				if (status & GPON_GTC_CAM_OP_COMPL)
+					break;
+				delay_us(1);
+				status = hwio_rd(io, ind);
+			}
+			if (i == GPON_GTC_CAM_TRIES)
+				return -ETIMEDOUT;
+			*pending = false;
+		}
+	}
 	hwio_wr(io, ind, op);
 	if (op_mode == GPON_GTC_CAM_OP_WRITE)
 		hwio_wr(io, wr, val & GPON_GTC_CAM_VAL_MASK);
+	if (pending)
+		*pending = true;
 	hwio_wr(io, ind, op | GPON_GTC_CAM_OP_REQ);
 	for (i = 0; i < GPON_GTC_CAM_TRIES; i++) {
-		if (hwio_rd(io, ind) & GPON_GTC_CAM_OP_COMPL)
+		if (hwio_rd(io, ind) & GPON_GTC_CAM_OP_COMPL) {
+			if (pending)
+				*pending = false;
 			return (int)i;
+		}
 		delay_us(1);
 	}
 	return -ETIMEDOUT;
+}
+
+/* Stateless compatibility entry point. Runtime users that retry after a
+ * timeout use the tracked form above and retain one state per CAM engine. */
+static inline int gpon_gtc_cam_xact(const struct hwio *io,
+				    u32 ind, u32 op_mode, u32 idx_mask,
+				    u32 idx, u32 wr, u16 val,
+				    void (*delay_us)(unsigned int us))
+{
+	return gpon_gtc_cam_xact_pending(io, ind, op_mode, idx_mask, idx, wr,
+					 val, delay_us, NULL);
 }
 
 /**
@@ -438,7 +475,7 @@ static inline int gpon_gtc_ds_port_clean(const struct hwio *io,
  * above latch it SET (G24W gtcponip-stock.json: 0x04064=0x6 against
  * 0x04040=0x807f, 0x0404c=0x807f, 0x01140=0x8101).  A MISC read through this
  * helper would return -ETIMEDOUT on every call and never yield a count.
- * gpon-luna.c keeps its hand-spelled MISC read, with the finding recorded
+ * luna_gpon.c keeps its hand-spelled MISC read, with the finding recorded
  * beside it.
  */
 #define GPON_GTC_CNTR_R_ACK	(1u << 15)	/* read-ack, all three counter INDs  */
@@ -461,7 +498,7 @@ static inline int gpon_gtc_ds_port_clean(const struct hwio *io,
  * @delay_us: the shell's sleep -- time is an EXPLICIT INPUT in this tier, so
  *        the same function runs on x86 under the write-stream differential.
  *
- * The sequence gpon-luna.c spelled by hand at FOUR sites until 2026-09-03:
+ * The sequence luna_gpon.c spelled by hand at FOUR sites until 2026-09-03:
  * write the flow/index, poll the SAME register for the read-ack -- bounded --
  * then read the count.  Three of the four were collapsed here (the MISC read
  * is refused above), and all three converted copies carried the same defect

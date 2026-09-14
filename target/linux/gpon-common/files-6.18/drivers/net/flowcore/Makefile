@@ -24,8 +24,15 @@ obj-$(CONFIG_CORTINA_GPON) += cortina_gpon_logic.o
 obj-$(CONFIG_CORTINA_NI) += cortina_ni_rx_logic.o cortina_ni_tx_logic.o
 obj-$(CONFIG_CORTINA_NI_FLOWOFFLOAD) += cortina_ni_flowoffload_logic.o \
 	cortina_l3fe_logic.o
-obj-$(CONFIG_RTL9602C_GPON) += gpon_rtl9602c_logic.o luna_ponmac_logic.o
-obj-$(CONFIG_RTL9607C_GPON) += luna_ponmac_logic.o
+obj-$(CONFIG_LUNA_GPON) += luna_gpon_logic.o luna_ponmac_logic.o
+# ★ REMOVED 2026-09-10: CONFIG_RTL9607C_GPON is not a Kconfig symbol -- no
+#   `config RTL9607C_GPON` exists anywhere in target/linux, so this line was
+#   always empty. It was harmless (line 27 already builds the object under
+#   the gate that DOES exist, and the .o is present in all three subtargets'
+#   build_dir) but it read as "also built for the 9607C", which is a claim
+#   about a symbol nobody declares.
+#   ⚠ If an RTL9607C gate is ever added, add it HERE and to the Kconfig in
+#     the same change -- a dependency on an undeclared symbol is silent.
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_l34_logic.o
 # ★ luna_gmac_logic.o under BOTH Ethernet gates (the luna_ponmac_logic.o
 # shape): the family's two Ethernet shells are gated on DISJOINT symbols
@@ -34,3 +41,12 @@ obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_l34_logic.o
 # other -- the measured crossconfig_call_guard defect.
 obj-$(CONFIG_RTL9602C_ETH) += luna_gmac_logic.o
 obj-$(CONFIG_LUNA_ETH) += luna_gmac_logic.o
+
+# The GN25L95 BOSA calibration: the ORDERED sequence and a fail-first executor,
+# both HW-decoupled.  Under BOTH GPON gates for the luna_gmac_logic.o reason --
+# the part is on the Cortina board today and on the Luna ones tomorrow, and an
+# object listed under one family's symbol alone links on one and breaks the
+# other.  Proven against stock on the real part by
+# dev/rtl9607c-test/gn25l95_cal_diff_test.c.
+obj-$(CONFIG_CORTINA_GPON) += gn25l95_cal_logic.o
+obj-$(CONFIG_LUNA_GPON) += gn25l95_cal_logic.o

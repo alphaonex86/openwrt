@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* See gpon_rtl9602c_logic.h. Moved verbatim; no line was rewritten.
- */
+/* See luna_gpon_logic.h. */
 #include <linux/types.h>
 #include "gpon_ddm.h"	/* the one 0.1 uW -> centi-dBm conversion */
 #include <linux/bitops.h>
 #include <linux/limits.h>
 
-#include "gpon_rtl9602c_logic.h"
+#include "luna_gpon_logic.h"
 
 /* Map an RTL8290B 12-bit register number to its paging I2C slave address. */
 u8 bosa_slave_for(u16 reg)
@@ -19,15 +18,9 @@ u8 bosa_slave_for(u16 reg)
 	}
 }
 
-/*
- * Convert a raw SFF-8472 DDM power word (unit 0.1 microWatt/LSB) to the ANI-G
- * level encoding. power_mW = raw/10000, so
- *   level = 500 * 10*log10(raw/10000) = 1505*log2(raw)/65536 - 20000
- * (5000*log10(2) = 1505.15). log2 is computed in Q16 fixed point (fls for the
- * integer part + linear interpolation of the mantissa; ~0.25 dB error, ample for
- * the diagnostic ANI-G report) so no kernel FPU is needed. Returns INT_MIN when
- * the word reads "not available" (0x0000/0xffff) so the caller keeps the cache.
- */
+/* Raw SFF-8472 DDM power word (0.1 uW/LSB) -> the ANI-G level encoding.
+ * INT_MIN when the word reads "not available" (0x0000/0xffff), so the caller
+ * keeps its cache. */
 s32 ddm_word_to_level(int raw)
 {
 	s32 level;
@@ -38,53 +31,28 @@ s32 ddm_word_to_level(int raw)
 	return level;
 }
 
-/* Linear power code (0.1uW) -> centi-dBm (0.01 dBm).
- *   cdBm = 1000*log10(code) - 4000 = (log2(code) * 1000*log10(2)) - 4000.
- * Same fixed-point log2 (fls integer part + Q16 linear-interp mantissa,
- * ~0.25 dB worst-case) as ddm_word_to_level -- exact enough for a diagnostic;
- * this is stock's pow2dbm1[] table computed instead of embedding 2 KB. Works
- * for TX power too (positive dBm). Floor -40.00 dBm for a dark/"n/a" read. */
+/* Linear power code (0.1 uW) -> centi-dBm. A dark or "n/a" read floors at
+ * -40.00 dBm rather than returning a sentinel: this family's reporting policy. */
 s32 bosa_code_to_cdbm(u32 code)
 {
-	/* A dark or "n/a" read floors at -40.00 dBm here rather than returning a
-	 * sentinel -- that is this family's reporting policy, so it stays here and
-	 * only the arithmetic is shared. */
 	if (code < 1)
 		return -4000;
 	return gpon_ddm_uw10_to_cdbm(code);
 }
 
-/* ===== BOSA/DDM optical measurement logic (hoisted 2026-09-02) ==========
- * The shell samples the RTL8290B over I2C (channel select, latch strobe,
- * settle sleeps) and hands the raw values here; these functions decide what
- * the samples MEAN. div_u64/div64_u64 are pure math helpers (math64.h), needed
- * because MIPS32 has no libgcc 64-bit divide -- they are not a kernel service
- * in the hoist-rule sense (no device, no state, no time). */
+/* BOSA/DDM optical measurement logic: the shell samples the RTL8290B over I2C
+ * and these functions decide what the samples MEAN. math64 because MIPS32 has
+ * no libgcc 64-bit divide. */
 #include <linux/math64.h>
 
 #define BOSA_ADC_VREF_UV	3300000		/* stock 3.3V ADC full-scale (0x325aa0) */
 
-/* Faithful RX power code (0.1uW) from the raw ratiometric ADC samples
- * (europa_drv.ko rtl8290b_rxPower_get + _rtl8290b_rx_power_cal). The shell
- * passes rssi = SD-ADC at the single in-range gain (0xC2) and the two on-die
- * reference taps (0x314 low anchor, 0x305 span endpoint). All 64-bit divides
- * go through the kernel helpers (no __divdi3 on MIPS32); /8192 and /4096 are
- * shifts.
- *
- * ★ A FLOOR CONSTANT IS NOT A MEASUREMENT.
- *
- * The three sentinel exits used to return 11, the same value the tail clamps a
- * genuine faint reading to -- and bosa_code_to_cdbm(11) is EXACTLY -2985,
- * so /proc/gpon published "rx=-29.85dBm" whenever the I2C bus was dead.
- * That constant was read as an optical measurement in three separate
- * project documents. It is now BOSA_RX_CODE_NA, which the printers render
- * as "n/a"; only the tail clamp still returns a real (floored) 11.
- *
- * tap_hi <= tap_lo is the direct dead-bus witness: a NACKing bus makes
- * the shell's bosa_read24() return 0 and a floating bus returns 0xffffff, so
- * both reference taps read alike. The old code papered over it with span = 1,
- * manufacturing a denominator out of a failed read.
- */
+/* RX power code (0.1 uW) from the raw ratiometric ADC samples (europa_drv
+ * rtl8290b_rxPower_get): rssi = SD-ADC at gain 0xC2, tap_lo/tap_hi = the on-die
+ * reference taps 0x314 and 0x305.
+ * tap_hi <= tap_lo is the dead-bus witness: a NACKing bus reads 0 and a floating
+ * one 0xffffff, so both taps agree. Sentinel exits return BOSA_RX_CODE_NA, never
+ * the tail clamp's 11 -- that value renders as a real -29.85 dBm. */
 u32 bosa_rx_code_calc(u32 rssi, u32 tap_lo, u32 tap_hi,
 		      const struct bosa_optical_cal *cal)
 {
@@ -109,14 +77,10 @@ u32 bosa_rx_code_calc(u32 rssi, u32 tap_lo, u32 tap_hi,
 	return code < 11 ? 11 : (u32)code;
 }
 
-/* Module temperature in deci-degC from 14 raw (0x302, 0x303) register pairs.
- * Kelvin code assembly (a[7:0]<<1 | b[7], 233..383 K = -40..+110 C), per-sample
- * clamp (catches torn/glitch reads, e.g. -292 C), sort, drop 2 low + 2 high,
- * mean the middle 10, minus the per-board Kelvin trim (stock
- * rtl8290b_temperature_get; stock stores SFF-8472 1/256 C). A negative sample
- * is a failed I2C read: INT_MIN, the "no reading" sentinel -- the check is
- * repeated here (the shell already aborts its sampling loop) so this function
- * is total over any input a host fuzzer hands it. */
+/* Module temperature in deci-degC from 14 raw (0x302, 0x303) register pairs:
+ * Kelvin code a[7:0]<<1 | b[7] (233..383 K = -40..+110 C), per-sample clamp
+ * against torn reads, sort, drop 2 low + 2 high, mean the middle 10, minus the
+ * per-board Kelvin trim. A negative sample is a failed I2C read -> INT_MIN. */
 s32 bosa_temp_dc_calc(const int *a, const int *b, s16 temp_off)
 {
 	u16 s[14];
@@ -155,12 +119,10 @@ u32 bosa_bias_ua_calc(int h, int l)
 	return (u32)div_u64((u64)code12 * 100000, 8192) * 2;
 }
 
-/* One TX-power sample's contribution to the 10-sample accumulator
- * (europa_drv update_ddmi_tx_power chain): MPD-minus-dark voltage -> power
- * code c (the /1374 slope and +50 offset), bias CLASSIFICATION of iavg into 5
- * classes, range compensation shift, and the shifted result. vmpd and dark are
- * millivolts from the shell's SD-ADC ch2 sequence; iavg is 0x23A[7:0], range
- * is 0x246[7:6]. */
+/* One TX-power sample's contribution to the 10-sample accumulator (europa_drv
+ * update_ddmi_tx_power): MPD-minus-dark voltage -> power code, then a bias class
+ * from iavg (0x23A[7:0]) and a range shift from 0x246[7:6]. vmpd and dark are
+ * millivolts from the shell's SD-ADC ch2 sequence. */
 u32 bosa_tx_sample_contrib(s32 vmpd, s32 dark, int iavg, int range)
 {
 	s32 c = (((vmpd - dark) * 1000 / 1374) >> 4) + 50;
@@ -173,60 +135,24 @@ u32 bosa_tx_sample_contrib(s32 vmpd, s32 dark, int iavg, int range)
 	return shift >= 0 ? (u32)c << shift : (u32)c >> -shift;
 }
 
-/* Fold the accumulated TX sample contributions into the per-board 0.1uW word:
- * word = (avg*slope*10)>>8 + (offset*10>>5). The caller feeds the word to
- * bosa_code_to_cdbm for centi-dBm. n must be >= 1 (the shell returns its
- * "no reading" sentinel when no sample survived). */
+/* Fold the accumulated TX contributions into the per-board 0.1 uW word for
+ * bosa_code_to_cdbm. n must be >= 1. */
 u32 bosa_tx_word_calc(u64 sum, int n, s32 tx_slope, s32 tx_offset)
 {
 	return (u32)((((u64)div_u64(sum, n) * tx_slope * 10) >> 8) +
 		     ((tx_offset * 10) >> 5));
 }
 
-/* ===== packed pi-register array addressing ==============================
- * pi_packed_locate/insert/extract MOVED to flowcore_hash.c on 2026-09-02
- * (round 3): generic packed-slot math the Cortina flow engine needed too,
- * and this object is gated on CONFIG_RTL9602C_GPON, which that board never
- * sets -- the definitions had to live in an obj-y object or be copied.
- * Declarations (and the SID2QID history that explains why set and get share
- * ONE locate result) are in flowcore.h, which gpon_rtl9602c_logic.h now
- * includes, so every existing caller compiles unchanged. */
-
-/* ===== round 2 (2026-09-02): module identity + sample selection =========
- * Same rule as everything above: the shell samples (I2C strobes, latches,
- * settle sleeps) and stores the flags/prints; these decide. */
+/* pi_packed_locate/insert/extract live in flowcore_hash.c, declared through
+ * flowcore.h: the Cortina flow engine needs them too and this object is gated
+ * on CONFIG_LUNA_GPON, which that board never sets. */
 #include <linux/string.h>
 
-/*
- * ★★★ THE MODULE'S OWN NAME DECIDES -- IT WAS READ AND NOT USED.
- *
- * This test used to be `ident > 0 && ident < 0x30 && extid >= 0`, i.e. "an
- * SFF-8472 identity exists" -> "therefore NOT an RTL8290B", while the vendor
- * string was read, formatted into the warning, and never consulted. An
- * RTL8290 that ships an SFF-8472 EEPROM -- and this one does -- was
- * classified as a foreign module and had EVERY register write refused with
- * -ENODEV, the RX enable among them.
- *
- * ⚠ MEASURED 2026-08-30 on the LANLY G24W, tier 1, over the board's own I2C:
- * slave 0x50 bytes 20..35 read `REALTEK` and bytes 40..55 read `RTL8290`, in
- * plain ASCII, while slave 0x54 (the control bank) answered 0xff to every
- * address -- which is what a bank nobody may write looks like. The board sat
- * at O1 with sdet=0 on a fibre stock had reached Online through hours earlier.
- *
- * ★ THE STRING IS EVIDENCE, THE IDENT BYTE IS NOT. A vendor's identity page
- * says WHAT the module is; the presence of that page says only that it HAS
- * one. Deciding on the second while holding the first is the
- * text-vs-structure family this tree keeps paying for, inverted: the
- * structure was there and the weaker signal was believed.
- *
- * ★ THREE OUTCOMES ARE KEPT, and the middle one is still ours: named as ours
- * -> the path stays enabled; a plausible SFF-8024 identifier (0x01..0x2x)
- * alongside a foreign name -> POSITIVE identification of a different module,
- * refuse the writes, which is what this guard is FOR; unreadable -> "could
- * not tell", never "it is not one". The ORDER of the first two tests is
- * load-bearing: a module both named ours AND carrying a plausible ident byte
- * (the G24W's exactly) must classify as ours.
- */
+/* The test ORDER is load-bearing. An RTL8290B may ship an SFF-8472 identity
+ * page -- measured 2026-08-30 on the G24W, slave 0x50 reads "REALTEK"/"RTL8290"
+ * -- so "an identity exists" alone once classified ours as foreign and refused
+ * every register write, the RX enable included. The NAME decides; the ident byte
+ * only separates a positively-foreign module from "could not tell". */
 enum bosa_module_verdict bosa_module_classify(int ident, int extid,
 					      const char *vend, const char *part)
 {
@@ -238,9 +164,7 @@ enum bosa_module_verdict bosa_module_classify(int ident, int extid,
 }
 
 /* One SFF-8472 string field, sanitized for the log: printable ASCII kept, any
- * other byte -- including a failed (negative) I2C read -- rendered '.', then
- * NUL-terminated. Was spelled inline three times in the shell (two probe
- * fields + the 9607C DDM scan). */
+ * other byte -- a failed (negative) I2C read included -- rendered '.'. */
 void bosa_sff_text(char *dst, const int *raw, unsigned int n)
 {
 	unsigned int i;
@@ -251,13 +175,9 @@ void bosa_sff_text(char *dst, const int *raw, unsigned int n)
 }
 
 /* Which of up to n samples is THE reading: insertion-sort ascending in place,
- * return the upper median v[n/2] (n=1 -> the sample, n=2 -> the higher, n=3
- * -> the middle). Shared by the DDM 16-bit word read (median of the samples
- * that did not NACK) and the RX code chain (BOSA_RX_CODE_NA == 0 sorts to the
- * bottom, so a single glitched/dark sample is discarded and only 2-of-3 NA
- * makes the verdict NA -- equal to the old sum-minus-extremes median-of-3 for
- * every u32 triple, wraparound included). n must be >= 1; the shell keeps its
- * "every sample failed" sentinel. */
+ * return the upper median. BOSA_RX_CODE_NA == 0 sorts to the bottom, so one
+ * glitched or dark sample is discarded and only 2-of-3 NA makes the verdict NA.
+ * n must be >= 1. */
 u32 bosa_median_u32(u32 *v, unsigned int n)
 {
 	unsigned int i, j;
@@ -272,12 +192,9 @@ u32 bosa_median_u32(u32 *v, unsigned int n)
 	return v[n / 2];
 }
 
-/* Whether an MPD ADC sample constitutes a measurement, and its ratiometric mV
- * value if so (europa_drv TX-power chain; the vmpd input of
- * bosa_tx_sample_contrib). hi == 0 or code at/below the zero tap is the same
- * taps-agree dead-bus shape bosa_rx_code_calc owns -> INT_MIN, "no reading";
- * else mV = (hi - zero) * 1200 / (code - zero), 64-bit intermediate. Moved
- * verbatim from the shell's bosa_vmpd_mv tail. */
+/* Whether an MPD ADC sample is a measurement, and its ratiometric mV if so (the
+ * vmpd input of bosa_tx_sample_contrib). hi == 0 or code at/below the zero tap is
+ * the same dead-bus shape bosa_rx_code_calc owns -> INT_MIN. */
 s32 bosa_vmpd_mv_calc(u32 code, s32 hi, s32 zero)
 {
 	if (hi == 0 || (s32)code <= zero)

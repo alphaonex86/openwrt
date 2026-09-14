@@ -1,210 +1,66 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * gpon_common.h — THE CONTRACT between the HW-decoupled GPON protocol core and
- * the per-target imperative shell.
+ * the per-target imperative shell: the canonical ONU state encoding, the
+ * G.984/G.988 wire enumerations, the per-chip fact block, and the op table the
+ * core reaches hardware through.  Built by realtek-luna (MIPS32 BE),
+ * realtek-elnath (ARM64 LE) and by dev/rtl9607c-test on x86.
  *
- * WHAT THIS IS
- *   The shared types the common GPON layer is built on: the canonical ONU
- *   state encoding, the G.988/G.984 wire enumerations the core decides on, the
- *   per-chip fact block, and `struct gpon_shell_ops` — the table of function
- *   pointers through which the core asks a shell to touch hardware.
+ * ★★ THE THREE TIERS — WHICH FILE MAY HOLD WHAT.  THIS IS THE CANONICAL COPY;
+ * every other file carries a one-line "TIER:" header pointing here.
  *
- * WHY IT IS COMMON — operator, 2026-08-05:
- *   "en openwrt debería estar estructurado algo así: rtl960x* para la familia
- *    para tener código común" · "la idea es poner en común el código que
- *    corresponde para no tener mucho duplicado" · on the two monoliths: "mal,
- *    poner en común".
- *   Compiled by BOTH OpenWrt targets, on two architectures and two byte orders:
- *     - realtek-luna   — RTL9602C/9603C/9607C, MIPS32 big-endian (Lexra/RLX)
- *     - realtek-elnath — RTL9607F "Elnath" (Cortina), ARM64 little-endian
- *   and additionally on x86 by the differential suite in dev/rtl9607c-test/,
- *   through the host shims in dev/rtl9607c-test/fuzz_shims/. The prefix is
- *   `gpon_` and deliberately NOT `luna_`: this layer must also serve the
- *   future ARM OLT and other vendors' hardware, so a Realtek-named prefix
- *   would be too narrow.
+ *   core    gpon_                     logic no single family owns: the PLOAM
+ *                                     FSM, G.988 OMCI + ME model, GEM/T-CONT
+ *                                     mapping, wire codecs.  NEVER touches HW
+ *   family  luna_ (MIPS)              one silicon family's registers, DMA,
+ *           cortina- (ARM64 NE)       IRQ, PON-MAC, SerDes
+ *   chip    rtl9602c_ rtl9607c_       exactly one part's registers and quirks
+ *           rtl9607f_
  *
- * ★★ THE THREE TIERS — WHICH FILE MAY HOLD WHAT.  THIS IS THE CANONICAL COPY.
- *   Every other file the 2026-08-05 refactor touched or created carries a
- *   ONE-LINE "TIER:" header pointing here, and nothing more: the rule is
- *   written out once, so it can be corrected once.  Do not restate it.
+ * The core line is ONE question — does it name a register or reach a bus?  If
+ * not it belongs here however much Linux it uses (widened by the operator
+ * 2026-08-28, because the old "protocol only" rule kept 347 register-free lines
+ * of cn_flow_replace forked per family).
  *
- *   The project rule it implements: "name each file by the NARROWEST prefix
- *   that matches everything it targets".  Widening a file's prefix without
- *   widening its content is how chip facts end up in a family file.
+ * ⚠ THE STRICT SUBSET stays free of Linux APIs too, because it is what fuzzes
+ * on x86 at thousands of cases/s.  ITS MEMBERSHIP IS NOT RESTATED HERE — it is
+ * STRICT_SUBSET in dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step
+ * 17), and the copy that used to sit here had drifted to SIX files against that
+ * array's ELEVEN (measured 2026-09-11): a list duplicated into a comment is a
+ * list that drifts.  That gate COMPILES them against stubs declaring no
+ * accessor, clock, lock or allocator — so impurity cannot build — and FAILS on
+ * zero sources found, so "pure" and "absent" cannot look alike.  Core code that
+ * needs Linux is a NEW file beside them, never an edit to one of those.
+ * ⚠ A TOKEN GREP IS THE WRONG INSTRUMENT and this banner is the proof: it NAMES
+ *   every forbidden token, so a raw scan scores 5 on this file and 0 on its code
+ *   (2026-08-05, same pattern after gcc -fpreprocessed -dD -E).
+ * ⚠ `gpon_core_purity_test` is named by gpon-common/build_wiring_guard.py:24 and
+ *   build_wiring_x86_check.sh:18 and DOES NOT EXIST (2026-08-05).  It is owed
+ *   work, not coverage; the compile guard above is the coverage.
  *
- *     TIER    prefix                       holds                    may touch HW
- *     ------  ---------------------------  -----------------------  ------------
- *     core    gpon_                        LOGIC that is not one     NO — never
- *                                          family's: the PLOAM FSM,
- *                                          G.988 OMCI + ME model,
- *                                          GEM/T-CONT mapping, wire
- *                                          codecs, and (since
- *                                          2026-08-28) driver logic
- *                                          that touches no register
- *                                          even when it uses Linux.
- *                                          Decides; never addresses.
+ * CORE decides and never performs I/O; SHELL does, and calls the core through
+ * the table below.  Three rules make the core replayable and fuzzable:
+ *   1. a side effect leaves as a RETURN VALUE wherever it can — an op exists
+ *      only for what a return value cannot express;
+ *   2. TIME IS AN INPUT: every entry point takes an explicit ms/tick argument;
+ *   3. per-chip facts arrive as `const struct gpon_chip_cfg *`, never #ifdef.
  *
- *   ★★★ THE CORE WIDENED ON 2026-08-28, BY THE OPERATOR, AND WHY IT HAD TO.
- *   The tier above used to say "protocol only", and the measurement that forced
- *   the change is worth keeping: what pins code into a family is NOT the
- *   hardware.  `cn_flow_replace` is 347 lines with ZERO register accesses and
- *   could not move, because it allocates, takes netdev references and drives an
- *   rhashtable -- and the old rule barred those.  Read across both families,
- *   that is the shape of most of the code: netdev, napi, skb, TC offload,
- *   timers.  Barring Linux from the core did not keep hardware out; it kept
- *   SHARED DRIVER LOGIC in two copies, one per family.
+ * ENDIANNESS: multi-octet wire fields are assembled by explicit byte math
+ * ((d[1]<<8)|d[2]).  Never a packed struct, a cast over wire bytes, or htons.
  *
- *   ⇒ the line is now exactly one thing: **does it name a register or reach a
- *   bus?**  If not, it is a candidate for the core however much Linux it uses.
- *
- *   ⚠⚠ AND THE STRICT SUBSET IS NOT NEGOTIABLE, because it is what this project
- *   PROVES things with.  These files stay free of Linux APIs as well as of
- *   MMIO, so they keep building for x86 and keep being fuzzed under
- *   libFuzzer/ASan/UBSan at thousands of cases per second -- the gate that
- *   DISCOVERS, against a board boot that only CONFIRMS:
- *
- *       gpon_ploam.[hc]   gpon_omci_core.[hc]   gpon_omci_me.[hc]
- *       gpon_gem_us.[hc]  gpon_sn.[hc]          gpon_regseq.[hc]
- *
- *   A file in that list may not gain an allocator, a lock, a device pointer, a
- *   timer or a sleep.  New core code that needs Linux is a NEW file beside
- *   them, never an edit to one of them.  `gpon_layer_hostbuild_test.sh` is what
- *   makes that a fact rather than an intention: it builds the list on the host,
- *   and it goes red the day one of them stops being buildable there.
- *     family  luna_  and  cortina-      one silicon FAMILY's     yes
- *                                          hardware: PON-MAC and
- *                                          SerDes bring-up, the
- *                                          switch/NE datapath
- *     chip    rtl9602c_  rtl9607c_         exactly ONE part's       yes
- *             rtl9607f_  cortina-gpon.c    registers and quirks
- *
- *   WHICH FILE IS WHICH TODAY (the whole set the refactor touched):
- *     core    drivers/net/gpon/gpon_common.h        this file — the contract
- *             drivers/net/gpon/gpon_unsup.h         the UNSUP reporting macro
- *                                                   — a header for SHELLS, see
- *                                                   the note in its own file
- *             drivers/net/gpon/gpon_ploam.[hc]      G.984.3 PLOAM FSM
- *             drivers/net/gpon/gpon_omci_core.[hc]  G.988 message layer
- *             drivers/net/gpon/gpon_omci_me.[hc]    G.988 ME model
- *             drivers/net/gpon/gpon_gem_us.[hc]     US GEM and T-CONT mapping
- *     family  realtek-luna  ... realtek/luna_ponmac.c   PON-MAC, SerDes
- *     chip    realtek-luna  ... realtek/gpon-luna.c    RTL9602C GPON shell
- *             realtek-luna  ... realtek/rtl9602c_eth.c     RTL9602C NIC shell
- *             realtek-elnath ... cortina/cortina-gpon.c    RTL9607F GPON shell
- *
- *   ⚠ TWO TIER TRAPS ALREADY PAID FOR, both measured on 2026-08-05:
- *     - luna_ponmac.c LOOKS like the family protocol home because of its
- *       prefix, and is not: it implements ZERO of the ops below (measured —
- *       the file contains no PLOAM, GEM, alloc, ONU-ID, EqD, AES or BOH
- *       identifier at all).  It is family HARDWARE, one tier below the shells.
- *     - a core file with no consumer is worse than duplication.  gpon_proto.c
- *       was a previous attempt at this same refactor, left unwired; it drifted
- *       until its code contradicted its own comment, and it was deleted in this
- *       refactor rather than revived.  A gpon_ file that nothing calls is dead
- *       weight in a 3 MB NAND kernel and a fork waiting to happen.
- *
- * THE CORE / SHELL RULE THIS FILE OBEYS (functional core, imperative shell)
- *   CORE  decides. It parses wire bytes, runs the FSM, builds reply buffers and
- *         holds the ME model. It NEVER performs I/O.
- *   SHELL does. It reads and writes registers, arms DMA, services interrupts,
- *         drives the PON MAC — and calls the core through this table.
- *   Three rules follow, and they are what make the core replayable and fuzzable:
- *     1. A side effect leaves as a RETURN VALUE wherever it can. An op exists
- *        only for what a return value cannot express. (This is why there is no
- *        "send" op invoked from inside a decision: a core entry point returns
- *        what it decided and the shell drains it.)
- *     2. TIME IS AN INPUT, never read. Core entry points take an explicit
- *        millisecond/tick argument. No jiffies, no ktime, no timers, no sleeping.
- *     3. Per-chip facts arrive as `const struct gpon_chip_cfg *`, never #ifdef.
- *
- * ★ THIS FILE, AND EVERY gpon_*.[ch] BESIDE IT, MUST NEVER GAIN AN MMIO ACCESS.
- *   No readl/writel/ioremap, no msleep/udelay, no spin_lock/mutex, no kmalloc,
- *   no dev_* or netdev_* or pr_* logging, no jiffies, no schedule_work, and no
- *   struct device.
- *   A shell detail that reaches this header is a defect in the header, not a
- *   fact about the hardware — express it as an op or as a `gpon_chip_cfg`
- *   member.
- *
- *   ★ THE GUARD, BY NAME — AND IT IS A COMPILER, NOT A GREP:
- *       dev/rtl9607c-test/gpon_layer_hostbuild_test.sh --LABEL="<name>"
- *       (suite step 17; run by run_steps.sh and by `make all`)
- *     It compiles every gpon_ source in this directory on the host against the
- *     kernel-type stubs in dev/rtl9607c-test/fuzz_shims, and those stubs are
- *     the enforcement: they deliberately declare NO register accessor, NO
- *     clock, NO lock, NO allocator, NO work/timer and NO net_device.  A core
- *     file that reaches for hardware therefore FAILS TO COMPILE.  It also
- *     refuses to pass vacuously — zero sources found is a FAIL, so "the layer
- *     is pure" and "there is no layer" can never look the same.
- *     Measured 2026-08-05: 5 pass, 0 fail, over 4 core sources.
- *
- *   ⚠ A TOKEN GREP IS THE WRONG INSTRUMENT HERE, AND THE PARAGRAPH ABOVE IS
- *     THE PROOF.  It NAMES every forbidden token, so a raw scan scores 5 on
- *     this file and 0 on its code (2026-08-05: `grep -cE` = 5; the same
- *     pattern after `gcc -fpreprocessed -dD -E` = 0).  Three independent
- *     authors hit this on the same day.  A guard that fails the file which
- *     DOCUMENTS the rule is the "matching TEXT where STRUCTURE is meant"
- *     defect aimed at itself — and the same scan would MISS a real register
- *     access that a stray comment terminator had exposed, which is exactly
- *     what the first compile of this header caught (a `*` followed by `/`
- *     inside `dev_` + `netdev_` closed the block comment early: prose, not
- *     code, and no grep would have found it).
- *
- *   ⚠ `gpon_core_purity_test` IS NAMED BY TWO BUILD SCRIPTS AND DOES NOT
- *     EXIST.  gpon-common/build_wiring_guard.py:24 and
- *     gpon-common/build_wiring_x86_check.sh:18 both defer the purity half to
- *     "gpon_core_purity_test in dev/rtl9607c-test/"; verified 2026-08-05,
- *     there is no such file, target or suite step, and nothing else in the
- *     tree names it.  Do NOT read those references as a check that ran.  It is
- *     OWED work, not coverage: if it is ever written it MUST strip comments
- *     first, per the paragraph above.  Today the compile guard is the coverage.
- *
- * ENDIANNESS
- *   One source serves MIPS-BE and ARM64-LE. Nothing here overlays a struct on
- *   wire bytes; the wire enumerations below are single octets, and multi-octet
- *   fields are assembled by the cores with explicit byte math ((d[1]<<8)|d[2]).
- *   Never add a packed struct, a pointer cast over a wire buffer, or an
- *   htons/ntohs to this layer.
- *
- * PROVENANCE
- *   Written for the plan at dev/sdk-facts/00-COMMON-LAYER-PLAN.md (2026-08-05).
- *   Every op below was verified against the shell function that implements it
- *   today; the file:line evidence is quoted per member. Where the plan's
- *   proposed shape did not match the measured source, the measurement wins and
- *   the divergence is named in the comment.
- * ⚠ PROVENANCE POINTERS BELOW NAME gpon-luna.c, WHICH WAS CALLED
- *   gpon-rtl9602c.c / gpon-rtl960x.c UNTIL THE 2026-08-29 RENAME.  The
- *   LINE NUMBERS ARE AS THEY WERE WHEN THE MOVE WAS RECORDED -- later
- *   edits moved them, and they are kept because a provenance note is a
- *   dated fact about where code CAME FROM, not a pointer to today.
- *   Renaming without saying so would turn a dated record into a claim
- *   about the current file, which is the 'wrong in a new way' that
- *   citation_guard warns a bare sed produces.
+ * ⚠ The `luna_gpon.c:NNN` pointers below were re-found BY TEXT at the 2026-09-10
+ *   rename (citation_repair.py), so they name today's content, not their era.
  */
 #ifndef GPON_COMMON_H
 #define GPON_COMMON_H
 
 #include <linux/types.h>
 
-/*
- * `fallthrough` for the HOST builds only.
- *
- * In kernel context this is already defined: compiler_attributes.h is force
- * -included by the kernel build, so the #ifndef below is false and the kernel's
- * own definition stands untouched. The host builds are what need it — neither
- * the offline fuzz shims (dev/rtl9607c-test/fuzz_shims) nor a plain libc
- * provide it, and this layer must compile on all three toolchains.
- *
- * ★ WHY A COMMENT WILL NOT DO, measured 2026-08-05: the kernel builds this tree
- *   with -Werror -Wimplicit-fallthrough=5 (read from the flags the build itself
- *   recorded in scripts/mod/.empty.o.cmd, both targets). At level 5 ONLY the
- *   attribute suppresses the diagnostic; NO comment spelling ever does. A
- *   "fall through" written as a COMMENT therefore builds on the host and is a
- *   hard error on both targets, which is exactly the divergence this macro
- *   closes. Spelled as the kernel spells it, so the two cannot drift.
- *   (That sentence deliberately does not quote the comment delimiters: a stray
- *   terminator inside prose closes the block early and turns the rest of the
- *   text into code, which is a real bug this layer has already had once.)
- */
+/* `fallthrough` for the HOST builds only; in kernel context
+ * compiler_attributes.h already defines it and this #ifndef is false.
+ * ★ A COMMENT WILL NOT DO: both targets build -Werror -Wimplicit-fallthrough=5
+ *   (measured 2026-08-05 from scripts/mod/.empty.o.cmd), and at level 5 only the
+ *   ATTRIBUTE suppresses the diagnostic — no comment spelling ever does. */
 #ifndef fallthrough
 # if defined(__GNUC__) && __GNUC__ >= 7
 #  define fallthrough	__attribute__((__fallthrough__))
@@ -213,50 +69,27 @@
 # endif
 #endif
 
-/*
- * ---------------------------------------------------------------------------
- * G.984 wire constants the core decides on (protocol facts, not chip facts)
- * ---------------------------------------------------------------------------
- */
-
-/* Broadcast/unassigned ONU-ID. G.984.3: the ONU uses 0xff until the OLT's
+/* Broadcast/unassigned ONU-ID: G.984.3 says the ONU carries 0xff until
  * Assign_ONU-ID lands, and every re-range path restores it. */
 #define GPON_ONU_ID_BROADCAST	0xffu
 
-/* The G.984 broadcast GEM port-id. Both targets already carry this number in
- * their own spelling — realtek-luna GPON_MCAST_GEM 0xfff
- * (rtl9602c_gpon_nic.h:67) and realtek-elnath CG_MCAST_GEM_ID 4095
- * (cortina-gpon.c:323) — so unifying it is safe today: it is one G.984 value
- * written twice, not a per-chip difference. */
+/* The G.984 broadcast GEM port-id.  Both targets already spell this number
+ * (luna GPON_MCAST_GEM 0xfff, elnath CG_MCAST_GEM_ID 4095), so it is one spec
+ * value written twice and not a per-chip difference. */
 #define GPON_MCAST_GEM_PORT	4095u
 
-/* Octets of an upstream PLOAM message the core hands to ->ploam_tx().
- * G.984.3 Table 9-3: ONU-ID[0] + Message-ID[1] + 10 message octets = 12; the
- * 13th octet (CRC) is appended by silicon, so it is NOT part of the buffer.
- * Matches the only implementation today, gpon-luna.c:5462
- * gpon_send_cpu_ploam(u8 queue, const u8 m[12]). */
+/* Octets of an upstream PLOAM handed to ->ploam_tx().  G.984.3 Table 9-3:
+ * ONU-ID + Message-ID + 10 message octets; the 13th octet (CRC) is appended by
+ * SILICON and is therefore NOT part of this buffer. */
 #define GPON_PLOAM_US_LEN	12u
 
-/*
- * Canonical ONU activation state. G.984.3 clause 10 names, 1-based.
- *
- * ★ THE TWO SILICONS GENUINELY DISAGREE AND NEITHER DRIVER IS WRONG, so this
- *   enum is the core's OWN encoding and each shell maps its hardware field to
- *   it at the boundary (plan D-6):
- *     - realtek-luna is 1-BASED and matches this enum directly
- *       (gpon-luna.c GPON_ONU_STATE_MASK 0xf, gpon_onu_state_name[1] =
- *       "O1-initial", and the driver's own note "the HW ONU_STATE field uses
- *       the same 1-based encoding");
- *     - realtek-elnath is 0-BASED (cortina-gpon.c CG_STATE_RANGING 3,
- *       CG_STATE_OPERATION 4, cg_state_name[0] = "O1-Initial").
- *   ⚠ Do NOT adopt the host oracle's enum (dev/rtl9607c-oracle/ploam_fsm.h:22).
- *   Its names are SHIFTED — it calls state 1 "GPON_O1_STANDBY" when O1 is
- *   Initial and O2 is Standby per G.984.3. The oracle is wrong here and both
- *   drivers are right; the correction is follow-up F17. The oracle stays an
- *   INDEPENDENT implementation and is never included from the kernel tree.
- *   ⚠ Mapping to this enum must not change either target's LOG STRINGS — those
- *   stay shell-side, byte-for-byte (plan, carve-eln-shell B7).
- */
+/* Canonical ONU activation state, G.984.3 clause 10 names, 1-BASED.
+ * ★ THE TWO SILICONS DISAGREE AND NEITHER DRIVER IS WRONG: luna's HW field is
+ *   1-based and matches directly, elnath's is 0-based (CG_STATE_RANGING 3,
+ *   CG_STATE_OPERATION 4), so each shell maps at the boundary.
+ * ⚠ Do NOT adopt the host oracle's enum (dev/rtl9607c-oracle/ploam_fsm.h:22):
+ *   its names are SHIFTED — it calls state 1 "STANDBY" when O1 is Initial.
+ * ⚠ Mapping to this enum must not change either target's LOG STRINGS. */
 enum gpon_ostate {
 	GPON_O1_INITIAL		= 1,	/* no downstream sync                */
 	GPON_O2_STANDBY		= 2,	/* DS sync, awaiting parameters      */
@@ -267,238 +100,74 @@ enum gpon_ostate {
 	GPON_O7_EMERGENCY	= 7,	/* emergency stop (SN disabled)      */
 };
 
-/*
- * ME 268 (GEM port network CTP) "direction" attribute, as it arrives on the
- * wire in the Set-by-Create body.
- *
- * ★ CORRECTED AGAINST THE PLAN. 00-COMMON-LAYER-PLAN.md §3 declares
- *   { GPON_GEM_DS = 1, GPON_GEM_US = 2, GPON_GEM_BIDIR = 3 } — US and DS are
- *   SWAPPED there. Two independent sources agree on the values below:
- *     - G.988 clause 9.2.3, "Direction": 1 = upstream, 2 = downstream,
- *       3 = bidirectional;
- *     - the live driver's own comment, cortina-gpon.c:2756: "direction[4]
- *       (1=US, 2=DS, 3=bidirectional)".
- *   No behaviour depends on the 1-vs-2 naming today — cortina-gpon.c:2766/2774
- *   only tests `== 3` / `!= 3` for the bidirectional-only data-GEM election —
- *   so this is a naming defect caught before it could be relied upon, not a
- *   live bug. It is fixed here because a wrong name in the CONTRACT is exactly
- *   the class of defect this project has already paid for twice (the `mcgid`
- *   name trap, cortina-ni-flowoffload.c:2156; mt_name[5]="Delete", F14).
- */
+/* ME 268 (GEM port network CTP) "direction", as it arrives in a Set-by-Create.
+ * ★ G.988 clause 9.2.3 is the authority and 00-COMMON-LAYER-PLAN.md §3 has US
+ *   and DS SWAPPED — a wrong name in the CONTRACT is the class of defect this
+ *   project has already paid for twice (`mcgid`; mt_name[5]="Delete"). */
 enum gpon_gem_dir {
 	GPON_GEM_US	= 1,	/* upstream only   (UNI -> ANI) */
 	GPON_GEM_DS	= 2,	/* downstream only (ANI -> UNI) */
 	GPON_GEM_BIDIR	= 3,	/* bidirectional — THE data GEM */
 };
 
-/*
- * Which upstream PLOAM queue a decision wants its message on.
- *
- * This is an ABSTRACT urgency class, not a register value: the shell maps it to
- * its own silicon. The class must be carried because it is a CORE decision made
- * per message and the three cases are not interchangeable — realtek-luna
- * selects all three at distinct points of the FSM (gpon-luna.c:5528 SN,
- * :5132 Password, :5154 Acknowledge, :5217 Encryption_Key, :6120/:6853/:7410
- * the idle No_message).
- *
- * ⚠ The plan's §3 op-table declares `ploam_tx(void *sh, const u8 msg[12])` with
- *   NO queue argument. Dropping it would put every upstream PLOAM on one queue
- *   and CHANGE LUNA'S BEHAVIOUR — this is a code-motion refactor, so the
- *   argument stays. The concrete RTL9602C mapping (US_PLOAM_IND[10:8]: SN 0x6,
- *   urgent 0x1, No_message 0x7 — gpon-luna.c:5416-4997) is a chip fact and
- *   MUST NOT appear in common code.
- */
+/* Which upstream PLOAM queue a decision wants its message on: an ABSTRACT
+ * urgency class, never a register value.  The RTL9602C mapping (US_PLOAM_IND
+ * [10:8]) is a chip fact and stays in the shell.
+ * ⚠ The plan's ploam_tx() drops this argument; dropping it would put every US
+ *   PLOAM on one queue and CHANGE LUNA'S BEHAVIOUR, so it is carried. */
 enum gpon_ploam_q {
 	GPON_PLOAM_Q_SN,	/* Serial_Number_ONU: the auto-SN slot        */
 	GPON_PLOAM_Q_URGENT,	/* Acknowledge, Password, Encryption_Key      */
 	GPON_PLOAM_Q_NOMSG,	/* the idle No_message keepalive slot         */
 };
 
-/*
- * ★ THE OMCI MIC CONVENTION IS SETTLED, AND THE SELECTOR THAT SAT HERE IS GONE.
- *
- * There used to be an `enum gpon_mic_variant` here offering AAL5-BE and
- * zlib-LE, on the grounds that "the two targets emit different bytes and the
- * evidence does not settle it" -- Elnath computing ~crc32_be and Luna
- * crc32_le, both reaching O5 on the same OLT.
- *
- * That is no longer true, and leaving it would have been worse than useless:
- * it named a live divergence that does not exist, so a reader would go looking
- * for a fork in the code and find none.  VERIFIED IN THE CODE, not from this
- * comment's predecessor: rtl9602c_omci_finalize() calls the core's
- * omci_set_mic(), and there is no executable crc32_le left in the Luna tree.
- * Both families stamp and verify through gpon_omci_core.c, which now spells
- * the convention exactly once (omci_mic_compute).
- *
- * The enum had exactly one referent, the `mic` member of struct gpon_chip_cfg,
- * and NOTHING ever read or wrote that member -- so no code ever consumed the
- * choice.  (Checking only for the ENUMERATOR names said "zero users" and was
- * wrong; the TYPE was what to search for.)  That member is gone with it, on
- * the rule the struct itself states four lines above it: do not add a member
- * without the code that reads it.
- * G.984.4 specifies the non-reflected I.363.5/AAL5 CRC-32, and that is what
- * this lab's OLT accepts, live-proven.  If a future OLT ever wants the other,
- * the place to add the choice is beside omci_mic_compute(), not here.
- */
-
-/*
- * ---------------------------------------------------------------------------
- * Per-chip facts
- * ---------------------------------------------------------------------------
- *
- * A member belongs here if and only if BOTH hold:
- *   (a) the two silicons are MEASURED to differ on it, and
- *   (b) the CORE must know it — i.e. the shell cannot simply pass it as a call
- *       argument.
- * Test (b) is what keeps this struct from becoming a dumping ground, and it is
- * why several values the plan listed are NOT here:
- *   - `data_gem_port` (luna's compile-time GPON_DATA_GEM 193 vs elnath's
- *     snooped id) is an ARGUMENT to the data install, not a core fact
- *     (carve-eln-gem §5.4);
- *   - `gem_flow_base` / `gem_flow_count` are shell-internal tokens. The
- *     internal GEM index is arithmetically tied to elnath's PUC VoQ map
- *     (CG_DATA_GEM_IDX = CG_DATA_TCONT_IDX * 8, cortina-gpon.c:321) and is a
- *     flat GTC constant on luna (GPON_OMCC_FLOW 64, GPON_DATA_FLOW 1). Common
- *     code that computes a flow is wrong on one of the two targets, so the core
- *     never sees one (carve-eln-gem §5.2);
- *   - `omcc_tcont` / `data_tcont` are silicon T-CONT INDICES the shell writes
- *     into a CAM (luna 16/8; elnath 0/1, cortina-gpon.c:2044/:320). The core
- *     reasons about ALLOC-IDs, which are wire identities, not about indices.
- *
- * ⚠ NOTHING READS THIS STRUCT YET, AND SETTING IT TODAY CHANGES NOTHING.
- *   The common OMCI responder currently hardcodes the conformant values
- *   (gpon_omci_core.c:93 crc32_be; gpon_omci_core.h:90 OMCI_MT_GET_NEXT 0x1a),
- *   because plan D-3 rules that realtek-luna does NOT switch to the common
- *   responder in this refactor — doing so would change its wire bytes on a
- *   board that is off the rig. These members are the hook that lets it switch
- *   later WITHOUT changing those bytes, and each is consumed by the follow-up
- *   named on its line. Until then, a target needing a non-default value must
- *   not use the common responder. Do not add a member here without the code
- *   that reads it: a knob that silently does nothing is this project's most
- *   expensive recurring defect.
- */
+/* Per-chip facts.  A member belongs here only if BOTH hold: the two silicons
+ * are MEASURED to differ on it, AND the core must know it (the shell cannot
+ * just pass it as a call argument).  Test two is what stops this becoming a
+ * dumping ground — data_gem_port, gem_flow_base and the T-CONT indices are all
+ * arguments or shell tokens, not core facts.
+ * ⚠ NOTHING READS THIS STRUCT YET and setting it today changes nothing: the
+ *   common responder hardcodes the conformant values because plan D-3 keeps
+ *   realtek-luna on its own responder.  Do not add a member without the code
+ *   that reads it — a knob that silently does nothing is this project's most
+ *   expensive recurring defect, and the `mic` member proved it. */
 struct gpon_chip_cfg {
-	/* ⚠ F3's `mic` member was REMOVED here (see the MIC note above): the
-	 * question it parked is settled and nothing read it.  The other two
-	 * members below are ALSO unread today -- each has exactly one site in
-	 * the whole tree, its own declaration, and no gpon_chip_cfg is ever
-	 * instantiated.  They are kept because their follow-ups (F2) are still
-	 * open, unlike F3; but the struct's own rule is aimed at exactly this
-	 * shape, so the next reader should either wire them or retire them. */
-
-	/* F2 — one-past-the-end offset of the GET response value area.
-	 * 36 is conformant (25 octets: G.988 reserves 36-37 optional-attribute
-	 * mask and 38-39 attribute-execution mask ALWAYS, success included);
-	 * the host oracle agrees (omci_msg.h:53 OMCI_GET_VAL_END 36u).
-	 * realtek-luna writes to 40 (29 octets, rtl9602c_eth.c:2265), i.e. it
-	 * overwrites both masks. */
+	/* F2 — one-past-the-end of the GET response value area.  36 is
+	 * conformant (G.988 always reserves 36-37 and 38-39); realtek-luna
+	 * writes to 40 (rtl9602c_eth.c:2265), overwriting both masks. */
 	u16			get_val_end;
-
-	/* F1 — the Get-Next message type. 0x1a (26) is conformant per G.988
-	 * Table 11.2.2-1 and matches the oracle (omci_msg.h:108).
-	 * realtek-luna uses 0x10 (rtl9602c_eth.c:1698), which is the ALARM
-	 * opcode, so its real Get-Next falls through to NOT_SUPPORTED. The
-	 * divergence is unfalsifiable on the wire; only a build-time constant
-	 * extractor catches it. */
+	/* F1 — the Get-Next message type.  0x1a is conformant; realtek-luna
+	 * uses 0x10 (rtl9602c_eth.c:1698), which is the ALARM opcode, so its
+	 * Get-Next falls through to NOT_SUPPORTED.  Unfalsifiable on the wire:
+	 * only a build-time constant extractor catches it. */
 	u8			mt_get_next;
 };
 
-/*
- * ---------------------------------------------------------------------------
- * The op table — everything the core cannot do for itself
- * ---------------------------------------------------------------------------
- *
- * @sh is the shell's opaque handle (realtek-elnath passes its `struct
- * cortina_gpon *`; realtek-luna passes NULL while its state is still
- * file-scope). It is void * so that no target's device struct can reach this
- * header.
- *
- * CALL CONTEXT — two classes, and mixing them is the single largest
- * correctness risk in the whole carve (carve-eln-gem §5.1):
- *   *_decide() core entry points may be called from SOFTIRQ. They must not
- *             sleep and must not take a lock. On realtek-elnath the OMCI snoop
- *             runs in NAPI softirq and publishes to the work context with
- *             WRITE_ONCE/READ_ONCE and no lock at all.
- *   *_apply()  core entry points run in PROCESS context only, and are the ONLY
- *             callers of an op that may block, poll or time out.
- * ⇒ Putting a mutex in common state would break the softirq caller
- *   (might_sleep); a spinlock would be a behaviour change. Neither is done.
- *
- * ORDERING FACTS THE CORE MAY REQUEST BUT MUST NEVER PERFORM:
- *   - teardown ORDER is a hardware fact. realtek-elnath must drain the VoQ
- *     before the CAM moves under the PUC scheduler (cortina-gpon.c:2113
- *     cg_data_teardown, the vendor drain-then-clear order); realtek-luna's
- *     sequence differs. The core says "tear down"; the shell decides how.
- *   - the deferred-work kick fires from INSIDE realtek-elnath's snoop
- *     (cortina-gpon.c:2751/:2773/:2794) BEFORE the responder runs at :2809.
- *     That position is load-bearing and stays shell-side, unchanged.
- *
- * ERROR CONVENTION: an int-returning op returns 0 on success or a negative
- * errno. -ETIMEDOUT is REACHABLE and the core must handle it — every hardware
- * table write on realtek-elnath goes through cg_tbl_op's bounded completion
- * poll (cortina-gpon.c:1977), and realtek-luna's CAM writes poll likewise. A
- * core that assumes an install succeeded leaves silicon carrying a binding its
- * shadow does not record.
- *
- * A NULL op means "this target does not have that hardware step" and the core
- * must skip it, not fail. This is not hypothetical: realtek-luna has no
- * downstream-GEM CAM teardown at all (its stale-CAM story is a re-arm flag),
- * so ->data_teardown is NULL there (carve-eln-gem §5.4).
- */
-/*
- * ---------------------------------------------------------------------------
- * ANYTHING WE DID NOT UNDERSTAND -- the two classes, and the one signature
- * ---------------------------------------------------------------------------
- * Operator, 2026-08-20: *"si el codigo recive algo desconocido o fuera de rango
- * tiene que informar (sin flood) por dmesg y el python tiene que detectarlo y
- * informar por log y console, es tanto una logica sana de diagnostico que una
- * forma de hacer el support de nuevos OLT si el message de error hacer un dump
- * sin saturar el dmesg (info minimal)"*.
- *
- * THE TWO CLASSES ARE NOT DEGREES OF THE SAME THING, and collapsing them would
- * make every foreign OLT look like a broken device:
- *
- *   UNKNOWN  we do not model this value. NOT a fault -- it is the new-support
- *            work list, and it is exactly what another vendor's OLT produces.
- *   RANGE    the value is outside the DECLARED domain: a grant naming a T-CONT
- *            we never configured, an index that would address a table past its
- *            end. That IS a defect or corruption, and it is a finding.
- *
- * The worked example is the alloc-CAM wall (X111W, 2026-08-20): the driver was
- * handed upstream grants for T-CONTs it had never configured and said NOTHING
- * -- it used them. The symptom surfaced weeks later at the OLT as LOAi, three
- * layers from the cause.
- *
- * The SHELL side (the emitting macro, the rate limit, the line format) lives in
- * gpon_unsup.h beside this file. It is deliberately NOT here: this header is
- * CORE and may never gain a pr_* (see the tier rule at the top of this file).
- */
+/* ANYTHING THE CORE DID NOT UNDERSTAND — two classes, and collapsing them
+ * would make every foreign OLT look like a broken device (operator, 2026-08-20):
+ *   UNKNOWN  we do not model this value.  NOT a fault — it is the new-OLT
+ *            support work list, and it is what another vendor's OLT produces.
+ *   RANGE    outside the DECLARED domain (a grant naming a T-CONT we never
+ *            configured).  That IS a defect or corruption, and it is a finding.
+ * The worked example is the X111W alloc-CAM wall (2026-08-20): the driver was
+ * granted T-CONTs it had never configured, said nothing, and the symptom
+ * surfaced weeks later at the OLT as LOAi, three layers from the cause.
+ * The emitting macro lives in gpon_unsup.h, NOT here: this header is CORE and
+ * may never gain a pr_*. */
 enum gpon_unsup_class {
 	GPON_UNSUP_UNKNOWN = 0,
 	GPON_UNSUP_RANGE   = 1,
 };
 
-/*
- * The op signature, named ONCE.
- *
- * ★ IT IS A TYPEDEF ON PURPOSE. `trace` is declared in BOTH op tables -- this
- *   one and struct gpon_ploam_ops in gpon_ploam.h -- and the FOLLOW-UP note
- *   there says the two are to be unified in a later step. Until they are, a
- *   member spelled out twice is a member that can drift in one of the two
- *   places, silently, and this project has already paid for a witness spelled
- *   twice. Both tables therefore declare `gpon_unsup_fn unsupported;` and
- *   there is exactly one signature to correct.
- */
+/* The op signature, named ONCE: `unsupported` is declared in BOTH op tables
+ * (here and struct gpon_ploam_ops), and a member spelled out twice is a member
+ * that drifts in one of the two places. */
 typedef void (*gpon_unsup_fn)(void *sh, const char *kind, int cls, u32 val,
 			      const char *want, const u8 *data,
 			      unsigned int len);
 
-/*
- * The NULL-safe caller every core uses. Mirrors the ev() idiom in
- * gpon_ploam.c: the guard lives in ONE place so no call site can forget it,
- * and "the shell does not implement this" stays a legal, silent, no-decision
- * state.
- */
+/* The NULL-safe caller every core uses: the guard lives in ONE place so no call
+ * site can forget it, and "the shell does not implement this" stays legal. */
 static inline void gpon_unsup_call(gpon_unsup_fn fn, void *sh, const char *kind,
 				   enum gpon_unsup_class cls, u32 val,
 				   const char *want, const u8 *data,
@@ -508,189 +177,139 @@ static inline void gpon_unsup_call(gpon_unsup_fn fn, void *sh, const char *kind,
 		fn(sh, kind, (int)cls, val, want, data, len);
 }
 
+/* CALL CONTEXT — two classes, and mixing them is the largest correctness risk
+ * in the carve: *_decide() entry points may run in SOFTIRQ and must not sleep
+ * or lock; *_apply() run in PROCESS context only and are the only callers of an
+ * op that may block, poll or time out.  ⇒ a mutex in common state would break
+ * the softirq caller and a spinlock would be a behaviour change; neither is
+ * done.
+ *
+ * ORDERING is a hardware fact the core may REQUEST but never PERFORM: elnath
+ * must drain the VoQ before the CAM moves (cortina-gpon.c:2113), luna differs.
+ *
+ * ERRORS: an int-returning op returns 0 or a negative errno, and -ETIMEDOUT is
+ * REACHABLE — every elnath table write polls a bounded completion
+ * (cortina-gpon.c:1977).  A core that assumes an install succeeded leaves
+ * silicon carrying a binding its shadow does not record.
+ *
+ * A NULL op means "this target has no such hardware step" and the core SKIPS
+ * it rather than failing: luna has no downstream-GEM CAM teardown at all.
+ *
+ * @sh is the shell's opaque handle, void * so no target's device struct can
+ * reach this header. */
 struct gpon_shell_ops {
-	/* --- PLOAM activation ---------------------------------------------
-	 * One consumer today (realtek-luna). realtek-elnath has NO software
-	 * PLOAM FSM: its MAC runs O1->O5 and auto-acknowledges in silicon
-	 * (measured — plan R2). These ops are justified by the roadmap (the
-	 * ARM OLT, the offline adversarial fuzzer) and by offline testability,
-	 * NOT by de-duplication. Saying so plainly is the point.
+	/* --- PLOAM activation.  One consumer today (realtek-luna): elnath has
+	 * NO software PLOAM FSM, its MAC runs O1->O5 in silicon.  These ops are
+	 * justified by offline testability and the roadmap, NOT by de-duplication.
 	 */
 
-	/* Queue one upstream PLOAM. @msg is GPON_PLOAM_US_LEN octets; silicon
-	 * appends the CRC.  <- gpon-luna.c:5462 gpon_send_cpu_ploam() */
+	/* Queue one upstream PLOAM; silicon appends the CRC.
+	 * <- luna_gpon.c:5704 gpon_send_cpu_ploam() */
 	void (*ploam_tx)(void *sh, enum gpon_ploam_q q,
 			 const u8 msg[GPON_PLOAM_US_LEN]);
 
 	/* Publish the activation state into the GTC status field.
-	 * <- gpon-luna.c:6068 gpon_fsm_set_state() / :6137 */
+	 * <- luna_gpon.c:6638 gpon_fsm_set_state() */
 	void (*set_hw_state)(void *sh, enum gpon_ostate st);
 
 	/* Publish the OLT-assigned ONU-ID (GPON_ONU_ID_BROADCAST on every
-	 * teardown). Writes BOTH the downstream status copy and the upstream
-	 * copy on realtek-luna, which is exactly why it is one op and not two
-	 * register writes the core could get half-right.
-	 * <- gpon-luna.c:6235-6236 (assign), :6344-6345, :6573-6574,
-	 *    :6662-6663, :6711-6712 (the four teardown paths) */
+	 * teardown).  ONE op and not two register writes because luna must
+	 * write BOTH the downstream and the upstream copy.
+	 * <- luna_gpon.c:6805-6236 and the four teardown paths */
 	void (*set_hw_onu_id)(void *sh, u8 onu_id);
 
-	/* Program the upstream equalization delay, in bits, as the OLT's
-	 * Ranging_Time gave it.  <- gpon-luna.c:6440 gpon_set_eqd()
-	 * ⚠ COARSER THAN THE PLAN, deliberately. The plan's §3 table declares a
-	 *   `get_min_delay()` op so the core can do the EqD arithmetic itself.
-	 *   Measured, that arithmetic is three CHIP facts to one protocol fact:
-	 *   it reads the MIN_DELAY1 timing field, scales it by the silicon's
-	 *   128-bit unit, and packs the result into [26:24]+[17:0] of one
-	 *   register. Moving it into the core would drag all three into common
-	 *   code for no protocol gain, and this step must stay bit-identical.
-	 *   The read therefore stays inside the shell, and `get_min_delay` is
-	 *   NOT declared — an op with no caller cannot be verified. If a later
-	 *   step does move the arithmetic, it adds the op together with the
-	 *   code that calls it, under its own gate. */
+	/* Program the upstream equalization delay, in bits, as Ranging_Time
+	 * gave it.  <- luna_gpon.c:7010 gpon_set_eqd()
+	 * ⚠ COARSER THAN THE PLAN on purpose: the EqD arithmetic is three CHIP
+	 *   facts to one protocol fact (MIN_DELAY1, the 128-bit unit, the
+	 *   [26:24]+[17:0] packing), so it stays shell-side and `get_min_delay`
+	 *   is NOT declared — an op with no caller cannot be verified. */
 	void (*set_eqd)(void *sh, u32 eqd_bits);
 
-	/* Apply the burst-overhead parameters the core computed (preamble,
-	 * delimiter, guard) for the pre-ranged or ranged case.
-	 * <- gpon-luna.c:6370 gpon_apply_boh()
-	 * (Absent from the plan's op table; it is a real shell entry the FSM
-	 * calls, and the dead gpon_proto.h:73 already declared it.) */
+	/* Apply the burst-overhead parameters the core computed, pre-ranged or
+	 * ranged.  <- luna_gpon.c:6940 gpon_apply_boh() */
 	void (*apply_boh)(void *sh, bool ranged);
 
 	/* Re-lock the transmit analog at O3 entry: the cold-start TX-CMU/PLL
 	 * relock without which a cold boot never ranges while a warm reboot
-	 * does.  <- gpon-luna.c:6053 gpon_txpll_relock()
-	 *    cf. cortina-gpon.c:1746 cg_psds_relock()
-	 * ⚠ void, not int as the plan declares: BOTH implementations return
-	 *   void, and an int nobody sets is a return value the core would be
-	 *   entitled to branch on. */
+	 * does.  <- luna_gpon.c:6623 gpon_txpll_relock()
+	 * ⚠ void, not the plan's int: BOTH implementations return void, and an
+	 *   int nobody sets is a value the core would branch on. */
 	void (*analog_relock)(void *sh);
 
-	/* Load a 128-bit AES key into the STAGED key bank. The core generates
-	 * the key (via ->rng) and answers Request_Key with it; the hardware
-	 * promotes staged->active at the switch time below.
-	 * <- gpon-luna.c:5601 gpon_aes_stage_key() */
+	/* Load a 128-bit AES key into the STAGED bank; the hardware promotes
+	 * staged->active at the switch time below.
+	 * <- luna_gpon.c:5843 gpon_aes_stage_key() */
 	void (*aes_stage_key)(void *sh, const u8 key[16]);
 
-	/* Arm the superframe counter at which the staged key is promoted, from
-	 * the OLT's Key_Switching_Time.  <- gpon-luna.c:6933
-	 * (Absent from the plan's op table; without it the KEY_SWITCH case
-	 * cannot leave the core, and an un-armed switch corrupts AES.) */
+	/* Arm the superframe at which the staged key is promoted, from
+	 * Key_Switching_Time.  Without it an un-armed switch corrupts AES.
+	 * <- luna_gpon.c:7551 */
 	void (*aes_set_switch_time)(void *sh, u32 superframe);
 
-	/* Fill @out with @len random octets. INJECTED rather than called
-	 * directly so that the core stays deterministic under replay and
-	 * fuzzing — the whole reason the key path can be tested offline at all.
-	 * <- gpon-luna.c:5624 get_random_bytes() */
+	/* Fill @out with @len random octets.  INJECTED rather than called so
+	 * the core stays deterministic under replay and fuzzing — which is why
+	 * the key path is testable offline at all. */
 	void (*rng)(void *sh, u8 *out, unsigned int len);
 
-	/* --- GEM / T-CONT provisioning -------------------------------------
-	 * Two consumers. THE GRANULARITY IS "INSTALL", NEVER "WRITE THE CAM
-	 * WORD" — this is the one place the plan's proposed table had to be
-	 * re-cut, and the evidence is unambiguous:
-	 *   - realtek-elnath's data install is ONE hardware transaction with
-	 *     seven early returns spanning the T-CONT CAM, eight upstream port
-	 *     stamps, two downstream CAM entries, two PDC map writes, a PUC
-	 *     enable and a VoQ flush (cortina-gpon.c:2171-2287). Decomposing it
-	 *     into four core-driven ops WOULD reorder it — a behaviour change,
-	 *     and one whose failure mode is a live silicon binding with no
-	 *     shadow record (recorded defect F13, not fixed here).
-	 *   - a fine-grained op keyed on a `flow` would force the core to know
-	 *     an internal index that is computed from the VoQ map on one target
-	 *     and is a flat constant on the other (carve-eln-gem §5.2).
-	 *   - carve-luna-gem B3 reached the same conclusion from the other
-	 *     side: "the op is 'install', never 'write the CAM word'."
-	 * The core therefore names WIRE IDENTITIES (alloc-id, GEM port-id) and
-	 * the shell owns every silicon index. @gem is a GEM PORT-ID as it
-	 * appears on the wire — never an internal GEM index, and never an
-	 * `mcgid`, which is a third, unrelated 12-bit egress port-group that has
-	 * already cost one board-proven regression.
+	/* --- GEM / T-CONT.  THE GRANULARITY IS "INSTALL", NEVER "WRITE THE CAM
+	 * WORD": elnath's data install is ONE transaction with seven early
+	 * returns over the T-CONT CAM, eight US port stamps, two DS CAM entries,
+	 * two PDC map writes, a PUC enable and a VoQ flush
+	 * (cortina-gpon.c:2171-2287) — decomposing it WOULD reorder it.  The
+	 * core names WIRE IDENTITIES (alloc-id, GEM port-id); the shell owns
+	 * every silicon index.  @gem is never an internal GEM index and never an
+	 * `mcgid`, a third unrelated 12-bit field that already cost one
+	 * board-proven regression.
 	 */
 
 	/* Bind the OMCC: the management alloc-id and its GEM port-id.
-	 * <- gpon-luna.c:5420 gpon_install_omcc() + :5765 gpon_install_tcont()
-	 *    cortina-gpon.c:2027 cg_omcc_tcont_bind() + :2063 cg_omcc_gem_bind() */
+	 * <- luna_gpon.c:5662 gpon_install_omcc()
+	 *    cortina-gpon.c:2027 cg_omcc_tcont_bind() */
 	int (*omcc_install)(void *sh, u16 alloc, u16 gem);
 
-	/* Bind the user-data path: the OLT-provisioned alloc-id and data GEM
-	 * port-id, as snooped from ME 262 / ME 268.
-	 * <- gpon-luna.c:6032 gpon_install_data_gem() + :5765
+	/* Bind the user-data path, as snooped from ME 262 / ME 268.
+	 * <- luna_gpon.c:6602 gpon_install_data_gem()
 	 *    cortina-gpon.c:2171 cg_data_try_install() */
 	int (*data_install)(void *sh, u16 alloc, u16 gem);
 
-	/* Tear the user-data path down, in whatever order that silicon
-	 * requires. NULL where a target has no teardown (realtek-luna).
-	 * <- cortina-gpon.c:2113 cg_data_teardown() */
+	/* Tear the user-data path down in whatever order that silicon requires.
+	 * NULL on realtek-luna.  <- cortina-gpon.c:2113 cg_data_teardown() */
 	void (*data_teardown)(void *sh);
 
-	/* --- OMCI ----------------------------------------------------------- */
-
-	/* Transmit one OMCI PDU upstream. @len is carried even though baseline
-	 * OMCI is always OMCI_LEN: an implicit length is precisely what makes a
-	 * buffer unfuzzable, and the extended (devid 0x0b) case is on the
-	 * roadmap.  <- cortina-gpon.c:2393 cg_omci_tx() */
+	/* Transmit one OMCI PDU upstream.  @len is carried even though baseline
+	 * OMCI is always OMCI_LEN: an implicit length is what makes a buffer
+	 * unfuzzable.  <- cortina-gpon.c:2393 cg_omci_tx() */
 	int (*omci_tx)(void *sh, const u8 *pdu, unsigned int len);
 
-	/* --- diagnostics ---------------------------------------------------
-	 * NEVER load-bearing. A NULL ->trace must change no decision the core
-	 * makes and no byte it emits; it exists because the project requires
-	 * spy/dump capability to be first-class rather than bolted on.
-	 * ⚠ It is NOT the mechanism for preserving a target's existing log
-	 *   lines. Those carry register reads and cross-driver counters inside
-	 *   their argument lists (gpon-luna.c:6758-6333 and three more), so
-	 *   they stay in the shell and must be replayed there in the same order
-	 *   — otherwise "bit-identical" quietly stops being true
-	 *   (carve-luna-ploam B4, carve-eln-shell B2).
-	 */
+	/* --- diagnostics: NEVER load-bearing.  A NULL ->trace must change no
+	 * decision and no emitted byte.
+	 * ⚠ It is NOT how a target's existing log lines are preserved: those
+	 *   carry register reads inside their argument lists, so they stay in
+	 *   the shell and must be replayed there in the same order. */
 	void (*trace)(void *sh, unsigned int ev, u32 a, u32 b);
 
-	/* Report ONE datum the core received and could not place. Same
-	 * diagnostic contract as ->trace above, and for the same reasons: a
-	 * NULL ->unsupported must change no decision the core makes and no byte
-	 * it emits, so a shell that does not implement it loses information and
-	 * nothing else. Existing shells use designated initialisers, so they get
-	 * NULL here without being touched.
-	 *
-	 * ★ WHY IT EXISTS BESIDE ->trace RATHER THAN INSIDE IT. ->trace carries
-	 *   two u32s and no buffer, so it can say "an unhandled type went by"
-	 *   and can NOT say WHAT went by. A 13-octet PLOAM cannot ride two
-	 *   u32s. That gap is the whole point: a report without the datum tells
-	 *   you something happened, a report WITH it is the specification for
-	 *   implementing the thing that happened -- which is how a foreign
-	 *   vendor's OLT gets supported.
-	 *
-	 * @kind  a stable slug naming WHAT was not understood, and it is the
-	 *        rate-limit key in the shell as well as the aggregation key in
-	 *        the reader. That is what stops a new kind being buried under a
-	 *        noisy old one.
+	/* Report ONE datum the core received and could not place.  Same
+	 * diagnostic contract as ->trace, but it carries a BUFFER, which ->trace
+	 * cannot: two u32s can say an unhandled type went by and cannot say WHAT
+	 * went by, and a report WITH the datum is the specification for
+	 * implementing it — which is how a foreign OLT gets supported.
+	 * @kind  a stable slug; it is the rate-limit key in the shell AND the
+	 *        aggregation key in the reader, so a new kind is never buried.
 	 * @cls   enum gpon_unsup_class, widened to int so this table needs no
 	 *        ordering dependency on that enum.
-	 * @val   the offending value.
-	 * @want  the DECLARED domain, as a SPACE-FREE token (the reader parses
-	 *        `want=` up to the first space).
-	 * @data  the minimal dump, and @len its length; the shell clips it.
-	 *        NULL/0 is legal -- a report with no dump is still a report.
-	 */
+	 * @want  the DECLARED domain, as a SPACE-FREE token: the reader parses
+	 *        `want=` up to the first space and silently loses the rest.
+	 * @data  the minimal dump, @len octets; the shell clips it.  NULL/0 is
+	 *        legal — a report with no dump is still a report. */
 	gpon_unsup_fn unsupported;
 };
 
-/*
- * ---------------------------------------------------------------------------
- * How a core holds its state
- * ---------------------------------------------------------------------------
- * Each core owns a CONTEXT STRUCT carrying at least { ops, sh, chip } plus its
- * own state, and takes a pointer to it on every entry point. NEVER file-scope
- * globals.
- *
- * This is not style. The abandoned first attempt at this refactor
- * (realtek-luna gpon_proto.c, dead since 2026-06-18, deleted by plan step M2)
- * kept its FSM state in ~11 externs, and that is what made it impossible to run
- * side by side with the host oracle for a differential comparison — you cannot
- * instantiate two of it. It also reached "hardware freedom" by DELETING the
- * register writes, the udelay and the deferred-work kick from the code it
- * copied, rather than turning them into ops. Both mistakes are why it drifted
- * into a plausible-looking wrong twin that still carries the Assign_Alloc-ID
- * regression this project spent months paying for. Do not repeat either.
- */
+/* Each core owns a CONTEXT STRUCT carrying { ops, sh, chip } plus its own
+ * state, and takes a pointer to it on every entry point.  NEVER file-scope
+ * globals: the abandoned gpon_proto.c kept its FSM state in ~11 externs, and
+ * that is exactly what made it impossible to instantiate twice and run against
+ * the host oracle for a differential. */
 struct gpon_core_base {
 	const struct gpon_shell_ops	*ops;
 	void				*sh;	/* opaque shell handle       */

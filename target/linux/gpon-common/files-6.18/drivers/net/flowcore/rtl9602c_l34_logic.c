@@ -4,6 +4,10 @@
 #include <linux/types.h>
 #include <linux/minmax.h>
 
+/* The RX descriptor layout is stated ONCE, in luna_gmac_logic.h. This file
+ * decodes the same words, so it asks for that declaration rather than
+ * re-spelling the shifts -- which is what it used to do. */
+#include "luna_gmac_logic.h"
 #include "rtl9602c_l34_logic.h"
 
 void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val)
@@ -15,7 +19,14 @@ void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val)
 		take = min(width, 32 - bit);
 		w[word] &= ~((((take >= 32) ? ~0u : ((1u << take) - 1))) << bit);
 		w[word] |= (val & ((take >= 32) ? ~0u : ((1u << take) - 1))) << bit;
-		val >>= take;
+		/* ⚠ `val >>= take` was UNDEFINED on the 32-bit-wide fields
+		 * (L34_RT_IP, L34_NETIF_IP): at bit 0 take is 32, and a shift
+		 * by the full width is UB.  Harmless in practice -- width
+		 * reaches 0 in the same iteration so the value is never read
+		 * again, and MIPS masks the shift count to 5 bits -- but it is
+		 * UB, and it went unseen until this file was first compiled on
+		 * the host (UBSan, 2026-09-11, l34_iface_safety_test). */
+		val = (take >= 32) ? 0 : (val >> take);
 		width -= take;
 		word++;
 		bit = 0;
@@ -161,10 +172,42 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
 }
 
-/* The more-specific /32 CPU self-route (mask code 31): traffic addressed to
- * the interface's OWN IP terminates locally instead of being ARP-routed by
- * the subnet route -- which black-holes management once the LAN netif is in
- * the L34 domain. */
+/* The /32 CPU self-route (mask code 31): traffic addressed to the interface's
+ * OWN IP should terminate locally instead of being ARP-routed by the subnet
+ * route.
+ *
+ * ⚠⚠ THIS COMMENT USED TO CLAIM THE ENTRY PREVENTS A BLACK-HOLE, AND THE BOARD
+ * REFUTED IT (X111W, 2026-09-11).  Read back from the silicon it is present and
+ * correct -- `route[ 9] 192.168.1.12 maskcode 31 (/32) process CPU int 1 netif
+ * 1`, every field where this die's own chipdef puts it -- and management is
+ * still 100% dead the moment the NETIF claims the ONU's own LAN MAC.  It is
+ * NOT losing a longest-prefix contest against the /24 either: with the /24
+ * DELETED and this entry the ONLY valid route, loss was still 100% (12/12,
+ * ARP 6/6 throughout, restored to 0% both times).  ⇒ on this path the local
+ * route table is not what decides, and the entry is written on the strength of
+ * the table layout alone.
+ *
+ * ⚠ AND THE OBVIOUS EXPLANATION IS REFUTED TOO, BY THE SAME READ-BACK.
+ * The SWTCR0 flow-route enables are written NOWHERE in this tree, so "IPv4
+ * routing was never enabled" was the cheap answer.  The silicon says
+ * otherwise: `swtcr0 64000e20`, i.e. V4FLRT_EN (bit 30) and V6FLRT_EN (bit 29)
+ * are ALREADY SET when we find them.
+ *
+ * ⚠⚠ A PARAGRAPH STOOD HERE CLAIMING THE ANSWER, AND THE BOARD REFUTED IT THE
+ * SAME DAY.  It said the engine's own L2 MAC-table lookup missed (glb_cfg bit 1
+ * = L34_L2_LOOKUP_MISS_ACT = DROP) and that "the repair is the missing L2
+ * entry".  Both halves were tried, with positive proof that each arm ran, and
+ * BOTH left the loss at 100%: the own-MAC static L2 entry on the CPU port, and
+ * the miss action set to TRAP (glb_cfg read back 0x00000007).  It is kept here
+ * as a refutation because a comment asserting a solved cause is what stops the
+ * next session measuring.
+ *
+ * ⚠⚠ AND SO IS SWTCR0, WHICH *DOES* DIFFER FROM STOCK (0x84801e10 vs
+ * 0x64000e20, seven fields apart) AND IS *NOT* WHAT DECIDES: written to stock's
+ * WHOLE word, with the board reading it back, the loss stayed 100%.  The same
+ * went for the binding pair and for all ten differing switch-LUT words.  The
+ * full nine-arm ledger, with what each proved, lives ONCE beside the code that
+ * makes the claim -- rtl9602c_l34_lan_setup() in rtl9602c_l34.c. */
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx)
 {
 	l34_field_set(w, L34_RT_IP_LSP,      L34_RT_IP_W,      own_ip);
@@ -173,6 +216,68 @@ void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx)
 	l34_field_set(w, L34_RT_INT_LSP,     L34_RT_INT_W,     1);
 	l34_field_set(w, L34_RT_DENTIF_LSP,  L34_RT_DENTIF_W,  netif_idx);
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
+}
+
+/*
+ * Run one ordered interface program, revoking the CLAIM if a later step fails.
+ *
+ * The contract and the measurement behind it are at struct l34_prog_step in
+ * the header.  Step 0 is the NETIF claim; a zeroed entry has VALID=0, so
+ * re-writing it is what stops the engine taking traffic for the interface.
+ *
+ * The FIRST failure is what the caller is owed and what it gets; the revoke's
+ * own result is not swallowed silently -- the shell's writer reports a failed
+ * table op, and it is the writer that owns that reporting because flowcore has
+ * no logger.
+ */
+int l34_prog_run(const struct l34_prog_step *s, unsigned int n,
+		 l34_tbl_wr_fn wr, void *ctx)
+{
+	u32 revoke[L34_WORDS_MAX] = { 0 };
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < n; i++) {
+		ret = wr(ctx, s[i].tbl, s[i].idx, s[i].w, s[i].words);
+		if (!ret)
+			continue;
+		if (i)
+			wr(ctx, s[0].tbl, s[0].idx, revoke, s[0].words);
+		return ret;
+	}
+	return 0;
+}
+
+/* A NETIF entry claims routed traffic once it is VALID with routing enabled
+ * and the interface classified into the L34 domain -- all three, because any
+ * one of them alone leaves the entry inert. */
+bool l34_netif_claims(const u32 *netif)
+{
+	return l34_field_get(netif, L34_NETIF_VALID_LSP, L34_NETIF_VALID_W) &&
+	       l34_field_get(netif, L34_NETIF_ENRTR_LSP, L34_NETIF_ENRTR_W) &&
+	       l34_field_get(netif, L34_NETIF_L34_LSP, L34_NETIF_L34_W);
+}
+
+/* The CPU self-route: valid, /32 (mask code 31), PROCESS=CPU, on this netif,
+ * for exactly this address. */
+bool l34_rt_is_cpu_self(const u32 *rt, u32 ip, u8 netif_idx)
+{
+	return l34_field_get(rt, L34_RT_VALID_LSP, L34_RT_VALID_W) &&
+	       l34_field_get(rt, L34_RT_MASK_LSP, L34_RT_MASK_W) == 31 &&
+	       l34_field_get(rt, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W) ==
+		       L34_RT_PROCESS_CPU &&
+	       l34_field_get(rt, L34_RT_DENTIF_LSP, L34_RT_DENTIF_W) ==
+		       netif_idx &&
+	       l34_field_get(rt, L34_RT_IP_LSP, L34_RT_IP_W) == ip;
+}
+
+/* The fault as a predicate: the engine claims traffic for this interface and
+ * nothing terminates the interface's OWN address locally. */
+bool l34_iface_blackholes(const u32 *netif, const u32 *cpu_rt, u32 own_ip,
+			  u8 netif_idx)
+{
+	return l34_netif_claims(netif) &&
+	       !l34_rt_is_cpu_self(cpu_rt, own_ip, netif_idx);
 }
 
 /* Ethernet next-hop via NETIF[ifidx], dst MAC = L2[l2idx]. */
@@ -283,15 +388,16 @@ void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add)
  * bcast 0xff) never 0x0a, so this does not steal LAN traffic.  Verified
  * live: OLT sent MT 0x49 (GET) DevID 0x0a class 0x0101.
  */
-bool rtl9602c_rx_is_ds_omci(bool trap_on, u32 opts2, u32 opts3,
+bool rtl9602c_rx_is_ds_omci(const struct luna_rx_layout *rxl,
+			    bool trap_on, u32 opts2, u32 opts3,
 			    const u8 *data, u32 len, unsigned int pon_port,
 			    unsigned int omci_reason,
 			    unsigned int cpu_prefix, u32 buf_size)
 {
 	if (!trap_on || len < cpu_prefix + 8 || len > buf_size)
 		return false;
-	if (((opts2 >> 21) & 0xff) == omci_reason &&
-	    ((opts3 >> 16) & 0xf) == pon_port)
+	if (luna_gmac_rx_reason(rxl, opts2, opts3) == omci_reason &&
+	    luna_gmac_rx_src_port(rxl, opts3) == pon_port)
 		return true;
 	return (data[cpu_prefix + 3] == 0x0a || data[cpu_prefix + 3] == 0x0b) &&
 	       !(data[cpu_prefix + 2] & 0x80);
@@ -313,10 +419,11 @@ bool rtl9602c_rx_is_ds_omci(bool trap_on, u32 opts2, u32 opts3,
  * is not includable here).  The shell keeps the netdev pointers, the
  * host_port learning side effect and the hand-up.
  */
-bool rtl9602c_rx_wan_demux(u32 opts3, const u8 *dst, const u8 *wan_mac,
+bool rtl9602c_rx_wan_demux(const struct luna_rx_layout *rxl, u32 opts3,
+			   const u8 *dst, const u8 *wan_mac,
 			   unsigned int pon_port)
 {
-	unsigned int sp = (opts3 >> 16) & 0xf;
+	unsigned int sp = luna_gmac_rx_src_port(rxl, opts3);
 	bool wan_drain = (opts3 >> 20) == 0x23e;
 	int i;
 

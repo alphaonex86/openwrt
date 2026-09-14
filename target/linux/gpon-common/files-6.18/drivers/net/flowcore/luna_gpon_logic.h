@@ -1,6 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * gpon_rtl9602c_logic.h -- logic hoisted out of gpon-rtl9602c.c.
+ * luna_gpon_logic.h -- the Luna GPON shell's hoisted pure logic.
+ *
+ * RENAMED 2026-09-10: gpon_rtl9602c_logic.{c,h} -> luna_gpon_logic.{c,h}.
+ * The old name claimed the CORE and a single CHIP at once (file_prefix_guard)
+ * and did neither: this object is built for BOTH Luna dies under
+ * CONFIG_LUNA_GPON, so its scope is the FAMILY -- the exact counterpart of
+ * cortina_gpon_logic.{c,h} beside it.  It was hoisted out of gpon-rtl9602c.c,
+ * which is today luna_gpon.c; provenance notes naming either older spelling are
+ * dated records of where code CAME FROM and are kept as written.
  *
  * Every function here was moved MECHANICALLY under one rule: it touches no
  * MMIO, calls no kernel service, and reads no file-scope state of the shell
@@ -8,8 +16,8 @@
  * y tal vez algunos workaround", and that is only true once the LOGIC
  * exists in one place instead of once per board.
  */
-#ifndef _GPON_RTL9602C_LOGIC_H
-#define _GPON_RTL9602C_LOGIC_H
+#ifndef _LUNA_GPON_LOGIC_H
+#define _LUNA_GPON_LOGIC_H
 
 #include <linux/types.h>
 
@@ -56,7 +64,7 @@ u32 bosa_tx_word_calc(u64 sum, int n, s32 tx_slope, s32 tx_offset);
 
 /* pi_packed_locate/insert/extract + struct pi_packed_slot MOVED to
  * flowcore.h / flowcore_hash.o on 2026-09-02 (round 3): generic packed-slot
- * math another engine needed, and this object's CONFIG_RTL9602C_GPON gate
+ * math another engine needed, and this object's CONFIG_LUNA_GPON gate
  * made a call from that engine a link error on its board.  The include below
  * keeps every existing caller of this header compiling unchanged. */
 #include "flowcore.h"
@@ -99,4 +107,4 @@ u32 bosa_median_u32(u32 *v, unsigned int n);
  * else mV = (hi - zero) * 1200 / (code - zero). */
 s32 bosa_vmpd_mv_calc(u32 code, s32 hi, s32 zero);
 
-#endif /* _GPON_RTL9602C_LOGIC_H */
+#endif /* _LUNA_GPON_LOGIC_H */

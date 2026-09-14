@@ -44,7 +44,8 @@
  * gpon_gtc_ds_ploam_read() - unpack the latched downstream PLOAM.
  * @io:      how to reach the GTC block (the shell's hwio over that block).
  * @msg_off: GPON_GTC_DS_PLOAM_MSG within the block, from the per-SoC header
- *           or table.  REG_ABSENT is refused before any bus traffic.
+ *           (reg_make()) or a per-chip table.  A DECLARED absence and a field
+ *           NOBODY REGISTERED are both refused before any bus traffic.
  * @m:       out -- the GPON_PLOAM_DS_LEN (13) message octets.  NOT written
  *           on refusal.
  *
@@ -58,21 +59,24 @@
  * Return: true when @m was filled; false when this chip declares no message
  * buffer (the caller logs -- a chip without it must never reach here).
  */
-static inline bool gpon_gtc_ds_ploam_read(const struct hwio *io, u32 msg_off,
+static inline bool gpon_gtc_ds_ploam_read(const struct hwio *io,
+					  struct reg msg_off,
 					  u8 m[GPON_PLOAM_DS_LEN])
 {
 	const unsigned int full = GPON_PLOAM_DS_LEN / 2u;	/* 6 two-octet words */
 	unsigned int i;
+	u32 base;
 
 	if (!reg_has(msg_off))
 		return false;
+	base = reg_at(msg_off);
 	for (i = 0; i < full; i++) {
-		u32 w = hwio_rd(io, msg_off + i * 4u);
+		u32 w = hwio_rd(io, base + i * 4u);
 
 		m[2 * i]     = (w >> 8) & 0xff;
 		m[2 * i + 1] = w & 0xff;
 	}
-	m[GPON_PLOAM_DS_LEN - 1] = (hwio_rd(io, msg_off + full * 4u) >> 8) & 0xff;
+	m[GPON_PLOAM_DS_LEN - 1] = (hwio_rd(io, base + full * 4u) >> 8) & 0xff;
 	return true;
 }
 

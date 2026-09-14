@@ -32,13 +32,51 @@
  * Every table declares which fields it does not have; a chip that lacks a
  * block sets the field to REG_ABSENT and the logic must ASK rather than
  * write to offset 0 of something. reg_has() is that question, spelled once.
- * The sentinel is 0xffffffff and deliberately NOT 0, because "the register
- * at 0" is a real address on these parts (GPON_INT_DLT is 0x0000) and a
- * silent write there is exactly the class of bug that reads back fine.
+ * The sentinel is deliberately NOT 0, because "the register at 0" is a real
+ * address on these parts (GPON_INT_DLT is 0x0000) and a silent write there is
+ * exactly the class of bug that reads back fine.
  * (Until 2026-09-02 this paragraph said an absent field "leaves it 0" --
  * following that would have marked absence as an offset reg_has() calls
- * PRESENT, and the logic would have written to offset 0. The luna_sw_map
- * tables' 0-means-untouched convention is THEIRS, not this header's.)
+ * PRESENT, and the logic would have written to offset 0.)
+ *
+ * ★★★ AND THE SENTENCE ABOVE WAS ONLY HALF THE MECHANISM UNTIL 2026-09-14:
+ * NOTHING FORCED AN AUTHOR TO SET A FIELD AT ALL (operator: *"debe existir
+ * mecanismo que donde hay que registrar algo como valor NO deja validar si
+ * hay valor por defecto a la compilacion"*).  C zero-fills every member a
+ * designated initialiser omits, and 0 is a legal offset on these parts, so a
+ * FORGOTTEN field silently became "the register at offset 0" -- which
+ * reg_has() reported as PRESENT and the logic happily wrote to.  The
+ * absence marker was declared and the DEFAULT was not, which is the same
+ * defect one layer up.
+ *
+ *   the measured instance, one layer down: the /proc GPON dump printed
+ *   pi_rd(0x20ac) under the label `ctl_us`.  PI_PONIP_CTL_US is 0x020d8 here
+ *   and 0x020ec on the RTL9603CVD; 0x20ac is CNT_MASK_US group 0's word for
+ *   SIDs 32..63, enrolled on NEITHER board, so it reads 0 BY DESIGN -- and a
+ *   comment then read that structural zero as a fact about stock.  A zero
+ *   that is guaranteed looks exactly like a zero that was measured.
+ *
+ * ⇒ A REGISTER OFFSET IS NO LONGER A u32.  It is `struct reg`, holding the
+ * offset BIASED BY ONE, so the value C leaves behind decodes to UNSET and
+ * cannot be mistaken for offset 0, for any other offset, or for a declared
+ * absence.  THREE answers, never two:
+ *
+ *     UNSET    nobody registered it. A DEFECT: reg_rc() answers -ENXIO and
+ *              every helper refuses BEFORE any bus traffic.
+ *     ABSENT   a human declared "this chip does not have it": -ENODEV.
+ *     PRESENT  reg_at() yields the offset.
+ *
+ * It is a distinct TYPE on purpose: a raw offset passed where an encoded one
+ * belongs is a compile ERROR, not an off-by-one nobody sees.  Crossing that
+ * boundary deliberately is spelled reg_make(), once, at the call site.
+ *
+ * ⚠ THE OTHER ZERO CONVENTION IN THIS TREE IS NOT CHANGED AND IS NOT AN
+ * EXCEPTION.  The luna_sw_map tables spell 0 as "this chip's bring-up does
+ * not touch it" -- a per-field DECLARED answer, documented on each field.
+ * What made the two conventions collide was never the meaning of 0; it was
+ * that nothing made a human TYPE it.  reg_table_registered_guard.py requires
+ * every field of every registered table to be initialised explicitly, so a 0
+ * there can only exist because somebody wrote it down.
  */
 #ifndef _REGTABLE_H
 #define _REGTABLE_H
@@ -48,13 +86,116 @@
 
 #include "hwio.h"	/* the injected accessor the logic below writes through */
 
-/** Sentinel for "this chip does not have this register". */
-#define REG_ABSENT	0xffffffffu
+/**
+ * struct reg - ONE register offset, encoded so that C's zero-fill is not a
+ * valid value.  @enc is the offset PLUS ONE; 0 is what an omitted member
+ * leaves and means UNSET.
+ *
+ * Same size as the u32 it replaces (asserted below), so a table costs no
+ * more flash than it did -- the footprint rule binds this tier too.
+ */
+struct reg {
+	u32	enc;
+};
 
-/** Is @off a register this chip actually has? */
-static inline bool reg_has(u32 off)
+/** The encoding, spelled once so a static assert can pin it. */
+#define REG_ENC_OF(off)	((u32)(off) + 1u)
+#define REG_ENC_UNSET	0u		/* exactly what C zero-fill leaves */
+#define REG_ENC_ABSENT	0xffffffffu	/* a human DECLARED the absence    */
+
+/* The offset reg_at() answers for a field that is not PRESENT.  NOT 0, which
+ * is a real register here; it shares REG_ENC_ABSENT's value only because both
+ * want an address no block on these parts can answer. */
+#define REG_BAD_OFF	0xffffffffu
+
+/**
+ * REG_AT() / REG_ABSENT - the two INITIALISER forms. Brace forms, so
+ * `.field = REG_AT(0x1204),` keeps the literal that a human, regtable_vs_sdk.py
+ * and gpon_regtable_diff_test all read; only the WRAPPER is new.
+ */
+#define REG_AT(off)	{ REG_ENC_OF(off) }
+#define REG_ABSENT	{ REG_ENC_ABSENT }
+
+/* The bias is the whole mechanism, so it is pinned AT COMPILE TIME: remove it
+ * and this header stops building, naming the property it lost. */
+_Static_assert(REG_ENC_UNSET == 0u,
+	       "UNSET must be exactly what C's zero-fill leaves behind");
+_Static_assert(REG_ENC_OF(0) != REG_ENC_UNSET,
+	       "offset 0 is a real register here (GPON_INT_DLT): registering it "
+	       "may never be indistinguishable from registering nothing");
+_Static_assert(REG_ENC_OF(0) != REG_ENC_ABSENT,
+	       "a registered offset may never encode as a declared absence");
+_Static_assert(REG_ENC_ABSENT != REG_ENC_UNSET,
+	       "a DECLARED absence and a field nobody registered are different "
+	       "answers and must stay distinguishable");
+_Static_assert(sizeof(struct reg) == sizeof(u32),
+	       "a register table may not grow: the ONU flash budget is a rule");
+
+/** What state is this field in? THREE answers, never two. */
+enum reg_state {
+	REG_STATE_UNSET = 0,	/* nobody registered it -- a DEFECT */
+	REG_STATE_ABSENT,	/* a human declared this chip lacks it */
+	REG_STATE_PRESENT,	/* an offset to use */
+};
+
+static inline enum reg_state reg_state(struct reg r)
 {
-	return off != REG_ABSENT;
+	if (r.enc == REG_ENC_UNSET)
+		return REG_STATE_UNSET;
+	if (r.enc == REG_ENC_ABSENT)
+		return REG_STATE_ABSENT;
+	return REG_STATE_PRESENT;
+}
+
+/** Is @r a register this chip actually has? */
+static inline bool reg_has(struct reg r)
+{
+	return reg_state(r) == REG_STATE_PRESENT;
+}
+
+/**
+ * reg_rc() - the NAMED refusal a helper owes before any bus traffic.
+ *
+ * Return: 0 when usable; -ENXIO when NOBODY REGISTERED IT (our defect, and a
+ * different repair from every other rc in this header); -ENODEV when the
+ * chip's own table declares the block absent.
+ */
+static inline int reg_rc(struct reg r)
+{
+	switch (reg_state(r)) {
+	case REG_STATE_PRESENT:
+		return 0;
+	case REG_STATE_ABSENT:
+		return -ENODEV;
+	default:
+		return -ENXIO;
+	}
+}
+
+/**
+ * reg_at() - the offset to write.  REG_BAD_OFF when @r is not PRESENT, so a
+ * caller that skipped the ask addresses 0xffffffff and not offset 0 -- the
+ * failure lands somewhere a human notices instead of in GPON_INT_DLT.
+ */
+static inline u32 reg_at(struct reg r)
+{
+	return reg_has(r) ? r.enc - 1u : REG_BAD_OFF;
+}
+
+/** Cross from a raw offset (a #define, which cannot be silently defaulted). */
+static inline struct reg reg_make(u32 off)
+{
+	struct reg r = { REG_ENC_OF(off) };
+
+	return r;
+}
+
+/** The value form of REG_ABSENT, for an ARGUMENT rather than an initialiser. */
+static inline struct reg reg_none(void)
+{
+	struct reg r = { REG_ENC_ABSENT };
+
+	return r;
 }
 
 /**
@@ -81,20 +222,23 @@ static inline bool reg_has(u32 off)
  * claimed there wasn't one.
  *
  * Return: the iteration COMPL was seen at (>= 0), -ETIMEDOUT when the bound
- * expires, -ENODEV when this chip's table has no such register (refused BEFORE
- * any bus traffic), -EINVAL with no pause op.
+ * expires, -ENODEV when this chip's table DECLARES no such register and
+ * -ENXIO when NOBODY REGISTERED IT (both refused BEFORE any bus traffic),
+ * -EINVAL with no pause op.
  */
-static inline int gpon_ind_poll(const struct hwio *io, u32 off, u32 busy,
+static inline int gpon_ind_poll(const struct hwio *io, struct reg off, u32 busy,
 				unsigned int tries, void (*pause)(void))
 {
 	unsigned int i;
+	int rc;
 
 	if (!pause)
 		return -EINVAL;
-	if (!reg_has(off))
-		return -ENODEV;
+	rc = reg_rc(off);
+	if (rc)
+		return rc;
 	for (i = 0; i < tries; i++) {
-		if (!(hwio_rd(io, off) & busy))
+		if (!(hwio_rd(io, reg_at(off)) & busy))
 			return (int)i;
 		pause();
 	}
@@ -108,15 +252,18 @@ static inline int gpon_ind_poll(const struct hwio *io, u32 off, u32 busy,
  * BEFORE the write, so a chip whose table lacks the block never emits a
  * transaction into empty space.
  */
-static inline int gpon_ind_go(const struct hwio *io, u32 off, u32 val,
+static inline int gpon_ind_go(const struct hwio *io, struct reg off, u32 val,
 			      u32 busy, unsigned int tries,
 			      void (*pause)(void))
 {
+	int rc;
+
 	if (!pause)
 		return -EINVAL;
-	if (!reg_has(off))
-		return -ENODEV;
-	hwio_wr(io, off, val);
+	rc = reg_rc(off);
+	if (rc)
+		return rc;
+	hwio_wr(io, reg_at(off), val);
 	return gpon_ind_poll(io, off, busy, tries, pause);
 }
 
@@ -130,24 +277,24 @@ static inline int gpon_ind_go(const struct hwio *io, u32 off, u32 val,
  * ★ ADDING A CHIP IS ADDING ONE INITIALISER BELOW. That is the deliverable.
  */
 struct gpon_gtc_regs {
-	u32	ds_omci_pti;		/* [6:4] PTI_MASK, [2:0] END_PTI      */
-	u32	gem_us_port_map;	/* array base; 32-bit words, stride 4 */
+	struct reg	ds_omci_pti;	/* [6:4] PTI_MASK, [2:0] END_PTI      */
+	struct reg	gem_us_port_map;/* array base; 32-bit words, stride 4 */
 	u32	gem_us_port_stride;	/* the stride itself, in BYTES        */
-	u32	gem_ds_mc_cfg;		/* broadcast / non-multicast / FCS    */
-	u32	ds_traffic_cfg;		/* per-flow DS traffic config array   */
+	struct reg	gem_ds_mc_cfg;	/* broadcast / non-multicast / FCS    */
+	struct reg	ds_traffic_cfg;	/* per-flow DS traffic config array   */
 	u32	ds_traffic_stride;
 	/* The two indirect GTC CAMs (gpon_gtc_cam_write() below).  Each is an
 	 * op/index register plus a write-data register; the INDEX MASK is that
 	 * CAM's own depth -- a per-CAM FACT (the GEM Port-ID CAM has 128 flows,
 	 * OP_IDX[6:0]; the alloc CAM 32 T-CONTs, OP_IDX[4:0]) -- so it rides
 	 * HERE with the registers, never as a magic number at a call site. */
-	u32	ds_port_ind;		/* GEM Port-ID CAM op: OP_MODE[9:8] OP_IDX[6:0] */
-	u32	ds_port_wr;		/* GEM Port-ID CAM write data: [11:0] gemPortId */
-	u32	ds_port_rd;		/* GEM Port-ID CAM read data: [11:0] RDATA      */
+	struct reg ds_port_ind;		/* GEM Port-ID CAM op: OP_MODE[9:8] OP_IDX[6:0] */
+	struct reg ds_port_wr;		/* GEM Port-ID CAM write data: [11:0] gemPortId */
+	struct reg ds_port_rd;		/* GEM Port-ID CAM read data: [11:0] RDATA      */
 	u32	ds_port_idx_mask;	/* OP_IDX width as a mask (0x7f = 128 flows)    */
-	u32	ds_alloc_ind;		/* T-CONT alloc CAM op: OP_IDX[4:0]             */
-	u32	ds_alloc_wr;		/* alloc CAM write data: [11:0] allocateId      */
-	u32	ds_alloc_rd;		/* alloc CAM read data: [11:0] RDATA            */
+	struct reg ds_alloc_ind;	/* T-CONT alloc CAM op: OP_IDX[4:0]             */
+	struct reg ds_alloc_wr;		/* alloc CAM write data: [11:0] allocateId      */
+	struct reg ds_alloc_rd;		/* alloc CAM read data: [11:0] RDATA            */
 	u32	ds_alloc_idx_mask;	/* OP_IDX width as a mask (0x1f = 32 T-CONTs)   */
 	/* The three flow-indexed indirect COUNTER muxes (gpon_gtc_cntr_read()
 	 * below).  Each is an index register plus a CLEAR-ON-READ status
@@ -159,12 +306,12 @@ struct gpon_gtc_regs {
 	 * it has no ack (see the counter-transaction comment below) and its
 	 * index width is the one counter field that DIFFERS between the two
 	 * chips ([3:0] vs [2:0]). */
-	u32	gem_ds_rx_cntr_ind;	/* per-flow DS GEM ETH RX: IDX[6:0], ack[15]    */
-	u32	gem_ds_rx_cntr_stat;	/* ETH_PKT_RX[31:0], clear-on-read              */
-	u32	gem_ds_fwd_cntr_ind;	/* per-flow DS GEM forwarded-to-PON-IP          */
-	u32	gem_ds_fwd_cntr_stat;	/* ETH_PKT_FWD[31:0], clear-on-read             */
-	u32	ds_port_cntr_ind;	/* per-flow DS de-encap: IDX[6:0] RSEL[8] ack[15] */
-	u32	ds_port_cntr_stat;	/* GEM_CNTR[31:0], clear-on-read                */
+	struct reg gem_ds_rx_cntr_ind;	/* per-flow DS GEM ETH RX: IDX[6:0], ack[15]    */
+	struct reg gem_ds_rx_cntr_stat;	/* ETH_PKT_RX[31:0], clear-on-read              */
+	struct reg gem_ds_fwd_cntr_ind;	/* per-flow DS GEM forwarded-to-PON-IP          */
+	struct reg gem_ds_fwd_cntr_stat;/* ETH_PKT_FWD[31:0], clear-on-read             */
+	struct reg ds_port_cntr_ind;	/* per-flow DS de-encap: IDX[6:0] RSEL[8] ack[15] */
+	struct reg ds_port_cntr_stat;	/* GEM_CNTR[31:0], clear-on-read                */
 	u32	cntr_flow_idx_mask;	/* counter IDX width as a mask (0x7f = 128 flows) */
 };
 
@@ -207,7 +354,8 @@ static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
 {
 	if (!reg_has(r->gem_us_port_map))
 		return false;
-	hwio_wr(io, r->gem_us_port_map + flow * r->gem_us_port_stride, port_id);
+	hwio_wr(io, reg_at(r->gem_us_port_map) + flow * r->gem_us_port_stride,
+		port_id);
 	return true;
 }
 
@@ -252,7 +400,7 @@ static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
  * @idx:      the entry to address (flow / T-CONT).
  * @wr:       the CAM's write-data register.  ONLY the WRITE op has a data
  *            phase (WDATA is consumed at REQ); READ and CLEAN callers pass
- *            REG_ABSENT and the register is never touched.  A READ's data
+ *            reg_none() and the register is never touched.  A READ's data
  *            comes back through the RD register AFTER completion --
  *            gpon_gtc_cam_read() owns that half.
  * @val:      the 12-bit WRITE value; masked to WDATA[11:0] here, the same
@@ -280,13 +428,14 @@ static inline bool gpon_gtc_us_gem_stamp(const struct hwio *io,
  * dev/rtl9607c-test/gpon_regtable_diff_test.
  */
 static inline int gpon_gtc_cam_xact_pending(const struct hwio *io,
-				    u32 ind, u32 op_mode, u32 idx_mask,
-				    u32 idx, u32 wr, u16 val,
+				    struct reg ind, u32 op_mode, u32 idx_mask,
+				    u32 idx, struct reg wr, u16 val,
 				    void (*delay_us)(unsigned int us),
 				    bool *pending)
 {
 	u32 op = op_mode | (idx & idx_mask);
 	unsigned int i;
+	int rc;
 
 	if (!delay_us)
 		return -EINVAL;
@@ -294,15 +443,19 @@ static inline int gpon_gtc_cam_xact_pending(const struct hwio *io,
 	    op_mode != GPON_GTC_CAM_OP_READ &&
 	    op_mode != GPON_GTC_CAM_OP_CLEAN)
 		return -EINVAL;
-	if (!reg_has(ind))
-		return -ENODEV;
-	if (op_mode == GPON_GTC_CAM_OP_WRITE && !reg_has(wr))
-		return -ENODEV;
+	rc = reg_rc(ind);
+	if (rc)
+		return rc;
+	if (op_mode == GPON_GTC_CAM_OP_WRITE) {
+		rc = reg_rc(wr);
+		if (rc)
+			return rc;
+	}
 	/* The caller serializes this engine through its readback tail. A timed-out
 	 * request remains owned until COMPL is observed, even if REQ falls. Luna
 	 * stock leaves REQ set after completion: REQ-clear is not this protocol. */
 	if (pending) {
-		u32 status = hwio_rd(io, ind);
+		u32 status = hwio_rd(io, reg_at(ind));
 
 		if (*pending || ((status & GPON_GTC_CAM_OP_REQ) &&
 				 !(status & GPON_GTC_CAM_OP_COMPL))) {
@@ -311,21 +464,21 @@ static inline int gpon_gtc_cam_xact_pending(const struct hwio *io,
 				if (status & GPON_GTC_CAM_OP_COMPL)
 					break;
 				delay_us(1);
-				status = hwio_rd(io, ind);
+				status = hwio_rd(io, reg_at(ind));
 			}
 			if (i == GPON_GTC_CAM_TRIES)
 				return -ETIMEDOUT;
 			*pending = false;
 		}
 	}
-	hwio_wr(io, ind, op);
+	hwio_wr(io, reg_at(ind), op);
 	if (op_mode == GPON_GTC_CAM_OP_WRITE)
-		hwio_wr(io, wr, val & GPON_GTC_CAM_VAL_MASK);
+		hwio_wr(io, reg_at(wr), val & GPON_GTC_CAM_VAL_MASK);
 	if (pending)
 		*pending = true;
-	hwio_wr(io, ind, op | GPON_GTC_CAM_OP_REQ);
+	hwio_wr(io, reg_at(ind), op | GPON_GTC_CAM_OP_REQ);
 	for (i = 0; i < GPON_GTC_CAM_TRIES; i++) {
-		if (hwio_rd(io, ind) & GPON_GTC_CAM_OP_COMPL) {
+		if (hwio_rd(io, reg_at(ind)) & GPON_GTC_CAM_OP_COMPL) {
 			if (pending)
 				*pending = false;
 			return (int)i;
@@ -338,8 +491,8 @@ static inline int gpon_gtc_cam_xact_pending(const struct hwio *io,
 /* Stateless compatibility entry point. Runtime users that retry after a
  * timeout use the tracked form above and retain one state per CAM engine. */
 static inline int gpon_gtc_cam_xact(const struct hwio *io,
-				    u32 ind, u32 op_mode, u32 idx_mask,
-				    u32 idx, u32 wr, u16 val,
+				    struct reg ind, u32 op_mode, u32 idx_mask,
+				    u32 idx, struct reg wr, u16 val,
 				    void (*delay_us)(unsigned int us))
 {
 	return gpon_gtc_cam_xact_pending(io, ind, op_mode, idx_mask, idx, wr,
@@ -354,8 +507,8 @@ static inline int gpon_gtc_cam_xact(const struct hwio *io,
  * success because two call sites print `(compl %d)` with it.
  */
 static inline int gpon_gtc_cam_write(const struct hwio *io,
-				     u32 ind, u32 wr, u32 idx_mask,
-				     u32 idx, u16 val,
+				     struct reg ind, struct reg wr,
+				     u32 idx_mask, u32 idx, u16 val,
 				     void (*delay_us)(unsigned int us))
 {
 	return gpon_gtc_cam_xact(io, ind, GPON_GTC_CAM_OP_WRITE, idx_mask,
@@ -381,20 +534,21 @@ static inline int gpon_gtc_cam_write(const struct hwio *io,
  * refused BEFORE any bus traffic), -EINVAL with no delay op.
  */
 static inline int gpon_gtc_cam_read(const struct hwio *io,
-				    u32 ind, u32 rd, u32 idx_mask, u32 idx,
+				    struct reg ind, struct reg rd,
+				    u32 idx_mask, u32 idx,
 				    u16 *val, bool *hit,
 				    void (*delay_us)(unsigned int us))
 {
-	int rc;
+	int rc = reg_rc(rd);
 
-	if (!reg_has(rd))
-		return -ENODEV;
+	if (rc)
+		return rc;
 	rc = gpon_gtc_cam_xact(io, ind, GPON_GTC_CAM_OP_READ, idx_mask,
-			       idx, REG_ABSENT, 0, delay_us);
+			       idx, reg_none(), 0, delay_us);
 	if (rc < 0)
 		return rc;
-	*hit = !!(hwio_rd(io, ind) & GPON_GTC_CAM_OP_HIT);
-	*val = (u16)(hwio_rd(io, rd) & GPON_GTC_CAM_VAL_MASK);
+	*hit = !!(hwio_rd(io, reg_at(ind)) & GPON_GTC_CAM_OP_HIT);
+	*val = (u16)(hwio_rd(io, reg_at(rd)) & GPON_GTC_CAM_VAL_MASK);
 	return rc;
 }
 
@@ -449,7 +603,7 @@ static inline int gpon_gtc_ds_port_clean(const struct hwio *io,
 					 void (*delay_us)(unsigned int us))
 {
 	return gpon_gtc_cam_xact(io, r->ds_port_ind, GPON_GTC_CAM_OP_CLEAN,
-				 r->ds_port_idx_mask, flow, REG_ABSENT, 0,
+				 r->ds_port_idx_mask, flow, reg_none(), 0,
 				 delay_us);
 }
 
@@ -517,19 +671,23 @@ static inline int gpon_gtc_ds_port_clean(const struct hwio *io,
  * dev/rtl9607c-test/gpon_regtable_diff_test.
  */
 static inline int gpon_gtc_cntr_read(const struct hwio *io,
-				     u32 ind, u32 stat, u32 sel, u32 *cnt,
-				     void (*delay_us)(unsigned int us))
+				     struct reg ind, struct reg stat, u32 sel,
+				     u32 *cnt, void (*delay_us)(unsigned int us))
 {
 	unsigned int i;
+	int rc;
 
 	if (!delay_us || !cnt)
 		return -EINVAL;
-	if (!reg_has(ind) || !reg_has(stat))
-		return -ENODEV;
-	hwio_wr(io, ind, sel);
+	rc = reg_rc(ind);
+	if (!rc)
+		rc = reg_rc(stat);
+	if (rc)
+		return rc;
+	hwio_wr(io, reg_at(ind), sel);
 	for (i = 0; i < GPON_GTC_CNTR_TRIES; i++) {
-		if (hwio_rd(io, ind) & GPON_GTC_CNTR_R_ACK) {
-			*cnt = hwio_rd(io, stat);
+		if (hwio_rd(io, reg_at(ind)) & GPON_GTC_CNTR_R_ACK) {
+			*cnt = hwio_rd(io, reg_at(stat));
 			return (int)i;
 		}
 		delay_us(1);

@@ -1049,10 +1049,10 @@ enum cortina_ni_win {
  * ------------------------------------------------------------------ */
 #define CA_DMA_AFT_MAP_ACCESS		0x0e4	/* idx[5:0] | WRITE | GO */
 #define CA_DMA_AFT_MAP_DATA		0x0e8
-#define  CA_DMA_AFT_MAP_FIB_ID		GENMASK(5, 0)
-#define  CA_DMA_AFT_MAP_EN		BIT(6)	/* DMAAFT_en */
-#define  CA_DMA_AFT_MAP_LSPID		GENMASK(10, 7)	/* lspid - CPU0 */
-#define  CA_DMA_AFT_MAP_VLD		BIT(11)
+/* ★ THE MAP-WORD FIELDS MOVED to drivers/net/flowcore/cortina_vlan_install.h
+ * (2026-09-14) as CORTINA_AFT_MAP_{FIB,EN,LSPID,VLD}_*: the word is PACKED by
+ * cortina_vlan_aft_map_word() there, so the layout has ONE spelling and is
+ * driven on x86.  The two COUNTS below are geometry this file owns. */
 #define CA_DMA_AFT_MAP_COUNT		64
 #define CA_DMA_AFT_MAP_DYN_FIRST	2	/* 0-1 are vendor-reserved */
 
@@ -1086,31 +1086,16 @@ enum cortina_ni_win {
  * ★ NAMES.  Ours say what the field DOES; the vendor spelling is kept beside
  * each one so a stock-vs-ours diff still lands on the same bit.
  */
-/* DATA2 */
-/* vendor: vlan_vld.  NOT "valid" - it selects the MODE, and the vendor's own
- * decoder says so verbatim:
- *     "(0: VLAN stacking operation mode, 1: VLAN set mode)"
- * Reading it as "valid" is what made a correctly programmed POP look like an
- * empty entry and wrongly excluded this table for a day.  We write 0 on every
- * flow today, i.e. we have been in STACKING mode all along. */
-#define  CA_DMA_AFT_D2_VLAN_SET_MODE	BIT(8)
-/* vendor: vlan_cnt.  MEANING DEPENDS ON CA_DMA_AFT_D2_VLAN_SET_MODE:
- *   set mode (1)      -> the number of tags the frame carries AFTER the edit,
- *                        so 1 = push one tag, 0 = strip to untagged
- *   stacking mode (0) -> REDEFINED as TOP_VLAN_CMD[1:0], an opcode
- *                        (0 = no-op, 1 = push, 2 = pop, 3 = swap)
- * Never read this field without reading the mode bit first. */
-#define  CA_DMA_AFT_D2_EGRESS_TAG_CNT	GENMASK(7, 6)
-/* vendor: top_tpid_enc.  A 1-BASED INDEX into the 4-entry TPID slot table,
- * NOT an enum and NOT a 0-based slot number: 0 means "no tag / any other
- * value", and n selects slot n-1.  Proven by stock's dumper, which prints
- * TPID_%d with the argument (field - 1), and by
- * aal_ni_set_dma_lso_aft_l2fib_top_vlan writing 1 when it programs a tag
- * whose TPID is slot 0 (0x8100).  3 bits, so slots 0..3 use 1..4. */
-#define  CA_DMA_AFT_D2_TOP_TPID_SLOT_P1	GENMASK(3, 1)
-/* DATA1 */
-#define  CA_DMA_AFT_D1_TOP_VID		GENMASK(30, 19)	/* <== the WAN VLAN */
-#define  CA_DMA_AFT_D1_TOP_TPID_SRC_LO	BIT(31)		/* src[0] - SPLIT */
+/* ★ THE THREE DATA WORDS' FIELDS MOVED to
+ * drivers/net/flowcore/cortina_vlan_install.h (2026-09-14) as
+ * CORTINA_AFT_D2_VLAN_SET_MODE / _D2_TAG_CNT_MASK / _D2_TPID_SLOT_MASK /
+ * _D1_TOP_VID_MASK / _D1_TPID_SRC_LO, beside cortina_vlan_aft_words() which
+ * PACKS them.  The banner above stays here because it is about this ENGINE and
+ * this window; what moved is the bit arithmetic, so it exists once and a
+ * decoder and the packer can no longer disagree.  Everything the banner warns
+ * about -- vlan_vld is a MODE bit, the TPID slot index is 1-BASED, top_tpid_sel
+ * and inner_vid are SPLIT across words -- is restated at the new home.
+ */
 /* DATA0 */
 /* vendor: top_tpid_sel.  WHERE the pushed tag's TPID comes from:
  *   0 = no-op, 1 = top_tpid_enc, 2 = inner_tpid_enc, 3 = fib.top_tpid_enc

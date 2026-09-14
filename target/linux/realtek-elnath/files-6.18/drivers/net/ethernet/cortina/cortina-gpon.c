@@ -441,8 +441,8 @@
  * cg_tcont_cam_rmw(), cg_us_gem_stamp_range(), cg_ds_gem_set() and
  * cg_data_teardown()'s stamp clear; the sequence is the core's. */
 #define CG_MAC_IND_TBL(acc, dat) \
-	{ .access = (acc), .data = (dat), .go = CG_TBL_GO, .wr = CG_TBL_WR, \
-	  .tries = CG_TBL_TRIES }
+	{ .access = REG_AT(acc), .data = REG_AT(dat), .go = CG_TBL_GO, \
+	  .wr = CG_TBL_WR, .tries = CG_TBL_TRIES }
 static const struct gpon_ind_tbl cg_tcont_cam_tbl =
 	CG_MAC_IND_TBL(CG_REG_TCONT_ACCESS, CG_REG_TCONT_DATA);
 static const struct gpon_ind_tbl cg_us_port_tbl =
@@ -2663,7 +2663,7 @@ static struct hwio cg_mac_io(struct cortina_gpon *cg)
 static int cg_ind_timed_out(struct cortina_gpon *cg,
 			    const struct gpon_ind_tbl *t, u32 stuck)
 {
-	cg_tbl_timeout_warn(cg, t->access, stuck & ~t->go);
+	cg_tbl_timeout_warn(cg, reg_at(t->access), stuck & ~t->go);
 	return -ETIMEDOUT;
 }
 

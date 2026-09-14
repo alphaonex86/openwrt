@@ -344,7 +344,13 @@ static const struct luna_pcie_chip luna_pcie_9602c = {
 	.ip_pre_or = IP_SEL_EN_PCIE_PHY | IP_SEL_EN_EXTRA,
 	/* PERST# is not driven by an SoC GPIO here: probing shows the candidate
 	 * lines left as inputs while the link is up, so the endpoint is tied
-	 * released. All four PERST fields stay 0 and the two steps are skipped. */
+	 * released, so the two PERST steps are skipped.
+	 * ★ WRITTEN DOWN rather than left to the compiler (2026-09-14): the
+	 * comment above had said "all four stay 0" since this table landed, and
+	 * an omitted member and a declared 0 looked identical.  The values are
+	 * UNCHANGED -- C already produced exactly these -- so the image is
+	 * byte-identical; what is new is that they are an ANSWER. */
+	.perst_pad_en = 0, .perst_dir = 0, .perst_data = 0, .perst_bit = 0,
 	/* resolved at init: stock's five by default, the full table with
 	 * `pcie_phy_full` on the command line. See luna_pcie_phy_9602c_stock. */
 	.phy = luna_pcie_phy_9602c_stock, .retries = 3, .link_polls = 10,

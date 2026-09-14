@@ -5,7 +5,7 @@
  * gpon_common.h (this directory).
  *
  * gpon_omci_vlan.h — the VLAN / classification half of the OMCI WAN service
- * model: G.988 ME 171, 78, 84, 79, 130, 280 and 281.
+ * model: G.988 ME 171, 78, 84, 79, 49, 130, 280 and 281.
  *
  * ★★★ WHY IT EXISTS.  The GEM Port-ID and the Alloc-ID arrive over OMCI and
  *     the install is gated on them; everything ABOVE the GEM came from uci.
@@ -212,6 +212,74 @@ static inline void gpon_ext_vlan_row_encode(const struct gpon_ext_vlan_row *r,
 	b[10] = (u8)(w2 >> 8); b[11] = (u8)w2;
 	b[12] = (u8)(w3 >> 24); b[13] = (u8)(w3 >> 16);
 	b[14] = (u8)(w3 >> 8); b[15] = (u8)w3;
+}
+
+/* ---------------------------------------------------------------------------
+ * ME 49 — the MAC bridge port filter table row
+ * ------------------------------------------------------------------------- */
+
+/*
+ * ★★ THE LAYOUT IS STOCK'S OWN DECODER, READ TWICE ON TWO DIES.  The X111W's
+ *    /lib/omci/mib_MacBridgePortFilterTable.so carries MacFilterTableOper(),
+ *    which memcpy()s EIGHT octets off the wire and then names every field with
+ *    its own debug strings -- `bit.isFilter:%d` is (w>>16)&1, `bit.isSa:%d` is
+ *    (w>>17)&1 and `bit.oper:%d` is (w>>22)&3, over the first four octets read
+ *    big-endian.  The G24W's copy of the same plugin uses the IDENTICAL shifts
+ *    0x10/0x11/0x16, so the row is a FAMILY fact and not one build's.
+ *
+ *      octet 0      not read by stock's decoder (G.988 leaves it unused)
+ *      octet 1      bit 0 filter/forward · bit 1 SA/DA · bits 6..7 operation
+ *      octets 2..7  the 6-octet MAC address
+ *
+ * ★ AND THE KEY IS THE MAC ALONE, which is a MEASUREMENT and not a choice:
+ *   stock's REMOVE arm walks its list comparing exactly the MAC halfword at
+ *   +2 and the MAC word at +4, and nothing else.  So two rows naming the same
+ *   MAC are ONE table entry, and an ADD over an existing MAC replaces it.
+ *   ⚠ Stock APPENDS a duplicate node instead of replacing, and its own REMOVE
+ *     then deletes only the first match -- a defect worth not copying, and the
+ *     reason this is stated rather than inherited.
+ */
+#define GPON_MAC_FILTER_ROW_LEN		8
+#define GPON_MAC_FILTER_MAC_OFF		2	/* where the address starts */
+
+/* The 2-bit operation, and its values are stock's own named constants
+ * (MAC_FILTER_TABLE_OPER_{REMOVE,CLEAR_ALL,ADD} in the plugin's string pool,
+ * bound to 0/1/2 by the switch that prints them).  3 is not an operation:
+ * stock frees the row and does nothing at all. */
+#define GPON_MAC_FILTER_REMOVE		0
+#define GPON_MAC_FILTER_CLEAR_ALL	1
+#define GPON_MAC_FILTER_ADD		2
+
+struct gpon_mac_filter_row {
+	u8	mac[6];
+	u8	oper;		/* GPON_MAC_FILTER_* */
+	bool	discard;	/* true = filter the frame, false = forward it */
+	bool	source;		/* true = match the SOURCE address, else dest */
+};
+
+static inline void gpon_mac_filter_row_decode(const u8 *b,
+					      struct gpon_mac_filter_row *r)
+{
+	unsigned int i;
+
+	r->discard = (b[1] & 0x01) != 0;
+	r->source  = (b[1] & 0x02) != 0;
+	r->oper    = (u8)((b[1] >> 6) & 0x03);
+	for (i = 0; i < 6; i++)
+		r->mac[i] = b[GPON_MAC_FILTER_MAC_OFF + i];
+}
+
+/* Do two raw rows name the same table entry?  The MAC, and only the MAC --
+ * see the key note above. */
+static inline bool gpon_mac_filter_same_key(const u8 *a, const u8 *b)
+{
+	unsigned int i;
+
+	for (i = 0; i < 6; i++)
+		if (a[GPON_MAC_FILTER_MAC_OFF + i] !=
+		    b[GPON_MAC_FILTER_MAC_OFF + i])
+			return false;
+	return true;
 }
 
 /* ---------------------------------------------------------------------------
@@ -619,6 +687,15 @@ static inline bool gpon_ext_vlan_decide(const struct gpon_ext_vlan_row *r,
 #define GPON_EXT_VLAN_ROWS	8
 #endif
 
+/* The same, for ME 49: how many bridge ports hold a MAC filter table and how
+ * many addresses each one holds.  Overridable for the same reason. */
+#ifndef GPON_MAC_FILTER_MAX
+#define GPON_MAC_FILTER_MAX	4
+#endif
+#ifndef GPON_MAC_FILTER_ROWS
+#define GPON_MAC_FILTER_ROWS	8
+#endif
+
 /* Zero one ME 171 instance.  A loop for the same reason the model reset uses
  * one: this header pulls in <linux/types.h> and nothing else. */
 struct gpon_ext_vlan_inst;
@@ -629,6 +706,16 @@ struct gpon_ext_vlan_inst {
 	u8	nrow;
 	bool	used;
 	u8	row[GPON_EXT_VLAN_ROWS][GPON_EXT_VLAN_ROW_LEN];
+};
+
+/* One bridge port's MAC filter table.  Same shape as the ME 171 rows above and
+ * for the same reason: one instance carries MANY 8-octet rows, and the 26-octet
+ * dense body every other modelled ME uses holds three of them. */
+struct gpon_mac_filter_inst {
+	u16	inst;
+	u8	nrow;
+	bool	used;
+	u8	row[GPON_MAC_FILTER_ROWS][GPON_MAC_FILTER_ROW_LEN];
 };
 
 /* The whole VLAN / classification model this core holds.  ME 78, 84, 79, 130,
@@ -645,6 +732,7 @@ static inline void gpon_vlan_inst_clear(struct gpon_ext_vlan_inst *e)
 
 struct gpon_vlan_model {
 	struct gpon_ext_vlan_inst	ext[GPON_EXT_VLAN_MAX];
+	struct gpon_mac_filter_inst	mfilt[GPON_MAC_FILTER_MAX];
 	/* ⚠ COUNTED, NOT DROPPED.  A row that did not fit and a decision no
 	 * family installed are the two ways this model can go quiet again, and
 	 * both are the failure it was written to end. */
@@ -655,6 +743,11 @@ struct gpon_vlan_model {
 	 * address tables.  Accepting them is what keeps the provisioning burst
 	 * alive; COUNTING them is what stops that acceptance being a silence. */
 	u16	attr_owed;
+	/* ME 49 rows carrying an operation code stock itself does not
+	 * implement (the reserved value 3).  Counted rather than ignored: an
+	 * OLT sending one is telling us something about its service model, and
+	 * a silent drop is how that stops being visible. */
+	u16	mfilt_rejected;
 };
 
 static inline void gpon_vlan_model_reset(struct gpon_vlan_model *m)
@@ -798,6 +891,152 @@ static inline const u8 *gpon_ext_vlan_raw(const struct gpon_vlan_model *m,
 		if (!m->ext[i].used || m->ext[i].inst != inst)
 			continue;
 		return row < m->ext[i].nrow ? m->ext[i].row[row] : NULL;
+	}
+	return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * ME 49 — the MAC filter table, per bridge port
+ * ------------------------------------------------------------------------- */
+
+static inline void gpon_mac_filter_inst_clear(struct gpon_mac_filter_inst *e)
+{
+	unsigned int i;
+
+	for (i = 0; i < sizeof(*e); i++)
+		((u8 *)e)[i] = 0;
+}
+
+static inline struct gpon_mac_filter_inst *
+gpon_mac_filter_find(struct gpon_vlan_model *m, u16 inst)
+{
+	unsigned int i;
+
+	for (i = 0; i < GPON_MAC_FILTER_MAX; i++)
+		if (m->mfilt[i].used && m->mfilt[i].inst == inst)
+			return &m->mfilt[i];
+	return NULL;
+}
+
+static inline void gpon_mac_filter_copy_row(u8 *dst, const u8 *src)
+{
+	unsigned int i;
+
+	for (i = 0; i < GPON_MAC_FILTER_ROW_LEN; i++)
+		dst[i] = src[i];
+}
+
+/*
+ * Apply one ME 49 table-attribute write.  @body is the 8 octets the OLT sent.
+ * -> true when the model changed.
+ *
+ * ★ THE OPERATION IS IN THE ROW, which is what makes this ME different from
+ *   every other table in this model: ME 171 signals a delete with a magic row,
+ *   ME 49 carries ADD / REMOVE / CLEAR-ALL in two bits.  All three are honoured
+ *   here; the reserved fourth value is COUNTED, because an OLT that sends it is
+ *   saying something and a silent drop is how that stops being visible.
+ */
+static inline bool gpon_mac_filter_row_set(struct gpon_vlan_model *m, u16 inst,
+					   const u8 *body)
+{
+	struct gpon_mac_filter_row r;
+	struct gpon_mac_filter_inst *e = gpon_mac_filter_find(m, inst);
+	unsigned int i, j;
+
+	gpon_mac_filter_row_decode(body, &r);
+	switch (r.oper) {
+	case GPON_MAC_FILTER_CLEAR_ALL:
+		if (!e || !e->nrow)
+			return false;
+		e->nrow = 0;
+		return true;
+	case GPON_MAC_FILTER_REMOVE:
+		if (!e)
+			return false;
+		for (i = 0; i < e->nrow; i++) {
+			if (!gpon_mac_filter_same_key(e->row[i], body))
+				continue;
+			/* close the hole: the rows are a list, not a map, and a
+			 * gap would be served to an auditing OLT as a row of
+			 * zeros -- which reads as a filter on 00:00:00:00:00:00 */
+			for (j = i; j + 1 < e->nrow; j++)
+				gpon_mac_filter_copy_row(e->row[j],
+							 e->row[j + 1]);
+			e->nrow--;
+			return true;
+		}
+		return false;			/* removing what we never held */
+	case GPON_MAC_FILTER_ADD:
+		break;
+	default:
+		m->mfilt_rejected++;
+		return false;
+	}
+
+	if (!e) {
+		for (i = 0; i < GPON_MAC_FILTER_MAX && !e; i++)
+			if (!m->mfilt[i].used) {
+				e = &m->mfilt[i];
+				gpon_mac_filter_inst_clear(e);
+				e->inst = inst;
+				e->used = true;
+			}
+	}
+	if (!e) {
+		m->rows_dropped++;
+		return false;
+	}
+	for (i = 0; i < e->nrow; i++) {
+		if (!gpon_mac_filter_same_key(e->row[i], body))
+			continue;
+		for (j = 0; j < GPON_MAC_FILTER_ROW_LEN; j++)
+			if (e->row[i][j] != body[j])
+				break;
+		if (j == GPON_MAC_FILTER_ROW_LEN)
+			return false;		/* the OLT re-sent what we hold */
+		gpon_mac_filter_copy_row(e->row[i], body);
+		return true;
+	}
+	if (e->nrow >= GPON_MAC_FILTER_ROWS) {
+		m->rows_dropped++;
+		return false;
+	}
+	gpon_mac_filter_copy_row(e->row[e->nrow], body);
+	e->nrow++;
+	return true;
+}
+
+/* Forget one bridge port's filter table (its ME 47 was deleted). */
+static inline void gpon_mac_filter_del(struct gpon_vlan_model *m, u16 inst)
+{
+	struct gpon_mac_filter_inst *e = gpon_mac_filter_find(m, inst);
+
+	if (e)
+		gpon_mac_filter_inst_clear(e);
+}
+
+/* How many addresses instance @inst filters on (0 when it has no table). */
+static inline u8 gpon_mac_filter_nrow(const struct gpon_vlan_model *m, u16 inst)
+{
+	unsigned int i;
+
+	for (i = 0; i < GPON_MAC_FILTER_MAX; i++)
+		if (m->mfilt[i].used && m->mfilt[i].inst == inst)
+			return m->mfilt[i].nrow;
+	return 0;
+}
+
+/* The raw 8 octets of one row, or NULL.  What a Get-Next read-back would
+ * serve, and what a family install would program. */
+static inline const u8 *gpon_mac_filter_raw(const struct gpon_vlan_model *m,
+					    u16 inst, u8 row)
+{
+	unsigned int i;
+
+	for (i = 0; i < GPON_MAC_FILTER_MAX; i++) {
+		if (!m->mfilt[i].used || m->mfilt[i].inst != inst)
+			continue;
+		return row < m->mfilt[i].nrow ? m->mfilt[i].row[row] : NULL;
 	}
 	return NULL;
 }
@@ -1038,11 +1277,38 @@ static inline bool gpon_mcast_iw_decode(const u8 *body, unsigned int blen,
  * it landed.  That is the whole difference between this model and the silence
  * it replaces — an unimplemented install is now a number somebody can read.
  *
- * ⚠ NO OP TABLE IS FILLED IN THIS TREE TODAY, and that is stated rather than
- *   hidden: the Luna install is a classifier-entry program whose pool geometry
- *   is per-die and whose behaviour cannot be established without a board, and
- *   the board CONFIRMS, it does not DISCOVER.  What this seam buys now is that
- *   the decision EXISTS, is fuzzed on x86, and is countable.
+ * ★ FILLED SINCE 2026-09-14, by BOTH families, and each fills exactly what
+ *   its silicon can be shown to do:
+ *     flowcore/cortina_vlan_install.c  the DMA-AFT egress VLAN edit (RTL9607F)
+ *     flowcore/luna_vlan_install.c     the per-port default VID (three dies)
+ *   Both leave five slots NULL on purpose -- ME 84, 79, 130, 280 and 281 have
+ *   no established programmable surface on either family -- so the owed count
+ *   still measures something real rather than reading zero by omission.  The
+ *   emitted write SEQUENCE is asserted per family and per die on x86, with no
+ *   board, by dev/rtl9607c-test/gpon_vlan_install_diff_test.
+ *
+ * ⚠ AND WHAT IS STILL OWED IS THE CLASSIFIER, which is where stock puts an
+ *   ME 171 row: neither family reaches one.  On Luna the access engine that
+ *   would carry a CF_ or ACL_ entry is not established and one declared die
+ *   (the RTL9603CVD) has no CF block at all; on Cortina no port2vid or
+ *   VID-membership descriptor exists in the NE.  A rule that needs one is
+ *   REFUSED with a named rc and no bus traffic, never approximated -- the
+ *   board CONFIRMS, it does not DISCOVER.
+ *
+ * ★★ AND ME 49 IS DELIBERATELY NOT HERE -- IT OWES NO INSTALL AT ALL, WHICH IS
+ *    A MEASUREMENT.  Stock reaches its install through omci_wrapper_setMacFilter
+ *    and that lands on a function that is TWO INSTRUCTIONS, `jr ra; move v0,
+ *    zero`: pf_rtl96xx_SetMacFilter at .text+0x128 of the X111W's pf_rg.ko
+ *    (8 bytes, mapper slot 60) and pf_rt_SetMacFilter at .text+0x5a8 of the
+ *    G24W's pf_rt_fc.ko (8 bytes, mapper slot 67).  Stock records the row in a
+ *    software list and programs NOTHING, on both dies and both kernel
+ *    generations.  ⇒ holding the table IS byte-for-byte what stock does here,
+ *    and giving ME 49 an op slot would invite a shell to "finish" an install
+ *    that does not exist.  The claim is re-derivable with no board and no AI:
+ *        python3 ONU-test-case/mac_filter_install_stub.py --board=<S>/<B>/<M>
+ *    ⚠ IT IS A PARITY CLAIM, NOT A CAPABILITY ONE: neither firmware filters on
+ *      a MAC here, and the day a die fills that mapper slot the guard above
+ *      goes red and the install becomes owed.
  */
 struct gpon_vlan_ops {
 	int (*rule_install)(void *ctx, const struct gpon_vlan_rule *r);
@@ -1087,6 +1353,149 @@ gpon_vlan_rule_emit(struct gpon_vlan_model *m, const struct gpon_vlan_ops *ops,
 static inline u16 gpon_vlan_owed(const struct gpon_vlan_model *m)
 {
 	return m->owed;
+}
+
+/* ---------------------------------------------------------------------------
+ * The GEOMETRY of a decided rule — the half BOTH families would otherwise
+ * derive separately
+ * ------------------------------------------------------------------------- */
+
+/*
+ * ★ WHY THIS IS CORE AND NOT FAMILY.  "How many received tags come off and how
+ *   many go on" is arithmetic over the OMCI row, identical on every silicon,
+ *   and it has two traps that cost a session each if re-derived per family:
+ *   TAGS_TO_REMOVE 3 is NOT a count (it is DISCARD, and stock diverts on it
+ *   before emitting any filter), and a tag with pri_act == NONE is not written
+ *   at all however complete the rest of its word looks.
+ *
+ * ⚠ IT CLASSIFIES, IT DOES NOT JUDGE CAPABILITY.  Whether a shape is
+ *   installable is the FAMILY's answer, per die, and the core has no business
+ *   having an opinion about a classifier it cannot see.
+ */
+enum gpon_vlan_shape {
+	GPON_VLAN_SHAPE_DISCARD = 0,	/* drop what matched; nothing else applies */
+	GPON_VLAN_SHAPE_TRANSPARENT,	/* strip nothing, write nothing */
+	GPON_VLAN_SHAPE_POP,		/* strip only */
+	GPON_VLAN_SHAPE_PUSH,		/* write only */
+	GPON_VLAN_SHAPE_SWAP,		/* strip and write the SAME number */
+	GPON_VLAN_SHAPE_REWRITE,	/* strip and write DIFFERENT numbers */
+};
+
+struct gpon_vlan_want {
+	u8	shape;		/* enum gpon_vlan_shape */
+	u8	strip;		/* received tags removed: 0, 1 or 2 */
+	u8	write;		/* output tags written: 0, 1 or 2 */
+	/* Every written tag takes a LITERAL VID and a LITERAL priority.  A FACT
+	 * about the row, not a verdict: a family whose table can only assign
+	 * refuses the rest, one whose table can copy does not have to. */
+	bool	all_assigned;
+};
+
+static inline bool gpon_vlan_tag_assigned(const struct gpon_vlan_tag_treat *t)
+{
+	return t->vid_act == GPON_VLAN_VID_ASSIGN &&
+	       t->pri_act == GPON_VLAN_PRI_ASSIGN;
+}
+
+static inline void gpon_vlan_rule_want(const struct gpon_vlan_rule *r,
+				       struct gpon_vlan_want *w)
+{
+	w->strip = 0;
+	w->write = 0;
+	w->all_assigned = true;
+	if (r->t.discard) {
+		w->shape = GPON_VLAN_SHAPE_DISCARD;
+		return;
+	}
+	w->strip = (r->t.remove == GPON_VLAN_REMOVE_BOTH) ? 2 :
+		   (r->t.remove == GPON_VLAN_REMOVE_OUTER) ? 1 : 0;
+	if (r->t.outer.written) {
+		w->write++;
+		w->all_assigned &= gpon_vlan_tag_assigned(&r->t.outer);
+	}
+	if (r->t.inner.written) {
+		w->write++;
+		w->all_assigned &= gpon_vlan_tag_assigned(&r->t.inner);
+	}
+	if (!w->strip && !w->write)
+		w->shape = GPON_VLAN_SHAPE_TRANSPARENT;
+	else if (!w->write)
+		w->shape = GPON_VLAN_SHAPE_POP;
+	else if (!w->strip)
+		w->shape = GPON_VLAN_SHAPE_PUSH;
+	else if (w->strip == w->write)
+		w->shape = GPON_VLAN_SHAPE_SWAP;
+	else
+		w->shape = GPON_VLAN_SHAPE_REWRITE;
+	if (!w->write)
+		w->all_assigned = false;	/* nothing was assigned at all */
+}
+
+/* ---------------------------------------------------------------------------
+ * Walking one ME 171 instance into the family
+ * ------------------------------------------------------------------------- */
+
+/* ME 171's per-INSTANCE attributes: everything a ROW needs that is not in the
+ * row.  Passed in rather than read from the ME store, so this header keeps its
+ * one include and the walker stays fuzzable with no ME model at all. */
+struct gpon_vlan_inst_attrs {
+	u8	assoc_type;	/* #1 */
+	u16	in_tpid;	/* #3 */
+	u16	out_tpid;	/* #4 */
+	u8	ds_mode;	/* #5 */
+	u16	assoc_ptr;	/* #7 */
+	u8	dir;		/* enum gpon_vlan_dir */
+};
+
+/* FOUR outcomes per row, and the last two are different repairs: a row this
+ * core could not DECIDE is a model gap, a row no family could INSTALL is a
+ * driver gap, and folding either onto the other sends the next session to the
+ * wrong tier. */
+struct gpon_vlan_commit_result {
+	u16	installed;
+	u16	failed;		/* the family tried and refused */
+	u16	no_installer;	/* no op table, or no rule_install in it */
+	u16	undecided;	/* gpon_ext_vlan_decide() could not represent it */
+};
+
+static inline void
+gpon_vlan_commit_inst(struct gpon_vlan_model *m,
+		      const struct gpon_vlan_ops *ops, void *ctx, u16 inst,
+		      const struct gpon_vlan_inst_attrs *a,
+		      struct gpon_vlan_commit_result *res)
+{
+	unsigned int i, n;
+
+	res->installed = res->failed = res->no_installer = res->undecided = 0;
+	if (!a)
+		return;
+	n = gpon_ext_vlan_nrow(m, inst);
+	for (i = 0; i < n; i++) {
+		const u8 *raw = gpon_ext_vlan_raw(m, inst, (u8)i);
+		struct gpon_ext_vlan_row row;
+		struct gpon_vlan_rule rule;
+
+		if (!raw)
+			continue;
+		gpon_ext_vlan_row_decode(raw, &row);
+		if (!gpon_ext_vlan_decide(&row, a->in_tpid, &rule)) {
+			res->undecided++;
+			continue;
+		}
+		rule.me_inst = inst;
+		rule.row = (u8)i;
+		rule.dir = a->dir;
+		rule.assoc_type = a->assoc_type;
+		rule.assoc_ptr = a->assoc_ptr;
+		rule.in_tpid = a->in_tpid;
+		rule.out_tpid = a->out_tpid;
+		rule.ds_mode = a->ds_mode;
+		switch (gpon_vlan_rule_emit(m, ops, ctx, &rule)) {
+		case GPON_VLAN_INSTALLED:	res->installed++; break;
+		case GPON_VLAN_INSTALL_FAILED:	res->failed++; break;
+		default:			res->no_installer++; break;
+		}
+	}
 }
 
 #endif /* GPON_OMCI_VLAN_H */

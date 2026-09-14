@@ -50,3 +50,14 @@ obj-$(CONFIG_LUNA_ETH) += luna_gmac_logic.o
 # dev/rtl9607c-test/gn25l95_cal_diff_test.c.
 obj-$(CONFIG_CORTINA_GPON) += gn25l95_cal_logic.o
 obj-$(CONFIG_LUNA_GPON) += gn25l95_cal_logic.o
+
+# The OMCI WAN service model's VLAN half: the core DECIDES (drivers/net/gpon/
+# gpon_omci_vlan.h) and these two FILL struct gpon_vlan_ops.  Gated on each
+# family's GPON symbol rather than its Ethernet one: the caller is the OMCI
+# side, and CONFIG_LUNA_GPON is the one symbol both Luna subtargets set (the
+# two Luna Ethernet shells are gated on DISJOINT symbols, which is the measured
+# crossconfig_call_guard defect).  Neither object names a register ADDRESS --
+# those arrive in the per-die table the shell fills -- so both build on x86 and
+# their write SEQUENCE is asserted by dev/rtl9607c-test/gpon_vlan_install_diff_test.
+obj-$(CONFIG_CORTINA_GPON) += cortina_vlan_install.o
+obj-$(CONFIG_LUNA_GPON) += luna_vlan_install.o

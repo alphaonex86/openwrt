@@ -145,7 +145,10 @@ static inline int ca_go_spin(void __iomem *reg, unsigned int tries,
 	struct hwio io = { .rd = ca_hwio_rd, .wr = ca_hwio_wr,
 			   .ctx = (void *)reg };
 
-	return gpon_ind_poll(&io, 0, CA_NI_IND_ACCESS_GO, tries, pause);
+	/* the register IS the ctx here, so the offset within it is 0 -- and
+	 * reg_make(0) says so explicitly, because a bare 0 is now UNSET. */
+	return gpon_ind_poll(&io, reg_make(0), CA_NI_IND_ACCESS_GO, tries,
+			     pause);
 }
 
 #endif /* _CORTINA_ACCESS_H */

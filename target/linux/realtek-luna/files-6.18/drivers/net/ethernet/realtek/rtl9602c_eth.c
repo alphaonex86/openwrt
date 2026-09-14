@@ -1139,8 +1139,8 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 		 * (0x12004), which is the one shape gpon_ind_go() cannot express.
 		 * A failure is reported, not fatal: LAN egress degrades, and a boot
 		 * that says why beats a boot that is merely quiet. */
-		rc = gpon_ind_poll(&io, SW_TBL_STS, SW_TBL_BUSY, SW_TBL_TRIES,
-				   rtl9602c_sw_tbl_pause);
+		rc = gpon_ind_poll(&io, reg_make(SW_TBL_STS), SW_TBL_BUSY,
+				   SW_TBL_TRIES, rtl9602c_sw_tbl_pause);
 		if (rc < 0)
 			netdev_warn(ep->ndev,
 				    "swcore VLAN 4k-table engine still BUSY after %u tries (rc=%d): default VLAN %u may not be installed, LAN egress may stay filtered\n",

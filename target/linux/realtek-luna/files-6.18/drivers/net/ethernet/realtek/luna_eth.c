@@ -364,6 +364,19 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.swcore_rst	= 0x00108,
 	.fephy_poll	= 0,	/* every PHY here is a GPHY: no FE auto-poller	*/
 	.cfg_phy_ini	= 0x0004C,
+	/* ★ 0 WRITTEN DOWN, not left to the compiler (2026-09-14).  Both were
+	 * OMITTED, so C supplied the 0 and the reader could not tell a declared
+	 * "this chip's bring-up does not use it" from a forgotten line -- which
+	 * is the whole of the operator's registered-value rule, and this table
+	 * is the one that carries cfg_phy_ctrl.  The value is UNCHANGED (0 was
+	 * already what this die compiled to, so the image is byte-identical);
+	 * what is new is that it is an ANSWER.  Nobody has established either
+	 * register on the RTL9607C, and the sibling's numbers may not be
+	 * borrowed: 0x4C is CFG_PHY_INI on this die and CFG_PHY_CTRL on the
+	 * RTL9603CVD, which is the same one-address-two-registers trap this
+	 * table exists for.  0 makes both writes SKIP, as they already did. */
+	.cfg_phy_ctrl	= 0,	/* NOT ESTABLISHED on this die -- never the sibling's */
+	.cfg_pcsxf	= 0,	/* NOT ESTABLISHED on this die -- the write is skipped */
 	.piso_per_word	= 1,
 	.piso_bits	= 29,
 	.piso_all	= 0x1FFFFFFF,

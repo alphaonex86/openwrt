@@ -357,6 +357,14 @@
 #define GPON_GTC_DS_CFG			0x01014
 #define GPON_GTC_DS_SUPERFRAME_CNT	0x01048
 #define GPON_GTC_DS_TOD_SUPERFRAME_CTRL	0x0104c
+/* The next GTC DS word, read by gpon_proc_show() and previously spelled as the
+ * bare literal 0x1050 under the label "r1050".  The RTL9603CVD chipdef names it
+ * GPON_GTC_DS_PPS_CTRL at 0x701050 (tier 4, the sibling die); the RTL9602C
+ * chipdef does not name it, and its two neighbours 0x1048/0x104c carry the same
+ * names on BOTH dies, so the block is the same one.  A bare literal here also
+ * bypasses nothing (gpon_rd is not relocated), but an unnamed address in a
+ * /proc label is a reader sent to a register nobody can look up. */
+#define GPON_GTC_DS_PPS_CTRL		0x01050
 #define GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT	0x0119c
 #define GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL	0x011a0
 #define GPON_GTC_DS_MISC_CNTR_BWM_FAIL	0x011a4
@@ -390,8 +398,33 @@
 #define PI_TX_SID_CNT_US		0x02068		/* 5 groups, 4-byte stride */
 #define PI_RX_SID_CNT_US		0x02094		/* 5 groups, 4-byte stride */
 #define PI_SID_CNT_GROUP_STRIDE		4u
-#define PI_RX_SID_GOOD_CNT_US		0x0203c
-#define PI_RX_SID_BAD_CNT_US		0x02054
+#define PI_RX_SID_GOOD_CNT_US		0x0203c	/* 5 groups, 4-byte stride */
+#define PI_RX_SID_BAD_CNT_US		0x02054	/* 5 groups, 4-byte stride */
+/* ★ THE GOOD-COUNTER GROUPS 1..4 WERE BARE LITERALS AT THEIR TWO READERS
+ * (0x2040 0x2044 0x2048 0x204c in gpon_proc_show_locked() and in the FSM poll's
+ * USDIAG line).  Both chipdefs declare RX_SID_GOOD_CNT_US@stride = 4 and
+ * @entries = 5, at the SAME address 0x0203c on the RTL9602C and the RTL9603CVD,
+ * and the next NAMED register above it is RX_ERR_CNT_US at 0x02050 -- a 0x14
+ * gap, which is 5 x 4.  Spelling the groups as base + n * stride is what makes a
+ * relocation of the base carry its own array, and it is the same shape
+ * PI_TX_SID_CNT_US / PI_RX_SID_CNT_US already use.  A bare PI literal also
+ * bypasses the per-chip pi_x() relocation, a defect class this file records. */
+#define PI_RX_SID_CNT_GROUPS		5u
+/* ★ ONE SPELLING OF THE COUNTER-MASK WORD, for the writer AND the reader.
+ * CNT_MASK_US gates RX_SID_GOOD/BAD_CNT_US: one bit per SID, FOUR groups of a
+ * 128-bit mask [tier 3, the RTL9603CVD chipdef], so group g's word for SID s is
+ * base + g*16 + (s/32)*4, bit s%32.  Four 16-byte groups end exactly where the
+ * chipdef puts RX_DROP_CNT_US, which is the arithmetic cross-checking itself.
+ * The enrolment site spelled this by hand and gpon_proc_show_locked() read the
+ * BARE literal 0x20ac -- group 0's word for SIDs 32..63, which is enrolled on
+ * NEITHER declared board (the RTL9602C's OMCC SID is 64 -> word 2, the
+ * RTL9603CVD's is 127 -> word 3), so that read is zero BY DESIGN -- and it was
+ * printed under the label "ctl_us", which is PI_PONIP_CTL_US, a different
+ * register at 0x020d8 / 0x020ec.  A witness that cannot fire is worse than no
+ * witness: it answers. */
+#define PI_CNT_MASK_US			0x020a8
+#define PI_CNT_MASK_US_GROUP_STRIDE	16u
+#define PI_CNT_MASK_US_WORD(grp, sid)	(PI_CNT_MASK_US + (grp) * PI_CNT_MASK_US_GROUP_STRIDE + ((sid) / 32u) * 4u)
 #define GPON_BWMAP_DATA			0x02400
 /* ★ GPON_BWMAP_DATA IS AN ARRAY OF 256 32-BIT WORDS, and gpon_proc_show() reads
  * it as 128 captured ALLOCATIONS of two words each (named 2026-09-05).  The
@@ -732,15 +765,26 @@ static_assert(SW_P_MISC_PORT_9602C(2) == 0x20804u &&
  * cannot drift silently.
  *
  * Offsets are WITHIN the GTC block (base 0x1b700000 belongs to the shell's
- * gpon_io), exactly as gpon_rd/gpon_wr already address it. */
+ * gpon_io), exactly as gpon_rd/gpon_wr already address it.
+ *
+ * ★★★ EVERY OFFSET IS SPELLED REG_AT(...) SINCE 2026-09-14, and the literal
+ * inside it is still the literal both oracles read.  The wrapper is what makes
+ * a FORGOTTEN field impossible to miss: C zero-fills any member a designated
+ * initialiser omits, and offset 0 is a real register on these parts, so before
+ * this the omission became "the register at 0" and reg_has() called it PRESENT.
+ * Now it decodes to UNSET and every helper refuses with -ENXIO.  The remaining
+ * plain values -- the two STRIDES and the three INDEX MASKS -- are not offsets;
+ * they are covered by reg_table_registered_guard.py, which requires every field
+ * of this initialiser to be written down (a stride left at 0 stamps every flow
+ * into ONE slot, which is the GEM_US_PORT_MAP regression in its other form). */
 static const struct gpon_chip luna_gpon_chip = {
 	.name = "RTL9602C",
 	.gtc = {
-		.ds_omci_pti		= 0x1204,	/* = GPON_GTC_DS_OMCI_PTI; chipdef 0x701204 */
-		.gem_us_port_map	= 0x6400,	/* = GPON_GEM_US_PORT_MAP; chipdef 0x706400 */
+		.ds_omci_pti		= REG_AT(0x1204),	/* = GPON_GTC_DS_OMCI_PTI; chipdef 0x701204 */
+		.gem_us_port_map	= REG_AT(0x6400),	/* = GPON_GEM_US_PORT_MAP; chipdef 0x706400 */
 		.gem_us_port_stride	= 4,		/* = GEM_US_PORT_MAP_STRIDE (luna_gpon.c); chipdef array-offset 32 bits */
-		.gem_ds_mc_cfg		= 0x4080,	/* = GPON_GEM_DS_MC_CFG; chipdef 0x704080 */
-		.ds_traffic_cfg		= 0x1400,	/* = GPON_GTC_DS_TRAFFIC_CFG; chipdef 0x701400 */
+		.gem_ds_mc_cfg		= REG_AT(0x4080),	/* = GPON_GEM_DS_MC_CFG; chipdef 0x704080 */
+		.ds_traffic_cfg		= REG_AT(0x1400),	/* = GPON_GTC_DS_TRAFFIC_CFG; chipdef 0x701400 */
 		.ds_traffic_stride	= 4,		/* = DS_TRAFFIC_CFG_STRIDE; chipdef array-offset 32 bits */
 		/* The two indirect CAMs (gpon_gtc_cam_write, 2026-09-03).
 		 * Addresses AND bit layout verified IDENTICAL in both vendor
@@ -749,13 +793,13 @@ static const struct gpon_chip luna_gpon_chip = {
 		 * each CAM's OP_IDX field width from those same chipdefs
 		 * (PORTID_OP_IDX len 7, ALLOCID_OP_IDX len 5) -- per-CAM
 		 * FACTS, not tuning. */
-		.ds_port_ind		= 0x1100,	/* = GPON_GTC_DS_PORT_IND; chipdef 0x701100 */
-		.ds_port_wr		= 0x1104,	/* = GPON_GTC_DS_PORT_WR; chipdef 0x701104 */
-		.ds_port_rd		= 0x110c,	/* = GPON_GTC_DS_PORT_RD; chipdef 0x70110C */
+		.ds_port_ind		= REG_AT(0x1100),	/* = GPON_GTC_DS_PORT_IND; chipdef 0x701100 */
+		.ds_port_wr		= REG_AT(0x1104),	/* = GPON_GTC_DS_PORT_WR; chipdef 0x701104 */
+		.ds_port_rd		= REG_AT(0x110c),	/* = GPON_GTC_DS_PORT_RD; chipdef 0x70110C */
 		.ds_port_idx_mask	= 0x7f,		/* 128 flows -- OP_IDX[6:0]; == GEM_US_PORT_MAP_IDX_MAX */
-		.ds_alloc_ind		= 0x10c0,	/* = GPON_GTC_DS_ALLOC_IND; chipdef 0x7010C0 */
-		.ds_alloc_wr		= 0x10c4,	/* = GPON_GTC_DS_ALLOC_WR; chipdef 0x7010C4 */
-		.ds_alloc_rd		= 0x10cc,	/* = GPON_GTC_DS_ALLOC_RD; chipdef 0x7010CC */
+		.ds_alloc_ind		= REG_AT(0x10c0),	/* = GPON_GTC_DS_ALLOC_IND; chipdef 0x7010C0 */
+		.ds_alloc_wr		= REG_AT(0x10c4),	/* = GPON_GTC_DS_ALLOC_WR; chipdef 0x7010C4 */
+		.ds_alloc_rd		= REG_AT(0x10cc),	/* = GPON_GTC_DS_ALLOC_RD; chipdef 0x7010CC */
 		.ds_alloc_idx_mask	= 0x1f,		/* 32 T-CONTs -- OP_IDX[4:0] */
 		/* The three flow-indexed indirect counter muxes
 		 * (gpon_gtc_cntr_read, 2026-09-03).  Addresses AND bit layout
@@ -763,12 +807,12 @@ static const struct gpon_chip luna_gpon_chip = {
 		 * family-invariant claim of this table holds for them too.
 		 * The MISC mux is deliberately absent: no ack field, and its
 		 * idx width is the one counter fact that differs per chip. */
-		.gem_ds_rx_cntr_ind	= 0x4040,	/* = GPON_GEM_DS_RX_CNTR_IND; chipdef 0x704040 */
-		.gem_ds_rx_cntr_stat	= 0x4044,	/* = GPON_GEM_DS_RX_CNTR_STAT; chipdef 0x704044 */
-		.gem_ds_fwd_cntr_ind	= 0x404c,	/* = GPON_GEM_DS_FWD_CNTR_IND; chipdef 0x70404C */
-		.gem_ds_fwd_cntr_stat	= 0x4050,	/* = GPON_GEM_DS_FWD_CNTR_STAT; chipdef 0x704050 */
-		.ds_port_cntr_ind	= 0x1140,	/* = GPON_GTC_DS_PORT_CNTR_IND; chipdef 0x701140 */
-		.ds_port_cntr_stat	= 0x1144,	/* = GPON_GTC_DS_PORT_CNTR_STAT; chipdef 0x701144 */
+		.gem_ds_rx_cntr_ind	= REG_AT(0x4040),	/* = GPON_GEM_DS_RX_CNTR_IND; chipdef 0x704040 */
+		.gem_ds_rx_cntr_stat	= REG_AT(0x4044),	/* = GPON_GEM_DS_RX_CNTR_STAT; chipdef 0x704044 */
+		.gem_ds_fwd_cntr_ind	= REG_AT(0x404c),	/* = GPON_GEM_DS_FWD_CNTR_IND; chipdef 0x70404C */
+		.gem_ds_fwd_cntr_stat	= REG_AT(0x4050),	/* = GPON_GEM_DS_FWD_CNTR_STAT; chipdef 0x704050 */
+		.ds_port_cntr_ind	= REG_AT(0x1140),	/* = GPON_GTC_DS_PORT_CNTR_IND; chipdef 0x701140 */
+		.ds_port_cntr_stat	= REG_AT(0x1144),	/* = GPON_GTC_DS_PORT_CNTR_STAT; chipdef 0x701144 */
 		.cntr_flow_idx_mask	= 0x7f,		/* IDX[6:0] on all three -- the 128-flow space */
 	},
 };
@@ -1019,7 +1063,7 @@ static inline int luna_smi_read(void __iomem *sw, u8 phy, u8 reg, u16 *out)
 	/* MAIN_PAGE=0x1FFF (broadcast), REG=phyreg, CMD=1 (trigger read) */
 	iowrite32((0x1FFFu << 11) | ((u32)reg << 6) | SMI_CMD_EN,
 		  sw + SMI_CTRL_0);
-	if (gpon_ind_poll(&io, SMI_CTRL_0, SMI_CMD_EN, LUNA_SMI_TRIES,
+	if (gpon_ind_poll(&io, reg_make(SMI_CTRL_0), SMI_CMD_EN, LUNA_SMI_TRIES,
 			  luna_smi_pause) < 0)
 		return -ETIMEDOUT;
 	*out = (u16)(ioread32(sw + SMI_CTRL_3) >> 16);
@@ -1039,7 +1083,7 @@ static inline void luna_smi_write(void __iomem *sw, u8 phy, u8 reg, u16 val)
 	/* the WRITE's completion is polled and the result deliberately unused,
 	 * exactly as both vendor copies had it: there is nothing to hand back,
 	 * and the next transaction re-arms the bus regardless. */
-	gpon_ind_poll(&io, SMI_CTRL_0, SMI_CMD_EN, LUNA_SMI_TRIES,
+	gpon_ind_poll(&io, reg_make(SMI_CTRL_0), SMI_CMD_EN, LUNA_SMI_TRIES,
 		      luna_smi_pause);
 }
 

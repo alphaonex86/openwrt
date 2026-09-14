@@ -315,6 +315,11 @@ static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
  *       --so <stock rootfs>/lib/omci/mib_<Name>.so                          */
 #define OMCI_ME_MAC_BRIDGE_SVC	45	/* mib_MacBriServProf */
 #define OMCI_ME_MAC_BRIDGE_PORT	47	/* mib_MacBriPortCfgData */
+#define OMCI_ME_MAC_BRIDGE_FILTER 49	/* mib_MacBridgePortFilterTable -- the
+					 * per-bridge-port MAC filter table.
+					 * ⚠ 49 IS THE FILTER TABLE and 52 is
+					 * PM history; the numbers are the
+					 * measurement and the names are not */
 #define OMCI_ME_MAC_BRIDGE_TABLE 50	/* mib_MacBriPortBriTblData */
 #define OMCI_ME_MAC_BRIDGE_PM	52	/* mib_MacBridgePortPmMonitorHistoryData
 					 * -- COUNTERS.  ⚠ class 49 is the filter

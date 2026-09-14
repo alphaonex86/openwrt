@@ -138,7 +138,9 @@ static inline void l3fe_access_pause(void)
 static inline int l3fe_access_wait(void __iomem *ne, u32 off, u32 busy)
 {
 	struct hwio io = l3fe_io(ne);
-	int rc = gpon_ind_poll(&io, off, busy, L3FE_ACCESS_TRIES,
+	/* reg_make(): @off is a #define, which the compiler cannot silently
+	 * default -- the explicit crossing is the point of the encoding. */
+	int rc = gpon_ind_poll(&io, reg_make(off), busy, L3FE_ACCESS_TRIES,
 			       l3fe_access_pause);
 
 	return rc < 0 ? rc : 0;
@@ -147,7 +149,7 @@ static inline int l3fe_access_wait(void __iomem *ne, u32 off, u32 busy)
 static inline int l3fe_access_go(void __iomem *ne, u32 off, u32 val, u32 busy)
 {
 	struct hwio io = l3fe_io(ne);
-	int rc = gpon_ind_go(&io, off, val, busy, L3FE_ACCESS_TRIES,
+	int rc = gpon_ind_go(&io, reg_make(off), val, busy, L3FE_ACCESS_TRIES,
 			     l3fe_access_pause);
 
 	return rc < 0 ? rc : 0;

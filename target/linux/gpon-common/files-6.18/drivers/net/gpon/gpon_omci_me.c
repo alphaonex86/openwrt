@@ -331,6 +331,7 @@ enum omci_attr_src {
 /* Where an OMCI_SRC_TBL write goes. */
 enum omci_attr_tbl {
 	OMCI_TBL_EXT_VLAN_ROW,	/* ME 171 #6 -> the row table, decoded */
+	OMCI_TBL_MAC_FILTER_ROW,/* ME 49 #1 -> the per-bridge-port MAC filter */
 	OMCI_TBL_HELD,		/* accepted and COUNTED, not held: see
 				 * gpon_vlan_model.attr_owed */
 };
@@ -561,6 +562,37 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(47, 11, 2, 19, 3),		/* #11 outbound TD ptr     OutboundTD */
 	A_ST(47, 12, 2, 21, 3),		/* #12 inbound TD ptr      InboundTD */
 	A_ST(47, 13, 1, 23, 7),		/* #13 MAC learning depth  NumOfAllowedMac */
+
+	/*
+	 * ---- ME 49 MAC bridge port filter table data
+	 *      (mib_MacBridgePortFilterTable) -- the per-bridge-port MAC
+	 * filter.  ONE attribute and it is the whole ME: a table of 8-octet
+	 * rows the OLT WRITES (stock's own OltAcc is 3 = read|write, and there
+	 * is no set-by-create bit anywhere in the plugin).
+	 *
+	 * ★★ WHY IT IS NOT "ACKed AND IGNORED" LIKE THE OTHER SPINE CLASSES
+	 *    WERE.  Those arrive as a Create, and omci_store_create() ACKs any
+	 *    class.  This one never does: stock's own action mask for it is
+	 *    0x04000300 -- Set, Get and Get-Next, and NOT Create or Delete
+	 *    (against 0x350 = Create|Delete|Set|Get for ME 47 and ME 268; read
+	 *    statically out of each plugin's mibTable_init, and IDENTICAL on
+	 *    both Luna dies).  So the OLT SETS it, and until this row existed a
+	 *    Set of class 49 hit an instance that did not exist and came back
+	 *    rc=0x04 UNKNOWN_ME -- a refusal, mid-burst, which is the shape of
+	 *    the ME 11 atomic refusal that stopped provisioning on both Luna
+	 *    boards.  omci_config_apply now creates the instance with its
+	 *    bridge port, exactly as G.988 and stock's action mask say.
+	 *
+	 * ⚠ THE WRITE IS HELD, THE READ-BACK IS OWED, same as ME 171 #6: a Get
+	 *   of a table attribute answers zeros of the right WIDTH and Get-Next
+	 *   answers end-of-table, so an OLT that AUDITS its filter table will
+	 *   re-write it.  Re-writing is idempotent here (an ADD over a MAC we
+	 *   already hold replaces it), which is why the gap is a cost and not a
+	 *   fault.  OWED: the table Get/Get-Next encoding, settled by RE of
+	 *   libomci_mib.so's Get handler -- not by recalling G.988.
+	 */
+	A_TBL(49, 1, GPON_MAC_FILTER_ROW_LEN, OMCI_TBL_MAC_FILTER_ROW, 3),
+					/* #1  MAC filter table    MACFilterTable */
 
 	/* ---- ME 50 MAC bridge port bridge table data (mib_MacBriPortBriTblData)
 	 * ★ KNOWN, WITH NO MODELLED ATTRIBUTE, AND THAT IS THE HONEST ANSWER.
@@ -980,6 +1012,7 @@ bool omci_me_mutable(u16 class_id)
 	 * bridge port that does not exist. */
 	case OMCI_ME_MAC_BRIDGE_SVC:
 	case OMCI_ME_MAC_BRIDGE_PORT:
+	case OMCI_ME_MAC_BRIDGE_FILTER:
 	case OMCI_ME_MAC_BRIDGE_TABLE:
 	case OMCI_ME_MAC_BRIDGE_PM:
 	case OMCI_ME_GEM_IW_TP:
@@ -1129,11 +1162,14 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 	if (a->src == OMCI_SRC_STORE)
 		memcpy(e->body + a->v, v, a->size);
 	else if (a->src == OMCI_SRC_TBL) {
-		/* The one table write this model HOLDS is the subscriber VLAN;
-		 * the rest are accepted so the burst completes and COUNTED so
-		 * the acceptance is not a silence. */
+		/* TWO table writes this model HOLDS -- the subscriber VLAN and
+		 * the per-bridge-port MAC filter; the rest are accepted so the
+		 * burst completes and COUNTED so the acceptance is not a
+		 * silence. */
 		if (a->v == OMCI_TBL_EXT_VLAN_ROW)
 			gpon_ext_vlan_row_set(&o->vlan, inst, v);
+		else if (a->v == OMCI_TBL_MAC_FILTER_ROW)
+			gpon_mac_filter_row_set(&o->vlan, inst, v);
 		else
 			o->vlan.attr_owed++;
 	} else if (a->class_id == OMCI_ME_PPTP_ETH_UNI)

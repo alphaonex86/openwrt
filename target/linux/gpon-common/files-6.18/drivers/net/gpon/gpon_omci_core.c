@@ -283,9 +283,17 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 	 * bridge port, and stock's own plugin agrees -- its EntityId carries no
 	 * set-by-create bit at all, so nothing about it is the OLT's to
 	 * instantiate. */
+	/* ★★ ME 49 is the fourth, and here the vendor states it outright rather
+	 * than by omission: the ACTION MASK its own plugin registers with the
+	 * framework is 0x04000300 -- Set, Get and Get-Next -- where ME 47 and ME
+	 * 268, the two the OLT really does create, carry 0x350 =
+	 * Create|Delete|Set|Get.  Read statically from each mibTable_init and
+	 * IDENTICAL on both Luna dies, so refusing a Create of 49 is not our
+	 * policy, it is stock's declared one. */
 	if ((class_id == OMCI_ME_TCONT || class_id == OMCI_ME_PPTP_ETH_UNI ||
 	     class_id == OMCI_ME_UNI_G ||
 	     class_id == OMCI_ME_MAC_BRIDGE_TABLE ||
+	     class_id == OMCI_ME_MAC_BRIDGE_FILTER ||
 	     class_id == OMCI_ME_PREASSIGN_FILTER) &&
 	    (mt == OMCI_MT_CREATE || mt == OMCI_MT_DELETE))
 		return OMCI_RC_NOT_SUPPORTED;
@@ -318,6 +326,21 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 			omci_store_del(o, class_id, inst);
 			return OMCI_RC_ATTR_FAILED;
 		}
+		/* ...and its MAC filter table, the third companion.  Through
+		 * omci_store_put() like ME 50 rather than omci_store_create()
+		 * like ME 79, because ME 49 has NO dense attribute at all --
+		 * its one attribute is the row table, which lives in the VLAN /
+		 * classification model beside ME 171's rows.  An instance with
+		 * an empty body is exactly what the Set path wants: the dense
+		 * gate is skipped for a class whose dense length is zero. */
+		if (class_id == OMCI_ME_MAC_BRIDGE_PORT &&
+		    !omci_store_put(o, OMCI_ME_MAC_BRIDGE_FILTER, inst,
+				    NULL, 0)) {
+			omci_store_del(o, OMCI_ME_PREASSIGN_FILTER, inst);
+			omci_store_del(o, OMCI_ME_MAC_BRIDGE_TABLE, inst);
+			omci_store_del(o, class_id, inst);
+			return OMCI_RC_ATTR_FAILED;
+		}
 		break;
 	case OMCI_MT_DELETE:
 		if (!e)
@@ -326,6 +349,12 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 		if (class_id == OMCI_ME_MAC_BRIDGE_PORT) {
 			omci_store_del(o, OMCI_ME_MAC_BRIDGE_TABLE, inst);
 			omci_store_del(o, OMCI_ME_PREASSIGN_FILTER, inst);
+			omci_store_del(o, OMCI_ME_MAC_BRIDGE_FILTER, inst);
+			/* the filter rows live outside the store, so the
+			 * instance going away must take them with it --
+			 * otherwise the next bridge port with this id inherits
+			 * a stranger's MAC filter */
+			gpon_mac_filter_del(&o->vlan, inst);
 		}
 		/* An ME 171 instance owns rows the dense store never held, so
 		 * deleting the instance must drop them too -- otherwise the
@@ -594,12 +623,20 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		break;
 	case OMCI_MT_GET_ALL_ALRM_NX:
 	case OMCI_MT_GET_NEXT:
-		/* Get Next walks a TABLE attribute; the ME model defines none
-		 * (only an OLT-created ME could have one, and its body is
-		 * opaque to us), so the honest answer is the "action this ME
-		 * does not implement" one below: result 0x00 with empty
-		 * contents = nothing to return / end of table.  Get-All-Alarms-
-		 * Next likewise: no alarm table to walk.  resp is already zero. */
+		/* Get Next walks a TABLE attribute.  ⚠ THE MODEL NOW DEFINES
+		 * TWO -- ME 171 #6, the subscriber VLAN rows, and ME 49 #1, the
+		 * per-bridge-port MAC filter -- and BOTH ARE HELD, with the
+		 * rows readable through gpon_ext_vlan_raw() /
+		 * gpon_mac_filter_raw().  What is still missing is the
+		 * ENCODING: how many rows a reply carries, how the sequence
+		 * number indexes them, and what the last one answers.  So the
+		 * answer stays "end of table" -- result 0x00 with empty
+		 * contents -- and an OLT that AUDITS one of those tables
+		 * re-writes it instead of reading it back, which is idempotent
+		 * on both.  OWED, and it is a READ-BACK, never a write:
+		 * RE libomci_mib.so's Get/Get-Next handler, which is on disk.
+		 * Get-All-Alarms-Next likewise: no alarm table to walk.
+		 * resp is already zero. */
 		break;
 	default:
 		/* A message type with no ONU-side action.  Answer result 0x00

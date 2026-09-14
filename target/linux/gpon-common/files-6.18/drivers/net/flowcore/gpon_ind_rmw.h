@@ -46,7 +46,7 @@
 
 #include <linux/errno.h>
 #include <linux/types.h>
-#include "regtable.h"	/* gpon_ind_go(), reg_has(), struct hwio */
+#include "regtable.h"	/* gpon_ind_go(), reg_rc(), struct hwio */
 
 /**
  * struct gpon_ind_tbl - one indirect ACCESS/DATA table, as offsets WITHIN its
@@ -62,11 +62,13 @@
  *          previous request still owns ACCESS and DATA.
  *
  * ★ ADDING A TABLE IS ADDING ONE INITIALISER IN THE SHELL.  The offsets come
- * from that chip's own register facts, never from a literal here.
+ * from that chip's own register facts, never from a literal here, and each is
+ * spelled REG_AT(...) so a field the initialiser FORGETS decodes to UNSET and
+ * is refused rather than becoming "the register at offset 0".
  */
 struct gpon_ind_tbl {
-	u32		access;
-	u32		data;
+	struct reg	access;
+	struct reg	data;
 	u32		go;
 	u32		wr;
 	unsigned int	tries;
@@ -87,8 +89,9 @@ struct gpon_ind_tbl {
  * reason to fetch is to touch DATA next, so a chip whose table lacks DATA must
  * not have emitted the read transaction first.
  *
- * Return: 0; -ETIMEDOUT; -ENODEV when this chip's table has no such register;
- * -EINVAL with no pause op.  The last two are refused BEFORE any bus traffic.
+ * Return: 0; -ETIMEDOUT; -ENODEV when this chip's table DECLARES no such
+ * register; -ENXIO when NOBODY REGISTERED IT; -EINVAL with no pause op.  The
+ * last three are refused BEFORE any bus traffic.
  */
 static inline int gpon_ind_fetch(const struct hwio *io,
 				 const struct gpon_ind_tbl *t, u32 idx,
@@ -96,10 +99,14 @@ static inline int gpon_ind_fetch(const struct hwio *io,
 {
 	u32 cmd = t->go | idx;
 	int rc;
+
 	if (!pause)
 		return -EINVAL;
-	if (!reg_has(t->access) || !reg_has(t->data))
-		return -ENODEV;
+	rc = reg_rc(t->access);
+	if (!rc)
+		rc = reg_rc(t->data);
+	if (rc)
+		return rc;
 
 	/* Retire a previous request before changing ACCESS or staging DATA.
 	 * The caller serializes the complete transaction against other users. */
@@ -135,10 +142,14 @@ static inline int gpon_ind_commit(const struct hwio *io,
 {
 	u32 cmd = t->go | t->wr | idx;
 	int rc;
+
 	if (!pause)
 		return -EINVAL;
-	if (!reg_has(t->access) || !reg_has(t->data))
-		return -ENODEV;
+	rc = reg_rc(t->access);
+	if (!rc)
+		rc = reg_rc(t->data);
+	if (rc)
+		return rc;
 
 	/* Retire a previous request before changing ACCESS or staging DATA.
 	 * The caller serializes the complete transaction against other users. */
@@ -148,7 +159,7 @@ static inline int gpon_ind_commit(const struct hwio *io,
 			*stuck = 0; /* This operation submitted no command. */
 		return rc;
 	}
-	hwio_wr(io, t->data, word);
+	hwio_wr(io, reg_at(t->data), word);
 	rc = gpon_ind_go(io, t->access, cmd, t->go, t->tries, pause);
 	if (rc < 0) {
 		if (stuck)
@@ -177,7 +188,7 @@ static inline int gpon_ind_rmw(const struct hwio *io,
 	if (rc < 0)
 		return rc;
 	return gpon_ind_commit(io, t, idx,
-			       (hwio_rd(io, t->data) & ~clr) | set, pause,
+			       (hwio_rd(io, reg_at(t->data)) & ~clr) | set, pause,
 			       stuck);
 }
 

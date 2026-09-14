@@ -40,6 +40,7 @@
 
 #include <linux/kernel.h>
 #include "cortina_ni_flowoffload_logic.h"	/* hoisted logic */
+#include "cortina_vlan_install.h"	/* the DMA-AFT VLAN word layout, once */
 #include <linux/module.h>
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
@@ -2807,7 +2808,7 @@ static int cn_wan_chain_vlan(struct net_device *dev)
  * by CPU lspid (cn_aft_install() writes bias 0 and 1 = AAL_LPORT_CPU_0/_1) plus
  * a TX-descriptor arming a forwarded frame has no descriptor for.  The map-key
  * fact holds - stock's own map reads lspid 0x10/0x11, and those ARE CPU_0/CPU_1
- * (CA_NI_LPORT_CPU_0 = 0x10; CA_DMA_AFT_MAP_LSPID is 4 bits biased by CPU0 and
+ * (CA_NI_LPORT_CPU_0 = 0x10; CORTINA_AFT_MAP_LSPID_MASK is 4 bits biased by CPU0 and
  * cannot encode anything else).  The INERTNESS does not follow: stock's per-flow
  * record binds a DMA-AFT fib and map to each flow (dma_aft{En=1 FibIdx MapIdx},
  * forceDisDmaAft=0), so there is a second, per-flow selection path we have not
@@ -3007,26 +3008,14 @@ static int cn_l3fe_tpid_ensure(struct cn_l3e *l3e, u16 tpid)
 static int cn_aft_fib_program(struct cn_l3e *l3e, u8 idx, u16 vid,
 			      u8 tag_cnt, int tpid_slot)
 {
-	u32 d0 = 0, d1 = 0, d2 = 0;
+	u32 d0, d1, d2;
 
-	/* SET mode: the edit is DECLARATIVE - the frame LEAVES with exactly
-	 * @tag_cnt tags.  In the other mode (stacking) this same tag_cnt field
-	 * would be an opcode instead, which is a different instruction set;
-	 * see the field comments in cortina-ni-regs.h. */
-	d2 |= CA_DMA_AFT_D2_VLAN_SET_MODE;
-	d2 |= FIELD_PREP(CA_DMA_AFT_D2_EGRESS_TAG_CNT, tag_cnt);
-	if (tag_cnt) {
-		d1 |= FIELD_PREP(CA_DMA_AFT_D1_TOP_VID, vid);
-		/* the slot index is 1-BASED here: 0 means "no tag", so slot 0
-		 * (0x8100) must be written as 1.  Writing the raw slot number
-		 * would disable the tag on the very slot we matched. */
-		d2 |= FIELD_PREP(CA_DMA_AFT_D2_TOP_TPID_SLOT_P1, tpid_slot + 1);
-		/* take the TPID from that slot.  The selector is SPLIT: bit0
-		 * lives in DATA1[31], bit1 in DATA2[0].  Value 1 = bit0 only. */
-		d1 |= CA_DMA_AFT_D1_TOP_TPID_SRC_LO;
-	}
-	/* inner_* and pppoe_* stay 0: one tag, and the PPPoE push is still
-	 * owned by hw_pppoe on the L3FE side. */
+	/* ★ THE PACKING MOVED TO flowcore/cortina_vlan_install.c (2026-09-14)
+	 * and is called from here, so the word layout exists ONCE and is driven
+	 * on x86 by gpon_vlan_install_diff_test.  It is the same three words:
+	 * SET mode, the count, and -- only when a tag is pushed -- the VID, the
+	 * 1-BASED TPID slot and the split selector's low bit. */
+	cortina_vlan_aft_words(vid, tag_cnt, tpid_slot, &d0, &d1, &d2);
 
 	writel(d0, l3e->dma_base + CA_DMA_AFT_L2FIB_DATA0);
 	writel(d1, l3e->dma_base + CA_DMA_AFT_L2FIB_DATA1);
@@ -3064,9 +3053,7 @@ static int cn_aft_fib_read(struct cn_l3e *l3e, u8 idx, u32 *d0, u32 *d1, u32 *d2
 /* write one MAP entry: "frames from this lspid use fib @fib". */
 static int cn_aft_map_program(struct cn_l3e *l3e, u8 idx, u8 lspid_map, u8 fib)
 {
-	u32 w = CA_DMA_AFT_MAP_VLD | CA_DMA_AFT_MAP_EN |
-		FIELD_PREP(CA_DMA_AFT_MAP_LSPID, lspid_map) |
-		FIELD_PREP(CA_DMA_AFT_MAP_FIB_ID, fib);
+	u32 w = cortina_vlan_aft_map_word(lspid_map, fib);
 
 	writel(w, l3e->dma_base + CA_DMA_AFT_MAP_DATA);
 	return cn_aft_go(l3e, CA_DMA_AFT_MAP_ACCESS,
@@ -3998,7 +3985,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 		 * artifact ("the map keys are lspid 0x10/0x11, not CPU lspids"):
 		 * 0x10 and 0x11 ARE the CPU lspids.  cortina-ni-regs.h has
 		 * CA_NI_LPORT_CPU_0 = 0x10 through CPU_7 = 0x17 and
-		 * CA_DMA_LSO_LSPID_CPU0 = 0x10, and CA_DMA_AFT_MAP_LSPID is a
+		 * CA_DMA_LSO_LSPID_CPU0 = 0x10, and CORTINA_AFT_MAP_LSPID_MASK is a
 		 * 4-bit field documented "lspid - CPU0", so it cannot even encode
 		 * a non-CPU lspid.  Stock's 0x10/0x11 are the same two ports
 		 * cn_aft_install() programs as map bias 0 and 1.  The map-key half
@@ -5055,15 +5042,25 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 			/* shadow = what we asked for, hw = what the table holds.
 			 * They must agree; a divergence is the finding. */
 			seq_printf(m,
-				   "  fib[%02d]: shadow{vid=%u cnt=%u ref=%u} hw{set_mode=%lu cnt=%lu vid=%lu tpid_slot_p1=%lu} raw{%08x %08x %08x} -> %s\n",
+				   "  fib[%02d]: shadow{vid=%u cnt=%u ref=%u} hw{set_mode=%u cnt=%u vid=%u tpid_slot_p1=%u} raw{%08x %08x %08x} -> %s\n",
 				   k, l3e->aft_fib_vid[k], l3e->aft_fib_cnt[k],
 				   l3e->aft_fib_ref[k],
-				   FIELD_GET(CA_DMA_AFT_D2_VLAN_SET_MODE, d2),
-				   FIELD_GET(CA_DMA_AFT_D2_EGRESS_TAG_CNT, d2),
-				   FIELD_GET(CA_DMA_AFT_D1_TOP_VID, d1),
-				   FIELD_GET(CA_DMA_AFT_D2_TOP_TPID_SLOT_P1, d2),
+				   /* ⚠ CAST AT THE CALL SITE, NOT %lu IN THE FORMAT.
+				    * FIELD_GET() is typed by its MASK, so the
+				    * width of these four follows however the
+				    * masks happen to be spelled -- and this
+				    * file is built for aarch64 AND for the
+				    * 32-bit siblings.  A (u32) here keeps one
+				    * readable format string correct on both,
+				    * and survives a mask respelled as
+				    * GENMASK(); -Werror=format caught exactly
+				    * that on 2026-09-14. */
+				   (u32)FIELD_GET(CORTINA_AFT_D2_VLAN_SET_MODE, d2),
+				   (u32)FIELD_GET(CORTINA_AFT_D2_TAG_CNT_MASK, d2),
+				   (u32)FIELD_GET(CORTINA_AFT_D1_TOP_VID_MASK, d1),
+				   (u32)FIELD_GET(CORTINA_AFT_D2_TPID_SLOT_MASK, d2),
 				   d0, d1, d2,
-				   FIELD_GET(CA_DMA_AFT_D2_EGRESS_TAG_CNT, d2) ?
+				   FIELD_GET(CORTINA_AFT_D2_TAG_CNT_MASK, d2) ?
 				   "PUSH (the US leg: this carries the WAN VLAN)" :
 				   "STRIP (the DS leg: vid is legitimately 0 here)");
 		}

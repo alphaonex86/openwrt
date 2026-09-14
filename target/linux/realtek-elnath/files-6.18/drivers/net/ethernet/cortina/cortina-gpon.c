@@ -4915,6 +4915,143 @@ static int cg_proc_open(struct inode *inode, struct file *file)
 	return single_open(file, cg_proc_show, cg_singleton);
 }
 
+#if IS_ENABLED(CONFIG_GPON_OMCI_DIAG)
+/*
+ * ★★★ THE UNI ADMINISTRATIVE-STATE INJECTION SEAM, the Cortina half of a
+ * capability the Luna family has carried since it was written (luna_gpon.c
+ * `uni_test`).  It forges ONE downstream ME 11 Set INSIDE the ONU and submits
+ * it through the REAL receive path: the same MIC gate, the same admission
+ * ring, the same bottom half, the same model and the same apply owner.
+ * Nothing here reaches into the model, and no upstream response is forged.
+ *
+ * ⚠ IT CERTIFIES *THE ONU'S OWN PATH* -- that a Set which arrives is carried
+ *   to the silicon.  It says NOTHING about an OLT's ability to drive it; the
+ *   OLT-observed half is a different measurement and neither substitutes for
+ *   the other.
+ *
+ * ⚠ ACCEPTANCE IS NOT COMPLETION.  `REQUEST`/`ACCEPTED` say the frame was
+ *   admitted; whether the PORT moved is `cortina_ni_uni_admin_set`'s own
+ *   confirmed read-back line (`UNI port N LOCKED` / `unlocked`), printed only
+ *   after the MAC gates and the PHY BMCR have been re-read.  The `owed` mask is
+ *   NOT a completion witness either: the worker clears it BEFORE the backend
+ *   runs, which is why the snapshot reports it and never rests on it.
+ *
+ * ⚠ AND CONFIG_GPON_OMCI_DIAG DEFAULTS TO y, so this gate is not a safety net.
+ *   An ONU that can be told from its own CPU to lock a subscriber port is not a
+ *   thing to leave locked: the revert is part of the measurement.
+ */
+static u16 cg_uni_test_tci = 0xd200;
+
+static void cg_uni_test_show(struct cortina_gpon *cg)
+{
+	u8 admin[OMCI_UNI_MAX] = { 0 }, port[OMCI_UNI_MAX] = { 0 };
+	u16 inst[OMCI_UNI_MAX] = { 0 };
+	u8 owed = 0, n = 0, port_n = 0, i;
+	int active;
+
+	/* ★★ THE LIFETIME OWNER IS TAKEN FIRST, and that is what makes `owed`
+	 *    mean anything: cg_uni_apply_work CLEARS the mask before the backend
+	 *    runs, so a zero read without holding sn_lock cannot tell "applied"
+	 *    from "being applied right now".  Holding it proves no apply is in
+	 *    flight; the OMCI spin section inside stays short.
+	 * ★ AND THE PORT MAP IS COPIED IN THE SAME CRITICAL SECTION as the
+	 *   instances.  Reading the global afterwards lets a re-declaration land
+	 *   in between and print OLD instances against a NEW map -- a table that
+	 *   never existed, in the one output a board run uses to decide what to
+	 *   restore. */
+	mutex_lock(&cg->sn_lock);
+	spin_lock_bh(&cg->omci_lock);
+	active = (cg->omci_active && cg->omci) ? 1 : 0;
+	if (cg->omci) {
+		n = cg->omci->pptp_eth_uni.n;
+		owed = cg->omci->pptp_eth_uni.changed;
+		for (i = 0; i < n && i < OMCI_UNI_MAX; i++) {
+			inst[i] = cg->omci->pptp_eth_uni.inst[i];
+			admin[i] = cg->omci->pptp_eth_uni.admin[i];
+		}
+	}
+	port_n = cg_uni_port_n;
+	memcpy(port, cg_uni_port, sizeof(port));
+	spin_unlock_bh(&cg->omci_lock);
+	mutex_unlock(&cg->sn_lock);
+
+	dev_info(cg->dev, "uni-test: SNAPSHOT omci_active %d slots %u owed 0x%x\n",
+		 active, n, owed);
+	for (i = 0; i < n && i < OMCI_UNI_MAX; i++) {
+		int p = i < port_n ? (int)port[i] : -1;
+
+		dev_info(cg->dev,
+			 "uni-test: SNAPSHOT slot %u inst 0x%04x admin %u owed %u port %d desired_locked %d\n",
+			 i, inst[i], admin[i], !!(owed & BIT(i)), p,
+			 p < 0 ? -1 : (int)cortina_ni_uni_port_locked(p));
+	}
+}
+
+static int cg_uni_test_set(struct cortina_gpon *cg, const char *arg)
+{
+	u32 rx0, drop0, mic0;
+	unsigned int inst, admin;
+	u8 msg[OMCI_LEN], n, i;
+	int slot = -1, port;
+	u16 tci;
+
+	if (sscanf(arg, "%x %u", &inst, &admin) != 2 || inst > 0xffff || admin > 1)
+		return -EINVAL;
+
+	/* ★ THE INSTANCE IS CHECKED AGAINST THE BOARD'S DECLARED PANEL.  A typo
+	 *   would otherwise inject a Set for a UNI this board does not have, and
+	 *   the run would measure nothing while looking like it measured. */
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci) {
+		n = cg->omci->pptp_eth_uni.n;
+		for (i = 0; i < n && i < OMCI_UNI_MAX; i++)
+			if (cg->omci->pptp_eth_uni.inst[i] == (u16)inst)
+				slot = i;
+	}
+	tci = ++cg_uni_test_tci;
+	spin_unlock_bh(&cg->omci_lock);
+	if (slot < 0) {
+		dev_err(cg->dev,
+			"uni-test: REFUSED: instance 0x%04x is not in this board's declared panel\n",
+			inst);
+		return -ENODEV;
+	}
+	port = slot < cg_uni_port_n ? (int)cg_uni_port[slot] : -1;
+
+	memset(msg, 0, sizeof(msg));
+	omci_put_be16(msg, tci);		/* a UNIQUE tid per injection */
+	msg[2] = OMCI_MT_SET;			/* AR=0 and AK=0: no response */
+	msg[3] = 0x0a;				/* device identifier: baseline */
+	omci_put_be16(msg + 4, OMCI_ME_PPTP_ETH_UNI);
+	omci_put_be16(msg + 6, (u16)inst);
+	omci_put_be16(msg + 8, 0x0800);		/* attribute 5: administrative state */
+	msg[10] = (u8)admin;
+	omci_finalize(msg);			/* the SHIPPED stamper, so the
+						 * MIC gate below sees a real one */
+
+	/* ★ THE REQUEST IS ANNOUNCED BEFORE IT IS SUBMITTED.  The bottom half can
+	 *   consume it and the apply can complete on another CPU before a line
+	 *   printed after the call reaches the log, and a reader would then see
+	 *   the completion BEFORE the request it belongs to. */
+	dev_info(cg->dev,
+		 "uni-test: REQUEST tid 0x%04x inst 0x%04x slot %d admin %u port %d\n",
+		 tci, inst, slot, admin, port);
+	rx0 = cg->omci_rx;
+	drop0 = cg->omci_queue_drop;
+	mic0 = cg->omci_rx_bad_mic;
+	cg_rx_omci(msg, OMCI_LEN);
+	/* ★★ THE THREE COUNTERS ARE THE ADMISSION EVIDENCE, and they are what
+	 *    tells a silent refusal from a silent success: the ring is closed
+	 *    between datapath generations, and a frame dropped there would
+	 *    otherwise look exactly like a port that declined to move. */
+	dev_info(cg->dev,
+		 "uni-test: ACCEPTED tid 0x%04x rx %u->%u drop %u->%u bad_mic %u->%u\n",
+		 tci, rx0, cg->omci_rx, drop0, cg->omci_queue_drop,
+		 mic0, cg->omci_rx_bad_mic);
+	return 0;
+}
+#endif /* CONFIG_GPON_OMCI_DIAG */
+
 /*
  * ONE-SHOT on-demand PLOAM MIB read: `echo mib <sel-hex> > /proc/gpon`.
  * Result goes to dmesg.  This is the sanctioned replacement for the removed
@@ -4974,6 +5111,19 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 		mutex_unlock(&cg->sn_lock);
 		return ret ? ret : len;
 	}
+#if IS_ENABLED(CONFIG_GPON_OMCI_DIAG)
+	/* `uni-test show` / `uni-test <instance-hex> <0|1>`: the UNI
+	 * administrative-state injection seam documented above its helpers. */
+	if (strcmp(p, "uni-test show") == 0) {
+		cg_uni_test_show(cg);
+		return len;
+	}
+	if (strncmp(p, "uni-test ", 9) == 0) {
+		int ret = cg_uni_test_set(cg, strim(p + 9));
+
+		return ret ? ret : len;
+	}
+#endif
 	/* manual SerDes CMU re-lock (the cold-start recovery primitive) -- for
 	 * validating it is non-destructive on a good O5 boot before relying on it */
 	if (strcmp(p, "relock") == 0) {

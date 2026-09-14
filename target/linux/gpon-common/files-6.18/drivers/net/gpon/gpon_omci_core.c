@@ -163,8 +163,19 @@ void omci_set_mic(u8 *msg)
 	msg[47] = (u8)c;
 }
 
-/* Stamp the baseline trailer (40..43 = 00 00 00 28) + MIC.  Call LAST. */
-static void omci_finalize(u8 *msg)
+/* Stamp the baseline trailer (40..43 = 00 00 00 28) + MIC.  Call LAST.
+ *
+ * ★ NOT static any more (2026-09-10).  The 0x0028 trailer length is a G.988
+ * constant, so by this tree's tiering rule exactly one copy of it may exist --
+ * and a second one had grown in a CHIP file: rtl9602c_omci_finalize() in
+ * realtek-luna/.../rtl9602c_eth.c respelled these same four stores next to a
+ * call to our omci_set_mic().  That is the identical shape that produced the
+ * two-MIC-polynomial defect on this very function (see the note beside
+ * omci_set_mic above): a shell copy of a spec constant, correct on the day it
+ * was written, with nothing able to notice when the spec side moves.
+ * Publishing it is the REBASE -- the home already existed, so no new core file
+ * was added. */
+void omci_finalize(u8 *msg)
 {
 	msg[40] = 0x00;
 	msg[41] = 0x00;
@@ -201,8 +212,12 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 			u8 *resp)
 {
 	u16 rmask = 0, known = 0, unsup, failed;
-	u8 rc = omci_me_fill(o, class_id, inst, mask, resp + 11, resp + 36,
-			     &rmask, &known);
+	u8 rc;
+
+	if (omci_me_mutable(class_id) && !omci_inst_exists(o, class_id, inst))
+		return OMCI_RC_UNKNOWN_INST;
+	rc = omci_me_fill(o, class_id, inst, mask, resp + 11, resp + 36,
+			  &rmask, &known);
 
 	if (rc == OMCI_RC_UNKNOWN_ME) {
 		struct omci_me_inst *e = omci_store_find(o, class_id, inst);
@@ -244,25 +259,32 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
  *           the OLT's own audit self-heal), else store + MDS+1.
  *   Delete: absent instance -> 0x05.
  *   Set:    unknown class -> 0x04, known class + absent instance -> 0x05.
- * Attribute-level Set validation is deliberately NOT done: this OLT Sets
- * ME 131 (OLT-G) attributes the ONU does not model and expects OK, and G.988
- * has no way for the ONU to announce a per-attribute write capability.
+ * Mapped classes validate masks atomically before changing state. Other
+ * classes keep their existing compatibility behavior, including ME 131.
  */
 static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
-			    const u8 *msg, unsigned int len)
+			    const u8 *msg, unsigned int len, u8 *resp)
 {
 	struct omci_me_inst *e = omci_store_find(o, class_id, inst);
 	u16 mask;
 
+	/* T-CONTs, PPTP Ethernet UNIs and UNI-Gs are all auto-instantiated: the
+	 * ONU presents them and the OLT Sets and Gets them.  Own-stock action
+	 * mask 0x300 permits Set/Get, not opaque Create/Delete shadow
+	 * instances -- and for the two UNI classes a Create reaching the
+	 * dynamic store would put an OPAQUE DUPLICATE of an inventory instance
+	 * there: uploaded twice, answered from the inventory, and holding a
+	 * store slot a provisioned ME then cannot have. */
+	if ((class_id == OMCI_ME_TCONT || class_id == OMCI_ME_PPTP_ETH_UNI ||
+	     class_id == OMCI_ME_UNI_G) &&
+	    (mt == OMCI_MT_CREATE || mt == OMCI_MT_DELETE))
+		return OMCI_RC_NOT_SUPPORTED;
+
 	switch (mt) {
 	case OMCI_MT_CREATE:
-		/* The dynamic store is the OLT-created space only: an
-		 * auto-instantiated ME is not "existing" for Create purposes
-		 * (this OLT Creates ME 262/268-shaped instances that the static
-		 * model also describes). */
 		if (e)
 			return OMCI_RC_INST_EXISTS;
-		if (!omci_store_put(o, class_id, inst, msg + 8,
+		if (!omci_store_create(o, class_id, inst, msg + 8,
 				    (len > 8) ? (int)(len - 8) : 0))
 			return OMCI_RC_ATTR_FAILED;
 		break;
@@ -280,8 +302,20 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 					OMCI_RC_UNKNOWN_INST :
 					OMCI_RC_UNKNOWN_ME;
 		mask = ((u16)msg[8] << 8) | msg[9];
-		if (e)
+		if (omci_me_mutable(class_id)) {
+			u16 unsupported, failed;
+			u8 rc = omci_me_set(o, class_id, inst, mask, msg + 10,
+					   30, &unsupported, &failed);
+
+			/* Set response masks immediately follow the result byte;
+			 * Get reserves its masks at 36/38 instead. */
+			omci_put_be16(resp + 9, unsupported);
+			omci_put_be16(resp + 11, failed);
+			if (rc != OMCI_RC_OK)
+				return rc;
+		} else if (e && mask) {
 			omci_store_merge(e, msg + 10, (int)(len - 10));
+		}
 		/* An OLT Set of ME2 attr-1 is an explicit resync write: take
 		 * its byte first, then this Set's own +1 still applies. */
 		if (class_id == OMCI_ME_ONU_DATA && len >= 11 &&
@@ -314,10 +348,14 @@ void omci_mds_walk(struct omci_onu *o)
 	o->mds_tries++;
 }
 
-int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp)
+int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
+		      u8 *resp, struct omci_accepted *accepted)
 {
 	u16 class_id, inst;
 	u8 mt, devid;
+
+	if (accepted)
+		memset(accepted, 0, sizeof(*accepted));
 
 	/*
 	 * ★ A BASELINE OMCI PDU IS 48 BYTES, FULL STOP (G.988 A.3).  This gate
@@ -401,6 +439,7 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		o->mds = 0;
 		memset(o->store, 0, sizeof(o->store));
 		o->store_n = 0;
+		omci_me_reset_values(o);
 		/* a provisioning event is the walk's GOAL, reached: rearm it */
 		o->audit_reads = 0;
 		o->mds_tries = 0;
@@ -415,6 +454,8 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		 * responder's half; the shell re-arms the timer (its own half). */
 		o->avc_veip_up_sent = false;
 		resp[8] = OMCI_RC_OK;
+		if (accepted)
+			accepted->kind = OMCI_ACCEPT_RESET;
 		break;
 	case OMCI_MT_MIB_UPLOAD:
 		/* Row count at contents[8..9], NO result byte (a result byte
@@ -435,8 +476,10 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 	case OMCI_MT_SET:
 	case OMCI_MT_CREATE:
 	case OMCI_MT_DELETE:
-		resp[8] = omci_config_apply(o, mt, class_id, inst, msg, len);
+		resp[8] = omci_config_apply(o, mt, class_id, inst, msg, len, resp);
 		if (resp[8] == OMCI_RC_OK) {
+			if (accepted)
+				accepted->kind = OMCI_ACCEPT_CONFIG;
 			/* the OLT provisioned: the walk reached its goal */
 			o->audit_reads = 0;
 			o->mds_tries = 0;
@@ -472,14 +515,19 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 				     resp + 14, resp + 40, &wmask, &wknown);
 			omci_put_be16(resp + 12, wmask);
 		} else if (seq < o->nrows + o->store_n) {
-			/* provisioned MEs after the static rows: present-only
-			 * (mask 0); values are served via GET. */
+			/* Mapped dynamic values use the same encoder as Get.
+			 * Other classes retain their present-only rows. */
 			const struct omci_me_inst *e =
 				omci_store_nth(o, seq - o->nrows);
 
 			if (e) {
 				omci_put_be16(resp + 8, e->class_id);
 				omci_put_be16(resp + 10, e->inst);
+				if (e->class_id == OMCI_ME_GEM_CTP) {
+					omci_me_fill(o, e->class_id, e->inst, 0xffff,
+						     resp + 14, resp + 40, &wmask, &wknown);
+					omci_put_be16(resp + 12, wmask);
+				}
 			}
 		}
 		/* out-of-range seq -> all-zero row, still well-formed */
@@ -517,6 +565,15 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		break;
 	}
 
+	/* Acceptance describes a committed request, independently of AR and
+	 * response delivery. The replay path above never reaches this point. */
+	if (accepted && accepted->kind != OMCI_ACCEPT_NONE) {
+		accepted->mt = mt;
+		accepted->class_id = class_id;
+		accepted->inst = inst;
+		if (mt == OMCI_MT_SET)
+			accepted->applied_mask = ((u16)msg[8] << 8) | msg[9];
+	}
 	omci_finalize(resp);
 
 	/*
@@ -545,6 +602,11 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 		return 0;
 	}
 	return OMCI_LEN;
+}
+
+int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp)
+{
+	return omci_onu_input_ex(o, msg, len, resp, NULL);
 }
 
 /*

@@ -33,6 +33,52 @@
 
 #include <linux/types.h>
 
+/*
+ * ★★★ THE RX DESCRIPTOR FIELD POSITIONS ARE A PER-DIE DATUM (2026-09-12).
+ * One parser, one policy, and the LAYOUT is a table -- the operator's rule for
+ * this whole family: a new part costs a row, never a second implementation.
+ *
+ * ⚠ THE TWO VERIFIED DIES DISAGREE, which is why this cannot be a constant:
+ *     RTL9602C  source = word3[31:28]   reason = word3[20:13]
+ *     RTL9603CVD source = word3[19:16]  reason = word2[28:21]
+ *   The 9602C values are its OWN stock's: rtk_gponapp_omci_rx_wrapper
+ *   @0x8022c45c picks reason 246 for chip 0x96030002 and reads
+ *   raw[a2+12] >> 13 & 255 -- raw+12 IS word3 in the 16-byte descriptor.
+ *   The 9603CVD values come from its own kernel's raw DMA copy and dispatch
+ *   (0x80795b6c, 0x80795e60, 0x803769a4).
+ *
+ * ⚠⚠ AND THE 9602C WAS BEING DECODED WITH THE 9603CVD's LAYOUT, which is how
+ *   a working board still lost traffic: a descriptor carrying OMCI reason 246
+ *   necessarily reads source 14 under the CVD shift -- never the PON port.
+ *   ⇒ CONDITIONAL, and stated as one: ANY descriptor carrying a true reason
+ *     246 cannot match the metadata arm of the OMCI classifier, so such a
+ *     frame can only be admitted by our payload heuristic. Stock has no such
+ *     heuristic.
+ *   ⚠ NOT MEASURED: what fraction of live OMCI frames actually carry reason
+ *     246. No raw live OMCI descriptor has been captured, so branch TOTALS
+ *     are unknown -- do not read this as "every OMCI frame takes the
+ *     heuristic". The arithmetic proves what cannot happen, not what does.
+ *
+ * ⚠ A DIE WITH NO VERIFIED ROW GETS NO ROW. `layout` is NULL there and the
+ *   accessors say so rather than borrowing a sibling's shifts -- borrowing is
+ *   exactly what produced this defect.
+ */
+struct luna_rx_layout {
+	u8 src_lsb;		/* source-port field, always in opts3 */
+	u8 src_bits;
+	bool rsn_in_opts3;	/* reason word: opts3 (9602C) or opts2 (9603CVD) */
+	u8 rsn_lsb;
+	u8 rsn_bits;
+};
+
+extern const struct luna_rx_layout luna_rx_layout_rtl9602c;
+extern const struct luna_rx_layout luna_rx_layout_rtl9603cvd;
+
+unsigned int luna_gmac_rx_src_port(const struct luna_rx_layout *l, u32 opts3);
+unsigned int luna_gmac_rx_reason(const struct luna_rx_layout *l, u32 opts2,
+				 u32 opts3);
+bool luna_gmac_rx_is_wan(const struct luna_rx_layout *rxl, u32 opts3, unsigned int pon_port);
+
 u32 luna_gmac_rxdesnum_pack(unsigned int ring_size, unsigned int th_on,
 			    unsigned int th_off);
 u32 luna_gmac_rxcdo_pack(unsigned int ring_size);
@@ -41,15 +87,38 @@ bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
 bool luna_gmac_rx_cpu_tag_present(const u8 *data, u32 len,
 				  unsigned int tag_len);
 
-/* CPU-side OMCI (OMCC) datapath -- the family's descriptor decisions.  Every
- * one of them is documented at its definition in luna_gmac_logic.c, including
- * why the RX verdict is NOT merged with rtl9602c_rx_is_ds_omci() and why the
- * TX words may not be copied from that chip's. */
-bool luna_gmac_rx_is_ds_omci(bool trap_on, u32 opts2, u32 len,
+/* The family's cpu-tag descriptor decisions.  Every one of them is documented
+ * at its definition in luna_gmac_logic.c, including why the OMCI RX verdict is
+ * NOT merged with rtl9602c_rx_is_ds_omci() and why the TX words may not be
+ * copied from that chip's.
+ *
+ * ★ THE TWO TX WORDS WERE CALLED luna_gmac_omci_txd_word{2,3} UNTIL 2026-09-11
+ * AND THE NAME WAS A DEFECT.  Nothing in either is about OMCI: they compose the
+ * family's cpu-tag DIRECT-TX descriptor -- egress port mask, keep, dislrn,
+ * cputag_psel and a stream id -- and the OMCC was merely the first stream that
+ * needed it.  The WAN data GEM is the second, with the same call and a
+ * different @stream_id, which is why the packing is not duplicated anywhere.
+ */
+bool luna_gmac_rx_is_ds_omci(const struct luna_rx_layout *rxl,
+			     bool trap_on, u32 opts2, u32 opts3, u32 len,
 			     unsigned int omci_reason,
 			     unsigned int cpu_prefix, u32 buf_size);
-u32 luna_gmac_omci_txd_word2(unsigned int pon_port);
-u32 luna_gmac_omci_txd_word3(unsigned int omcc_flow);
+/* The cpu-tag TX steering word2 for an EXPLICIT egress port mask: the switch
+ * egresses the frame to exactly these ports instead of deciding by L2
+ * lookup.  The vendor's own LAN egress is this pair -- cputag set, a port
+ * mask, and cputag_psel LEFT CLEAR (psel is raised only when the mask names
+ * the fibre, for the GEM direct-TX).  @port_mask is a SWITCH port mask.  */
+u32 luna_gmac_cputag_txd_pmask(u32 port_mask);
+u32 luna_gmac_cputag_txd_word2(unsigned int pon_port);
+u32 luna_gmac_cputag_txd_word3(unsigned int stream_id);
+
+/* The switch port a received frame ingressed on, and whether that is the
+ * fibre.  One spelling of opts3[19:16] for the demux and for the ledger that
+ * watches it. */
+
+/* The PON stream id a fibre-ingress frame carried.  MEANINGLESS on a frame
+ * that did not ingress on the fibre -- ask luna_gmac_rx_is_wan() first. */
+unsigned int luna_gmac_rx_pon_sid(u32 opts3);
 
 
 /* ── family GMAC RING arithmetic (folded in from luna_gmac_ring.h,

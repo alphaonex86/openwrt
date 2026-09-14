@@ -171,16 +171,65 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				 * flow_offload_eth_dst() resolves the neighbour
 				 * of the OTHER tuple's source address.
 				 */
+				/*
+				 * ★★★ READ THE VALUE'S *MEMORY*, NOT ITS
+				 * NUMBER -- and this was wrong here until
+				 * 2026-09-11, on big-endian only.
+				 *
+				 * flow_offload_eth_dst() builds these two words
+				 * with `memcpy(&val, ha, 4)` and
+				 * `memcpy(&val16, ha + 4, 2)`. There is NO
+				 * htonl anywhere in that path (unlike the IP
+				 * and port mangles, which DO carry network
+				 * order and are correctly read with ntohl
+				 * below), so what the word carries is the MAC's
+				 * own byte order in memory and nothing else.
+				 * Decoding it with numeric shifts therefore
+				 * yields the right MAC on a little-endian host
+				 * and a per-word REVERSED one on a big-endian
+				 * host: ha[3],ha[2],ha[1],ha[0],ha[5],ha[4].
+				 *
+				 * ⚠ WHICH IS WHY IT SURVIVED: this file was
+				 * written and proven on the Cortina, ARM64 and
+				 * LITTLE-endian, where the two spellings agree
+				 * byte for byte. The Luna family is MIPS
+				 * BIG-endian, and the first consumer there to
+				 * compare this MAC against one read from the
+				 * neighbour table refused every flow it was
+				 * offered -- correctly, because the two really
+				 * did differ (measured: 168 refusals, "the
+				 * rule's next hop is not the WAN gateway").
+				 *
+				 * The project's own rule names this exact
+				 * shape: wire parsing uses explicit byte math,
+				 * never a cast. The fix is a NO-OP on
+				 * little-endian by construction.
+				 */
+				/*
+				 * ⚠⚠ AND THE TWO WORDS ARE NOT BUILT THE SAME
+				 * WAY -- the host differential caught this in
+				 * the FIRST version of this very fix, before
+				 * the board did. Word 0 is `memcpy(&val, ha, 4)`
+				 * with no promotion, so its memory IS the MAC's.
+				 * Word 4 is `memcpy(&val16, ha + 4, 2);
+				 * val = val16` -- a NUMERIC promotion, so on a
+				 * big-endian host those two octets live in the
+				 * LOW half and the word's first two memory
+				 * bytes are ZERO. Narrowing back to u16 and
+				 * reading THAT object's memory is right on both
+				 * orders; reading the u32's memory is not.
+				 * Pinned by rtl9607c-test/eth_mangle_endian_test.
+				 */
 				if (fa->mangle.offset == 0) {
-					act->gw_dmac[0] = fa->mangle.val & 0xff;
-					act->gw_dmac[1] = (fa->mangle.val >> 8) & 0xff;
-					act->gw_dmac[2] = (fa->mangle.val >> 16) & 0xff;
-					act->gw_dmac[3] = (fa->mangle.val >> 24) & 0xff;
+					u32 w = fa->mangle.val;
+
+					memcpy(act->gw_dmac, &w, 4);
 					got_dmac_lo = true;
 				} else if (fa->mangle.offset == 4 &&
 					   (fa->mangle.mask & 0xffff) == 0) {
-					act->gw_dmac[4] = fa->mangle.val & 0xff;
-					act->gw_dmac[5] = (fa->mangle.val >> 8) & 0xff;
+					u16 w = (u16)fa->mangle.val;
+
+					memcpy(act->gw_dmac + 4, &w, 2);
 					got_dmac_hi = true;
 				}
 				break;

@@ -53,6 +53,11 @@ bool gpon_omci_is_get(const u8 *pdu, unsigned int len);
  * the diagnostic must know which detail it may read out of the request. */
 bool gpon_omci_is_set(const u8 *pdu, unsigned int len);
 
+/* Is this PDU a Create?  Same shape and same reason as is_get/is_set: the
+ * diagnostic must know which detail it may read out of the request, and a
+ * Create's ATTRIBUTE BODY starts at octet 8 where a Get and a Set put a mask. */
+bool gpon_omci_is_create(const u8 *pdu, unsigned int len);
+
 /*
  * Does a baseline RESPONSE to this request carry a RESULT CODE at octet 8?
  *

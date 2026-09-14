@@ -54,7 +54,7 @@ bool gpon_gem_us_range_ok(const struct gpon_gem_us_range *r)
  * and BOTH paid for it.  It is three comparisons; it has cost this project more
  * than anything else of its size.
  *
- *   Luna, the months-long wall.  gpon-luna.c:6863-6440 records it in the
+ *   Luna, the months-long wall.  luna_gpon.c:7481-6440 records it in the
  *   code that replaced it: the old Assign_Alloc-ID handler bound the OLT's
  *   Alloc-ID to T-CONT 16 — the OMCC's — "OVERWRITING the ONU-ID so the OLT's
  *   default-alloc(=ONU-ID) grants missed the alloc-CAM -> T-CONT16 unreachable
@@ -79,7 +79,7 @@ bool gpon_gem_us_range_ok(const struct gpon_gem_us_range *r)
  *   @omcc_alloc — WHAT IT IS COMPARED AGAINST.
  *     Elnath passes cg->omcc_alloc (cortina-gpon.c:2190), the Alloc-ID actually
  *     bound to hw T-CONT 0 at :2050.
- *     Luna passes gpon_fsm_onu_id (gpon-luna.c:6872), the live ONU-ID.
+ *     Luna passes gpon_fsm_onu_id (luna_gpon.c:7490), the live ONU-ID.
  *     Those agree only while Luna's gpon_omcc_alloc override is 0, because
  *     Luna binds T-CONT 16 to `gpon_omcc_alloc ? gpon_omcc_alloc : onu_id`
  *     (:6264).  0 is the shipped default and is documented as the correct one
@@ -162,6 +162,18 @@ const char *gpon_omcc_action_name(enum gpon_omcc_action a)
 	return "unknown";
 }
 
+void gpon_omcc_tcont_decide(u16 alloc_override, u8 onu_id, bool alt_bind,
+			  struct gpon_omcc_tcont_plan *out)
+{
+	if (!out)
+		return;
+	out->alloc = alloc_override ? alloc_override : onu_id;
+	/* Never double-bind the plain ONU-ID: with no override the alternate
+	 * T-CONT would take the SAME alloc as the real one and swallow the
+	 * grant (see the header). */
+	out->bind_alt = alt_bind && out->alloc != onu_id;
+}
+
 const char *gpon_gem_us_bind_name(enum gpon_gem_us_bind v)
 {
 	switch (v) {
@@ -182,16 +194,20 @@ const char *gpon_gem_us_bind_name(enum gpon_gem_us_bind v)
  * ★ TWO UPSTREAM FACTS THAT ARE *NOT* HERE, AND WHY — so a later reader does
  * not "finish the job" by adding them.
  *
- * 1. The physical queue / VoQ a T-CONT drains on.  The two families compute it
- *    with different formulas over different quantities:
- *      Luna    gpon-luna.c:6230-5809 — qid = 32 * (tcont / 8), overridden
- *              to the fixed OMCC qid for T-CONT 16 and for the alt bind.
+ * 1. The physical queue / VoQ a T-CONT drains on.  The families compute it with
+ *    different formulas over different quantities:
+ *      Luna    luna_tcont_phys_qid() — queue_per_tcont * (tcont / tcont_group),
+ *              both numbers per chip, and the OMCC's queue ASSIGNED from the
+ *              table because the RTL9603CVD's DAL never computes it.
  *      Elnath  cortina-gpon.c:321, :1222 — voq = tcont * 8 + queue.
  *    A single "portable" formula would have to be wrong on one of them.  It
- *    stays a per-chip fact in each shell.  (The oracle models Luna's family
- *    form as phys_qid() in chip_config.h and notes it is identical across the
- *    two Luna chips — which is exactly why it belongs at the FAMILY tier, not
- *    at this one.)
+ *    stays a per-chip fact in each shell.
+ *    ⚠ THIS USED TO SAY the Luna form was `32 * (tcont / 8)` and that the
+ *    oracle's phys_qid() "is identical across the two Luna chips".  Both were
+ *    false: 32 and 8 are the RTL9602C/RTL9607C numbers, the RTL9603CVD uses 8
+ *    and 1, and the driver had the 9602C literal running on every die.  The
+ *    RULING above survives it — a portable formula IS wrong somewhere — and it
+ *    is why this decision belongs at the FAMILY tier, not at this one.
  *
  * 2. The upstream teardown order.  cortina-gpon.c:2104-2107 names it as a
  *    hardware requirement — drain the T-CONT's VoQs FIRST "so the scheduler

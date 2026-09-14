@@ -77,6 +77,11 @@ bool gpon_omci_is_set(const u8 *pdu, unsigned int len)
 	return pdu && len >= 3 && (pdu[2] & 0x1f) == OMCI_MT_SET;
 }
 
+bool gpon_omci_is_create(const u8 *pdu, unsigned int len)
+{
+	return pdu && len >= 3 && (pdu[2] & 0x1f) == OMCI_MT_CREATE;
+}
+
 bool gpon_omci_has_result_code(const u8 *pdu, unsigned int len)
 {
 	u8 mt;

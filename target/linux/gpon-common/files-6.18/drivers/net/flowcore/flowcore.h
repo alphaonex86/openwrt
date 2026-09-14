@@ -76,7 +76,7 @@ u16 flowcore_crc16_ccitt_reflected(const u8 *p, u32 len);
 /*                                                                     */
 /* MOVED HERE 2026-09-02 (round 3) from gpon_rtl9602c_logic.{c,h}: it  */
 /* is generic math with no register, offset or engine name in it, but  */
-/* it lived in an object gated on CONFIG_RTL9602C_GPON -- so the       */
+/* it lived in an object gated on CONFIG_LUNA_GPON -- so the       */
 /* Cortina flow engine (CONFIG_CORTINA_NI_FLOWOFFLOAD, a board that    */
 /* never sets the 9602C symbol) could reach it only by writing a       */
 /* second copy.  flowcore_hash.o is obj-y on every board that carries  */

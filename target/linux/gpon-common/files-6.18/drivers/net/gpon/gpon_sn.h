@@ -73,7 +73,28 @@ void gpon_sn_format(const u8 sn[GPON_SN_BYTES], char *out);
  * gpon_sn_is_set() - has a serial number been provisioned at all?
  * @sn: the 8 bytes; may be NULL.
  *
- * Return: true when any byte is non-zero.
+ * Return: true only when NEITHER 4-byte half is a blank-storage pattern, i.e.
+ * neither the vendor-id half nor the vendor-specific half is entirely 0x00 or
+ * entirely 0xff.
+ *
+ * ★★★ RANGING IS PERMITTED ONLY ONCE THE SERIAL IS DEFINED (operator,
+ * 2026-09-10: *"tiene que permitir rangear una vez el serial definido"*), and
+ * THIS is the predicate that decides "defined". It is a pure question over
+ * eight bytes -- no register, no board, no clock -- so it lives in the core and
+ * every family asks it rather than keeping its own copy.
+ *
+ * ★★ A HALF-BLANK SERIAL IS THE ONE THAT ACTUALLY SHIPS. "Any byte non-zero"
+ * was the whole test until 2026-09-10, and the Elnath (RTL9607F / X400AXF)
+ * drove straight through it: on a 60 s provisioning timeout the Cortina driver
+ * installed { 'X','P','O','N', 0xff,0xff,0xff,0xff } and STARTED RANGING with
+ * it. Four of those eight bytes are printable ASCII, so the predicate said
+ * "set". The vendor-id half is a fleet constant a driver can legitimately hold
+ * while the vendor-specific half is the per-unit value that must be read off
+ * the board -- so half an identity is exactly the shape a provisioning failure
+ * takes here, and 0xff is the blank-flash/unburnt-efuse value this project
+ * already catalogues as a same-class bug ("blank identity defaults, efuse
+ * 0xFF"). 0x00 is refused on the same argument: a half nobody programmed is
+ * not a half somebody chose, and there is no way to tell those apart.
  *
  * ★★ ALL-ZERO MEANS "NOBODY HAS TOLD THIS ONU WHO IT IS", and an ONU in that
  * state may not announce itself: a Serial_Number_ONU carrying a placeholder is

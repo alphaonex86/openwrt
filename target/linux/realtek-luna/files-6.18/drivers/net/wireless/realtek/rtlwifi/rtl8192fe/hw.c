@@ -2542,8 +2542,8 @@ static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
 		       0x2e, 0x2e, 0x2e, 0x2e, 0x2e, 0x2e, 0x2e },
 	.ht40_1s_b = { 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c,
 		       0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c },
-	.thermalmeter = 0x36,
-	.crystalcap = 0x47,
+	.thermalmeter = 36,		/* MIB text "36", INT_T => base 10 */
+	.crystalcap = 47,		/* MIB text "47", INT_T => base 10 */
 	.pa_type = 0,
 	.reg_domain = 1,
 };
@@ -2562,22 +2562,26 @@ static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
  *   HW_WLAN0_11N_PA_TYPE        0
  *   HW_WLAN0_REG_DOMAIN         14
  *
- * ★ THE ENCODING IS PROVEN, NOT ASSUMED. The same reader run on the X111W's own
- * config partition returns THER 36 / XCAP 47 / PA_TYPE 0 / REG_DOMAIN 1 and the
- * four power arrays byte for byte -- i.e. exactly the constants baked into
- * rtl92fe_x111w_cal above, which were obtained independently. So the MIB's
- * scalar digits are HEX, and this table reads the G24W's the same way.
+ * ★★★ THE MIB HOLDS ONE FILE IN TWO BASES, AND THE VENDOR'S OWN PARSER DECIDES
+ * WHICH (corrected 2026-09-10; this comment previously claimed the scalars were
+ * hex and both boards' tables were baked that way). In rtl8192cd's mib_table[]
+ * the tx-power arrays are BYTE_ARRAY_T -- hex digit pairs, so 27 27 28 IS 0x27
+ * 0x27 0x28 -- while THER / XCAP / PA_TYPE / REG_DOMAIN are INT_T, which
+ * `_atoi(arg_val, 10)` reads in BASE TEN unless the text starts with 0x. The
+ * board's own stock console confirms it: `iwpriv wlan0 set_mib xcap=47 ther=36`.
+ * So the scalars below are DECIMAL, matching the MIB text digit for digit.
+ * ⚠ Reading XCAP as hex gave 0x47, which does not even fit the six-bit AFE
+ * field: it was masked to 0x07 and the radio ran at a seventh of the vendor's
+ * crystal trim, silently. `ONU-test-case/wifi_cal_vs_mib.py` is the guard.
  *
  * ★ AND THE MAC IS THE *ELAN* MAC, which the same cross-check established: the
  * X111W's baked .mac IS its ELAN_MAC_ADDR. `WLAN_MAC_ADDR` in the MIB reads
  * 00:e0:4c:07:68:02 on BOTH boards -- a vendor placeholder, not a per-unit
  * address, and using it would put every unit of this family on one MAC.
  *
- * ⚠ reg_domain is the one field the cross-check cannot discriminate (the X111W's
- * is 1, which reads the same in either base). It is read with the SAME hex rule
- * as the four scalars the sibling proved, and it is masked to 3 bits here and
- * only selects a tx-power limit table -- the LEGAL domain comes from OpenWrt's
- * own country setting and wireless-regdb, never from this byte.
+ * ⚠ reg_domain is masked to 3 bits here and only selects a tx-power limit table
+ * -- the LEGAL domain comes from OpenWrt's own country setting and
+ * wireless-regdb, never from this byte.
  */
 static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 	.compat = "realtek,rtl9603cvd", .board = "G24W",
@@ -2590,10 +2594,10 @@ static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 		       0x2c, 0x2c, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d },
 	.ht40_1s_b = { 0x2e, 0x2e, 0x2e, 0x2e, 0x2e, 0x2e, 0x2e,
 		       0x2e, 0x2e, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f },
-	.thermalmeter = 0x34,
-	.crystalcap = 0x21,
+	.thermalmeter = 34,		/* MIB text "34", INT_T => base 10 */
+	.crystalcap = 21,		/* MIB text "21", INT_T => base 10 */
 	.pa_type = 0,
-	.reg_domain = 0x14,
+	.reg_domain = 14,		/* MIB text "14", INT_T => base 10 */
 };
 
 /*
@@ -2686,8 +2690,13 @@ static void _rtl92fe_apply_board_cal(struct ieee80211_hw *hw,
 
 	/* Crystal load cap (XCAP).  Critical for an on-frequency beacon; the
 	 * AFE trim in rtl92fe_hw_init() picks this up via efuse.crystalcap
-	 * when xtal_cap < 0 (the default).
+	 * when xtal_cap < 0 (the default).  The AFE field is SIX BITS, and a
+	 * wider value used to be masked in silence -- which is how a cal read in
+	 * the wrong base ran the radio at 0x07 instead of 0x2f for months.
 	 */
+	if (cal->crystalcap > 0x3f)
+		pr_warn("rtl8192fe: board cal crystalcap 0x%02x exceeds the 6-bit AFE field and is being masked to 0x%02x -- the cal is wrong, not the radio\n",
+			cal->crystalcap, cal->crystalcap & 0x3f);
 	efu->crystalcap = cal->crystalcap & 0x3f;
 	efu->eeprom_crystalcap = cal->crystalcap & 0x3f;
 

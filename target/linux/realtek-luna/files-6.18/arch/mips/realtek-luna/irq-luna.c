@@ -60,10 +60,19 @@
  * Realtek numbers the routing nibbles in inverted word order: input 0 lives in
  * the *last* IRR word's lowest nibble.
  *
- * ROUTING NIBBLE -> CP0 LINE.  A nibble of 0 disconnects the input; a value V
- * selects aggregator output line V-1, and output line 0 is wired to CP0 HW IRQ
- * 2, so the delivered line is CP0 HW IRQ (V + 1).  Cross-checked two ways, and
- * the two agree on every case:
+ * ROUTING NIBBLE -> CP0 LINE.  A nibble of 0 disconnects the input; a non-zero
+ * value V is delivered on CP0 HW IRQ V.
+ *
+ * ⚠ THIS USED TO SAY "CP0 HW IRQ (V + 1)" AND THE TREE ITSELF REFUTES IT, two
+ * independent ways.  The nibbles both tables actually use are {2, 3, 6}, and
+ * the set of parent lines this chip's device tree hooks is {2, 3, 6} -- equal,
+ * which V+1 cannot produce.  And GMAC0 (input 26) carries nibble 3 while the
+ * board's Ethernet demonstrably works, so nibble 3 cannot be arriving on CP0 4,
+ * a line no parent claims.  It matters to anyone ADDING an input: the arithmetic
+ * decides which of the three chained parents must exist for that input to be
+ * delivered at all, and getting it wrong disconnects a line silently.
+ *
+ * Cross-checked two ways, and the two agree on every case:
  *
  *   - the vendor's own dispatchers read GISR word 0 from CP0 IP3 and GISR word
  *     1 from CP0 IP4, and take the SoC timer on IP7;
@@ -87,11 +96,29 @@
  * Named inputs (a reserved input is omitted):
  *
  *	 4 ECC		 5 NAND		 8 switch core	14 USB host p2
- *	16 PCIe		17 PCM0		18 PCM1		24 PON NIC
- *	25 PON NIC DS	26 GMAC0 int0	27 GMAC0 int1	28 VoIP XSI
- *	29 VoIP SPI	31 LX bus debug	32 GPIO JKMN	39 WDT phase-1
+ *	15 PCIe PORT 0	16 PCIe PORT 1	17 PCM0		18 PCM1
+ *	24 PON NIC	25 PON NIC DS	26 GMAC0 int0	27 GMAC0 int1
+ *	28 VoIP XSI	29 VoIP SPI	31 LX bus debug	32 GPIO JKMN
+ *	39 WDT phase-1
  *	40 WDT phase-2	41 GPIO EFGH	42 GPIO ABCD	43..48 TC0..TC5
  *	49..52 UART0..3	60..62 TC6..TC8
+ *
+ * ★★★ PCIe IS TWO INPUTS, ONE PER ROOT-COMPLEX PORT, AND THIS LIST USED TO
+ * CARRY ONE ENTRY FOR THE PAIR.  It said "16 PCIe" and did not name 15 at all,
+ * so a reader checking a chip's `.hwirq` against this map found 16 confirmed
+ * and 15 absent -- and on 2026-09-01 that is exactly what moved the RTL9602C
+ * (which is on PORT 0) from its correct 15 to 16, leaving its radio deaf with
+ * every source apparently agreeing.  MEASURED CAUSALLY on the X111W 2026-09-10
+ * (`ONU-test-case/pcie_intx_bind.py`): masking the endpoint's own HIMR/HIMRE
+ * clears GISR0 bit 15 and restoring it sets bit 15 again, twice, while bit 16
+ * never sets.  The vendor's own map of this same register agrees
+ * (BSP_PCIE0_IE = BIT(15), BSP_PCIE1_IE = BIT(16) at 0xB8003000).
+ *
+ * ⇒ AN INPUT THIS LIST OMITS IS NOT AN INPUT THAT DOES NOT EXIST.  The list is
+ * evidence of what HAS been named, never of what is absent; treat a gap as an
+ * open question.  `pcie_irq_port_guard.py` now checks each chip's declared
+ * PCIe input against the port that chip's own MAC gate selects, so the pair
+ * cannot drift apart again silently.
  *
  * DELIVERY INVARIANT: every GISR interrupt is delivered to CPU 0.  Only CPU 0's
  * block carries routing and mask bits; a second CPU's block, where the chip has

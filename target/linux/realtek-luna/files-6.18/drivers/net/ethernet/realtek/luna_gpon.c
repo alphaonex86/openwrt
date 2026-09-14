@@ -8191,14 +8191,23 @@ MODULE_PARM_DESC(core_fsm, "dispatch downstream PLOAM through the COMMON core FS
 static int gpon_avc_sent;	/* OMCI oper-state AVCs emitted this O5 (reset on re-range) */
 
 /*
- * ★★★ THE ALLOC-ID -> T-CONT BIND BELONGS TO Assign_Alloc-ID, AND LUNA HAD
- *     STOPPED DOING IT.  The rule is the COMMON one, gpon_gem_us_tcont_decide()
- *     in drivers/net/gpon/gpon_gem_us.c, and its own comment describes a Luna
- *     call site -- "where Luna passes its live ONU-ID" -- that no longer
- *     existed: Cortina was the only family still calling it, and this family
- *     had kept only HALF the rule by hand (the `alloc != onu_id` refusal) while
- *     the bind itself moved into luna_data_reconcile(), gated on the OLT's
- *     ME 268 GEM-CTP Create.
+ * ★★★ THE ALLOC-ID -> T-CONT BIND BELONGS TO Assign_Alloc-ID.  That PLOAM
+ *     message IS the OLT telling us to make the allocation operational, and
+ *     the bind had moved out of here into luna_data_reconcile(), gated on the
+ *     OLT's ME 268 GEM-CTP Create.
+ *
+ * ⚠ WHAT WAS WRONG IS THE TIMING, NOT A MISSING FUNCTION CALL, and the
+ *   distinction matters because this family NOT calling the core predicate was
+ *   a DELIBERATE, DOCUMENTED choice, not an oversight:
+ *   OMCI-simulate/FINDING-tcont-rule-three-ways.md records all three
+ *   mechanisms (stock asks the PON-MAC, Cortina asks the core predicate with a
+ *   cached flag, Luna leans on the hardware CAM search) and says plainly that
+ *   none of them is obviously wrong.  Calling gpon_gem_us_tcont_decide() here
+ *   makes the shared rule EXPLICIT at the site and closes that file's
+ *   "exactly one caller" observation -- it is a second, cheap gate beside the
+ *   CAM search, and it is not what restored the WAN.
+ *   ⚠ Its BIND_IS_OMCC arm is unreachable from here: the caller already
+ *     refuses `alloc == gpon_fsm_onu_id` one line above.
  *
  * ⚠ THAT GATE IS A DEADLOCK ON AN OLT THAT WAITS FOR THE T-CONT FIRST.
  *   MEASURED 2026-09-14 on the X111W (OLT row 2/0): the OLT runs its whole

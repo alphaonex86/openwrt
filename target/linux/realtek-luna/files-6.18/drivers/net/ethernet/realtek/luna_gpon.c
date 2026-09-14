@@ -8190,6 +8190,45 @@ MODULE_PARM_DESC(core_fsm, "dispatch downstream PLOAM through the COMMON core FS
 
 static int gpon_avc_sent;	/* OMCI oper-state AVCs emitted this O5 (reset on re-range) */
 
+/*
+ * ★★★ THE ALLOC-ID -> T-CONT BIND BELONGS TO Assign_Alloc-ID, AND LUNA HAD
+ *     STOPPED DOING IT.  The rule is the COMMON one, gpon_gem_us_tcont_decide()
+ *     in drivers/net/gpon/gpon_gem_us.c, and its own comment describes a Luna
+ *     call site -- "where Luna passes its live ONU-ID" -- that no longer
+ *     existed: Cortina was the only family still calling it, and this family
+ *     had kept only HALF the rule by hand (the `alloc != onu_id` refusal) while
+ *     the bind itself moved into luna_data_reconcile(), gated on the OLT's
+ *     ME 268 GEM-CTP Create.
+ *
+ * ⚠ THAT GATE IS A DEADLOCK ON AN OLT THAT WAITS FOR THE T-CONT FIRST.
+ *   MEASURED 2026-09-14 on the X111W (OLT row 2/0): the OLT runs its whole
+ *   provisioning script, stops at `Set me=262/32768` -- the T-CONT's Alloc-ID
+ *   -- and Deactivates ~2 s into O5 without ever sending Create me=268/2.  We
+ *   wait for the GEM; it waits for the T-CONT.  The 2026-09-12 image, which
+ *   still bound here, reaches Create me=268/2 and leases: `T-CONT 8 <- alloc
+ *   0x100 bound` at +4 ms, `DATA GEM installed` at +64 ms, DHCP at +2.3 s.
+ *
+ * ★ THE GEM CLASSIFY STAYS DEFERRED.  Installing the data GEM before the OLT
+ *   created its own is what churn-locked a 2nd+ admit, and that reason is
+ *   still good; only the T-CONT bind -- which is what Assign_Alloc-ID IS --
+ *   comes back here.
+ */
+static void luna_data_tcont_from_assign(u16 alloc, bool assigned)
+{
+	enum gpon_gem_us_bind bind;
+
+	if (!assigned || !data_tcont)
+		return;
+	bind = gpon_gem_us_tcont_decide(alloc, gpon_fsm_onu_id,
+					READ_ONCE(luna_data.armed.alloc_bound));
+	if (bind == GPON_GEM_US_BIND_TCONT) {
+		gpon_install_tcont(GPON_DATA_TCONT, alloc);
+		return;
+	}
+	pr_info("luna-gpon: Alloc 0x%x NOT bound to the data T-CONT: %s\n",
+		alloc, gpon_gem_us_bind_name(bind));
+}
+
 static void luna_omci_poll(void)
 {
 	unsigned int budget = LUNA_OMCI_POLL_BUDGET;
@@ -9946,8 +9985,10 @@ static void gpon_fsm_handle(const u8 *m)
 			pr_info("luna-gpon: ASSIGN_ALLOC alloc=0x%x op=0x%x tcont_done=%d\n", alloc, d[2], gpon_tcont_installed);
 
 			if (alloc != gpon_fsm_onu_id && gpon_data_alloc_valid(alloc) &&
-			    (d[2] == 0x01 || d[2] == 0xff))
+			    (d[2] == 0x01 || d[2] == 0xff)) {
 				luna_data_alloc_changed(NULL, alloc, d[2] == 0x01);
+				luna_data_tcont_from_assign(alloc, d[2] == 0x01);
+			}
 			gpon_send_ack(m);
 			if (trace)
 				pr_info_ratelimited("luna-gpon: ACK type=0x%02x d=%*phN\n",

@@ -4234,9 +4234,19 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 				 gpon_hwaddr_src_name(src));
 	}
 
-	/* Bring up the switch L3/L4 NAT engine (gated by the hw_nat param). This
-	 * writes switch-core registers, so it is validated for datapath safety
-	 * before any per-flow programming is added. */
+	/* Bring up the switch L3/L4 NAT engine (gated by the hw_nat param).
+	 *
+	 * ⚠ IT WRITES NO HARDWARE HERE, and this comment used to say it did
+	 * ("this writes switch-core registers"). MEASURED 2026-09-14, reading
+	 * rtl9602c_l34_init(): it sets a pointer, a mutex and `ready = true`,
+	 * nothing else. The engine is armed LAZILY -- l34_engine_on() is called
+	 * from flow_add, so a boot that installs no flow leaves the switch core
+	 * exactly as hw_nat=0 leaves it.
+	 * That matters because the false version sent an investigation looking
+	 * for a boot-time register delta between the two arms; there is none,
+	 * and a comment claiming a hardware write is a comment that invents
+	 * suspects. What IS gated here is the /proc harness and the TC
+	 * lifecycle registration below. */
 	if (hw_nat) {
 		if (rtl9602c_l34_init(&ep->l34, ep->sw)) {
 			dev_warn(dev, "L34 hw-nat init failed; software forwarding\n");

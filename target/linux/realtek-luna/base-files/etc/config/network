@@ -44,9 +44,42 @@ config interface 'lan'
 # (nas0_0) is likewise UNTAGGED (VLAN 0) IPoE — NOT a tagged switch VLAN, so eth0.2 was
 # wrong. LAN (br-lan/eth0) and WAN (gpon0) stay on separate L3 interfaces -> the ONU
 # routes + NATs (firewall lan->wan).
+# keepalive = "<lcp-echo-failure> <lcp-echo-interval>"; persist and holdoff are
+# read by the same ppp.sh. All three are INERT while proto is 'dhcp' -- netifd's
+# dhcp.sh declares none of them and uci drops an undeclared option silently -- and
+# they are here so that a switch to proto 'pppoe' (uci, the vendor UI's
+# equivalent, or a test case) inherits a survivable session instead of OpenWrt's
+# default.
+#
+# ★ WHY, and it is measured on THIS board. ppp.sh's default is an LCP echo EVERY
+# SECOND with teardown after 5 misses = a FIVE SECOND budget, and it sets
+# `maxfail 1` with no `persist`, so pppd EXITS and netifd destroys and re-creates
+# the ppp netdev. Under a 60 B upstream UDP flood the echo crosses the same
+# congested upstream queue as the load, five are lost in a row, and the session
+# dies -- recorded on the X111W as `pppoe-wan` ifindex 8 -> 9 plus
+# `pppd: Connection terminated`, on 2026-08-22 and again on 2026-09-10.
+# `lcp-echo-adaptive` does not save it: it suppresses the echo only when the PPP
+# unit's pkts_in MOVED (ppp-2.5.2 pppd/lcp.c), and an upstream-only flow gives
+# the peer nothing to send back.
+#
+# ★ THE VALUE COMES FROM STOCK. This board's own vendor image (etc/producttype
+# X111WF1) runs spppd, and two independent points in its binaries agree on the
+# retry count: lib/libmib.so holds the literal pair `spppctl katimer 30` +
+# `spppctl echo_retry 6`, and bin/spppd's .data `max_alive_cnt` (0x4932c4) is
+# initialised to 6. So stock tolerates 30 s x 6 = 180 s.
+#
+# DELIBERATE DEVIATION: we take 20 s x 6 = 120 s, not stock's 180 s. It is 24x
+# ppp.sh's budget and far beyond any congestion gap this ONU produces, while
+# detecting a genuinely dead peer a minute sooner -- and it is the same value the
+# realtek-elnath target already ships, so the two boards do not need two answers
+# to one question. `pppoe_dead_peer_redial` allows 170 s, which 180 s would not
+# fit inside.
 config interface 'wan'
 	option device 'gpon0'
 	option proto 'dhcp'
+	option keepalive '6 20'
+	option persist '1'
+	option holdoff '5'
 
 config interface 'wan6'
 	option device 'gpon0'

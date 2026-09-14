@@ -52,6 +52,7 @@
 #include <linux/kernel.h>	/* sscanf */
 #include <linux/types.h>
 #include <linux/bits.h>
+#include "luna_gmac_logic.h"	/* struct luna_rx_layout: the per-die RX field map */
 
 /* ───────────────────────── family-invariant facts ───────────────────────── */
 /* MAC block, offsets from the MAC base. */
@@ -120,12 +121,29 @@
  * `ep->sw + 0x0` and `+ 0x4` with the comment `switch regs 0x10004/0x0/0x4`
  * -- the author knew they were a pair and had no name for it.  It is the
  * same shape as every other indirect block here: a DATA word, then a
- * COMMAND word that says where the data goes.
- * ⚠ The command VALUES stay as they are.  Their field layout (phy, page,
- * register, op) is not established by anything in reach, and decoding them
- * would be inventing a structure to make the code look tidier. */
+ * COMMAND word that says where the data goes, and a RESULT word that also
+ * carries BUSY.
+ *
+ * ★ THE COMMAND LAYOUT IS ESTABLISHED, and this note used to say it was not.
+ *   luna_eth.c drives the same window field by field, and the literals the
+ *   other shell writes decode exactly: 0x0060A400 is WREN|EN, phy 0, OCP
+ *   0xA400, and 0x0061A400 is the same on phy 1 -- which is the BMCR
+ *   power-down/power-up pair that file's own comments describe.  Leaving the
+ *   note standing would keep two shells writing one register two ways.
+ *
+ * ⚠ WHAT IS *NOT* SETTLED IS THE OCP MAP PER PORT, which is a per-chip
+ *   question and lives with the chip, not here. */
 #define SW_GPHY_IND_WD		0x00000	/* GPHY_IND_WD: the data word */
 #define SW_GPHY_IND_CMD		0x00004	/* GPHY_IND_CMD: where it goes */
+#define SW_GPHY_IND_RD		0x00008	/* GPHY_IND_RD: the answer, and BUSY */
+#define   GPHY_IND_BUSY		BIT(16)	/* in the RD word: still in flight */
+#define   GPHY_IND_EN		BIT(21)	/* in the CMD word: start */
+#define   GPHY_IND_WREN		BIT(22)	/* in the CMD word: write, not read */
+#define   GPHY_IND_PHY(p)	((u32)(p) << 16)	/* in the CMD word */
+/* The OCP address of MII register N on a PHY answering on page 0xA40; an FE PHY
+ * with a FLAT map answers at (N & 0x1f) << 1 instead.  WHICH of the two a given
+ * port uses is per chip and is decided by that chip's own driver. */
+#define GPHY_MII_PAGE		0xA400
 /* ⚠ 0x198 / 0x1b8 / 0x1d8 / 0x1f8 ARE NOT NAMED HERE, and the attempt is worth
  * recording (2026-09-04).  The chipdef names three of them P_ABLTY,
  * BYPS_ABLTY_LOCK and MISCELLANEOUS_BONDING -- three unrelated registers -- but
@@ -135,20 +153,52 @@
  * naming ELEMENTS of an array, exactly as it does for the PISO block, and a
  * flat name for one element would be the same defect that made the G24W write
  * 0x2700c twice.  The compiler caught this one: SW_P_ABLTY was already taken. */
+#define ABLTY_LINK		BIT(4)	/* the LINK field of the ability trio	*/
 #define SW_MAC_CPU_TAG_CTRL	0x23030	/* MAC_CPU_TAG_CTRL */
 #define SW_CHIP_INFO		0x10004	/* CHIP_INFO: low 16 bits = the GPHY variant */
 #define SW_METER_TB_CTRL	0x25000	/* METER_TB_CTRL: meter tick/token config */
 #define SW_VLAN_EGRESS_TAG	0x2A000	/* VLAN_EGRESS_TAG */
 #define SW_STAT_PORT_TX_MIB	0x32000	/* STAT_PORT_TX_MIB, +0x80 per port */
+/* ★ THE RX BASE, ONE PER DIE, AND THE DIE IS IN THE NAME ON PURPOSE.  These
+ * exist so the number lives in exactly ONE place -- the table rows below are
+ * initialised FROM them and never repeat the literal -- and so the pin at the
+ * foot of this file can be a static_assert: a member of a `static const struct`
+ * is not a constant expression in C, a macro is.
+ * ⚠ THE SUFFIX IS A WARNING LABEL, NOT DECORATION.  A bare SW_STAT_PORT_RX_MIB
+ * would look portable and a shared file would reach for it, which is exactly
+ * how SW_MACPP_STRIDE_9602C got used on the RTL9603CVD.  Nothing outside that
+ * die's own table row may name one of these. */
+#define SW_STAT_PORT_RX_MIB_RTL9602C	0x32200
+#define SW_STAT_PORT_RX_MIB_RTL9603CVD	0x32600
+#define SW_STAT_PORT_RX_MIB_RTL9607C	0x32600
 #define SW_STAT_PORT_MIB_STRIDE	0x80u	/* the per-port step, stated by the
 					 * dump's own comment and confirmed by
 					 * every TX address it reads */
-/* ⚠ THERE IS DELIBERATELY NO SW_STAT_PORT_RX_MIB (2026-09-04).  The /proc
- * dump's comment says the RX block is at 0x32400, but this chip's OWN
- * chipdef names 0x32400 STAT_PORT_OAM_MIB, and names 0x32600 -- which the
- * dump reads as p3's RX -- STAT_ACL_CNT.  Naming a base two sources
- * disagree about would put the disagreement behind a word that looks
- * settled.  See FINDING-the-rx-mib-dump-reads-a-base-nobody-confirms.md. */
+/* ★★ THE RX MIB BASE IS SETTLED, AND IT IS PER-DIE -- WHICH IS WHY IT IS IN
+ * THE TABLE AND NOT HERE (2026-09-11).  The 2026-09-04 note that used to sit
+ * at this spot said there was "deliberately no SW_STAT_PORT_RX_MIB" because
+ * the chipdef named 0x32400 STAT_PORT_OAM_MIB and 0x32600 STAT_ACL_CNT --
+ * both true, and both the wrong register.  The chipdef DOES declare a
+ * STAT_PORT_RX_MIB; nobody had looked it up by its own name:
+ *
+ *     die          STAT_PORT_TX_MIB   STAT_PORT_RX_MIB   ports   stride
+ *     RTL9602C          0x32000           0x32200         0..3    0x80
+ *     RTL9603CVD        0x32000           0x32600         0..6    0x80
+ *     RTL9607C          0x32000           0x32600         0..11   0x80
+ *
+ * ⚠ READ THE TX AND RX COLUMNS TOGETHER.  TX does not move and RX does, so a
+ * family #define for RX would give the RTL9602C the SIBLINGS' 0x32600 -- and
+ * on that die 0x32600 is STAT_ACL_CNT, a real register that answers a real
+ * read.  That is not a hypothetical: the /proc dump in rtl9602c_eth.c was
+ * reading exactly that address under the label "p3 rx".  Same shape as the
+ * LUT rows above, same shape as IO_LED_EN vs IO_MODE_EN.
+ *
+ * The block LAYOUT is family-invariant (the three chipdefs list the same 23
+ * RX and 27 TX fields at the same byte offsets inside the 0x80 window), which
+ * is why luna_eth_mib.c carries ONE field table and the bases are data.
+ * Independently cross-checked: luna_eth.c's own RX unicast/multicast/broadcast
+ * addresses on the RTL9603CVD (0x32620 / 0x32628 / 0x3262C) are exactly
+ * base + IFINUCASTPKTS / IFINMULTICASTPKTS / IFINBROADCASTPKTS. */
 
 
 /* Switch core: the VLAN block did NOT move between these two revisions. */
@@ -176,7 +226,82 @@
 #define SW_PISO_PORT_STRIDE	4u
 #define SW_VLAN_PORT_ACCEPT_FRAME_TYPE		0x13000	/* per-port accept-frame-type (0 = accept all) */
 #define SW_VLAN_CTRL		0x13008
-#define SW_VLAN_PB_VID		0x1300C	/* per-port default VID (PVID), stride 4 */
+/* ★★★ PVID IS PACKED TWO PER WORD -- "stride 4" WAS FALSE (measured 2026-09-12).
+ * The array is 12-BIT elements in 32-bit words, so port p lives at
+ * word (p / 2) in bits [(p % 2) * 12 + 11 : (p % 2) * 12], NOT at its own word.
+ *
+ * Proven three ways from our OWN stock kernel (cross-compiler/stock_nor/k0_kernel),
+ * not from the SDK:
+ *   descriptor @file 0xca15d0 : offset 0x1300c · element stride 0x000c = 12 BITS
+ *                               · max port index 3
+ *   _reg_addr_find @0x801b69dc: li 32 / div by stride / div port / sll 2 / addu
+ *                               => addr = base + 4 * (port / (32 / 12))
+ *   reg_array_field_write @0x801b72e8: mfhi after div / mult by stride
+ *                               => shift = (port % (32 / 12)) * 12
+ *
+ * ⚠ WHAT THE FALSE STRIDE DID: a writer stepping by 4 set port 0 and port 2,
+ *   left ports 1 and 3 INHERITED, and wrote its value into 0x13014/0x13018 --
+ *   which are EXT_VID, a different register entirely. Three defects from one
+ *   wrong word in a comment, and the code read correctly at every call site.
+ */
+#define SW_VLAN_PB_VID		0x1300C	/* per-port default VID (PVID) array base */
+#define SW_VLAN_PB_VID_BITS		12u	/* element width */
+#define SW_VLAN_PB_VID_PORTS		4u	/* descriptor max port index 3 */
+
+/*
+ * ★★★ THE PACKED PER-PORT ARRAY, ONCE FOR THE WHOLE FAMILY (2026-09-12).
+ *
+ * This switch core states most per-port registers as an ARRAY OF BIT-FIELDS,
+ * not as one word per port: element `port` of a `bits`-wide array lives in word
+ * (port / (32/bits)) at lsb (port % (32/bits)) * bits. Stock implements exactly
+ * that arithmetic ONCE, generically, for every array it owns -- own k0_kernel
+ * _reg_addr_find @0x801b69dc (`addr = base + 4 * (port / (32/bits))`) and
+ * reg_array_field_write @0x801b72e8 (`shift = (port % (32/bits)) * bits`).
+ *
+ * ⚠ WE IMPLEMENTED IT PER CALL SITE AND GOT IT WRONG TWICE IN ONE FILE, each
+ *   time by assuming one word per port:
+ *     PVID  (12 bits): stepping by 4 set ports 0 and 2, left 1 and 3 inherited,
+ *                      and wrote two words of EXT_VID.
+ *     DLF   ( 2 bits): "16 bits per port" set port 0 only, and the second write
+ *                      landed on LUT_LEARN_OVER_CTRL, a different register.
+ *   Meanwhile luna_eth.c already knew the DLF field was 2 bits and said so in a
+ *   comment -- the knowledge existed in one sibling and not the other, which is
+ *   the shape this family header exists to end.
+ *
+ * ⇒ ONE statement of the arithmetic, here, for both Luna Ethernet shells. It is
+ *   PURE -- no MMIO, no device pointer -- so each shell keeps its own accessor
+ *   (ioread32/iowrite32 here, sw_rd/sw_wr there) and neither grows a copy of
+ *   the layout. Per chip the TABLE supplies the base and the width; a new part
+ *   costs a row, never a second implementation.
+ */
+/* The unknown-SA / unknown-DA per-port ACTION arrays: 2-bit elements, so 16
+ * per 32-bit word. Own k0_kernel descriptors @0xca1360 (0x1c008) and
+ * @0xca1378 (0x1c00c, a SEPARATE register) both state stride 2 bits. */
+#define SW_DA_ACT_BITS		2u
+
+#define SW_PACKED_PER_WORD(bits)	(32u / (bits))
+
+/* Byte offset of the word holding element `port`. */
+static inline u32 sw_packed_off(u32 base, unsigned int port, unsigned int bits)
+{
+	return base + (port / SW_PACKED_PER_WORD(bits)) * 4u;
+}
+
+/* Bit position of element `port` inside that word. */
+static inline unsigned int sw_packed_lsb(unsigned int port, unsigned int bits)
+{
+	return (port % SW_PACKED_PER_WORD(bits)) * bits;
+}
+
+/* `word` with element `port` replaced by `val`; every other bit preserved. */
+static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
+				u32 val)
+{
+	unsigned int lsb = sw_packed_lsb(port, bits);
+	u32 mask = ((1u << bits) - 1u) << lsb;
+
+	return (word & ~mask) | ((val << lsb) & mask);
+}
 
 /* SoC glue that is at the same physical address on every Luna part seen here. */
 #define SWCORE_PHYS		0x1B000000UL
@@ -185,9 +310,31 @@
 /* ─────────────────────────── the per-chip table ─────────────────────────── */
 /**
  * struct luna_sw_map - the switch-core facts that differ between Luna chips
- * @src_permit:       L2_SRC_PORT_PERMIT -- egress FILTER ENABLE, permissive
- *                    value is 0 (writing all-ones reflects every frame back
- *                    out its own ingress port; that was a real broadcast loop).
+ * @src_permit:       L2_SRC_PORT_PERMIT -- one bit per port, and each die
+ *                    states its OWN width on read-back: 0xFFFFFFFF comes back
+ *                    0xF on the RTL9602C and 0x3F on the RTL9603CVD.
+ *                    ★★ WHAT THE FIELD GATES IS NOT ESTABLISHED, AND THIS TREE
+ *                    CLAIMED IT THREE WAYS, ALL INCOMPATIBLE: luna_eth.c said
+ *                    "EN=1 DROPS the forwarded frame, 0 is the permissive
+ *                    value"; rtl9602c_eth.c said "INVERTED polarity: EN=1
+ *                    PERMITS a frame to egress its OWN ingress port"; the
+ *                    RTL9607C bring-up said "all-zero means NO port may
+ *                    forward" and wrote 0xFFFFFFFF to open it.
+ *                    MEASURED 2026-09-11 on BOTH Luna boards by forcing every
+ *                    bit and reading the EFFECT, never the read-back
+ *                    (ONU-test-case/src_permit_polarity.py): the register KEEPS
+ *                    the write and all three predictions FAIL.  Host<->board
+ *                    forwarding 3/3 at the factory value, 3/3 forced, 3/3
+ *                    restored on both dies; 0 of 12 of the host's own
+ *                    broadcasts came back inbound either way; and on the
+ *                    RTL9603CVD the CPU port's own flood return
+ *                    (lan_flood_return) was `returns-internally` at 0x0 and at
+ *                    0x3F alike.  ⇒ 0 is written because it IS the reset
+ *                    value, not because 0 was proven permissive, and no
+ *                    behaviour of this driver may be explained by this field
+ *                    until a measurement finds one.  The claims are refuted for
+ *                    the shipped configuration of these two dies; the RTL9607C
+ *                    one is UNTESTED -- no such board is on this bench.
  *                    ⚠ ON THE RTL9602C THIS ADDRESS WAS WRONG ONCE, and the
  *                    note travels with the value: it was 0x1C114, which is
  *                    QOS_PB_PRI on that chip, so the CPU port's ingress permit
@@ -201,7 +348,12 @@
  *                    touches (MIB, PISO).  Too small and those reads land
  *                    outside the mapping instead of failing loudly.
  * @lut_unkn_sa:      unknown-SA action, 2 bits per port
- * @lut_unkn_uc_da:   per-port unknown-UC DLF action, 16 bits per port
+ * @lut_unkn_uc_da:   per-port unknown-UC DLF action. ★ 2 BITS PER PORT, every
+ *                    port in ONE word -- "16 bits per port" was false and the
+ *                    writer obeyed it (own k0_kernel descriptor @0xca1360:
+ *                    stride 2 bits, max port 3). The next word, +4, is a
+ *                    SEPARATE register (LUT_LEARN_OVER_CTRL, descriptor
+ *                    @0xca1378) and must never be written as this one's port 2/3.
  * @unkn_l2_mc:       unknown L2 multicast action
  * @unkn_ip4_mc:      unknown IPv4 multicast action
  * @unkn_ip6_mc:      unknown IPv6 multicast action
@@ -235,6 +387,23 @@ struct luna_sw_map {
 	u32 piso_base;
 	u8  cpu_port;
 	u8  pon_port;
+	/* Copper PHY ports, always 0..n_copper-1.  It lives HERE, beside the
+	 * other port numbers, because BOTH Ethernet shells need it: one to walk
+	 * the PHYs, the other to refuse an administrative request aimed at a
+	 * port that has no PHY behind it. */
+	u8  n_copper;
+	/* ★ THE PER-PORT REGISTER INTERVAL, AND IT IS NOT THE FAMILY'S.  The
+	 * vendor states it as data -- macPpInfo.interval, 0x400 on the RTL9602C
+	 * and 0x100 on the RTL9603CVD and RTL9607C (sdk chipdef chip.c).  It sat
+	 * in luna_gpon_regs.h only as a NUMBER named for one chip
+	 * (SW_MACPP_STRIDE_9602C), so a shared file could reach for it and did:
+	 * luna_gpon.c -- which BOTH Luna boards build -- wrote
+	 * SW_P_MISC_PORT_9602C(2) and (3) at five sites, which on the RTL9603CVD
+	 * address P_MISC[8] and P_MISC[12].  That chip has SIX ports, so both
+	 * writes land outside the declared per-port block (macPpInfo upper bound
+	 * 0x203FF) and the CPU port's RX_SPC -- what makes the switch accept the
+	 * 48-byte OMCI PDU instead of runt-filtering it -- was never set. */
+	u16 macpp_stride;
 	u32 port_mask;
 	u32 swcore_size;
 	u32 lut_unkn_sa;
@@ -262,6 +431,9 @@ struct luna_sw_map {
 	 * 0x1B4.  The numbers overlap between chips without meaning the same
 	 * thing, which is the third register block today found to do that.
 	 * 0 = this chip's driver does not use that member. */
+	/* ABLTY_LINK is the LINK field inside force_ablty (the value) and inside
+	 * ablty_force (whether it is forced): the pair both Ethernet shells use
+	 * to gate one port administratively. */
 	u32 force_ablty;	/* + 4*port: forced ability values	*/
 	u32 p_ablty;		/* + 4*port: LIVE ability, read-only	*/
 	u32 ablty_force;	/* + 4*port: which fields are forced	*/
@@ -270,6 +442,27 @@ struct luna_sw_map {
 	u32 bc_flood;
 	u32 unkn_mc_flood;
 	u32 unkn_uc_flood;
+	/* ★ THE STATISTICS BLOCK.  STAT_PORT_TX_MIB is family-invariant (0x32000
+	 * on all three dies) and lives as a #define above; the RX base MOVES and
+	 * the port count differs, so both are data.  See the table in the RX-MIB
+	 * note above for the chipdef evidence.
+	 * 0 = this die's RX MIB base has not been established -> luna_eth_mib.c
+	 * publishes NO rx row for it.  A base nobody established rendered as 0
+	 * would read as "this port received nothing", which is a device finding
+	 * nobody measured. */
+	u32 rx_mib;		/* STAT_PORT_RX_MIB base; 0 = not established */
+	u8  n_mib_ports;	/* MIB port index range is 0..n_mib_ports-1	*/
+	/* ★ THE MAC-LEVEL MIB ARRAY, and it is ESTABLISHED ON ONE DIE ONLY.
+	 * Offset (from the MAC base, not the switch base) of the fourteen 16-bit
+	 * GMAC counters -- TXOKCNT RXOKCNT TXERR RXERR MISSPKT FAE ... -- named
+	 * and 16-bit-confirmed by the RTL9602C's OWN stock firmware, which prints
+	 * them four hex digits wide from /proc/rtl8686gmac/hw_reg (tier 2,
+	 * dev/STOCK_GMAC_REGS.md).  Nothing has established the array on the
+	 * RTL9603CVD or the RTL9607C -- neither shell reads it there and neither
+	 * chipdef covers the MAC window -- so those tables leave it 0 and those
+	 * boards publish no mac_* row at all.  Borrowing the sibling's offset
+	 * would answer with whatever that window holds. */
+	u32 gmac_mib16;		/* 16-bit MAC MIB array base; 0 = not established */
 	/* ★ THE DS-OMCI CPU-TAG REASON, and it lives beside the port numbers for
 	 * the same reason they do: BOTH Ethernet shells classify a trapped OMCI
 	 * frame by it, so a second home is how the two come to disagree.  It was
@@ -277,6 +470,10 @@ struct luna_sw_map {
 	 * being read as a family fact -- the exact spelling that makes a sibling's
 	 * literal look portable. */
 	u8  omci_cpu_reason;
+	/* ★ RX descriptor field positions for THIS die. NULL = not established;
+	 * the parser then decodes nothing rather than borrowing a sibling's
+	 * shifts, which is the defect this field exists to end. */
+	const struct luna_rx_layout *rx_layout;
 };
 
 static const struct luna_sw_map rtl9602c_sw_map = {
@@ -289,6 +486,11 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.piso_base	= 0x27000,
 	.cpu_port	= 3,
 	.pon_port	= 2,
+	.n_copper	= 2,	/* 0 = FE, 1 = GE -- this board's own stock map,
+				 * where ME 0x0101 (the GE UNI) is port 1, and
+				 * the boot loader's BMCR pair agrees: a 100M
+				 * value to phy 0, a 1G value to phy 1 */
+	.macpp_stride	= 0x400,	/* macPpInfo.interval, this chip's own */
 	.port_mask	= 0xf,
 	.swcore_size	= 0x40000,	/* must cover MIB @0x32000 + PISO @0x27000 */
 	.lut_unkn_sa	= 0x1C004,	/* unmoved: the SAME offset on both chips */
@@ -299,7 +501,11 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.bc_flood	= 0x1C020,
 	.unkn_mc_flood	= 0x1C024,
 	.unkn_uc_flood	= 0x1C028,
+	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9602C,	/* [tier 3, its chipdef] */
+	.n_mib_ports	= 4,		/* chipdef port index 0..3 */
+	.gmac_mib16	= 0x10,		/* the 16-bit MAC MIB array [tier 2, stock hw_reg] */
 	.omci_cpu_reason = 246,	/* RTL9602C_CHIP_ID -> omciRsn 246 [tier 3, gponapi.c] */
+	.rx_layout	= &luna_rx_layout_rtl9602c,
 };
 
 static const struct luna_sw_map rtl9603cvd_sw_map = {
@@ -312,6 +518,8 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.piso_base	= 0x27000,
 	.cpu_port	= 5,
 	.pon_port	= 4,
+	.n_copper	= 4,	/* 0..3 */
+	.macpp_stride	= 0x100,	/* macPpInfo.interval, this chip's own */
 	.port_mask	= GENMASK(5, 0),
 	.swcore_size	= 0x43000,
 	.lut_unkn_sa	= 0x1C004,
@@ -322,7 +530,11 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.bc_flood	= 0x1C028,
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
+	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9603CVD,	/* [tier 3, its chipdef] */
+	.n_mib_ports	= 7,		/* chipdef port index 0..6 */
+	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */
 	.omci_cpu_reason = 229,	/* RTL9603CVD_CHIP_ID -> omciRsn 229 [tier 3, gponapi.c] */
+	.rx_layout	= &luna_rx_layout_rtl9603cvd,
 };
 
 /* The RTL9607C's eight LUT offsets were CROSS-READ from its own chipdef on
@@ -352,6 +564,8 @@ static const struct luna_sw_map rtl9607c_sw_map = {
 	.piso_base	= 0x27000,
 	.cpu_port	= 9,
 	.pon_port	= 5,
+	.n_copper	= 5,	/* 0..4 */
+	.macpp_stride	= 0x100,	/* macPpInfo.interval, this chip's own */
 	.port_mask	= GENMASK(9, 0),
 	.swcore_size	= 0x43000,
 	.lut_unkn_sa	= 0x1C004,
@@ -362,7 +576,21 @@ static const struct luna_sw_map rtl9607c_sw_map = {
 	.bc_flood	= 0x1C028,
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
+	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9607C,	/* [tier 3, its chipdef] */
+	.n_mib_ports	= 12,		/* chipdef port index 0..11 */
+	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */
 	.omci_cpu_reason = 229,	/* RTL9607C_CHIP_ID -> omciRsn 229 [tier 3, gponapi.c] */
+	/* ★★ INHERITED FROM THE 9603CVD, DECLARED AS SUCH, NOT VERIFIED
+	 * (2026-09-12). NULL here was WORSE than a guess: luna_eth.c has no
+	 * payload OMCI fallback, so an unset layout makes every OMCI metadata
+	 * match fail, sends all WAN data to the LAN netdev, and -- worst --
+	 * feeds BIT(sp) a shift of UINT_MAX, which is undefined behaviour.
+	 * I wrote that NULL AS the safe option, having reasoned about the
+	 * X111W shell, which does have a fallback; the property did not carry.
+	 * ⇒ this die keeps EXACTLY the behaviour it ships with today, and the
+	 *   borrowing that used to be invisible is now written down. It is a
+	 *   candidate for its own row the moment 9607C stock evidence exists. */
+	.rx_layout	= &luna_rx_layout_rtl9603cvd,
 };
 
 
@@ -425,31 +653,11 @@ static inline void luna_idr_set(void __iomem *base, const u8 *mac)
 	iowrite32(((u32)mac[4] << 24) | ((u32)mac[5] << 16), base + R_IDR4);
 }
 
-/* ---- a MAC handed in on the kernel command line --------------------------- */
-/* THE FIRST RUNG of this project's declared precedence (bootarg -> DT/nvmem ->
- * random LAA).  On these products it is the ONLY rung that can carry a PER-UNIT
- * value today: no DTS in this target declares `mac-address`, and the real
- * address lives zlib-compressed inside the vendor MIB in the config partition,
- * which the kernel cannot read (no JFFS2, and an nvmem cell cannot express a
- * compressed value).  The suite hands it in from the BOARD's own declaration --
- * `rig/bootmode.py:_mac_bootarg`, keyed on that board's ETH_MAC_BOOTARG.
- *
- * ⚠ NO ADDRESS IS EVER SPELLED IN THE KERNEL.  A literal here, or in a DTS,
- * would hand the second unit of the same product the first one's identity. */
-static inline bool luna_mac_from_param(const char *s, u8 *out)
-{
-	u8 v[ETH_ALEN];
-	int n;
-
-	if (!s || !*s)
-		return false;
-	n = sscanf(s, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-		   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
-	if (n != ETH_ALEN || !is_valid_ether_addr(v))
-		return false;
-	memcpy(out, v, ETH_ALEN);
-	return true;
-}
+/* The bootarg parser and the whole precedence moved to
+ * drivers/net/gpon/gpon_hwaddr.h on 2026-09-10; luna_mac_is_bringup_default()
+ * stays here because WHICH constant this silicon powers up holding is a family
+ * fact. Never spell an address in a header or a DTS: it is per-unit.
+ */
 
 
 /* ---- GMAC stop, and the promiscuous bit -----------------------------------
@@ -526,31 +734,81 @@ struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
  * fault: the engine simply walks off the end of the ring into whatever follows
  * it, which is the quietest possible corruption.  `nr` is the ring's own entry
  * count, passed in, never a #define read from whichever driver compiled last. */
+/* Hand slot @idx back to HW with the buffer it ALREADY holds.
+ *
+ * The DROP path.  Nothing is unmapped and nothing is freed: the frame sitting
+ * in that buffer is abandoned and the device overwrites it.  This is what a
+ * poll loop must do when it cannot secure a replacement buffer -- see the
+ * ownership contract on luna_rx_alloc(). */
+static inline void luna_rx_rearm(struct rx_desc *ring, unsigned int idx,
+				 unsigned int nr, unsigned int buf_size)
+{
+	u32 opts1 = D_OWN | buf_size;
+
+	ring[idx].opts2 = 0;
+	ring[idx].opts3 = 0;
+	if (idx == nr - 1)
+		opts1 |= D_EOR;
+	ring[idx].opts1 = opts1;
+}
+
+/* Allocate and map ONE replacement buffer.  -> the skb, or NULL.
+ *
+ * ★★ THE OWNERSHIP CONTRACT, and it is the whole point of the split.  A poll
+ * loop hands its skb away on EVERY arm (napi_gro_receive / netif_rx take it,
+ * dev_kfree_skb_any frees it), so once the loop body has run there is nothing
+ * left to put back.  A refill that fails AFTER that point therefore cannot
+ * "retry next poll": it leaves skbs[idx] pointing at memory the driver no
+ * longer owns, behind a descriptor whose D_OWN is clear -- so the next poll
+ * walks straight past the ownership guard and re-delivers a freed skb (and
+ * unmaps the same address a second time, which fires first).
+ *
+ * ⇒ CALL THIS BEFORE CONSUMING THE FRAME, and on NULL drop the frame with
+ * luna_rx_rearm() instead.  Never NULL out skbs[idx] as a shortcut: the loops
+ * have no !skb guard, so that converts the use-after-free into a NULL deref
+ * and still leaves the stale dmas[idx] to be unmapped twice. */
+static inline struct sk_buff *luna_rx_alloc(struct net_device *ndev,
+					    struct device *dev,
+					    unsigned int buf_size,
+					    dma_addr_t *da)
+{
+	struct sk_buff *skb = netdev_alloc_skb(ndev, buf_size);
+
+	if (!skb)
+		return NULL;
+	*da = dma_map_single(dev, skb->data, buf_size, DMA_FROM_DEVICE);
+	if (dma_mapping_error(dev, *da)) {
+		dev_kfree_skb_any(skb);
+		return NULL;
+	}
+	return skb;
+}
+
+/* Install an already-allocated buffer in slot @idx and hand it to HW. */
+static inline void luna_rx_arm(struct rx_desc *ring, struct sk_buff **skbs,
+			       dma_addr_t *dmas, unsigned int idx,
+			       unsigned int nr, unsigned int buf_size,
+			       struct sk_buff *skb, dma_addr_t da)
+{
+	skbs[idx] = skb;
+	dmas[idx] = da;
+	ring[idx].addr = da | DMA_BUS_WINDOW;
+	luna_rx_rearm(ring, idx, nr, buf_size);
+}
+
+/* alloc + arm, for callers with nothing to lose: the OPEN path, where the slot
+ * is still NULL and a failure simply propagates. */
 static inline int luna_rx_refill(struct net_device *ndev, struct device *dev,
 				    struct rx_desc *ring, struct sk_buff **skbs,
 				    dma_addr_t *dmas, unsigned int idx,
 				    unsigned int nr, unsigned int buf_size)
 {
-	struct sk_buff *skb = netdev_alloc_skb(ndev, buf_size);
 	dma_addr_t da;
-	u32 opts1;
+	struct sk_buff *skb = luna_rx_alloc(ndev, dev, buf_size, &da);
 
 	if (!skb)
 		return -ENOMEM;
-	da = dma_map_single(dev, skb->data, buf_size, DMA_FROM_DEVICE);
-	if (dma_mapping_error(dev, da)) {
-		dev_kfree_skb_any(skb);
-		return -ENOMEM;
-	}
-	skbs[idx] = skb;
-	dmas[idx] = da;
-	ring[idx].addr = da | DMA_BUS_WINDOW;
-	ring[idx].opts2 = 0;
-	ring[idx].opts3 = 0;
-	opts1 = D_OWN | buf_size;
-	if (idx == nr - 1)
-		opts1 |= D_EOR;
-	ring[idx].opts1 = opts1;
+	luna_rx_arm(ring, skbs, dmas, idx, nr, buf_size, skb, da);
 	return 0;
 }
 
@@ -613,6 +871,19 @@ static_assert(SW_STAT_PORT_TX_MIB + 2 * SW_STAT_PORT_MIB_STRIDE == 0x32100u,
 	      "p2 TX MIB moved");
 static_assert(SW_STAT_PORT_TX_MIB + 3 * SW_STAT_PORT_MIB_STRIDE == 0x32180u,
 	      "p3 TX MIB moved");
+/* ★ AND THE RX SIDE IS PINNED PER DIE.  Two separate claims, because they fail
+ * for different reasons: each base is what its own chipdef says, and the
+ * RTL9602C's is NOT its siblings' -- which is the borrowing this table exists
+ * to prevent.  On that die 0x32600 is STAT_ACL_CNT, a real register that
+ * answers a real read, so the borrowed value would never fault; it would just
+ * report ACL hits as received frames. */
+static_assert(SW_STAT_PORT_RX_MIB_RTL9602C == 0x32200 &&
+	      SW_STAT_PORT_RX_MIB_RTL9603CVD == 0x32600 &&
+	      SW_STAT_PORT_RX_MIB_RTL9607C == 0x32600,
+	      "an RX MIB base no longer matches its own chipdef");
+static_assert(SW_STAT_PORT_RX_MIB_RTL9602C != SW_STAT_PORT_RX_MIB_RTL9603CVD &&
+	      SW_STAT_PORT_RX_MIB_RTL9602C != SW_STAT_PORT_RX_MIB_RTL9607C,
+	      "the RTL9602C's RX MIB base was borrowed from a sibling die");
 static_assert(SW_VLAN_EGRESS_TAG + 3 * 4 == 0x2a00cu,
 	      "the VLAN egress-tag array moved");
 static_assert(SW_PISO_PORT + 1 * SW_PISO_PORT_STRIDE == 0x27004u,

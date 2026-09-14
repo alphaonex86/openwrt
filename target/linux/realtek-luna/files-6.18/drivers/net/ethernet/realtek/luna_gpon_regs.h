@@ -188,7 +188,32 @@
 #define   I2C_CFG_AW_LSB	12
 #define   I2C_CFG_DW_LSB	10
 #define   I2C_CFG_CLKDIV_LSB	0
-#define   I2C_CLKDIV_100K	0x270u		/* (62500/100)-1 -> ~100 kHz   */
+/* ★★★ THE NAME AND THE COMMENT WERE BOTH WRONG BY A FACTOR OF TWO, AND THE
+ * VALUE IS UNCHANGED (renamed 2026-09-12). This read I2C_CLKDIV_100K with
+ * "(62500/100)-1 -> ~100 kHz". The parent clock is 31250, not 62500 --
+ * verified in BOTH dies' own stock: dal_rtl9602c_i2c_clock_set @0x801f42c4
+ * and the RTL9603CVD clock_set @0x803125a8 each load 31250, divide by the
+ * wanted kHz and subtract 1. So 0x270 = 624 gives 31250/625 = 50 kHz, half
+ * of what the name promised, on BOTH VERIFIED DIES. The RTL9607C's formula is
+ * NOT verified, so this says nothing about that part.
+ *
+ * ⚠ THE VALUE IS DELIBERATELY NOT TOUCHED, AND THE REASON IS NARROWER THAN THE
+ *   FIRST DRAFT OF THIS COMMENT CLAIMED. The X111W is healthy at this divisor,
+ *   which refutes exactly one thing: "50 kHz is universally unusable". It does
+ *   NOT clear the divisor for the G24W, because the two boards carry DIFFERENT
+ *   BOSA PARTS -- an RTL8290B here, a Semtech GN25L95 there -- and what one
+ *   I2C slave tolerates is not evidence about the other.
+ *   ⇒ G24W clock causality is UNPROVEN: neither established nor refuted. The
+ *     demonstrated gap there is the MISSING GN BACKEND, not this number.
+ *
+ * ⚠ AND EACH DIE'S STOCK AIMS ELSEWHERE AGAIN, so one shared divisor matches
+ *   NEITHER: the X111W's own stock sets ~1000 kHz (europa_drv.ko
+ *   rtl8290b_i2c_init .text:944 calls rtk_i2c_clock_set with a1=1000, matching
+ *   its stock CONFIG 0x0235001e = div 30), and the G24W's stock uses div 314,
+ *   ~99.2 kHz. A declared gap owed a per-die table, not a number to guess --
+ *   and a comparison alone never justifies a hardware experiment.
+ */
+#define   I2C_CLKDIV_50K	0x270u		/* (31250/50)-1 = 624 -> 50 kHz */
 #define I2C_IND_WD		0x000b0		/* [31:0] write data           */
 #define I2C_IND_ADR		0x000b8		/* [31:0] target reg offset    */
 #define I2C_IND_CMD		0x000c0		/* [0]CMD_EN [1]RW_EN [2]BUSY [3]NACK */
@@ -351,6 +376,20 @@
 #define GPON_GTC_DS_MISC_CNTR_GEM_NON_IDLE	0x011c4
 #define GPON_BWMAP_CTRL			0x0200c
 #define GPON_BWMAP_STS			0x02010
+/* ★ THE UPSTREAM HALF OF THE SAME COUNTER GROUP, and it is the one that splits
+ * this board's open fault in two.  All four are 5-word arrays at a 4-byte
+ * stride, gated by the SAME CNT_MASK_US enrolment, at the SAME offsets on both
+ * chipdefs (0xF02068 / 0xF02094 / 0xF0203C / 0xF02054):
+ *   RX_SID_CNT_US    frames the PON-IP took FROM THE SWITCH for an enrolled SID
+ *   RX_SID_GOOD/BAD  how the US-NIC classified them
+ *   TX_SID_CNT_US    frames actually TRANSMITTED upstream for that SID
+ * RX climbing with TX flat = the frame reached the PON-IP carrying the right
+ * SID and the SCHEDULER is not serving it (queue map / T-CONT / PBO).  Both
+ * flat = it never got the SID at all (cpu-tag, P_MISC RX_SPC, classify).  One
+ * pair of reads decides between two whole families of cause. */
+#define PI_TX_SID_CNT_US		0x02068		/* 5 groups, 4-byte stride */
+#define PI_RX_SID_CNT_US		0x02094		/* 5 groups, 4-byte stride */
+#define PI_SID_CNT_GROUP_STRIDE		4u
 #define PI_RX_SID_GOOD_CNT_US		0x0203c
 #define PI_RX_SID_BAD_CNT_US		0x02054
 #define GPON_BWMAP_DATA			0x02400
@@ -401,9 +440,9 @@
 #define GPON_GEM_US_EOB_MERGE	0x06260
 #define GPON_GEM_US_BYTE_STAT		0x06800
 /* ★ THE TWO US EMISSION COUNTER ARRAYS, NAMED 2026-09-05. Both were reached by
- * bare hex from gpon-luna.c (0x6a00, 0x6c80, 0x6c40, 0x6810...) while their
+ * bare hex from luna_gpon.c (0x6a00, 0x6c80, 0x6c40, 0x6810...) while their
  * BASE and STRIDE were spelled only in a driver comment. The names and the
- * arithmetic are the tree's own (gpon-luna.c:6215-6218): "TCONT_IDLE_BYTE_STAT
+ * arithmetic are the tree's own (luna_gpon.c:6785-6218): "TCONT_IDLE_BYTE_STAT
  * array base 0x6c00, stride 8 BYTES (register-map 'array offset 64' = 64 BITS),
  * 64-bit/entry" and "GEM_US_BYTE_STAT base 0x6800, stride 8". Nothing invented.
  * ⚠ THE STRIDE IS 8 BYTES AND THE REGISTER MAP SAYS 64: the map counts BITS.
@@ -428,6 +467,21 @@
 #define PI_PKT_OK_CNT_DS		0x0c010
 #define PI_PKT_ERR_CNT_DS		0x0c014
 #define PI_PKT_MISS_CNT_DS		0x0c018
+/* ★ THE UPSTREAM TWINS, AND THEY WERE NEVER READ.  Ten comments in
+ * luna_gpon.c reason about "PKT_OK/ERR/MISS all 0" on the US-NIC as the
+ * discriminator between "the frame never reached the US-NIC" and "it reached
+ * it and was dropped later", and until 2026-09-08 no line of code took the
+ * reading: only the DS three above existed.  The witness that WAS taken,
+ * RX_SID_GOOD_CNT_US, is MASK-GATED -- it counts only SIDs enrolled in a
+ * CNT_MASK_US group -- so a mis-enrolled mask makes it read zero whatever the
+ * hardware did, which is precisely the trap gpon_install_omcc() records having
+ * fallen into on the G24W.  PKT_OK_CNT_US is UNGATED: it counts every frame the
+ * US-NIC MAC accepts, no classification involved.  Same offsets on both
+ * chipdefs (0xF04010/14/18), so no per-chip move.
+ * PKT_OK_CNT_US packs TWO counters: TX_OK_CNT[31:16] and RX_OK_CNT[15:0]. */
+#define PI_PKT_OK_CNT_US		0x04010		/* [31:16] TX_OK [15:0] RX_OK */
+#define PI_PKT_ERR_CNT_US		0x04014
+#define PI_PKT_MISS_CNT_US		0x04018
 #define PI_RXFDP1_DS			0x0d3f0
 
 #define PI_IO_CMD_0_US		0x05434		/* [5] GMII_RX_EN [4] GMII_TX_EN */
@@ -485,26 +539,28 @@
 #define PI_PON_SID_GLB_TH	0x02454		/* [28:16] ON_TH [12:0] OFF_TH (global) */
 #define PI_PON_SID_RPV_TH	0x02458		/* per-SID reserved-page threshold, +sid*4 */
 /*
- * ⚠ OPEN QUESTION, 2026-09-01, and it is stated rather than guessed.
+ * ★ CLOSED 2026-09-08, BY ARITHMETIC ON TWO CHIPDEFS AND NO BOARD.  The open
+ * question this block used to carry -- whether PON_SID_RPV_TH's "array offset
+ * 32" means 32 BITS (4-byte stride) or 32 BYTES -- is settled by where each
+ * chip's array ENDS, because on both dies the next declared register sits
+ * exactly one entry past the last one:
  *
- * The vendor chipdef declares PON_SID_RPV_TH as an ARRAY with "array offset 32"
- * on BOTH the RTL9602C (65 entries) and the RTL9603CVD (8 entries). 32 could be
- * 32 BITS -- i.e. 4 bytes, the value below -- or 32 BYTES. The chipdef alone
- * does not say which, and the neighbours do not settle it either:
- * PON_SID_STOP_TH and PON_SID_GLB_TH sit 4 bytes below it and are NOT arrays
- * ("array offset 0"), so there is no interleaved per-SID record to infer from.
+ *     RTL9602C    0x02458 + 65 * 4 == 0x0255c == that chip's PONIP_DBG_CTRL_US
+ *     RTL9603CVD  0x026c8 +  8 * 4 == 0x026e8 == that chip's PONIP_DBG_CTRL_US
  *
- * ★ THE DISCRIMINATOR IS A LIVE READ ON STOCK, which works: read
- *   0xF02458 + n*4 and 0xF02458 + n*32 on the G24W under vendor firmware and
- *   see which spacing carries the programmed thresholds. Until then this stays
- *   at the value the port has always used.
+ * Two independent chipdefs agreeing on a 4-byte stride is the second source
+ * this project's own rule asks for, so the stride below is CONFIRMED and the
+ * live stock read it used to ask for is no longer owed.
  *
- * ⚠ AND THE ENTRY COUNT DIFFERS BETWEEN THE CHIPS -- 65 vs 8 -- so PI_SID_NUM
- *   is a 9602C fact being applied to both. Whatever the stride turns out to be,
- *   looping 65 times on the RTL9603CVD writes past the end of its array.
+ * ★★ AND THE ENTRY COUNT IS NOW A PER-CHIP TABLE FIELD, gpon_swc_map's
+ * .sid_rpv_entries -- 65 and 8, not one number.  PI_SID_NUM (65) used to bound
+ * this loop for every chip and is RETIRED rather than left to be reached for:
+ * the same arithmetic that closes the stride proves the overrun it caused,
+ * 57 registers of the RTL9603CVD's upstream scheduler written by a loop that
+ * had no business leaving the array.  A count that is right for one die is a
+ * defect the day a second die exists.
  */
 #define PI_RPV_TH_STRIDE	4u
-#define PI_SID_NUM		65u		/* SIDs 0..64 (64 = OMCI) */
 #define PI_PON_FC_CONFIG_DS	0x0a0fc		/* [28:16] FC_ON_TH [12:0] FC_OFF_TH */
 #define PI_CFG_US		0x0404c		/* [26] RFF_AFULL [17] TX_STOP   */
 #define PI_CFG_DS		0x0c04c		/* [16] TXE_EXTRA                */
@@ -571,6 +627,14 @@
 #define SW_MACPP_STRIDE_9602C	0x400u		/* RTL9602C macPpInfo.interval;
 						 * 0x100 on the 9603CVD/9607C */
 #define SW_P_MISC_PORT_9602C(p)	(SW_P_MISC + (p) * SW_MACPP_STRIDE_9602C)
+/* ★ THE SPELLING A SHARED FILE MUST USE (2026-09-08).  It takes the stride from
+ * the chip's OWN luna_sw_map, so P_MISC[pon] is 0x20804 on the RTL9602C and
+ * 0x20404 on the RTL9603CVD -- which is the address luna_ponmac.c already
+ * spells out by hand for that die (C3_P_MISC_PON).  The _9602C form above stays
+ * for the RTL9602C-only shell and for the static_assert that pins the
+ * arithmetic; it must not be reached for from luna_gpon.c, which both boards
+ * build. */
+#define SW_P_MISC_PORT(m, p)	(SW_P_MISC + (unsigned int)(p) * (m)->macpp_stride)
 static_assert(SW_P_MISC_PORT_9602C(2) == 0x20804u &&
 	      SW_P_MISC_PORT_9602C(3) == 0x20C04u,
 	      "P_MISC moved: the PON (2) and CPU (3) port words are these two");
@@ -632,10 +696,11 @@ static_assert(SW_P_MISC_PORT_9602C(2) == 0x20804u &&
  * actually stamps, exactly as cortina-gpon.c does with CG_US_PORT_IDX_MAX.
  *
  * ⚠ THE OBVIOUS GREP IS A TRAP AND COST A WRONG ANSWER ONCE: PI_US_SRAM_NO is
- * also 127 and is a different block, and PI_SID_NUM is 65 -- a count, not a
- * maximum, of yet another block, which would read as 64 while still passing
- * every range this driver uses today.  A write past the end lands in an
- * unrelated register and is accepted without complaint. */
+ * also 127 and is a different block, and the retired PI_SID_NUM was 65 -- a
+ * count, not a maximum, of yet another block, which read as 64 while still
+ * passing every range this driver used.  A write past the end lands in an
+ * unrelated register and is accepted without complaint -- which is exactly
+ * what it did, on the RTL9603CVD, until 2026-09-08 (see PI_RPV_TH_STRIDE). */
 #define   GEM_US_PORT_MAP_IDX_MAX 127u
 
 /* ★ THE TWO PTI REGISTERS BESIDE THE OMCI ONE, NAMED 2026-09-05.  gpon_install_omcc()
@@ -673,7 +738,7 @@ static const struct gpon_chip luna_gpon_chip = {
 	.gtc = {
 		.ds_omci_pti		= 0x1204,	/* = GPON_GTC_DS_OMCI_PTI; chipdef 0x701204 */
 		.gem_us_port_map	= 0x6400,	/* = GPON_GEM_US_PORT_MAP; chipdef 0x706400 */
-		.gem_us_port_stride	= 4,		/* = GEM_US_PORT_MAP_STRIDE (gpon-luna.c); chipdef array-offset 32 bits */
+		.gem_us_port_stride	= 4,		/* = GEM_US_PORT_MAP_STRIDE (luna_gpon.c); chipdef array-offset 32 bits */
 		.gem_ds_mc_cfg		= 0x4080,	/* = GPON_GEM_DS_MC_CFG; chipdef 0x704080 */
 		.ds_traffic_cfg		= 0x1400,	/* = GPON_GTC_DS_TRAFFIC_CFG; chipdef 0x701400 */
 		.ds_traffic_stride	= 4,		/* = DS_TRAFFIC_CFG_STRIDE; chipdef array-offset 32 bits */

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Realtek Luna (MIPS interAptiv) GMAC0 + on-chip switch — eth0.
+ * Realtek Luna (MIPS interAptiv) GMAC0 + on-chip switch -- eth0.
  *
  * Clean-room driver for the SoC's CPU-port Gigabit MAC (the "GMAC0" engine at
  * phys 0x18012000) and a minimal open-L2 bring-up of the on-chip switch core
@@ -8,44 +8,30 @@
  *
  *	CPU <-> GMAC0 (eth0) <-> switch CPU-port <-> physical LAN port <-> wire
  *
- * ★★ WHY THIS FILE IS NAMED luna_* AND NOT rtl9607c_*.
- * It serves TWO chips, and the project's naming rule is explicit: family-shared
- * code may not hide behind one chip's name, because the next human or LLM has to
- * land on the work BY NAME. It was renamed the day the second chip was proven to
- * use it, not later. The chip-specific half is a TABLE (`struct luna_eth_chip`),
- * never an `#ifdef` and never a second copy of the file — a duplicated driver is
- * how a repair lands on one board and not the others.
+ * It serves TWO chips, so it carries the FAMILY name; the chip-specific half is
+ * a TABLE (struct luna_eth_chip), never an #ifdef and never a second copy of
+ * the file -- a duplicated driver is how a repair lands on one board only.
  *
  *	RTL9607C   engineering board, 11 switch ports, 3 CPU GMACs, SerDes uplink
  *	RTL9603CVD LANLY G24W,         6 switch ports, 1 CPU GMAC,  no SerDes
  *
- * ★ THE MAC ENGINE IS IDENTICAL ON BOTH; THE SWITCH REGISTERS ARE NOT.
- * The vendor compiles ONE NIC source for both parts, from one header, and takes
- * the register base from its device tree — so base, every MAC offset, both
- * descriptor layouts, the interrupt bits and the DMA model carry over unchanged
- * [tier 3, the chips' own 4.4.140 SDK]. The SWITCH is a different story: of 1361
- * name-matched switch registers, 853 keep their offset and **508 move**. The
- * ability block is the trap that pays for this table — the RTL9607C's `P_ABLTY`
- * at 0x200 is `SDS_CFG` on the RTL9603CVD, so a driver that "just worked
- * because the family is the same" would be reading a SerDes configuration word
- * and calling it a link state.
+ * The MAC engine is identical on both; the SWITCH registers are not. Of 1361
+ * name-matched switch registers, 853 keep their offset and 508 MOVE [tier 3,
+ * each chip's own SDK]. The trap that pays for the table: the RTL9607C's
+ * P_ABLTY at 0x200 is SDS_CFG on the RTL9603CVD, so a driver that "just worked
+ * because the family is the same" would read a SerDes configuration word and
+ * call it a link state.
  *
- * Switch bring-up facts (behavioural, established on the RTL9607C):
- *  - The CPU port is this GMAC; the LAN copper ports and the fibre/PON port are
- *    per chip (see the table).
- *  - ★ THE LOAD-BEARING RX GATE IS THE PER-PORT SPANNING-TREE STATE
- *    (`MSTI_CTRL`), not a permit mask. An earlier version of this comment said
- *    the bootloader leaves a "source permit" mask cleared and that opening it
- *    was the fix — that is RETRACTED. `SRC_PORT_PERMIT` is a per-source-port
- *    egress-FILTER ENABLE whose forwarding-permissive value is 0 (its own reset
- *    value); writing all-ones there silently dropped every LAN->CPU frame.
- *  - ⚠ AND THE SILICON IS NOT THE ONE THAT BLOCKS: `MSTI_CTRL` resets to
- *    0x000000FF on BOTH chips, i.e. every port FORWARDING. If ports are found
- *    non-forwarding at probe, that is the BOOT LOADER's doing, not a reset
- *    state — so the write below is a correction, not an initialisation, and it
- *    must stay even if a future bootloader stops needing it.
- *  - The integrated copper PHYs need no analog calibration on either chip; the
- *    deterministic path is MAC-force-link every port plus open-L2 flood.
+ * Switch bring-up facts, established on the RTL9607C:
+ *  - The LOAD-BEARING RX GATE is the per-port spanning-tree state (MSTI_CTRL).
+ *    SRC_PORT_PERMIT was blamed alongside it and that reading is REFUTED on
+ *    both measurable dies; the field has ONE statement and it is
+ *    luna_eth_regs.h's @src_permit.  Do not restate it here.
+ *  - MSTI_CTRL resets to 0x000000FF on BOTH chips, every port FORWARDING. Ports
+ *    found non-forwarding at probe are the BOOT LOADER's doing, so the write
+ *    below is a correction and must stay even if a future loader stops needing
+ *    it.
+ *  - The integrated copper PHYs need no analog calibration on either chip.
  *  - The ordered sequence matters: replaying only the final register values is
  *    not sufficient on this hardware.
  *
@@ -57,6 +43,7 @@
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/mii.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
@@ -66,8 +53,11 @@
 #include <linux/timer.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "luna_gmac_logic.h"	/* family GMAC ring packings + this shell's hoisted RX verdicts (flowcore) */
-#include "rtl9602c_gpon_nic.h"	/* the GPON<->NIC glue -- this shell now IMPLEMENTS it */
-#include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN, the OMCI_MT_* codes */
+#include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
+#include "luna_gpon_nic.h"	/* the GPON<->NIC glue -- this shell now IMPLEMENTS it */
+#include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN.
+				 * NOT the OMCI_MT_* codes any more: this shell
+				 * stopped decoding message types on 2026-09-10 */
 #include "gpon_omci_me.h"	/* struct omci_onu, omci_onu_init, the common ME store */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the board-side log */
 
@@ -111,10 +101,8 @@ module_param(rtl8221b_phy, bool, 0644);
 MODULE_PARM_DESC(rtl8221b_phy, "de-assert the RTL8221B 2.5G PHY reset (SerDes-6 uplink)");
 
 static unsigned int diag_ms = 3000;
-/* ★ DEFAULT 0 = do NOT assert the GPHY reset, which is what the vendor does.
- * A param and not a deletion, so the OLD behaviour is one bootarg away and the
- * A/B costs no rebuild -- and so a board that turns out to NEED it can have it.
- */
+/* Default 0 = do NOT assert the GPHY reset, which is what the vendor does. A
+ * param and not a deletion, so the old behaviour is one bootarg away. */
 static bool gphy_reset;
 module_param(gphy_reset, bool, 0444);
 MODULE_PARM_DESC(gphy_reset,
@@ -129,96 +117,31 @@ static int diag_count = 12;
 module_param(diag_count, int, 0644);
 MODULE_PARM_DESC(diag_count, "number of periodic link/rxpkts diagnostic dumps");
 
-/* ★★★ DEFAULT 1 SINCE 2026-08-23, and the EMULATED vendor trace is why.
- * Running `dal_rtl9603cvd_switch_init` under Unicorn showed the vendor write the
- * PHY POWER register at OCP `0xA400` on **all of phy0..phy5**, and use the flat
- * low addresses `0x0020`-`0x003E` ONLY for the FE *patch* register block on
- * phy0/1/2. Those are two different register SETS, not two maps for one
- * register -- which settles a contradiction this file's own comment called
- * unresolved.
- * With `gphy_map = 0` and this chip's `gphy_ports = 0x08`, our BMCR and
- * AN-restart writes on THREE of the four copper ports went to flat `0x0000`
- * where the vendor uses `0xA400`.
- * ⚠ A SINGLE-VARIABLE EXPERIMENT, not a proven fix: the previous three
- * candidates (the RxCDO store width, the force-every-UTP-port policy, the GPHY
- * reset) were each plausible and each REFUTED by measurement. `gphy_map=0` is
- * one bootarg away, so this is reversible without a rebuild.
- */
-/* ★ How long to let an OCP transaction start before sampling BUSY. The vendor
- * uses a flat mdelay(10) and no poll at all; 200 us is two orders of magnitude
- * less and still far longer than a bus turnaround, and the poll below keeps the
- * timeout safety the vendor's version does not have. 0 = the old behaviour.
- */
-/* ★★ MEASURED 2026-08-24 -- STOCK vs OURS, the SAME register, same board.
- * SWCORE 0x0000004C is CFG_PHY_CTRL, named and laid out by THIS chip's own
- * chipdef (rtl9603cvd): MSK_MDI[8:5] | BASE_PHYAD[4:0].
- *
- *      stock  0x00000000  ->  BASE_PHYAD = 0
- *      ours   0x00000019  ->  BASE_PHYAD = 25
- *
- * ⚠ CORRECTED 2026-08-26 -- IT WAS NOT THE BOOTLOADER, IT WAS OUR OWN GPON
- * DRIVER, and blaming U-Boot sent this investigation to the wrong tree.
- * gpon-rtl960x.c used the RTL9602C literal SOC_IO_GPIO_EN = 0x48 for the
- * optical-SD GPIO pad recipe. On the RTL9603CVD 0x48 is CFG_PCSXF and 0x4c is
- * CFG_PHY_CTRL, so its second word landed HERE:
- *
- *      SOC_IO_GPIO_EN_W1 = 0x819,  0x819 & 0x1ff = 0x019
- *      -> MSK_MDI[8:5] = 0, BASE_PHYAD[4:0] = 25
- *
- * which is bit-for-bit the 0x00000019 measured above. The boot log shows both
- * halves in order: "gpon: GPIO pads set (gpio_en1=0x00000019)" at t=0.75 s,
- * then this driver's "BASE_PHYAD 25 -> 0" at t=7.02 s -- a 6.3 s window in
- * which the switch ran with the wrong MDIO base. The GPON driver now skips
- * that recipe on this chip, so there is nothing left to repair and the write
- * below is a no-op that merely asserts the value.
- * Beside that, every PHY read here returns 0000 with BUSY never once
- * asserting, while the identical window on stock holds a real datum
- * (GPHY_IND_RD = 0x1940, a BMCR with PDOWN set). If the indirect GPHY access
- * is addressed through the MDIO master BASE_PHYAD points at, our phyid 0..3
- * land on MDIO 25..28, where nothing answers -- which is what a read of 0000
- * with no BUSY looks like.
- *
- * -1 leaves the register exactly as the bootloader left it. That is how this
- * gets FALSIFIED rather than believed. */
-/* Which receive FIFOs stay in reset. Stock holds NONE.
- *
- * ⚠ CORRECTED 2026-08-26, SAME CAUSE AS CFG_PHY_CTRL ABOVE: the one asserted
- * FIFO was not the bootloader's either. The GPON driver's first pad word,
- * SOC_IO_GPIO_EN_W0 = 0x40202006, landed on CFG_PCSXF (0x48 on this chip) and
- * its writable bits are 0x2006 -> RST_RXFIFO[13:10] = 8, i.e. exactly one FIFO
- * held in reset. Fixed at the source; -1 still = leave whatever was there. */
+/* Which receive FIFOs stay in reset. Stock holds NONE; the one this board had
+ * asserted came from our own GPON pad recipe writing CFG_PCSXF, which is 0x48
+ * on this chip -- fixed at the source. -1 leaves the bootloader's value. */
 static int rst_rxfifo;
 module_param(rst_rxfifo, int, 0644);
 MODULE_PARM_DESC(rst_rxfifo,
 	"CFG_PCSXF RST_RXFIFO mask to program (-1 = leave the bootloader's value)");
 
-/* ★★★ THE BOARD'S OWN MAC, HANDED IN AT BOOT (2026-08-24).
- *
- * The comment on the probe path below already records where this board's real
- * address lives: the vendor's `config` MTD partition, in a MIB the vendor
- * applies from USERSPACE -- not from the bootloader, whose environment carries
- * only the shared default this driver refuses. Reading that partition in the
- * kernel is a JFFS2 mount away and the value inside is zlib-compressed, so an
- * `nvmem-cell` (which reads raw bytes at a fixed offset) cannot express it.
- *
- * What CAN be done today, and is the FIRST rung of this project's own declared
- * precedence -- "U-Boot ethaddr bootarg -> DT/nvmem -> random LAA" -- is to
- * hand the address in on the kernel command line:
- *
- *     luna_eth.mac=5c:19:23:b3:ce:90
- *
- * ⚠ AND THE VALUE IS NOT WRITTEN HERE OR IN THE DTS. It is per-UNIT, and a DTS
- * literal would hand the second G24W the first one's identity -- silently, on a
- * segment where three ONUs already share one L2 domain. The boot tool reads it
- * from THAT BOARD's own declaration and passes it; a board that declares none
- * passes nothing and the random-LAA behaviour below is unchanged.
- */
+/* The board's own MAC, handed in at boot as luna_eth.mac=xx:xx:... -- the first
+ * rung of the declared precedence (bootarg -> DT/nvmem -> random LAA).
+ * It is per-UNIT and is NOT written here or in the DTS: a DTS literal would
+ * hand the second G24W the first one's identity on a segment where three ONUs
+ * share one L2 domain. The real address lives in the vendor's `config` MTD
+ * partition, zlib-compressed inside a MIB, so no nvmem-cell can express it. */
 static char *mac_param;
 module_param_named(mac, mac_param, charp, 0444);
 MODULE_PARM_DESC(mac,
 	"the board's own MAC, handed in at boot (xx:xx:xx:xx:xx:xx). Empty = "
 	"fall back to DT, then the engine, then a random locally-administered one");
 
+/* CFG_PHY_CTRL BASE_PHYAD. MEASURED 2026-08-24 on the G24W: stock 0, ours 25 --
+ * and the writer was OUR OWN GPON driver, not U-Boot, landing
+ * SOC_IO_GPIO_EN_W1 (0x819) on 0x4c, which is CFG_PHY_CTRL on this chip. Fixed
+ * at the source, so this write now only asserts the value. -1 leaves the
+ * bootloader's, which is how the claim stays falsifiable. */
 static int base_phyad = 0;
 module_param(base_phyad, int, 0644);
 MODULE_PARM_DESC(base_phyad,
@@ -228,6 +151,8 @@ MODULE_PARM_DESC(base_phyad,
  * one build and one boot. This lets a single image answer the whole sweep. */
 static struct luna_eth *survey_ep;
 
+/* Let an OCP transaction START before sampling BUSY. The vendor uses a flat
+ * mdelay(10) and no poll at all; 0 = sample immediately, the old behaviour. */
 static int gphy_settle_us = 200;
 module_param(gphy_settle_us, int, 0644);
 MODULE_PARM_DESC(gphy_settle_us,
@@ -235,9 +160,15 @@ MODULE_PARM_DESC(gphy_settle_us,
 		 "sampling BUSY (0 = sample immediately, which returns success "
 		 "before the transaction begins and reads a stale zero)");
 
+/* Default 1 since 2026-08-23: emulating dal_rtl9603cvd_switch_init showed the
+ * vendor write PHY POWER at OCP 0xA400 on ALL of phy0..phy5, and use the flat
+ * 0x0020-0x003E addresses only for the FE PATCH block -- two register SETS, not
+ * two maps for one register. With gphy_map=0 and this chip's gphy_ports=0x08,
+ * our BMCR writes on three of the four copper ports went to flat 0x0000. */
 static int gphy_map = 1;
-module_param(gphy_map, int, 0644);
-MODULE_PARM_DESC(gphy_map, "internal-PHY OCP map: 0 = per the chip table, 1 = force GPHY page 0xA40 on every port, 2 = force the flat FE map (a bring-up experiment: the vendor SDK and its own OCP map disagree for the FE ports)");
+/* The writable parameter itself is declared beside luna_gphy_lock: its setter
+ * has to take that mutex, and a knob that steers an address must not be able to
+ * move between the read and the write of one transaction. */
 
 static int phy_settle_ms;
 module_param(phy_settle_ms, int, 0644);
@@ -251,6 +182,51 @@ static bool cpu_no_loopback = true;
 module_param(cpu_no_loopback, bool, 0644);
 MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (stops self-loopback RX)");
 
+/*
+ * ★ A FRAME THE CPU FLOODS COMES BACK IN ON THE CPU PORT, AND NO SWITCH
+ * REGISTER STOPS IT -- the vendor does it PER PACKET, in the TX descriptor.
+ *
+ * The switch floods broadcast / unknown-multicast / unknown-unicast to the
+ * destination set in LUT_{BC,UNKN_MC,UNKN_UC}_FLOOD, and that set must contain
+ * the CPU port or no LAN broadcast ever reaches this board.  For a frame the
+ * CPU itself injects that set is unchanged, so a copy is egressed straight back
+ * at us: br-lan then learns a WiFi station on eth0 and every DHCP OFFER for it
+ * leaves by the cable.  Clearing the CPU bit out of PISO_PORT[cpu] does not
+ * stop it (MEASURED: ours 0x27008 = 0x00FDFFFF and the flood still returned),
+ * and L2_SRC_PORT_PERMIT is refuted on both Luna dies.
+ *
+ * ⚠ AND THE SWITCH IS NOT GUESSING THE SOURCE: with this knob OFF the returning
+ * copy arrives carrying opts3[19:16] == 5, THE CPU PORT ITSELF (the rx ingress
+ * ledger below logged `rx ingress port 5 seen (opts3=0015007e)` during exactly
+ * that phase and never otherwise).  So the engine was told the ingress port and
+ * egressed the flood to it anyway -- there is no source-port exclusion to find.
+ *
+ * The vendor never meets this because its CPU never floods: LUT_BC_FLOOD reads
+ * 0x20 -- the CPU port ALONE -- on this unit's own stock (tier 1, swcore capture
+ * 2026-09-09), and a vendor CPU transmit sets opts2.cputag with an explicit
+ * tx_portmask unconditionally (tier 2, THIS board's own stock epon_drv.ko:
+ * epon_muticast_pkt_tx zeroes a tx_info then sets cputag, keep, dislrn, aspri,
+ * cputag_pri and tx_portmask before re8686_tx_with_Info).  An explicit mask is
+ * not flooded, so the question never arises.  ⚠ psel is NOT set here: the vendor
+ * raises it only when the mask names the fibre, for the GEM direct-TX.
+ *
+ * We keep the switch doing the bridging, so we take the same route only where
+ * the switch would have flooded anyway: a multicast or broadcast destination
+ * egresses to the flood set MINUS the CPU port.  Unicast is untouched and is
+ * still forwarded by L2 lookup.  ⚠ An unknown-DA UNICAST from the CPU is still
+ * flooded by the switch and still returns; covering it would need the mask on
+ * every frame, which would turn per-port steering into a hub.
+ *
+ * MEASURED 2026-09-12, both states on ONE boot of ONE image
+ * (ONU-test-case/lan_flood_return.py, station on ONU-B3CE90): ON -> no-return,
+ * the station stayed on the radio port through 13 unicast and 13 broadcast
+ * samples; OFF -> returns-internally, 13 of 13 broadcast samples moved it to the
+ * cable port while the wire carried each flood exactly once.
+ */
+static bool lan_flood_direct = true;
+module_param(lan_flood_direct, bool, 0644);
+MODULE_PARM_DESC(lan_flood_direct, "send CPU-originated multicast/broadcast to an explicit egress mask (the flood set minus the CPU port) instead of letting the switch flood it back at us");
+
 /* ---- GMAC0 register block (offsets from the DT reg base 0x18012000) -------- */
 #define R_MAR0		0x08	/* multicast hash [31:0]				*/
 #define R_MAR4		0x0C	/* multicast hash [63:32]			*/
@@ -263,42 +239,15 @@ MODULE_PARM_DESC(cpu_no_loopback, "drop the CPU port from its own egress flood (
 #define R_RRING_ROUTE	0x1370	/* RX class -> ring routing			*/
 #define R_RxFDP0	0x13F0	/* RX ring0 fetch-descriptor pointer		*/
 #define R_RxCDO0	0x13F4	/* RX ring0: RxCDO[31:16] | RxRingSize[15:8]	*/
-				/* 32-BIT register. The (u16) this comment used to carry
-				 * named the FIELD, and an iowrite16 was written to match
-				 * it -- see the store below.			*/
+				/* 32-BIT register: the store must not be 16-bit. */
 
-/* engine enable values (inherited-config + DMA-enable edge) */
-/* MSR(0x58) top byte.  Live working stock runs 0xf0 (FORCE_TRXFCE|RXFCE|TXFCE:
- * flow control FORCED on the internal GMAC<->switch links).
- *
- * ★★ HW-PROVEN ON THE SIBLING CHIP (RTL9602C, 2026-06-12): with our MINIMAL
- * init, 0xf0 STALLS the LAN datapath (ping 0/60) while 0x10 keeps it healthy
- * (40/40).  Stock tolerates 0xf0 because its FULL init configures flow control
- * properly; ours does not, so 0xf0's forced pause-frame handling wedges the
- * MAC.  It is an init-COMPLETENESS problem, not a value we can simply match.
- *
- * ⚠ THIS DRIVER HARDCODED 0xf0 UNTIL 2026-08-28 -- the exact value the other
- * Luna driver had already measured as harmful.  That is the failure mode the
- * whole deduplication exists to stop: a repair that lands in one board's copy
- * of a shared driver and never reaches the others.  The two drivers had no
- * symbol in common, so nothing could have flagged it.
- *
- * ★★ THE A/B WAS RUN ON THIS BOARD, 2026-08-28, AND IT REFUTED THE TRANSFER.
- * Two cold TFTP boots of the same image, one at 0x10 and one with
- * `luna_eth.msr_top=0xf0` in bootargs: the LAN answered 5/5 BOTH TIMES.  So
- * the RTL9602C finding does NOT carry to the RTL9603CVD -- forced flow control
- * is not what decides this board's datapath, and nobody should re-chase it.
- *
- * The default stays 0x10 because it is the only value anyone has MEASURED as
- * safe on this family and it makes the two sibling drivers agree; it is NOT
- * claimed as a fix, and on this chip both values were measured equal.
- *
- * ⚠ NOTE WHAT THIS ALSO SAYS: the LAN answered at all.  The board's standing
- * "RX path exhausted" investigation describes a dead LAN->CPU ingress, and on
- * this date that path carries pings on both settings -- so that document is
- * either stale or the fault is intermittent.  Re-verify it before building on
- * it; do not read this comment as "RX is fixed".
- */
+/* MSR(0x58) top byte. Live working stock runs 0xf0 (FORCE_TRXFCE|RXFCE|TXFCE),
+ * but with our MINIMAL init 0xf0 STALLED the LAN on the RTL9602C sibling (ping
+ * 0/60 against 40/40 at 0x10) -- an init-COMPLETENESS problem, not a value we
+ * can simply match. The A/B on THIS chip (2026-08-28, two cold boots) answered
+ * 5/5 at BOTH values, so that finding does not carry to the RTL9603CVD and
+ * nobody should re-chase it. The default stays 0x10 because it is the only
+ * value measured safe anywhere on this family; it is not claimed as a fix. */
 static unsigned int msr_top = 0x10;
 module_param(msr_top, uint, 0644);
 MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf0 = stock's value, MEASURED to stall the LAN on the RTL9602C)");
@@ -311,64 +260,44 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
  * the rest selects tag sizes, the 0x04 protocol and the 0x8899 match. Clearing
  * CTEN_RX leaves the raw in-band tag in the delivered frame. */
 #define CPUTAGCR_INIT	0x9022FF04
-/* ⚠ A SIBLING LITERAL, RECORDED RATHER THAN CHANGED (2026-09-08).  The 64 is
- * the RTL9602C's OMCC stream id; this chip's is 127 (GPON_OMCC_FLOW_9603CVD),
- * so if [14:8] really did select the trapped DS stream here, we would be asking
- * for a stream the OLT never uses.
- *
- * IT IS LEFT ALONE BECAUSE THE EVIDENCE SAYS THE FIELD IS NOT THIS DIE'S TRAP
- * SELECTOR AT ALL: the sibling shell's own note records CPUTAG1CR bit1 as "not
- * present in the 9607C register map", the vendor's 9607C-generation NIC driver
- * writes NEITHER 0x48 NOR 0x50 anywhere, and on this generation the SWITCH
- * decides what is OMCI (PON_OMCI_CFG.CFG_OMCI_SID) while the NIC only reads the
- * reason back.  Changing it would be a second variable in the same experiment,
- * on a register we cannot name.
- *
- * ⇒ IF THE DS-OMCI TRAP NEVER REACHES THE CPU, THIS IS SUSPECT NUMBER ONE, and
- * the RX cpu-tag reason census in eth_rx() is what tells the two apart: a NEW
- * reason code appearing exactly when the OLT sends OMCI means the trap works
- * and only the code was wrong; NOTHING new appearing means no OMCI frame is
- * being handed to the CPU at all, and then this line is where to look. */
-#define CPUTAG1CR_INIT	0x00004000	/* [14:8] = 64: see the warning above	*/
+/* R_CPUTAG1CR[14:8] selects WHICH downstream stream-id the GMAC traps to the
+ * CPU as OMCI, and there is no SID literal here any more (2026-09-11). It was
+ * 0x00004000 -- SID 64, the RTL9602C's OMCC -- on a shell that does not serve
+ * the RTL9602C at all and whose two dies both use SID 127, so downstream OMCI
+ * was counted by the PON-IP and never trapped.
+ * The OLT assigns the OMCC; the GPON driver hands it over through
+ * rtl9602c_eth_set_omci_sid(), sourced from the ONE home, luna_gpon.c's
+ * per-chip swc->omcc_flow. Pre-arm the field reads 0, which selects no valid
+ * stream. It is programmed in TWO places on purpose: eth_hw_program() runs on
+ * every ndo_open, so an ifdown/ifup after O5 would otherwise disarm the trap. */
+#define CPUTAG1CR_SID(s)	(((s) & 0x7fu) << 8)	/* R_CPUTAG1CR[14:8] */
+#define CPUTAG1CR_SID_MASK	CPUTAG1CR_SID(0x7fu)
 #define ABLTY_CPU_FORCE	0xBFFF		/* CPU-port forced-ability mode (keep)	*/
 
 
-/* ---- switch core (SWCORE), phys 0x1b000000 ---------------------------------
- * ★ THE BASE IS THE SAME ON BOTH CHIPS AND THAT IS ESTABLISHED, NOT ASSUMED.
- * The RTL9603CVD's own chipdef spells its reset table in ABSOLUTE addresses
- * (0x1b000000 .. 0x1bf15438) where the RTL9607C's spells OFFSETS, and the
- * difference of the two top entries is exactly 0x1b000000. The block layout is
- * otherwise identical. [tier 3, each chip's own SDK]
- *
- * ⚠ THE WINDOW BELOW IS THE UNION AND IT IS DELIBERATELY GENEROUS: the
- * RTL9607C's highest named register sits at 0x42E7C, so the 0x42000 this file
- * used to map was 0xE7C SHORT — a register at the top of the block would have
- * been written into a hole with nothing to read. */
+/* ---- switch core (SWCORE), phys 0x1b000000 --------------------------------
+ * The base is the same on both chips and that is established, not assumed: the
+ * RTL9603CVD's chipdef spells its reset table in ABSOLUTE addresses where the
+ * RTL9607C's spells OFFSETS, and the two top entries differ by exactly
+ * 0x1b000000 [tier 3]. The window below is the UNION and deliberately generous:
+ * the RTL9607C's highest named register sits at 0x42E7C. */
 
 /* -- offsets that are the SAME on every Luna part covered here -------------- */
-#define SW_GPHY_WD		0x00000	/* internal-PHY indirect: write data	*/
-#define SW_GPHY_CMD		0x00004	/*   ... command (phy<<16 | ocp)		*/
-#define SW_GPHY_RD		0x00008	/*   ... read data + BUSY		*/
+/* The indirect PHY window is FAMILY data: its offsets and its command fields
+ * are in luna_eth_regs.h, so both Ethernet shells drive one register one way. */
 #define   STP_STATE_MASK	0x3
 #define   STP_FORWARDING	0x3
 
-/* ---------------------------------------------------------------------------
- * ★★ THE PER-CHIP TABLE.  Everything in it MOVED between the two parts, and
- * every field was read from that chip's OWN SDK (tier 3) rather than inferred
- * from the sibling.  A zero means "this chip has no such register" and the code
- * must SKIP the write — never write to offset 0, which on both chips is the
- * PHY indirect-access data register.
- * --------------------------------------------------------------------------- */
+/* THE PER-CHIP TABLE. Everything in it MOVED between the two parts, and every
+ * field was read from that chip's OWN SDK (tier 3) rather than inferred from
+ * the sibling. A zero means "this chip has no such register" and the code must
+ * SKIP the write -- offset 0 is the PHY indirect-access data register. */
 struct luna_eth_chip {
 	const char *name;
 
-	/* ★ The switch-core map for THIS chip -- and the ONLY home of this
-	 * chip's port numbers.  They were briefly duplicated here AND in
-	 * luna_sw_map (2026-08-28, by the same change that tabulated them for
-	 * the sibling driver); the two agreed, which is luck and not structure.
-	 * Two copies of one silicon fact is how they come to disagree in silence.  Kept as a pointer into
-	 * luna_eth_regs.h rather than copied in, so the sibling driver and
-	 * this one read the SAME numbers and a correction lands once. */
+	/* The switch-core map for THIS chip, and the ONLY home of its port
+	 * numbers: a pointer into luna_eth_regs.h so the sibling driver and this
+	 * one read the SAME numbers and a correction lands once. */
 	const struct luna_sw_map *sw_map;
 
 	/* --- switch port map ------------------------------------------------ */
@@ -376,20 +305,15 @@ struct luna_eth_chip {
 	 * chip where STOCK was MEASURED doing it. See the write site. */
 	u8	force_pon_ablty;
 	u8	last_port;	/* highest port to iterate, INCLUSIVE		*/
-	u8	n_copper;	/* copper PHY ports, always 0..n_copper-1	*/
 	u8	gphy_ports;	/* bitmap: ports whose PHY is a GPHY, not FE	*/
 
 	/* --- switch registers that MOVED ------------------------------------ */
-	/* force_ablty MOVED to luna_sw_map (via ->sw_map) */	/* + 4*port: forced ability values		*/
-	/* p_ablty MOVED to luna_sw_map (via ->sw_map) */	/* + 4*port: LIVE ability, read-only		*/
-	/* ablty_force MOVED to luna_sw_map (via ->sw_map) */	/* + 4*port: which ability fields are forced	*/
+	/* force_ablty / p_ablty / ablty_force live in luna_sw_map (->sw_map) */
 	u32	msti_ctrl;	/* + 4*port: per-port spanning-tree state	*/
 	u32	cpu_tag_insert;
 	u32	cpu_tag_aware;
 	u32	swcore_rst;	/* swcore soft reset (bit10), excludes cfg	*/
-	/* gphy_misc MOVED to luna_sw_map (reached via ->sw_map): the RTL9602C
-	 * driver needs the same fact and a second home is how the two come to
-	 * disagree.  Same reasoning, and the same fix, as the port numbers. */
+	/* gphy_misc lives in luna_sw_map too: the RTL9602C driver needs the same fact */
 	u32	fephy_poll;	/* 0 on a chip with no FE-PHY auto-poller	*/
 	u32	cfg_phy_ini;	/* per-port PHY enable; U-Boot loads it from efuse*/
 	u32	cfg_phy_ctrl;	/* MSK_MDI[8:5] | BASE_PHYAD[4:0]; 0 = not known */
@@ -408,28 +332,31 @@ struct luna_eth_chip {
 
 	/* --- SoC glue OUTSIDE the switch's own register space ---------------- */
 	u32	sys_status;	/* 0 = this chip's bring-up does not use it	*/
+
+	/* ★ A MODEL FACT LIVING IN THE CHIP TABLE, said out loud because the two
+	 * are not the same thing.  Stock gives the WAN service netdev its own
+	 * identity, LAN base + a small offset, and the OLT/ISP recognise the ONU
+	 * by it.  The offset is a property of the PRODUCT, not of the silicon --
+	 * it is 3 on the RTL9602C X111W and 5 here -- and it sits here only
+	 * because this tree has one model per Luna part today.  The day a second
+	 * board on one of these dies disagrees, this field moves to the board's
+	 * own declaration (DT/nvmem, beside the base MAC) and does NOT grow a
+	 * second table row.  0 means "no distinct WAN identity", which is what
+	 * stock's own L2 nas0 presents, never "unknown". */
+	u8	wan_mac_offset;
 };
 
-/* ---------------------------------------------------------------------------
- * ★ THE RTL9607C ENTRY IS THIS FILE'S PREVIOUS CONSTANTS, VALUE FOR VALUE.
- * That is deliberate and it is the acceptance test for the refactor: the
+/* The RTL9607C entry is this file's previous constants, value for value: the
  * engineering board that boots today must see a byte-identical register
- * sequence, so any behaviour change on it would be a defect of THIS commit and
- * not of the new chip.
- * --------------------------------------------------------------------------- */
+ * sequence, so any behaviour change on it is a defect of the refactor. */
 static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.sw_map		= &rtl9607c_sw_map,
 	.name		= "RTL9607C",
-	/* ⚠ 0 DELIBERATELY, and it is a scope statement rather than a
-	 * finding: nobody has diffed SWCORE 0x1cc/0x238 stock-vs-ours on the
-	 * RTL9607C engineering board, and this chip reaches its PON/PBO
-	 * abilities through the separate force_ablty_x trio below. The
-	 * acceptance test for this driver is that the 9607C sees a
-	 * byte-identical register sequence, so a value measured on another
-	 * die may not be applied here on the strength of the family name. */
+	/* 0 DELIBERATELY, a scope statement and not a finding: nobody has diffed
+	 * SWCORE 0x1cc/0x238 stock-vs-ours on the RTL9607C board, and this chip
+	 * reaches its PON/PBO abilities through the force_ablty_x trio below. */
 	.force_pon_ablty = 0,
 	.last_port	= 11,	/* 0..4,8 copper; 5 PON; 6,7 SerDes; 9 CPU; 11 PBO */
-	.n_copper	= 5,	/* ports 0..4 */
 	.gphy_ports	= 0x1f,	/* all five copper ports are GPHYs here	*/
 	.msti_ctrl	= 0x1704C,
 	.cpu_tag_insert	= 0x230F4,
@@ -445,50 +372,41 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.ablty_force_x	= 0x002FC,
 	.sds_fib_status	= 0x0028C,
 	.sys_status	= 0,
+	/* 0 DELIBERATELY: nobody has captured a WAN identity on the engineering
+	 * board, and it carries no ISP service.  Copying the G24W's 5 here would
+	 * be one model's answer standing in for another's. */
+	.wan_mac_offset	= 0,
 };
 
-/* ---------------------------------------------------------------------------
- * ★★ THE RTL9603CVD ENTRY -- EVERY FIELD READ FROM *THIS CHIP'S OWN* SDK
- * (tier 3), never carried over from the sibling.  The four that matter most,
- * and why an inherited value would have been silently wrong:
+/*
+ * The RTL9603CVD entry -- every field read from THIS chip's own SDK (tier 3),
+ * never carried over from the sibling. The four that matter most:
  *
- *   msti_ctrl   0x1704C -> 0x1713C.  This is the LOAD-BEARING RX GATE. At the
- *               9607C offset it would write into the middle of a different
- *               block on this chip and every LAN->CPU frame would vanish with
- *               the port counters climbing -- the exact "configured OK but
- *               dead" signature.
- *   p_ablty     0x00200 -> 0x001B8.  ⚠ THE 9607C's 0x200 IS `SDS_CFG` HERE.
- *               A driver that "just worked because the family is the same"
- *               would read a SerDes configuration word and print it as a link
- *               state -- a phantom that reads healthy.
- *   cpu_tag_*   0x230F4/F8 -> 0x2303C/40.  The whole MAC-control block sits
- *               0xB8 lower on this chip, because the 9607C inserts three
- *               CPU_HASH_* registers this part does not have.
- *   piso        same BASE, different SHAPE: 12-bit masks packed TWO PORTS PER
- *               WORD (6 ports + 6 ext), against the 9607C's 29-bit one-per-word
- *               (11 ports + 18 ext). Both tile exactly, which is the
- *               cross-check that makes the packing believable rather than
- *               guessed.
+ *   msti_ctrl   0x1704C -> 0x1713C. The LOAD-BEARING RX GATE; at the 9607C
+ *               offset it writes into a different block here and every LAN->CPU
+ *               frame vanishes with the port counters climbing.
+ *   p_ablty     0x00200 -> 0x001B8. The 9607C's 0x200 is SDS_CFG here, so an
+ *               inherited value reads a SerDes word as a link state.
+ *   cpu_tag_*   0x230F4/F8 -> 0x2303C/40: the whole MAC-control block sits 0xB8
+ *               lower, because the 9607C inserts three CPU_HASH_* registers.
+ *   piso        same BASE, different SHAPE -- 12-bit masks two ports per word
+ *               against the 9607C's 29-bit one-per-word. Both tile exactly.
  *
- * ★ AND `fephy_poll` HAS NO 9607C COUNTERPART AT ALL. Its reset value stops
- * the FE-PHY auto-poller, so the switch never learns FE link state until
- * somebody clears bit 16 -- the chip's own U-Boot does exactly that, and a
- * port that "links but forwards nothing" is what forgetting it looks like.
- * --------------------------------------------------------------------------- */
+ * fephy_poll has no 9607C counterpart at all: its reset value stops the FE-PHY
+ * auto-poller, so the switch never learns FE link state until somebody clears
+ * bit 16, which this chip's own U-Boot does.
+ */
 static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.sw_map		= &rtl9603cvd_sw_map,
 	.name		= "RTL9603CVD",
-	/* ★★ MEASURED 2026-08-27, stock vs ours, SWCORE 0x180..0x1fc
-	 * (swcore_diff.py --board=RTL9603CVD/LANLY/G24W --diff):
+	/* MEASURED 2026-08-27, stock vs ours, SWCORE 0x180..0x1fc:
 	 *     FORCE_P_ABLTY[4]     stock 0x00000016   ours 0x00000000
 	 *     ABLTY_FORCE_MODE[4]  stock 0x0000bfff   ours 0x00000000
-	 * i.e. stock forces the PON port up with EXACTLY the pair it applies
-	 * to the CPU port, and we leave it at reset. Both are portless
-	 * internal MAC links: there is no PHY to auto-negotiate with, so the
-	 * `leave a UTP port alone` rule below does not reach them. */
+	 * Stock forces the PON port up with exactly the pair it applies to the CPU
+	 * port. Both are portless internal MAC links, so the "leave a UTP port
+	 * alone" rule below does not reach them. */
 	.force_pon_ablty = 1,
 	.last_port	= 5,	/* 0..2 FE; 3 GE; 4 PON; 5 CPU (6 = PBO loopback)*/
-	.n_copper	= 4,	/* ports 0..3					*/
 	.gphy_ports	= 0x08,	/* ONLY port 3 is a GPHY; 0..2 are FE PHYs	*/
 	.msti_ctrl	= 0x1713C,
 	.cpu_tag_insert	= 0x2303C,
@@ -506,6 +424,13 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.ablty_force_x	= 0,
 	.sds_fib_status	= 0,
 	.sys_status	= 0xB8000044,	/* SoC handshake, outside SWCORE		*/
+	/* MEASURED on THIS unit's own stock, two independent sources agreeing:
+	 * the live `ip link` capture has ELAN 5c:19:23:b3:ce:90 and the WAN
+	 * service netdev nas0_0 at ..:95, and the vendor MIB in the config
+	 * partition carries the same pair (ELAN_MAC_ADDR ..90, the WAN
+	 * connection object's MacAddr ..95 with MacOverrideEnable 0).  Both are
+	 * tier 2 and neither was derived from the other. */
+	.wan_mac_offset	= 5,
 };
 
 /* Accessors: the table lives in `ep->c`, so a per-port register is one call and
@@ -526,19 +451,12 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 #define ABLTY_1G_FULL_LINK	0x16	/* speed=1000, duplex=full, link=up	*/
 #define ABLTY_FORCE_ALL		0xFFF	/* force all basic abilities		*/
 
-/* ★ THE PORT MAP MOVED INTO THE CHIP TABLE. It used to be these three
- * constants, and they described the RTL9607C only: 11 ports with the CPU at 9.
- * The RTL9603CVD has SIX, with the CPU at 5 and the PON at 4 -- so a loop
- * bounded by 11 there walks four ports that do not exist, reading and writing
- * registers past the end of every per-port array in the block. That is not a
- * harmless over-read: the per-port arrays are adjacent, so port 6..11 of a
- * 6-port chip lands in whatever register file follows.
- * ⚠ ONE MORE TRAP RECORDED SO NOBODY RE-CHASES IT: the vendor NIC header
- * declares a "LAN_PORT5 = 8" for the RTL9603CVD. It is REFUTED -- that chip's
- * own chipdef marks port 8 as RT_PORT_NONE and caps the port space at 0..6,
- * and the board's own boot log only ever uses 0..4. It reads like a copy-paste
- * from the sibling branch below it. DO NOT USE PORT 8 ON THE 9603CVD.
- */
+/* The port map lives in the chip table: the RTL9607C has 11 ports with the CPU
+ * at 9, the RTL9603CVD SIX with the CPU at 5 and the PON at 4. A loop bounded
+ * by 11 on the smaller part walks past the end of every per-port array into
+ * whatever register file follows.
+ * The vendor NIC header's "LAN_PORT5 = 8" for the RTL9603CVD is REFUTED: that
+ * chip's own chipdef marks port 8 RT_PORT_NONE and caps the space at 0..6. */
 
 /* switch CPU-port control tag: ethertype 0x8899 followed by 6 control bytes,
  * inserted after the source MAC on frames to/from the CPU. */
@@ -549,32 +467,15 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
  * also records that this driver and gpon-rtl960x.c name bit 5 differently. */
 
 /* Internal-PHY indirect window. The register TRIO and its bit layout are the
- * same on both chips (declared at the top with the other shared offsets); the
- * PHYs behind it are addressed by their switch port number, and BUSY lives in
- * the RD register, NOT in CMD.
+ * same on both chips; the PHYs behind it are addressed by their switch port
+ * number, and BUSY lives in the RD register, NOT in CMD.
  *
- * ★ THE OCP ADDRESS OF BMCR IS NOT ONE CONSTANT. A GPHY answers on page 0xA40
- * (BMCR = 0xA400, register N adds (N&7)<<1); an FE PHY has a FLAT map where the
- * OCP address is simply reg<<1, so BMCR = 0x0000. The RTL9607C has only GPHYs,
- * which is why this used to be a single #define.
- * ⚠ AND THE SOURCES DISAGREE FOR THE FE PORTS -- the board must settle it. The
- * RTL9603CVD's own SDK power-up loop uses 0xA400 for ALL of ports 0..5,
- * character-for-character the 9607C's, while that same SDK's OCP map says its
- * FE PHYs are flat. Either the loop was carried over unadapted (so only port 3
- * is really being powered) or the FE PHY aliases. `gphy_map` is a module
- * parameter for exactly that one-boot experiment; the DEFAULT follows the
- * chip table, and 1 reproduces the vendor's own behaviour. */
-#define GPHY_MII_PAGE	0xA400		/* GPHY: page 0xA40, register 0			*/
-#define   GPHY_CMD_EN	BIT(21)		/* start					*/
-#define   GPHY_WREN	BIT(22)		/* write strobe					*/
-#define   GPHY_RD_BUSY	BIT(16)		/* in the RD register				*/
+ * The OCP address of BMCR is not one constant: a GPHY answers on page 0xA40
+ * (BMCR = 0xA400, register N adds (N&7)<<1), an FE PHY has a FLAT map where the
+ * address is reg<<1. The RTL9603CVD's own SDK power-up loop uses 0xA400 for ALL
+ * of ports 0..5 while that same SDK's OCP map says its FE PHYs are flat, so
+ * `gphy_map` exists to settle it in one boot. */
 #define   CMD_GPHY_RST_PS	BIT(6)	/* SOFTWARE_RST(0x0E0) bit 6	*/
-/* ★ RENAMED 2026-08-23. It was `GPHY_MACRO_RST`, a name this chip does not
- * use: `MACRO` occurs ZERO times in the RTL9603CVD field list. The register
- * at 0x0E0 is SOFTWARE_RST and bit 6 is CMD_GPHY_RST_PS (lsp 6, len 1),
- * sibling to SW_RST / PONMAC_RST / CMD_CHIP_RST_PS. The offset and the bit
- * were right; the name described a register that does not exist here, and a
- * misleading name is renamed the day it is proven wrong.	*/
 #define   FEPHY_STOP_POLL	BIT(16)	/* in fephy_poll: 1 = auto-poller OFF	*/
 
 /* Live link / speed (genuine, independent of the MAC force). Copper genuine link
@@ -598,10 +499,10 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 #define RTL8221B_PHYAD		6
 
 /* MII BMCR/BMSR bits. */
-#define MII_PDOWN	0x0800
-#define MII_ANENABLE	0x1000
-#define MII_ANRESTART	0x0200
-#define MII_LSTATUS	0x0004
+/* The MII register bits are <linux/mii.h>'s.  They were spelled BMCR_PDOWN /
+ * BMCR_ANENABLE here, and that prefix belongs to the REGISTER NUMBERS in that
+ * header (MII_BMCR, MII_BMSR): one prefix for two unrelated index spaces is a
+ * name a reader cannot look up. */
 
 /* The DMA descriptor address bus window (0 on this SoC). */
 /* DMA_BUS_WINDOW is the FAMILY's -- luna_eth_regs.h, with the measurement
@@ -621,6 +522,7 @@ struct luna_eth {
 	struct napi_struct	napi;
 	struct timer_list	backstop;
 	struct timer_list	diag;
+	struct work_struct	diag_work;
 	int			diag_left;
 	spinlock_t		tx_lock;
 
@@ -657,25 +559,46 @@ struct luna_eth {
 	u32			dbg_omci_tx;	/* US OMCI responses queued */
 	u32			dbg_omci_tx_drop;
 	u32			dbg_omci_unhandled;
-	/* ★ THE CPU-TAG REASON CENSUS -- one log line per DISTINCT reason code
-	 * this die has ever stamped on a frame handed to the CPU, and never a
-	 * second for the same one.  It is bounded by construction (256 lines in
-	 * the life of a boot, two or three in practice) and it is here because
-	 * the alternative cost a boot: the OMCI reason is PER CHIP, a wrong one
-	 * matches nothing, and a trap that matches nothing is indistinguishable
-	 * from an OLT that sent nothing.  This makes the silicon say which codes
-	 * it actually uses instead of us inferring it from a silence. */
+	/* One log line per DISTINCT cpu-tag reason this die has ever stamped, and
+	 * never a second for the same one. The OMCI reason is PER CHIP, a wrong
+	 * one matches nothing, and a trap that matches nothing is
+	 * indistinguishable from an OLT that sent nothing. */
 	u32			rx_reason_seen[8];
+
+	/* The egress mask a CPU-originated flood must use: the very set
+	 * switch_init() programs into LUT_*_FLOOD, minus this chip's CPU port.
+	 * Derived there so the flood registers and the descriptor can never
+	 * disagree about which ports a broadcast belongs on. */
+	u32			lan_flood_mask;
+
+	/* ---- WAN (gpon0), the data GEM's netdev ------------------------- */
+	struct net_device	*wan_ndev;
+
+	/* The same ledger idea applied to opts3[19:16], and it is the instrument
+	 * that keeps a silent WAN honest.  If downstream data reaches this GMAC
+	 * on a port the demux does not call the fibre, gpon0 counts nothing --
+	 * which reads exactly like an OLT forwarding nothing.  One line per
+	 * distinct ingress port ever delivered says which of the two it is,
+	 * without a second boot and without a debug knob. */
+	u16			rx_src_port_seen;
+
+	/* And one line per distinct PON STREAM ID ever delivered on the fibre.
+	 * MEASURED 2026-09-11: the port ledger alone was not enough -- the first
+	 * fibre frame this board logged decoded as sid 127, the OMCC, so "a frame
+	 * arrived on the fibre" did not yet mean "user data arrived on the data
+	 * GEM".  The sid separates OMCC / data / multicast in one line, and the
+	 * GTC's own per-flow DS counters cannot: they are CLEAR-ON-READ and
+	 * /proc/gpon is itself a reader, so a zero there means nobody
+	 * accumulated. 128 possible ids, one bit each. */
+	u32			rx_pon_sid_seen[4];
 };
 
 /* The single instance, for the exported glue the GPON driver calls.  Same
  * shape as the sibling shell: this SoC has exactly one CPU-port GMAC. */
 static struct luna_eth *g_ep;
 
-/* The G.988 ONU model.  ★ THE PROTOCOL IS THE CORE'S AND IS NOT RE-WRITTEN
- * HERE: every byte of state lives in this struct and every decision in
- * gpon_omci_core.c, which the Cortina family and the sibling Luna shell
- * already drive.  A third responder is what this tier exists to prevent. */
+/* The G.988 ONU model. The protocol is the CORE's: every byte of state lives in
+ * this struct and every decision in gpon_omci_core.c. */
 static struct omci_onu luna_eth_onu;
 
 static inline u32 ep_rd(struct luna_eth *ep, u32 r) { return ioread32(ep->base + r); }
@@ -687,28 +610,78 @@ static inline void sw_or(struct luna_eth *ep, u32 r, u32 v) { sw_wr(ep, r, sw_rd
 static inline unsigned int tx_slot(unsigned int counter) { return counter % TX_RING_SIZE; }
 
 /* ---- internal GPHY MDIO (indirect window) --------------------------------- */
-/* ★★★ SETTLE BEFORE THE FIRST SAMPLE, OR THE POLL CANNOT FAIL.
- * `gphy_wait` waits for BUSY to CLEAR and samples immediately after the CMD
- * store. If BUSY has not yet ASSERTED -- the transaction has not started -- the
- * very first read sees BUSY=0, the wait returns SUCCESS instantly, and the
- * caller then reads RD_DAT holding whatever was there before: ZERO.
+/* ---- internal GPHY MDIO (indirect window) ---------------------------------
+ * SETTLE BEFORE THE FIRST SAMPLE, or the poll cannot fail: gphy_wait() waits
+ * for BUSY to CLEAR, so if BUSY has not yet ASSERTED the first read returns
+ * success instantly and the caller reads a stale zero. MEASURED 2026-08-24 on
+ * the G24W: every copper port, on both OCP maps, read bmcr=0000 bmsr=0000 with
+ * not one timeout warning. The vendor does not poll BUSY at all -- CMD,
+ * mdelay(10), read -- i.e. its own code treats BUSY as unusable here. */
+/*
+ * ★★★ THE GPHY BUS IS AN INDIRECT WINDOW, AND IT HAD NO OWNER.
  *
- * MEASURED 2026-08-24 on the G24W, and it is uniform: EVERY copper port, on
- * BOTH OCP maps, reads `bmcr=0000 bmsr=0000` -- and NOT ONE "read timeout"
- * warning is emitted, because we never time out. We return zero and call it a
- * register value. That is a check that cannot fail, in the reassuring
- * direction, and it sits UPSTREAM of every candidate tested so far: the RxCDO
- * store width, the force-every-UTP-port policy, the GPHY reset and the OCP map
- * were all about WHAT we write to a PHY we were never reaching.
+ * Every access is a SEQUENCE through shared switch registers -- write
+ * SW_GPHY_IND_WD, write SW_GPHY_IND_CMD, poll BUSY, read SW_GPHY_IND_RD -- over the same
+ * sw_rd/sw_wr window that carries unrelated traffic.  Two users interleaving
+ * their command and data phases do not get an error: they get each other's
+ * answer, which is the most confident wrong value this driver can produce.
  *
- * ★ THE VENDOR DOES NOT POLL BUSY AT ALL. `_dal_rtl9603cvd_switch_phyPower_set`
- * does CMD -> mdelay(10) -> read RD -> modify -> WD -> CMD -> mdelay(10). A
- * flat settle, no handshake -- i.e. the vendor's own code treats BUSY as
- * unusable for this.
+ * ⚠ A MUTEX, IN PROCESS CONTEXT.  A spinlock was tried first, to keep the
+ *   diagnostic's timer context legal, and the price is not payable: gphy_wait()
+ *   allows 10000 x udelay(1) plus the settle, so ONE port's read+write can hold
+ *   IRQs off for ~20 ms and the four-port loop for ~80 ms -- computed from the
+ *   bounds in this file, not measured.  That sits next to a GPON datapath and a
+ *   NAPI poll.  The diagnostic moved to a WORK ITEM instead: a diagnostic must
+ *   bend to the datapath, never the other way round.
  *
- * ⚠ SINGLE VARIABLE, and reversible: `gphy_settle_us=0` restores the old
- * behaviour without a rebuild.
+ * ⚠ THE __locked SPELLING IS FOR CALLERS THAT WANT ONE ACQUISITION ACROSS
+ *   SEVERAL ACCESSES -- the per-port loops.  gphy_ocp() is pure address
+ *   arithmetic and touches no bus, so read/write do not nest.
  */
+static DEFINE_MUTEX(luna_gphy_lock);
+
+/*
+ * gphy_map picks the OCP map, so it is part of the ADDRESS every transaction
+ * uses.  At 0644 it could move between the read and the write of one
+ * read-modify-write, addressing two different registers for one operation --
+ * the same defect as writing BASE_PHYAD outside the window.  The setter takes
+ * the window, so a change lands only between whole transactions.
+ */
+static int gphy_map_set(const char *val, const struct kernel_param *kp)
+{
+	int rc;
+
+	mutex_lock(&luna_gphy_lock);
+	rc = param_set_int(val, kp);
+	mutex_unlock(&luna_gphy_lock);
+	return rc;
+}
+static const struct kernel_param_ops gphy_map_ops = {
+	.set = gphy_map_set,
+	.get = param_get_int,
+};
+module_param_cb(gphy_map, &gphy_map_ops, &gphy_map, 0644);
+MODULE_PARM_DESC(gphy_map, "internal-PHY OCP map: 0 = per the chip table, 1 = force GPHY page 0xA40 on every port, 2 = force the flat FE map (a bring-up experiment: the vendor SDK and its own OCP map disagree for the FE ports)");
+
+/*
+ * The UNI administrative lock, as a DESIRED state per copper port.
+ *
+ * ★ eth_copper_phy_up() is this family's restoring writer: it clears BMCR_PDOWN
+ *   and restarts auto-negotiation on every copper port, from eth_switch_init()
+ *   on every open.  A lock written once and walked away from would be undone
+ *   by the next open with nothing reporting it.
+ *
+ * ⚠ THIS FILE IS THE G24W's.  The X111W compiles rtl9602c_eth.c with
+ *   CONFIG_LUNA_ETH=n, so nothing here reaches it; the apply itself belongs in
+ *   the luna_gpon_nic.h contract both Ethernet shells already share.
+ */
+static u32 luna_uni_locked_ports;
+
+static bool luna_uni_port_locked(unsigned int port)
+{
+	return port < 32 && (READ_ONCE(luna_uni_locked_ports) & BIT(port));
+}
+
 static int gphy_wait(struct luna_eth *ep)
 {
 	int i;
@@ -718,7 +691,7 @@ static int gphy_wait(struct luna_eth *ep)
 		udelay(gphy_settle_us);
 
 	for (i = 0; i < 10000; i++) {
-		if (!(sw_rd(ep, SW_GPHY_RD) & GPHY_RD_BUSY))
+		if (!(sw_rd(ep, SW_GPHY_IND_RD) & GPHY_IND_BUSY))
 			return 0;
 		udelay(1);
 	}
@@ -737,82 +710,140 @@ static u32 gphy_ocp(struct luna_eth *ep, unsigned int p, unsigned int reg)
 /* Read one OCP address on one PHY. The SURVEY needs this because it asks the
  * SAME register through BOTH maps, which `gphy_read()` cannot express: that one
  * consults the chip table (correctly) and so can only ever return one answer. */
-static u16 gphy_read_ocp(struct luna_eth *ep, unsigned int phyad, u32 ocp)
+static int gphy_read_ocp__locked(struct luna_eth *ep, unsigned int phyad,
+				 u32 ocp, u16 *out)
 {
-	sw_wr(ep, SW_GPHY_CMD, (phyad << 16) | ocp | GPHY_CMD_EN);
+	/* ★ PREFLIGHT.  Issuing a command while the previous transaction is
+	 *   still BUSY makes the window answer for the wrong one. */
 	if (gphy_wait(ep))
-		return 0xffff;
-	return sw_rd(ep, SW_GPHY_RD) & 0xffff;
-}
-
-static u16 gphy_read(struct luna_eth *ep, unsigned int phyad, unsigned int reg)
-{
-	u32 adr = (phyad << 16) | gphy_ocp(ep, phyad, reg);
-
-	sw_wr(ep, SW_GPHY_CMD, adr | GPHY_CMD_EN);
-	if (gphy_wait(ep)) {
-		/* ★ NEVER 0xffff SILENTLY. An all-ones MII read is a PERFECTLY
-		 * PLAUSIBLE register value -- BMSR 0xffff reads as "link up, every
-		 * ability" -- so returning it for a DEAD BUS manufactures a healthy
-		 * answer out of a broken instrument. Say so, rate-limited. */
-		dev_warn_ratelimited(ep->dev,
-			"gphy: read timeout phy %u reg %u -- the indirect bus never cleared BUSY; the 0xffff returned is NOT a register value\n",
-			phyad, reg);
-		return 0xffff;
-	}
-	return sw_rd(ep, SW_GPHY_RD) & 0xffff;
-}
-
-static void gphy_write(struct luna_eth *ep, unsigned int phyad,
-		       unsigned int reg, u16 val)
-{
-	u32 adr = (phyad << 16) | gphy_ocp(ep, phyad, reg);
-
-	sw_wr(ep, SW_GPHY_WD, val);
-	sw_wr(ep, SW_GPHY_CMD, adr | GPHY_WREN | GPHY_CMD_EN);
+		return -ETIMEDOUT;
+	sw_wr(ep, SW_GPHY_IND_CMD, (phyad << 16) | ocp | GPHY_IND_EN);
 	if (gphy_wait(ep))
-		dev_warn_ratelimited(ep->dev,
-			"gphy: write timeout phy %u reg %u val %04x -- the write may never have landed\n",
-			phyad, reg, val);
+		return -ETIMEDOUT;
+	*out = sw_rd(ep, SW_GPHY_IND_RD) & 0xffff;
+	return 0;
 }
 
-/* Power up + (re)start auto-negotiation on the integrated copper PHYs so a copper
- * LAN jack actually trains. Each PHY is addressed by its switch port number. */
-/* ★★ ONE BOOT INSTEAD OF THREE.  The open M2 question is whether this chip's FE
- * PHYs answer on the GPHY page (0xA40, so BMCR = 0xA400) or on a FLAT map
- * (ocp = reg<<1, so BMCR = 0x0000) -- the RTL9603CVD's own SDK power-up loop
- * uses the GPHY page for ALL ports while that same SDK's OCP map says its FE
- * PHYs are flat, and the two cannot both be right.
+/*
+ * -> 0 and *out set, or negative with *out LEFT EXACTLY AS IT WAS.
  *
- * Sweeping `gphy_map` would cost a BOOT PER VALUE. Reading the same two
- * registers through BOTH maps in one pass costs four MDIO reads per port and
- * answers it outright: the map that returns a PLAUSIBLE BMCR/BMSR pair is the
- * map, and if both return 0xffff the answer is that neither is -- which is
- * itself a finding, and points at the patch/settle or the per-port enable
- * rather than at the address.
- *
- * ★ IT IS READ-ONLY AND IT SAYS SO. Nothing here writes a PHY, so it cannot
- * change the outcome it is measuring -- which is the whole reason it can be
- * left on by default on both chips.
- *
- * ★ AND 0xffff IS PRINTED AS WHAT IT IS. An all-ones MDIO read is a perfectly
- * plausible register value (BMSR 0xffff reads as "link up, every ability"), so
- * the dump labels it rather than letting a dead bus look like a healthy PHY.
+ * ★★ THE SENTINEL IS GONE.  It used to return 0xffff on a timeout, and an
+ *    all-ones MII read is a plausible register value (BMSR 0xffff = link up,
+ *    every ability) -- so a dead bus manufactured a healthy answer, and a
+ *    read-modify-write happily wrote that answer back.  The caller now cannot
+ *    confuse a failure with a value, because on failure it gets neither.
  */
-static void eth_phy_survey(struct luna_eth *ep)
+static int gphy_read__locked(struct luna_eth *ep, unsigned int phyad,
+			     unsigned int reg, u16 *out)
+{
+	u32 adr = (phyad << 16) | gphy_ocp(ep, phyad, reg);
+
+	if (gphy_wait(ep))
+		goto timeout;
+	sw_wr(ep, SW_GPHY_IND_CMD, adr | GPHY_IND_EN);
+	if (gphy_wait(ep))
+		goto timeout;
+	*out = sw_rd(ep, SW_GPHY_IND_RD) & 0xffff;
+	return 0;
+timeout:
+	dev_warn_ratelimited(ep->dev,
+		"gphy: read timeout phy %u reg %u -- the indirect bus never cleared BUSY; NO value is returned\n",
+		phyad, reg);
+	return -ETIMEDOUT;
+}
+
+static int gphy_write_ocp__locked(struct luna_eth *ep, unsigned int phyad,
+				  u32 ocp, u16 val)
+{
+	/* ★ PREFLIGHT BEFORE THE DATA REGISTER.  SW_GPHY_IND_WD was written while a
+	 *   previous transaction could still be BUSY, so the value could be
+	 *   consumed by that one instead of this one. */
+	if (gphy_wait(ep))
+		goto timeout;
+	sw_wr(ep, SW_GPHY_IND_WD, val);
+	sw_wr(ep, SW_GPHY_IND_CMD, GPHY_IND_PHY(phyad) | ocp |
+				   GPHY_IND_WREN | GPHY_IND_EN);
+	if (gphy_wait(ep))
+		goto timeout;
+	return 0;
+timeout:
+	dev_warn_ratelimited(ep->dev,
+		"gphy: write timeout phy %u ocp %#06x val %04x -- the write did NOT land\n",
+		phyad, ocp, val);
+	return -ETIMEDOUT;
+}
+
+static int gphy_write__locked(struct luna_eth *ep, unsigned int phyad,
+			      unsigned int reg, u16 val)
+{
+	return gphy_write_ocp__locked(ep, phyad, gphy_ocp(ep, phyad, reg), val);
+}
+
+/*
+ * The OCP address THIS BOARD'S OWN ADMINISTRATIVE PATH uses, which is NOT the
+ * one its bring-up uses -- and both are measured, so neither may be folded into
+ * the other:
+ *
+ *   INITIALISATION -- the vendor's switch_phyPower_set helper writes page 0xA40
+ *   to EVERY admitted port, with a fixed delay and no BUSY poll.  That is what
+ *   the gphy_map default (force 0xA40) was established from, and it stands.
+ *
+ *   ADMINISTRATION -- the vendor's phyPowerDown path goes through its MIIM
+ *   read/write helpers, and those select page 0xA40 for the GPHY port and the
+ *   FLAT FE map for the others, which is exactly what the chip table's
+ *   gphy_ports mask already says.
+ *
+ * So an administrative write follows the table, whatever the bring-up knob is
+ * set to -- and no sibling board's mapping is borrowed for either.
+ */
+static u32 gphy_ocp_miim(struct luna_eth *ep, unsigned int p, unsigned int reg)
+{
+	if (ep->c->gphy_ports & BIT(p))
+		return GPHY_MII_PAGE | ((reg & 7) << 1);
+	return (reg & 0x1f) << 1;
+}
+
+/* Power up + (re)start auto-negotiation on the integrated copper PHYs so a
+ * copper LAN jack actually trains. Each PHY is addressed by its switch port.
+ *
+ * The survey reads the same two registers through BOTH OCP maps in one pass, so
+ * the open question of which map this chip's FE PHYs answer on costs four MDIO
+ * reads per port instead of a boot per gphy_map value. It writes no PHY, so it
+ * cannot change the outcome it measures, and it LABELS an all-ones read rather
+ * than letting a dead bus look like a healthy one. */
+static void eth_phy_survey__locked(struct luna_eth *ep)
 {
 	unsigned int p;
+
+	lockdep_assert_held(&luna_gphy_lock);
 
 	if (ep->c->cfg_phy_ini)
 		dev_info(ep->dev,
 			 "phy survey: CFG_PHY_INI(%#05x) = %08x  (U-Boot loads its per-port field from the efuse; we do NOT write it -- the polarity is unresolved)\n",
 			 ep->c->cfg_phy_ini, sw_rd(ep, ep->c->cfg_phy_ini));
 
-	for (p = 0; p < ep->c->n_copper; p++) {
-		u16 g_bmcr = gphy_read_ocp(ep, p, GPHY_MII_PAGE | (0 << 1));
-		u16 g_bmsr = gphy_read_ocp(ep, p, GPHY_MII_PAGE | (1 << 1));
-		u16 f_bmcr = gphy_read_ocp(ep, p, 0 << 1);
-		u16 f_bmsr = gphy_read_ocp(ep, p, 1 << 1);
+	for (p = 0; p < ep->c->sw_map->n_copper; p++) {
+		u16 g_bmcr = 0, g_bmsr = 0, f_bmcr = 0, f_bmsr = 0;
+		int rc;
+
+		/* four reads of ONE port through BOTH maps, inside the caller's
+		 * single acquisition: a window taken per access would let
+		 * another user answer in the middle of them */
+		rc = gphy_read_ocp__locked(ep, p, GPHY_MII_PAGE | (0 << 1), &g_bmcr);
+		if (!rc)
+			rc = gphy_read_ocp__locked(ep, p, GPHY_MII_PAGE | (1 << 1), &g_bmsr);
+		if (!rc)
+			rc = gphy_read_ocp__locked(ep, p, 0 << 1, &f_bmcr);
+		if (!rc)
+			rc = gphy_read_ocp__locked(ep, p, 1 << 1, &f_bmsr);
+		if (rc) {
+			/* ★ NOT PRINTED AS VALUES.  The old code printed 0xffff
+			 * and then reasoned about whether 0xffff meant anything. */
+			dev_info(ep->dev,
+				 "phy survey: port %u -- the bus did not answer (%d); no register values\n",
+				 p, rc);
+			continue;
+		}
 
 		dev_info(ep->dev,
 			 "phy survey: port %u (%s by table)  gphy-page[bmcr=%04x bmsr=%04x]%s  flat[bmcr=%04x bmsr=%04x]%s\n",
@@ -824,30 +855,22 @@ static void eth_phy_survey(struct luna_eth *ep)
 	}
 }
 
-/* Program CFG_PHY_CTRL, and SAY what was there before: the previous value is
- * the measurement -- a silent write would destroy the evidence it rests on. */
-/* ★★★ RELEASE THE RECEIVE FIFOs. MEASURED 2026-08-24, stock vs ours, the same
- * board within minutes, SWCORE 0x00048 = CFG_PCSXF (this chip's own chipdef:
- * RST_RXFIFO[13:10] | CFG_MIIRX_IPG[9:5] | CFG_PCSXF[4:1] | COL_10M[0]):
- *
- *      stock  0x00000000  ->  RST_RXFIFO = 0     no FIFO held in reset
- *      ours   0x00002006  ->  RST_RXFIFO = 0b1000   ONE held, and it is the
- *                                                   cabled port's
- *
- * We never wrote that register: the value is the bootloader's, and stock clears
- * it. Exactly the shape of the BASE_PHYAD defect found the same morning -- a
- * register nobody on our side had ever read.
- *
- * It explains what nothing else did: the PHY answers, the port reports LINK=1
- * with autoneg complete, and the switch's own per-port RX counter does not move
- * by a single frame for traffic this host demonstrably delivers to that port on
- * stock. A receive FIFO held in reset ingresses nothing and reports nothing.
- *
- * `rst_rxfifo` is a parameter, and -1 leaves the bootloader's value, which is
- * how this claim gets FALSIFIED instead of believed. The witness is NOT the
- * link -- that was already up. It is the switch MIB at SWCORE 0x32620 + 3*0x80
- * moving past the 2824 frames U-Boot's own TFTP left frozen there.
- */
+static void eth_phy_survey(struct luna_eth *ep)
+{
+	mutex_lock(&luna_gphy_lock);
+	eth_phy_survey__locked(ep);
+	mutex_unlock(&luna_gphy_lock);
+}
+
+/* Release the receive FIFOs. MEASURED 2026-08-24, stock vs ours, same board,
+ * SWCORE 0x00048 = CFG_PCSXF (RST_RXFIFO[13:10] | CFG_MIIRX_IPG[9:5] |
+ * CFG_PCSXF[4:1] | COL_10M[0]): stock 0x00000000, ours 0x00002006, i.e. ONE
+ * FIFO held in reset and it is the cabled port's. A receive FIFO held in reset
+ * ingresses nothing and reports nothing, which is why the PHY answered, the
+ * port reported LINK=1 with autoneg complete, and the switch's per-port RX
+ * counter did not move by a single frame. The witness is NOT the link -- it was
+ * already up -- it is the switch MIB at 0x32620 + 3*0x80 moving past the 2824
+ * frames U-Boot's own TFTP left frozen there. */
 static void eth_rxfifo_release(struct luna_eth *ep)
 {
 	u32 was, now;
@@ -870,116 +893,169 @@ static void eth_rxfifo_release(struct luna_eth *ep)
 		 ep->c->cfg_pcsxf, (was >> 10) & 0xf, rst_rxfifo & 0xf, was, now);
 }
 
-static void eth_phy_ctrl_apply(struct luna_eth *ep)
+/* Program CFG_PHY_CTRL, and SAY what was there before: the previous value is
+ * the measurement, and a silent write would destroy the evidence it rests on. */
+/*
+ * ⚠ BASE_PHYAD IS PART OF THE ADDRESS EVERY GPHY TRANSACTION USES, so changing
+ *   it while one is in flight re-points that transaction at another PHY.  It
+ *   was written outside the window's lock.
+ */
+/*
+ * -> 0, or negative and the caller must NOT bring the interface up.
+ *
+ * ★★ THE MUTEX EXCLUDES OTHER CPUs; IT DOES NOT EXCLUDE THE HARDWARE.  This
+ *    held the window's lock and retargeted BASE_PHYAD anyway -- and BASE_PHYAD
+ *    is part of the address EVERY transaction uses, so a transaction still in
+ *    flight from an earlier timeout would land on a DIFFERENT PHY.  Executing
+ *    the compiled body with BUSY held at 1 showed exactly that: it read CFG,
+ *    wrote the new value, re-read it, and never looked at the RD register at
+ *    all (dev/re-tools/g24w_base_phyad_repro.py).
+ *
+ * ★ A NO-OP NEEDS NO WAIT.  When the value already carries BASE_PHYAD nothing
+ *   is written, so nothing can be re-pointed and there is nothing to wait for.
+ */
+static int eth_phy_ctrl_apply__locked(struct luna_eth *ep)
 {
-	u32 was;
+	u32 was, back;
 
+	lockdep_assert_held(&luna_gphy_lock);
 	if (!ep->c->cfg_phy_ctrl || base_phyad < 0)
-		return;
+		return 0;
 
 	was = sw_rd(ep, ep->c->cfg_phy_ctrl);
 	if ((was & 0x1f) == (u32)(base_phyad & 0x1f)) {
 		dev_info(ep->dev,
 			 "CFG_PHY_CTRL(%#05x) = %08x already carries BASE_PHYAD %u -- left alone\n",
 			 ep->c->cfg_phy_ctrl, was, base_phyad & 0x1f);
-		return;
+		return 0;
+	}
+	/* ADMISSION: the window must be idle before the address moves. */
+	if (gphy_wait(ep)) {
+		dev_err(ep->dev,
+			"CFG_PHY_CTRL(%#05x): the indirect window never cleared BUSY, so BASE_PHYAD %u -> %u is NOT applied -- retargeting it now would re-point a transaction already in flight\n",
+			ep->c->cfg_phy_ctrl, was & 0x1f, base_phyad & 0x1f);
+		return -ETIMEDOUT;
 	}
 	sw_wr(ep, ep->c->cfg_phy_ctrl, (was & ~0x1fu) | (base_phyad & 0x1f));
+	back = sw_rd(ep, ep->c->cfg_phy_ctrl);
+	if ((back & 0x1f) != (u32)(base_phyad & 0x1f)) {
+		dev_err(ep->dev,
+			"CFG_PHY_CTRL(%#05x): BASE_PHYAD %u did NOT take -- it reads %08x, so every PHY address after this would be wrong\n",
+			ep->c->cfg_phy_ctrl, base_phyad & 0x1f, back);
+		return -EIO;
+	}
 	dev_info(ep->dev,
 		 "CFG_PHY_CTRL(%#05x): BASE_PHYAD %u -> %u (%08x -> %08x)\n",
-		 ep->c->cfg_phy_ctrl, was & 0x1f, base_phyad & 0x1f,
-		 was, sw_rd(ep, ep->c->cfg_phy_ctrl));
+		 ep->c->cfg_phy_ctrl, was & 0x1f, base_phyad & 0x1f, was, back);
+	return 0;
+}
+
+static int eth_phy_ctrl_apply(struct luna_eth *ep)
+{
+	int rc;
+
+	mutex_lock(&luna_gphy_lock);
+	rc = eth_phy_ctrl_apply__locked(ep);
+	mutex_unlock(&luna_gphy_lock);
+	return rc;
 }
 
 /* Writing this re-applies BASE_PHYAD and dumps the survey again, so a whole
  * sweep costs one boot instead of one build each. */
 static int resurvey_set(const char *val, const struct kernel_param *kp)
 {
-	if (!survey_ep)
+	struct luna_eth *ep;
+	int rc;
+
+	/* ⚠ A MODULE-PARAMETER WRITER CAN ARRIVE AT ANY MOMENT, INCLUDING AFTER
+	 *   devres has freed ep and its MMIO.  COPYING THE POINTER UNDER THE
+	 *   LOCK AND RELEASING IT IS NOT ENOUGH: clearing the global does not
+	 *   revoke a copy, so the teardown could still free what this call is
+	 *   about to dereference.  The lock is the lifetime owner and is HELD
+	 *   THROUGH EVERY ACCESS -- which is why both bodies below have a
+	 *   __locked spelling. */
+	mutex_lock(&luna_gphy_lock);
+	ep = survey_ep;
+	if (!ep) {
+		mutex_unlock(&luna_gphy_lock);
 		return -ENODEV;
-	eth_phy_ctrl_apply(survey_ep);
-	eth_phy_survey(survey_ep);
-	return 0;
+	}
+	rc = eth_phy_ctrl_apply__locked(ep);
+	if (!rc)
+		eth_phy_survey__locked(ep);
+	mutex_unlock(&luna_gphy_lock);
+	return rc;
 }
+/* Clear the diagnostic's subject.  Called from ndo_stop and, as the lifetime
+ * guarantee, from a devres action that runs before devres frees @ep. */
+static void luna_eth_survey_withdraw(void *cookie)
+{
+	struct luna_eth *ep = cookie;
+
+	mutex_lock(&luna_gphy_lock);
+	if (survey_ep == ep)
+		survey_ep = NULL;
+	mutex_unlock(&luna_gphy_lock);
+}
+
 static const struct kernel_param_ops resurvey_ops = { .set = resurvey_set };
 module_param_cb(resurvey, &resurvey_ops, NULL, 0200);
 MODULE_PARM_DESC(resurvey, "write anything: re-apply base_phyad and re-dump the PHY survey");
 
-static void eth_copper_phy_up(struct luna_eth *ep)
+/* The three public accessors: each takes the indirect window for the WHOLE
+ * command/data sequence, and nothing inside takes it again. */
+static int gphy_read(struct luna_eth *ep, unsigned int phyad, unsigned int reg,
+		     u16 *out)
+{
+	int rc;
+
+	mutex_lock(&luna_gphy_lock);
+	rc = gphy_read__locked(ep, phyad, reg, out);
+	mutex_unlock(&luna_gphy_lock);
+	return rc;
+}
+
+/* No gphy_write() wrapper: its only writer today is the per-port loop, which
+ * holds the window across read-modify-write.  One is added back with its first
+ * caller -- an unused static is a build error here, and rightly so. */
+
+/*
+ * -> 0, or negative and the caller must NOT bring the interface up.
+ *
+ * ★★ IT LOGGED AND CARRIED ON.  A BMCR that could not be read left the port
+ *    alone, a write that did not land printed a line, and the patch-done bit
+ *    was asserted over both -- so "the PHYs are up" was a claim nobody checked.
+ */
+static int eth_copper_phy_up(struct luna_eth *ep)
 {
 	unsigned int p;
+	int rc = 0;
 
-	/* ★★★ SAVE CFG_PHY_INI ACROSS THE GPHY-MACRO RESET, AND PUT IT BACK.
-	 * MEASURED 2026-08-23 on the G24W, on our own running image:
-	 *
-	 *     CFG_PHY_INI (SWCORE 0x00050) = 0x00000200
-	 *
-	 * which is the register's RESET VALUE, i.e. PWRUP[8:5] = 0 -- all four
-	 * PHY macros UNPOWERED. That is why every PHY register reads 0000, why
-	 * no UTP port links, and why nothing enters the switch.
-	 *
-	 * It was not always 0. In the SAME boot, minutes earlier, U-Boot moved
-	 * 4.1 MB through port 3 by TFTP: the switch's own MIB counted 2823
-	 * unicast frames against a 2824-packet transfer, with port 5 carrying
-	 * the matching ACKs. The PHY linked, the switch forwarded both ways --
-	 * and the counters FREEZE the instant this driver takes over.
-	 *
-	 * ⚠⚠ THE MECHANISM I EXPECTED IS REFUTED, BY THIS VERY LOG LINE. I
-	 * thought the pulse below cleared PWRUP and that nothing restored it.
-	 * The first boot with this code printed
-	 *
-	 *     CFG_PHY_INI(0x050) 00000200 -> 00000200 across the GPHY reset,
-	 *                        restored to 00000200 (read back 00000200)
-	 *
-	 * -- the value was ALREADY 0x200 going in. The reset does not clear it,
-	 * and U-Boot leaves it at 0x200 as well. So U-Boot moved 4.1 MB through
-	 * these PHYs with PWRUP reading zero: on this board PWRUP[8:5] is NOT
-	 * the gate that powers a GPHY, whatever the field name suggests.
-	 * ⇒ PWRUP = 0 is NOT the fault, and nobody should re-chase it.
-	 *
-	 * ★ THE SAVE/RESTORE STAYS ANYWAY, and it is not superstition: it is a
-	 * reset-domain re-lock, the shape this project's anti-repeat list names
-	 * first, and it costs one read and one write. It copies forward whatever
-	 * the bootloader and the efuse agreed on rather than inventing a value,
-	 * so it stays correct on a board where the reset DOES clear it. What
-	 * earns its keep here is the LOG: it refuted a plausible hypothesis in a
-	 * single boot instead of a bisect.
-	 *
-	 * ★ The vendor never pulses this reset at all in its own switch_init
-	 * (tier 2: index 0x000E0 is written only by `chip_reset` and
-	 * `ponmac_mode_set`), so not pulsing is the other candidate repair --
-	 * kept separate, because one change at a time is what makes a bisect
-	 * mean something.
-	 */
+	/* ★ ONE ACQUISITION FOR THE WHOLE SEQUENCE, not just the BMCR loop.  A
+	 *   GPHY reset, the CFG_PHY_INI save/restore around it and the FE
+	 *   auto-poller all change what a transaction in flight is talking to,
+	 *   so a diagnostic or a resurvey landing between them would read a PHY
+	 *   that is being reset underneath it. */
+	mutex_lock(&luna_gphy_lock);
+
+	/* Save CFG_PHY_INI across the GPHY reset and put it back. The mechanism I
+	 * expected is REFUTED by the log this very code prints: the value was
+	 * ALREADY 0x200 (PWRUP[8:5] = 0) going in, the reset does not clear it,
+	 * and U-Boot moved 4.1 MB through these PHYs in that state -- so PWRUP is
+	 * NOT the gate that powers a GPHY here and nobody should re-chase it. The
+	 * save/restore stays as a reset-domain re-lock: it copies forward what
+	 * the bootloader and the efuse agreed on rather than inventing a value. */
 	{
 		u32 phy_ini = ep->c->cfg_phy_ini
 			      ? sw_rd(ep, ep->c->cfg_phy_ini) : 0;
 
-		/* ★★★ THE VENDOR NEVER ASSERTS THIS, AND WE NEVER RE-INIT AFTER IT.
-		 * Measured 2026-08-23 by EMULATING `dal_rtl9603cvd_switch_init`
-		 * (0x802dcd04) under Unicorn with MMIO hooks -- it ran to
-		 * completion, returning 0, and logged 457 SWCORE writes, 442
-		 * reads, 209 internal-PHY writes and 40 same-value rewrites.
-		 * `SOFTWARE_RST.CMD_GPHY_RST_PS` is NOT among them.
-		 * Three independent confirmations: absent from that trace; the
-		 * 9603CVD DAL never writes the field at all (only the interactive
-		 * `switch reset ... gphy` diag command does); and where the 9607C
-		 * DOES write it, in `_dal_rtl9607c_gen2_switch_phyCal`, it pairs it
-		 * with mdelay(20) AND a full re-programming of every PHY.
-		 * We paired it with msleep(50) and nothing: no patch, no cal, no
-		 * vendor power sequence -- and it is an `sw_or` with no clear.
-		 * That is the shape this project's anti-repeat list names first: a
-		 * cal/bring-up is an FSM that must RUN and COMPLETE, not a reset to
-		 * assert. It explains every symptom at once -- all copper PHYs
-		 * dead, ZERO ingress on EVERY port (the switch MIB frozen on all
-		 * six), and counters that freeze exactly when our driver takes
-		 * over, while U-Boot's configuration worked because U-Boot never
-		 * asserts it.
-		 * ⚠ THIS IS THE FALSIFIER, NOT A PROVEN FIX. Removing one line and
-		 * re-measuring RX is the whole experiment: RX still dead ⇒
-		 * refuted, and the next candidates are already ranked (the FE-PHY
-		 * OCP map, the FEPHY_POLL polarity, the three absent patch loads).
-		 */
+		/* The vendor NEVER asserts this, and we re-init nothing after it.
+		 * Measured 2026-08-23 by emulating dal_rtl9603cvd_switch_init under
+		 * Unicorn: 457 SWCORE writes, 442 reads, 209 internal-PHY writes, and
+		 * SOFTWARE_RST.CMD_GPHY_RST_PS is not among them. Where the 9607C DOES
+		 * write it, it pairs it with mdelay(20) AND a full re-programming of
+		 * every PHY; we paired it with msleep(50) and nothing. A cal is an FSM
+		 * that must RUN and COMPLETE, not a reset to assert. */
 		if (gphy_reset) {
 			sw_or(ep, ep->c->swcore_rst, CMD_GPHY_RST_PS);
 			msleep(50);
@@ -996,36 +1072,209 @@ static void eth_copper_phy_up(struct luna_eth *ep)
 		}
 	}
 
-	/* ★ THE FE AUTO-POLLER IS OFF AT RESET ON THE CHIPS THAT HAVE ONE, and
-	 * that is a "configured OK but dead" trap with the port's own name on
-	 * it: with it stopped the switch never learns FE link state, so a socket
-	 * trains a perfectly good link and the switch forwards nothing through
-	 * it. The chip's own boot loader clears this bit; so do we, and only on
-	 * a chip whose table declares the register. */
+	/* The FE auto-poller is OFF at reset on the chips that have one, and that
+	 * is a "configured OK but dead" trap: with it stopped the switch never
+	 * learns FE link state, so a socket trains a good link and the switch
+	 * forwards nothing through it. The chip's own boot loader clears it. */
 	if (ep->c->fephy_poll)
 		sw_wr(ep, ep->c->fephy_poll,
 		      sw_rd(ep, ep->c->fephy_poll) & ~FEPHY_STOP_POLL);
 
-	for (p = 0; p < ep->c->n_copper; p++) {
-		u16 bmcr = gphy_read(ep, p, 0);
+	/* The UNI decision is made inside the same acquisition: read outside and
+	 * an administrative lock landing in between is undone by this write. */
+	for (p = 0; p < ep->c->sw_map->n_copper; p++) {
+		u16 bmcr;
 
-		bmcr &= ~MII_PDOWN;			/* leave power-down	*/
-		bmcr |= MII_ANENABLE | MII_ANRESTART;	/* auto-neg + restart	*/
-		gphy_write(ep, p, 0, bmcr);
+		/* ★★ A FAILED READ WRITES NOTHING.  With the old sentinel this
+		 *    loop read 0xffff, modified it and wrote it back -- setting
+		 *    loopback, isolate and reset on a port whose bus was merely
+		 *    slow to answer. */
+		rc = gphy_read__locked(ep, p, 0, &bmcr);
+		if (rc) {
+			dev_err(ep->dev,
+				"gphy: port %u BMCR could not be read (%d) -- nothing is written back and this bring-up FAILS\n",
+				p, rc);
+			break;
+		}
+		if (luna_uni_port_locked(p)) {
+			/* the OLT has this UNI locked: it stays powered down,
+			 * and auto-negotiation is NOT restarted under it */
+			bmcr |= BMCR_PDOWN;
+			bmcr &= ~BMCR_ANRESTART;
+		} else {
+			bmcr &= ~BMCR_PDOWN;		/* leave power-down	*/
+			bmcr |= BMCR_ANENABLE | BMCR_ANRESTART;	/* + restart	*/
+		}
+		rc = gphy_write__locked(ep, p, 0, bmcr);
+		if (rc) {
+			dev_err(ep->dev,
+				"gphy: port %u BMCR write did not land (%d); its power state is UNKNOWN, not assumed\n",
+				p, rc);
+			break;
+		}
 	}
+	/*
+	 * ★★ AND A LOCKED PORT IS RE-APPLIED THROUGH THE *ADMINISTRATIVE* MAP.
+	 *
+	 *    The loop above addresses the PHYs the way BRING-UP does, which on
+	 *    this die is page 0xA40 on every admitted port; the administrative
+	 *    path addresses them the way the board's own MIIM helpers do, which
+	 *    is the FLAT map for the FE ports.  Those are two different paths --
+	 *    established by executing the board's own code, not assumed -- so a
+	 *    successful init-map write is NOT evidence that the administrative
+	 *    BMCR of an FE port still says power-down.  Neither map is rewritten
+	 *    to look like the other; the locked ports simply get a second,
+	 *    CHECKED pass through the one that answers for them.
+	 */
+	for (p = 0; !rc && p < ep->c->sw_map->n_copper; p++) {
+		u32 ocp = gphy_ocp_miim(ep, p, 0);
+		u16 bmcr;
+
+		if (!luna_uni_port_locked(p))
+			continue;
+		/* ⚠ A VALUE THAT COULD NOT BE READ IS ITS OWN ERROR, and it is
+		 *   reported separately: printing "reads %04x" for a read that
+		 *   never happened puts a number nobody measured in the log. */
+		rc = gphy_read_ocp__locked(ep, p, ocp, &bmcr);
+		if (!rc && !(bmcr & BMCR_PDOWN))
+			rc = gphy_write_ocp__locked(ep, p, ocp,
+						    (u16)(bmcr | BMCR_PDOWN));
+		if (!rc)
+			rc = gphy_read_ocp__locked(ep, p, ocp, &bmcr);
+		if (rc) {
+			dev_err(ep->dev,
+				"gphy: port %u is administratively LOCKED and its administrative-map BMCR could not be read or written (%d) -- its power state is UNKNOWN, not assumed\n",
+				p, rc);
+			break;
+		}
+		/* ★ A DESIRED MASK IS NOT PROOF THE PHY STAYED DOWN. */
+		if (!(bmcr & BMCR_PDOWN)) {
+			dev_err(ep->dev,
+				"gphy: port %u is administratively LOCKED and its administrative-map BMCR reads %04x -- the power-down did not hold across the bring-up; refusing to bring the interface up over it\n",
+				p, bmcr);
+			rc = -EIO;
+			break;
+		}
+	}
+	if (rc)
+		goto out;
 	sw_or(ep, ep->c->sw_map->gphy_misc, BIT(0));		/* patch-done sticky	*/
 
-	/* ★ THE SETTLE THIS DRIVER NEVER SPENT. The RTL9603CVD's own U-Boot sets
-	 * the same patch-done bit and then waits 800 ms before touching the PHYs
-	 * again. We set the bit and carried straight on, which is the shape
-	 * CLAUDE.md names outright: a bring-up is an FSM that must RUN and
-	 * COMPLETE, not a set of resting values to write.
-	 * DEFAULT 0 = today's behaviour, DELIBERATELY: this lands together with
-	 * the survey below, and changing two things at once would make one boot
-	 * unable to say which of them mattered. Set phy_settle_ms=800 on the boot
-	 * that tests it. */
+	/* The RTL9603CVD's own U-Boot sets the same patch-done bit and then waits
+	 * 800 ms before touching the PHYs again; we set it and carried straight
+	 * on. Default 0 is today's behaviour deliberately -- this lands with the
+	 * survey, and changing two things at once makes one boot say nothing. */
 	if (phy_settle_ms > 0)
 		msleep(phy_settle_ms);
+out:
+	/* ONE acquisition, ONE release: the patch-done sticky and the settle are
+	 * part of the same sequence, and handing the window back between them
+	 * would let a diagnostic read a PHY mid-bring-up. */
+	mutex_unlock(&luna_gphy_lock);
+	return rc;
+}
+
+/*
+ * Drive ONE Ethernet UNI's administrative state onto its switch port and PHY --
+ * the luna_gpon_nic.h @uni_admin_set backend for the boards that build this
+ * shell.  @port is a SWITCH PORT index, taken from the board's own device tree
+ * by the common owner; nothing here derives it from an OMCI instance id.
+ *
+ * ★ TWO GATES, BOTH READ BACK.  The MAC gate is the vendor's own
+ *   adminEnable_set shape on this family -- lock forces the LINK ability DOWN,
+ *   unlock stops forcing it and lets auto-negotiation decide again -- and the
+ *   PHY gate is MII power-down.  A locked port must not merely stop linking:
+ *   the subscriber's own equipment has to see the link drop.
+ *
+ * ★ THE DESIRED STATE IS RECORDED FIRST, inside the same window acquisition,
+ *   because eth_copper_phy_up() is this family's restoring writer and runs on
+ *   every open.  A lock applied and then walked away from would be undone by
+ *   the next ifup with nothing reporting it.
+ *
+ * ⚠ THE ADDRESSES ARE THE CHIP TABLE'S, NEVER A SIBLING'S.  force_ablty and
+ *   ablty_force are 0x180/0x1B4 on the RTL9602C and 0x198/0x1DC on the
+ *   RTL9603CVD; the two overlap without meaning the same thing.
+ *
+ * ⚠ AND IT ADDRESSES THE PHY THE WAY THE BOARD'S OWN ADMINISTRATIVE PATH
+ *   DOES, which is not the way its bring-up does -- see gphy_ocp_miim().  The
+ *   bring-up knob is left exactly as it is.
+ */
+static int luna_eth_uni_admin_set(void *cookie, unsigned int port, bool locked)
+{
+	struct luna_eth *ep = cookie;
+	u32 force, mode, back;
+	u16 bmcr, want;
+	int rc;
+
+	/* ★ A UNI IS A COPPER PORT.  The port index comes from the board's own
+	 *   device tree, and the CPU, PON and SerDes ports are in the same index
+	 *   space -- so a mis-declared panel would otherwise drive a PHY that is
+	 *   not there and report the reserved port LOCKED. */
+	if (!ep || port >= ep->c->sw_map->n_copper || port >= 32) {
+		pr_err("luna-eth: UNI port %u is not one of this board's %u copper ports -- REFUSED, nothing is written\n",
+		       port, ep ? ep->c->sw_map->n_copper : 0);
+		return -EINVAL;
+	}
+
+	mutex_lock(&luna_gphy_lock);
+	WRITE_ONCE(luna_uni_locked_ports,
+		   locked ? (luna_uni_locked_ports | BIT(port))
+			  : (luna_uni_locked_ports & ~BIT(port)));
+
+	force = sw_rd(ep, SW_FORCE_ABLTY(ep, port));
+	mode = sw_rd(ep, SW_ABLTY_FORCE(ep, port));
+	if (locked) {
+		sw_wr(ep, SW_FORCE_ABLTY(ep, port), force & ~ABLTY_LINK);
+		sw_wr(ep, SW_ABLTY_FORCE(ep, port), mode | ABLTY_LINK);
+	} else {
+		sw_wr(ep, SW_ABLTY_FORCE(ep, port), mode & ~ABLTY_LINK);
+	}
+	back = sw_rd(ep, SW_ABLTY_FORCE(ep, port));
+	force = sw_rd(ep, SW_FORCE_ABLTY(ep, port));
+	/* BOTH words, because the claim is two gates: the MODE word says the
+	 * LINK ability is forced, and the VALUE word says what it is forced TO.
+	 * Checking only the first would report a lock that forces the link UP. */
+	if (!(back & ABLTY_LINK) != !locked ||
+	    (locked && (force & ABLTY_LINK))) {
+		mutex_unlock(&luna_gphy_lock);
+		dev_err(ep->dev,
+			"UNI port %u: the MAC gate did not take -- FORCE_P_ABLTY %08x, ABLTY_FORCE_MODE %08x, so the administrative state is NOT applied\n",
+			port, force, back);
+		return -EIO;
+	}
+
+	rc = gphy_read_ocp__locked(ep, port, gphy_ocp_miim(ep, port, 0), &bmcr);
+	if (rc) {
+		mutex_unlock(&luna_gphy_lock);
+		dev_err(ep->dev,
+			"UNI port %u: its BMCR could not be read (%d); nothing is written back and the state is owed\n",
+			port, rc);
+		return rc;
+	}
+	/* ★ ONLY THE POWER BIT MOVES.  This board's own phyPowerDown operation
+	 *   changes BMCR bit 11 and nothing else, so the speed, duplex and
+	 *   auto-negotiation settings the port already had are carried through
+	 *   unchanged.  Forcing them as well during an administrative toggle
+	 *   would silently overwrite a configuration nobody asked us to change.
+	 *   The BRING-UP still enables and restarts auto-negotiation -- that is
+	 *   its job, and it is a different path. */
+	want = (u16)(locked ? (bmcr | BMCR_PDOWN) : (bmcr & ~BMCR_PDOWN));
+	rc = gphy_write_ocp__locked(ep, port, gphy_ocp_miim(ep, port, 0), want);
+	if (!rc)
+		rc = gphy_read_ocp__locked(ep, port,
+					   gphy_ocp_miim(ep, port, 0), &bmcr);
+	if (!rc && (!(bmcr & BMCR_PDOWN) != !locked))
+		rc = -EIO;
+	mutex_unlock(&luna_gphy_lock);
+	if (rc) {
+		dev_err(ep->dev,
+			"UNI port %u: the PHY did not reach %s (%d, BMCR %04x); the administrative state is owed\n",
+			port, locked ? "power-down" : "power-up", rc, bmcr);
+		return rc;
+	}
+	dev_info(ep->dev, "UNI port %u %s (BMCR %04x, ABLTY_FORCE_MODE %08x)\n",
+		 port, locked ? "LOCKED" : "UNLOCKED", bmcr, back);
+	return 0;
 }
 
 /* Release the external RTL8221B 2.5G PHY from reset (active-low). This alone does
@@ -1056,10 +1305,17 @@ static u32 eth_mib_rx_pkts(struct luna_eth *ep, unsigned int p)
  * directly-readable PHY/SerDes (5 PON, 8 RGMII, 9 CPU, 10, 11). */
 static int eth_port_real_link(struct luna_eth *ep, unsigned int p)
 {
-	if (p >= ep->c->n_copper && p != 6 && p != 7)
+	if (p >= ep->c->sw_map->n_copper && p != 6 && p != 7)
 		return -1;
-	if (p < ep->c->n_copper)
-		return !!(gphy_read(ep, p, 1) & MII_LSTATUS);	/* BMSR */
+	if (p < ep->c->sw_map->n_copper) {
+		u16 bmsr;
+
+		/* -1 is this function's COULD NOT ASK, which it already uses for
+		 * a port it cannot reach.  A bus timeout is that, never "down". */
+		if (gphy_read(ep, p, 1, &bmsr))
+			return -1;
+		return !!(bmsr & BMSR_LSTATUS);		/* BMSR */
+	}
 	if (!ep->c->sds_fib_status)		/* no SerDes on this chip */
 		return -1;
 	return !!(sw_rd(ep, SW_SDS_FIB_STATUS(ep, p - 6)) & SDS_LINK_OK);
@@ -1085,21 +1341,38 @@ static void eth_diag_dump(struct luna_eth *ep)
 			 sw_rd(ep, SW_SDS_FIB_STATUS(ep, 1)));
 }
 
+/*
+ * ★★ THE DIAGNOSTIC'S PHY READS RUN IN A WORK ITEM, NOT THE TIMER.
+ *
+ * They go through the indirect GPHY window, whose owner is a mutex -- and a
+ * mutex is illegal in a timer callback.  Making the window a spinlock instead
+ * was tried and is not payable: the bounds in this file allow ~80 ms with IRQs
+ * off for a four-port survey, next to a GPON datapath and a NAPI poll.  A
+ * diagnostic bends to the datapath, not the other way round.
+ */
+static void eth_diag_work(struct work_struct *w)
+{
+	struct luna_eth *ep = container_of(w, struct luna_eth, diag_work);
+
+	dev_info(ep->dev, "link/rxpkts diag (%d left):\n", ep->diag_left);
+	eth_diag_dump(ep);
+}
+
 static void eth_diag_timer(struct timer_list *t)
 {
 	struct luna_eth *ep = timer_container_of(ep, t, diag);
 
-	dev_info(ep->dev, "link/rxpkts diag (%d left):\n", ep->diag_left);
-	eth_diag_dump(ep);
+	schedule_work(&ep->diag_work);
+	/* the RE-ARM stays here, so the work never arms the timer and a
+	 * timer_delete_sync() followed by a cancel_work_sync() is enough */
 	if (--ep->diag_left > 0 && diag_ms)
 		mod_timer(&ep->diag, jiffies + msecs_to_jiffies(diag_ms));
 }
 
 /* ---- station address ------------------------------------------------------ */
-/* The bring-up default and its predicate are FAMILY facts and live in
- * luna_eth_regs.h.  They were defined here first; the copy was removed on
- * 2026-08-28 after the RTL9602C driver was found shipping that very address,
- * because its own byte-identical IDR reader had never received this refusal. */
+/* The bring-up default and its predicate are FAMILY facts, in luna_eth_regs.h:
+ * the RTL9602C driver was found shipping that very address because its own
+ * byte-identical IDR reader had never received this refusal. */
 
 /* Thin wrappers over the family helpers, kept at their own names so the call
  * sites and this diff stay small. The BODIES live in luna_eth_regs.h. */
@@ -1115,9 +1388,8 @@ static void eth_set_hwaddr(struct luna_eth *ep, const u8 *mac)
 
 /* ---- rings ---------------------------------------------------------------- */
 /* Allocate a fresh RX skb, stream-map it, and arm the descriptor on it. */
-/* The body is the FAMILY's (luna_eth_regs.h): both drivers had it character
- * for character apart from the struct that reached `->rx_ring`.  The wrapper
- * keeps the old name and signature so every call site is untouched. */
+/* The body is the FAMILY's (luna_eth_regs.h); the wrapper keeps the old name
+ * and signature so every call site is untouched. */
 static int eth_refill(struct luna_eth *ep, unsigned int idx)
 {
 	return luna_rx_refill(ep->ndev, ep->dev, ep->rx_ring, ep->rx_skb,
@@ -1179,7 +1451,7 @@ static int eth_alloc_rings(struct luna_eth *ep)
 }
 
 /* ---- switch open-L2 bring-up (ordered; see file header) ------------------- */
-static void eth_switch_init(struct luna_eth *ep)
+static int eth_switch_init(struct luna_eth *ep)
 {
 	unsigned int p;
 
@@ -1216,13 +1488,22 @@ static void eth_switch_init(struct luna_eth *ep)
 	 *    up + auto-neg the integrated PHYs. SerDes-6 (external RTL8221B 2.5G):
 	 *    release its reset so it runs (full HiSGMII SerDes bring-up is a larger
 	 *    sequence, added separately). */
-	survey_ep = ep;
 	/* BEFORE the power-up: the power-up itself talks to the PHYs through the
-	 * very bus this register addresses. */
-	eth_phy_ctrl_apply(ep);
+	 * very bus this register addresses -- so a BASE_PHYAD that did not take
+	 * makes every PHY access below address the wrong device. */
+	{
+		int rc = eth_phy_ctrl_apply(ep);
+
+		if (rc)
+			return rc;
+	}
 	eth_rxfifo_release(ep);
-	if (copper_phy)
-		eth_copper_phy_up(ep);
+	if (copper_phy) {
+		int rc = eth_copper_phy_up(ep);
+
+		if (rc)
+			return rc;	/* the PHYs ARE the LAN: do not claim them up */
+	}
 	/* AFTER the power-up, so the survey reads the PHYs in the state the rest
 	 * of the bring-up will actually see -- not the pre-power-up one, which
 	 * would answer a question nobody asked. */
@@ -1235,23 +1516,26 @@ static void eth_switch_init(struct luna_eth *ep)
 		eth_rtl8221b_reset_release(ep);
 
 	/* 4. open the L2 forwarding plane. */
+	/* ★ THE PACKED ARITHMETIC IS THE FAMILY'S, NOT THIS FILE'S (2026-09-12).
+	 * This site had it RIGHT -- 2-bit elements, 16 per word -- while
+	 * rtl9602c_eth.c spelled the same idea twice and wrong. One statement in
+	 * luna_eth_regs.h now serves both shells; the values below are unchanged,
+	 * byte for byte: sw_packed_off(base, p, 2) is base + (p/16)*4 and
+	 * sw_packed_ins(w, p, 2, 0) is w & ~(3u << ((p%16)*2)). */
 	for (p = 0; p <= ep->c->sw_map->cpu_port; p++) {
-		u32 reg = ep->c->sw_map->lut_unkn_sa + (p / 16) * 4;
+		u32 reg = sw_packed_off(ep->c->sw_map->lut_unkn_sa, p,
+					SW_DA_ACT_BITS);
 
 		/* unknown-source-MAC action 0 = learn + forward */
-		sw_wr(ep, reg, sw_rd(ep, reg) & ~(3u << ((p % 16) * 2)));
+		sw_wr(ep, reg, sw_packed_ins(sw_rd(ep, reg), p,
+					     SW_DA_ACT_BITS, 0));
 	}
 	/*
-	 * ★ THE PON PORT IS NOT A FLOOD DESTINATION (2026-08-27).
-	 * Flooding LAN broadcast, unknown multicast and unknown unicast out of
-	 * the fibre port sends every ARP and every DHCP DISCOVER on the LAN
-	 * upstream to the OLT. Our RTL9602C sibling excludes it for exactly this
-	 * reason. It is invisible from the ONU -- only the OLT or a fibre capture
-	 * would ever see it -- which is why it is fixed now rather than after
-	 * ranging works and it becomes a real leak.
-	 * `pon_port` is only meaningful on a chip that declares one; the mask is
-	 * left untouched where force_pon_ablty is 0, so the RTL9607C engineering
-	 * board sees the identical write it saw before.
+	 * The PON port is not a flood destination (2026-08-27): flooding LAN
+	 * broadcast, unknown multicast and unknown unicast out of the fibre sends
+	 * every ARP and DHCP DISCOVER upstream to the OLT, and it is invisible
+	 * from the ONU. The mask is left untouched where force_pon_ablty is 0, so
+	 * the RTL9607C board sees the identical write it saw before.
 	 */
 	{
 		u32 flood = ep->c->sw_map->port_mask;
@@ -1261,13 +1545,10 @@ static void eth_switch_init(struct luna_eth *ep)
 		sw_or(ep, ep->c->sw_map->bc_flood, flood);
 		sw_or(ep, ep->c->sw_map->unkn_mc_flood, flood);
 		sw_or(ep, ep->c->sw_map->unkn_uc_flood, flood);
+		ep->lan_flood_mask = flood & ~BIT(ep->c->sw_map->cpu_port);
 	}
-	/* SW_SRC_PORT_PERMIT (0x1C114) is a per-source-port EGRESS-FILTER ENABLE
-	 * (EN, 1 bit/port), NOT a permit bitmap: EN=1 turns on source-port egress
-	 * filtering and DROPS the forwarded frame after lookup/flood selection. The
-	 * working firmware leaves it 0 (no filtering = forward). Writing all-ones here
-	 * silently dropped every LAN->CPU frame (port RX climbed, CPU RX stayed flat).
-	 * Correct forwarding-permissive value is 0. */
+	/* 0 is the RESET value and is written only because it is: forcing every
+	 * bit moved no witness on either Luna die (luna_eth_regs.h @src_permit). */
 	sw_wr(ep, ep->c->sw_map->src_permit, 0x00000000);
 
 	/* 4a2. per-port unknown-DA lookup-miss action = FORWARD(0). We only set the
@@ -1306,10 +1587,9 @@ static void eth_switch_init(struct luna_eth *ep)
 
 	/* 4c. (optional) drop the CPU port from its own egress flood so it stops
 	 *     receiving the broadcasts it injected (the observed self-loopback). */
-	/* ★ THE PACKING IS PER CHIP, NOT JUST THE OFFSET: one 12-bit mask per
-	 * port packed TWO PER WORD here, one 29-bit mask per word there. A
-	 * read-modify-write is therefore mandatory -- a plain store would wipe
-	 * the neighbouring port's mask on the chip that shares a word. */
+	/* The packing is per chip, not just the offset: one 12-bit mask per port
+	 * packed two per word here, one 29-bit mask per word there, so the
+	 * read-modify-write is mandatory. */
 	if (cpu_no_loopback) {
 		unsigned int cp = ep->c->sw_map->cpu_port;
 		unsigned int per = ep->c->piso_per_word;
@@ -1332,38 +1612,13 @@ static void eth_switch_init(struct luna_eth *ep)
 			sw_or(ep, SW_FORCE_ABLTY(ep, p), BIT(4));
 			sw_wr(ep, SW_ABLTY_FORCE(ep, p), ABLTY_CPU_FORCE);
 		} else {
-			/* ★★★ FORCE NOTHING ON A UTP PORT. We used to write
-			 * FORCE_P_ABLTY = 1G/full/link and ABLTY_FORCE_MODE =
-			 * 0xFFF here, i.e. override a live auto-negotiated link
-			 * with a value of our own choosing.
-			 *
-			 * THE VENDOR DOES THE OPPOSITE, on this exact chip:
-			 * `dal_rtl9603cvd_port_adminEnable_set(port, ENABLED)`
-			 * on a UTP port does one thing -- it CLEARS
-			 * ABLTY_FORCE_MODE.FORCE_LINK_ABLTY, i.e. STOPS forcing
-			 * and lets the PHY drive the MAC. The force is applied
-			 * to the CPU PORT ONLY (`dal_rtl9603cvd_port_init`).
-			 *
-			 * OUR OWN WORKING SIBLING ALREADY LEARNED THIS and the
-			 * repair was never carried across. rtl9602c_eth.c, whose
-			 * RX works, says it in its own words: "Force NO port ...
-			 * Force-up ... overrides that auto-linked state and
-			 * kills CPU->LAN egress (MIB: all LAN-port TX=0). Leave
-			 * every port at its auto-negotiated reset state, as the
-			 * bootloader does."
-			 *
-			 * AND THE BOOTLOADER IS THE ORACLE HERE. Measured
-			 * 2026-08-23: U-Boot moved 4.1 MB through port 3 by TFTP
-			 * (the switch MIB counted 2823 unicast against a 2824
-			 * packet transfer, port 5 carrying the matching ACKs) --
-			 * so the auto-negotiated state this code was overriding
-			 * is, by construction, a state that WORKS on this board.
-			 * The MIB then freezes the instant this driver runs.
-			 *
-			 * P_ABLTY's reset value on this chip is 0x60, the
-			 * "auto-linked" value. Leaving it alone is not doing
-			 * nothing: it is keeping what the hardware negotiated.
-			 */
+			/* Force NOTHING on a UTP port. This used to write FORCE_P_ABLTY =
+			 * 1G/full/link and ABLTY_FORCE_MODE = 0xFFF, overriding a live
+			 * auto-negotiated link. The vendor does the opposite on this exact
+			 * chip -- adminEnable_set on a UTP port CLEARS
+			 * ABLTY_FORCE_MODE.FORCE_LINK_ABLTY -- and forces the CPU PORT ONLY.
+			 * P_ABLTY's reset value here is 0x60, the auto-linked value, and
+			 * U-Boot moved 4.1 MB through port 3 in that state. */
 			continue;
 		}
 	}
@@ -1373,28 +1628,13 @@ static void eth_switch_init(struct luna_eth *ep)
 	}
 
 	/*
-	 * ★★★ 5b. THE PON PORT IS NOT A UTP PORT, AND THE RULE ABOVE DOES NOT
-	 * REACH IT.  Step 5 deliberately forces nothing on ports 0..last except
-	 * the CPU port, because overriding a live auto-negotiated copper link
-	 * kills CPU->LAN egress.  The PON port has NO PHY behind it -- there is
-	 * nothing to auto-negotiate with, and its P_ABLTY therefore never leaves
-	 * the reset value on its own.
-	 *
-	 * STOCK IS THE ORACLE AND IT WAS READ, not reasoned about.  On the G24W,
-	 * SWCORE 0x180..0x1fc, stock vs ours, same board, same bench:
-	 *
-	 *     FORCE_P_ABLTY[4]     stock 0x00000016   ours 0x00000000
-	 *     ABLTY_FORCE_MODE[4]  stock 0x0000bfff   ours 0x00000000
-	 *
-	 * 0x16 is ABLTY_1G_FULL_LINK and 0xbfff is ABLTY_CPU_FORCE -- the SAME
-	 * pair stock applies to the CPU port, which is the other portless
-	 * internal link.  So this is not a new recipe, it is the recipe already
-	 * in this function applied to the port it was always missing.
-	 *
-	 * ⚠ WHAT THIS DOES AND DOES NOT CLAIM.  It makes the switch side of the
-	 * PON path forward; it says NOTHING about ranging, and this board's PON
-	 * MAC is at O1.  A silent switch port would have hidden a working PON
-	 * MAC behind it, which is why it is repaired now rather than after.
+	 * 5b. The PON port is not a UTP port and the rule above does not reach
+	 * it: there is no PHY to auto-negotiate with, so its P_ABLTY never
+	 * leaves the reset value on its own. Stock was READ, not reasoned about
+	 * -- on the G24W it applies FORCE_P_ABLTY 0x16 and ABLTY_FORCE_MODE
+	 * 0xbfff to the PON port, the same pair it applies to the CPU port.
+	 * This makes the SWITCH side of the PON path forward; it says nothing
+	 * about ranging.
 	 */
 	if (ep->c->force_pon_ablty) {
 		unsigned int pp = ep->c->sw_map->pon_port;
@@ -1424,6 +1664,7 @@ static void eth_switch_init(struct luna_eth *ep)
 	/* Baseline real-link snapshot; the periodic diag (armed at open) then shows
 	 * which port's genuine link comes up + rxpkts climb under host traffic. */
 	eth_diag_dump(ep);
+	return 0;
 }
 
 /* ---- MAC engine ----------------------------------------------------------- */
@@ -1455,30 +1696,22 @@ static void eth_hw_program(struct luna_eth *ep)
 	 * the switch forwards by L2 lookup). The IP-block reset above clears this,
 	 * so it must be re-asserted here. */
 	ep_wr(ep, R_CPUTAGCR, CPUTAGCR_INIT);
-	ep_wr(ep, R_CPUTAG1CR, CPUTAG1CR_INIT);
+	/* the OMCC SID, from ep->omci_sid -- 0 until the OLT assigns one */
+	ep_wr(ep, R_CPUTAG1CR, CPUTAG1CR_SID(ep->omci_sid));
 
 	/* ring pointers (writable only while the engine is stopped). */
 	ep_wr(ep, R_TxFDP0, ep->tx_ring_dma | DMA_BUS_WINDOW);
 	iowrite16(0, ep->base + R_TxCDO0);
 	ep_wr(ep, R_RxFDP0, ep->rx_ring_dma | DMA_BUS_WINDOW);
-	/* Was this file's own spelling of the family packing -- the THIRD copy
-	 * (rtl9602c_eth.c spells it twice via the same flowcore call). */
+	/* Was this file's own spelling of the family packing -- the THIRD copy. */
 	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	/* ★★ 32-BIT, like the vendor and like rtl9602c_eth.c -- NOT iowrite16.
-	 * 0x13F4 is one 32-bit word holding RxCDO[31:16] (hardware-owned; the
-	 * vendor only ever READS it, and RMWs this word with mask 0xffff00f0
-	 * to preserve it) and RxRingSize[15:8].
-	 * MEASURED on this board 2026-08-23: a 16-bit store lands in the UPPER
-	 * half -- `iowrite16(0xf835, base + 0x3C)` read back as
-	 * `0x1801203c f8350000`. So the old iowrite16 of 0x3F00 wrote
-	 * 0x3F000000: RxRingSize = 0 (never programmed) and RxCDO stomped with
-	 * 0x3F00. A ring of size ZERO fits every symptom -- the GMAC accepted
-	 * frames (0x18012010 = 00080008, RXOKCNT = 8) with MISSPKT = 0, while
-	 * eth0 RX packets stayed 0 and ISR never latched.
-	 * The identical value is stored 32-bit by rtl9602c_eth.c:3371, whose RX
-	 * WORKS -- a repair that lives in one copy of this driver and not the
-	 * other. Guarded by ONU-test-case/reg_store_width_guard.py.	*/
+	/* 32-BIT, like the vendor and like rtl9602c_eth.c -- NOT iowrite16. 0x13F4
+	 * is one word holding RxCDO[31:16] (hardware-owned) and RxRingSize[15:8].
+	 * MEASURED 2026-08-23: a 16-bit store lands in the UPPER half, so the old
+	 * iowrite16 of 0x3F00 wrote 0x3F000000 -- RxRingSize never programmed.
+	 * A ring of size ZERO fits every symptom. Guarded by
+	 * ONU-test-case/reg_store_width_guard.py. */
 	ep_wr(ep, R_RxCDO0, luna_gmac_rxcdo_pack(RX_RING_SIZE));
 	/* route every RX class to ring 0. */
 	{
@@ -1509,52 +1742,40 @@ static void eth_hw_program(struct luna_eth *ep)
 /* ---- RX / TX datapath ----------------------------------------------------- */
 
 /* ---- CPU-side OMCI (OMCC) datapath ---------------------------------------
+ * Until 2026-09-08 this shell implemented NO OMCI path: downstream OMCI reached
+ * the PON-IP and stopped there, so the ONU answered the OLT nothing and the OLT
+ * timed its configuration out.
  *
- * ★ WHAT THIS IS, AND WHY IT IS A PORT RATHER THAN A REGISTER FIX.  Until now
- * this shell implemented NO OMCI path at all: the six glue entry points at the
- * bottom of the file were empty stubs, so downstream OMCI reached the PON-IP
- * (its own OMCI_RX_PKT_CNT proving it) and stopped there, and the ONU answered
- * the OLT nothing -- which is why the OLT walked ranging, Configure_Port-ID and
- * Request_Password and then timed its configuration out.
- *
- * THE SHAPE, and each half is in the tier that owns it:
- *   core   gpon_omci_core.c   decides WHAT to answer (G.988) and returns bytes
+ * Each half sits in the tier that owns it:
+ *   core   gpon_omci_core.c   decides WHAT to answer (G.988), returns bytes
  *   family luna_gmac_logic.c  decides WHICH frame is OMCI and how to steer one
  *   chip   luna_sw_map        the reason code and the port numbers, as a table
  *   shell  here               the ring, the DMA, the log and the responder call
  *
- * ⚠ NOTHING IN THIS BLOCK MAY BE READ ACROSS FROM rtl9602c_eth.c.  Both the RX
- * reason (229 here, 246 there) and the TX descriptor field placement differ
- * between the two generations; the values live in the table and in
- * luna_gmac_omci_txd_word2/3(), each carrying its tier-3 citation.
+ * Nothing in this block may be read across from rtl9602c_eth.c: both the RX
+ * reason (229 here, 246 there) and the TX descriptor field placement differ.
  */
 
 static void eth_tx_reclaim(struct luna_eth *ep);	/* defined with the TX path */
 
-/* How many ring slots LAN transmit keeps in hand so a (sparse, control-rate)
- * OMCI response is never dropped for want of one.  This is the @reserve
- * argument luna_gmac_tx_ring_full() documents as the caller's ROLE: the LAN
- * producer passes it, the OMCI injector passes 0.  ⚠ THE WAKE TEST IN
- * eth_tx_reclaim() PASSES THE SAME VALUE -- a queue woken at a threshold the
+/* How many ring slots LAN transmit keeps in hand so a sparse, control-rate OMCI
+ * response is never dropped for want of one -- the @reserve argument
+ * luna_gmac_tx_ring_full() documents as the caller's role. The wake test in
+ * eth_tx_reclaim() MUST pass the same value: a queue woken at a threshold the
  * xmit path still refuses spins on NETDEV_TX_BUSY. */
 #define LUNA_OMCI_RESV	2
 
 /*
  * Transmit one OMCI PDU upstream on the OMCC.
  *
- * ★ THE FRAME IS THE BARE 48-BYTE G.988 PDU AND IS NOT PADDED.  The vendor's
- * own transmit hands re8686_tx_with_Info() exactly
- * RTK_GPON_OMCI_BASELINE_MSG_LEN_TX == 48 bytes (tier 3, gpon_omci.c); padding
- * it to the 60-byte Ethernet minimum would put 12 bytes of nothing inside the
- * GEM frame the OLT parses.  eth_xmit()'s runt pad is therefore NOT reused --
- * this is not an Ethernet frame and has no Ethernet header.
+ * The frame is the bare 48-byte G.988 PDU and is NOT padded: padding to the
+ * 60-byte Ethernet minimum would put 12 bytes of nothing inside the GEM frame
+ * the OLT parses, so eth_xmit()'s runt pad is deliberately not reused.
+ * D_TXCRC is required -- without it the PDU leaves with no valid FCS and the
+ * fabric MAC drops it before any counter moves.
  *
- * ★ D_TXCRC IS REQUIRED.  The GMAC generates and appends the FCS; without it
- * the PDU leaves with no valid FCS and the fabric MAC drops it before any
- * counter moves -- the sibling shell paid a long debug for that exact silence.
- *
- * Runs in the GPON driver's softirq/timer context.  Never blocks and never
- * stops the LAN queue: a full ring drops the response and the OLT retransmits.
+ * Runs in the GPON driver's softirq/timer context. Never blocks and never stops
+ * the LAN queue: a full ring drops the response and the OLT retransmits.
  */
 static int luna_eth_omci_xmit(struct luna_eth *ep, const u8 *omci,
 			      unsigned int len)
@@ -1598,20 +1819,14 @@ static int luna_eth_omci_xmit(struct luna_eth *ep, const u8 *omci,
 	ep->tx_buf_dma[i] = da;
 	ep->tx_buf_len[i] = len;
 	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
-	ep->tx_ring[i].opts2 = luna_gmac_omci_txd_word2(ep->c->sw_map->pon_port);
-	ep->tx_ring[i].opts3 = luna_gmac_omci_txd_word3(ep->omci_sid);
+	ep->tx_ring[i].opts2 = luna_gmac_cputag_txd_word2(ep->c->sw_map->pon_port);
+	ep->tx_ring[i].opts3 = luna_gmac_cputag_txd_word3(ep->omci_sid);
 	ep->tx_ring[i].opts4 = 0;
-	/* ★ D_IPCS IS HERE AND NOT ON THE LAN PATH, and both halves of that are
-	 * deliberate.  The vendor's submit ORs a FIXED flag set into opts1 for
-	 * every frame, OMCI included -- `eor|len|DescOwn|FirstFrag|LastFrag|
-	 * TxCRC|IPCS` (tier 3, re8686_rtl9607c.c) -- and the sibling Luna shell's
-	 * OMCI descriptor carries the same pair after a long debug that proved
-	 * D_TXCRC load-bearing (without it the 48-byte PDU leaves with no valid
-	 * FCS and the fabric drops it pre-MAC, every counter reading zero).
-	 * Matching the oracle EXACTLY removes the last divergence between our
-	 * descriptor and the one that is known to work on this silicon.
-	 * The LAN path is left alone: it works, and changing what works to match
-	 * a frame type it does not carry is how a repair becomes a regression. */
+	/* D_IPCS is here and not on the LAN path, and both halves are deliberate.
+	 * The vendor's submit ORs a FIXED flag set into opts1 for every frame,
+	 * OMCI included (tier 3, re8686_rtl9607c.c). The LAN path is left alone:
+	 * it works, and changing what works to match a frame type it does not
+	 * carry is how a repair becomes a regression. */
 	opts1 = luna_gmac_txd_word0(D_FS | D_LS | D_TXCRC | D_IPCS, len,
 				    TXD_LEN_MASK,
 				    luna_gmac_slot_is_eor(i, TX_RING_SIZE),
@@ -1624,71 +1839,25 @@ static int luna_eth_omci_xmit(struct luna_eth *ep, const u8 *omci,
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
 	ep->dbg_omci_tx++;
-	/* ⚠ THE FIRST FOUR ONLY -- AND THAT IS A TRAP THIS COMMENT EXISTS TO
-	 * DISARM.  On the port's first boot the log showed `US OMCI #1..#4` and
-	 * then silence while downstream Gets kept arriving, and I read the
-	 * silence as "the responder stopped answering".  It had not: the CAP IS
-	 * ON THE PRINT, not on the transmit.  The running totals are in
-	 * /proc/gpon (omci_pi ... cpu_tx/cpu_drop), which is where a count
-	 * belongs; a log line is a sample, never a counter. */
+	/* THE CAP IS ON THE PRINT, not on the transmit: the running totals are in
+	 * /proc/gpon, which is where a count belongs. A log line is a sample. */
 	if (ep->dbg_omci_tx <= 4)
 		netdev_info(ep->ndev,
 			    "US OMCI #%u: %u B sid=%u opts2=%08x opts3=%08x\n",
 			    ep->dbg_omci_tx, len, ep->omci_sid,
-			    luna_gmac_omci_txd_word2(ep->c->sw_map->pon_port),
-			    luna_gmac_omci_txd_word3(ep->omci_sid));
+			    luna_gmac_cputag_txd_word2(ep->c->sw_map->pon_port),
+			    luna_gmac_cputag_txd_word3(ep->omci_sid));
 	return 0;
 }
 
-/*
- * Downstream OMCI -> upstream response.  @msg is the raw baseline PDU with the
- * CPU prefix already stripped.
- *
- * ★ THE DECISION IS THE CORE'S AND THE TRANSMIT IS THIS SHELL'S -- the
- * established boundary: omci_onu_input() returns a LENGTH and never touches
- * hardware.  The log line and the ME268 query below are the SHELL's, for the
- * same reasons they are in the sibling: what the OLT sent is a fact about THIS
- * link, and the core may not print.
- */
+/* RX copies the original baseline prefix and length to the shared timer owner. */
 static void luna_eth_omci_input(struct luna_eth *ep, const u8 *msg,
 				unsigned int len)
 {
-	u8 resp[OMCI_LEN];
-	int n;
+	int rc = luna_omci_enqueue(ep, msg, len);
 
-	if (len < 8)
-		return;
-
-	/* Rate-limit only the BULK types, so a Create or an Alarm is never
-	 * dropped from the log while a MIB upload cannot flood it. */
-	if (((msg[2] & 0x1f) != OMCI_MT_GET &&
-	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD_NX &&
-	     (msg[2] & 0x1f) != OMCI_MT_MIB_UPLOAD) || net_ratelimit()) {
-		char det[96];
-
-		gpon_omci_describe(msg, len, det, sizeof(det));
-		netdev_info(ep->ndev, "OMCI DS: %s\n", det);
-	}
-
-	n = omci_onu_input(&luna_eth_onu, msg, len, resp);
-	if (n > 0)
-		luna_eth_omci_xmit(ep, resp, n);
-	else
+	if (rc)
 		ep->dbg_omci_unhandled++;
-
-	/* The WAN data GEM: ASK the responder which Port-ID the OLT created
-	 * (it already stores every Create body), never re-parse the PDU here.
-	 * Idempotent and edge-free on purpose -- the core clears its store on an
-	 * on-wire MIB-Reset without this shell being told, so a "already
-	 * reported" latch here would hold a stale port for ever.  Identical
-	 * reasoning, and identical call, to the sibling shell. */
-	{
-		u16 gem = 0;
-
-		if (omci_data_gem_port(&luna_eth_onu, gpon_omcc_gem(),
-				       GPON_MCAST_GEM, &gem))
-			gpon_omci_note_gem_create(gem);
-	}
 }
 
 static int eth_rx(struct luna_eth *ep, int budget)
@@ -1699,11 +1868,27 @@ static int eth_rx(struct luna_eth *ep, int budget)
 	while (done < budget) {
 		unsigned int i = ep->rx_head;
 		u32 opts1 = ep->rx_ring[i].opts1;
-		struct sk_buff *skb;
+		struct sk_buff *skb, *fresh;
+		dma_addr_t fresh_dma;
 		u32 len;
 
 		if (opts1 & D_OWN)		/* still HW-owned */
 			break;
+
+		/* Secure the REPLACEMENT before consuming the frame: every arm
+		 * below hands `skb` away, so an allocation failure after that
+		 * point leaves rx_skb[i] dangling behind a descriptor the next
+		 * poll reads as CPU-owned.  On failure drop THIS frame and give
+		 * the buffer straight back -- nothing is unmapped or freed, so
+		 * the ring stays consistent and the slot keeps making progress. */
+		fresh = luna_rx_alloc(ndev, ep->dev, RX_BUF_SIZE, &fresh_dma);
+		if (!fresh) {
+			ndev->stats.rx_dropped++;
+			luna_rx_rearm(ep->rx_ring, i, RX_RING_SIZE, RX_BUF_SIZE);
+			ep->rx_head = (i + 1) % RX_RING_SIZE;
+			done++;
+			continue;
+		}
 
 		len = opts1 & RXD_LEN_MASK;
 		skb = ep->rx_skb[i];
@@ -1713,35 +1898,18 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		if (ep->rx_dumped < rx_dump && len) {
 			ep->rx_dumped++;
 			/*
-			 * ★★★ THE DESCRIPTOR, BESIDE THE BYTES (2026-08-27).
-			 *
-			 * This driver has NEVER read opts2/opts3 on RX. On the
-			 * RTL9602C sibling those two words ARE the WAN demux:
-			 * opts3[19:16] is the ingress switch port and
-			 * opts3[31:20]==0x23e marks the PON-IP NIC drain, which
-			 * is how `gpon0` tells a downstream frame from a LAN one.
-			 * Whether the same layout holds on THIS die is unknown --
-			 * the two chips' TX word3 layouts already differ (SID at
-			 * [22:16] vs [6:0]), and assuming they matched cost this
-			 * project the US-OMCI wall once already.
-			 *
-			 * It is printed HERE, gated by the existing rx_dump, so
-			 * the answer arrives on a boot that was going to happen
-			 * anyway instead of costing one of its own. The bytes and
-			 * the descriptor on the same frame are what make it a
-			 * measurement: the DA tells you what the frame IS, and
-			 * opts3 tells you what the silicon SAID it was.
-			 *
-			 * ⚠ The in-band 0x8899 tag is NOT present on this board
-			 * today (every dump in results/ is [prefix][DA][SA][type]),
-			 * so the excision branch below has never fired and the tag
-			 * is not an available demux source without enabling the
-			 * switch's trap-tag insert first.
+			 * The descriptor, beside the bytes.  opts3[19:16] is the
+			 * ingress port on THIS generation too, from the vendor NIC
+			 * driver its own build gate compiles for this die; what is
+			 * still open is what ARRIVES there for downstream user
+			 * data, which no static source answers.  The in-band 0x8899
+			 * tag is NOT present on this board today, so the excision
+			 * branch below has never fired.
 			 */
 			dev_info(ep->dev,
-				 "rx0 desc: opts1=%08x opts2=%08x opts3=%08x len=%u (src_port_if_9602c_layout=%u reason=%u)\n",
+				 "rx0 desc: opts1=%08x opts2=%08x opts3=%08x len=%u (src_port=%u reason=%u)\n",
 				 opts1, ep->rx_ring[i].opts2, ep->rx_ring[i].opts3,
-				 len, (ep->rx_ring[i].opts3 >> 16) & 0xf,
+				 len, luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, ep->rx_ring[i].opts3),
 				 (ep->rx_ring[i].opts2 >> 21) & 0xff);
 			print_hex_dump(KERN_INFO, "rx0: ", DUMP_PREFIX_OFFSET,
 				       16, 1, skb->data, min_t(u32, len, 32), false);
@@ -1761,15 +1929,46 @@ static int eth_rx(struct luna_eth *ep, int budget)
 			}
 		}
 
-		/* ★ DS OMCI FIRST, BEFORE THE ETHERNET VERDICTS.  An OMCI PDU is
-		 * not an Ethernet frame -- it has no DA, no SA and no ethertype
-		 * -- so every test below it would judge it as one: the length
-		 * floor would pass it, eth_type_trans() would invent a protocol
-		 * from bytes 12-13 of a G.988 header, and the bridge would drop
-		 * it without a word.  That is what happened on this board while
-		 * the PON-IP's own counter proved the frames were arriving. */
-		if (luna_gmac_rx_is_ds_omci(ep->omci_trap_on,
-					    ep->rx_ring[i].opts2, len,
+		/* One line per DISTINCT ingress port, ever.  See the field: this is
+		 * what tells a WAN that counts nothing apart from an OLT that is
+		 * sending nothing. */
+		{
+			unsigned int sp = luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, ep->rx_ring[i].opts3);
+
+			if (!(ep->rx_src_port_seen & BIT(sp))) {
+				ep->rx_src_port_seen |= BIT(sp);
+				netdev_info(ndev,
+					    "rx ingress port %u seen (opts3=%08x len=%u); this chip's fibre port is %u, CPU port %u\n",
+					    sp, ep->rx_ring[i].opts3, len,
+					    ep->c->sw_map->pon_port,
+					    ep->c->sw_map->cpu_port);
+			}
+		}
+
+		/* ... and one per distinct PON stream id, fibre-ingress only: the
+		 * field is extspa on a frame that came from anywhere else. */
+		if (luna_gmac_rx_is_wan(ep->c->sw_map->rx_layout,
+					ep->rx_ring[i].opts3,
+					ep->c->sw_map->pon_port)) {
+			unsigned int sid = luna_gmac_rx_pon_sid(ep->rx_ring[i].opts3);
+
+			if (!(ep->rx_pon_sid_seen[sid >> 5] & BIT(sid & 31))) {
+				ep->rx_pon_sid_seen[sid >> 5] |= BIT(sid & 31);
+				netdev_info(ndev,
+					    "rx PON stream %u seen (opts3=%08x len=%u); OMCC is %u, WAN data is %u, multicast is %u\n",
+					    sid, ep->rx_ring[i].opts3, len,
+					    ep->omci_sid, GPON_DATA_FLOW,
+					    GPON_MCAST_FLOW);
+			}
+		}
+
+		/* DS OMCI FIRST, before the Ethernet verdicts: an OMCI PDU has no DA, no
+		 * SA and no ethertype, so eth_type_trans() would invent a protocol from
+		 * bytes 12-13 of a G.988 header and the bridge would drop it silently. */
+		if (luna_gmac_rx_is_ds_omci(ep->c->sw_map->rx_layout,
+					    ep->omci_trap_on,
+					    ep->rx_ring[i].opts2,
+					    ep->rx_ring[i].opts3, len,
 					    ep->c->sw_map->omci_cpu_reason,
 					    (unsigned int)rx_prefix,
 					    RX_BUF_SIZE)) {
@@ -1804,25 +2003,39 @@ static int eth_rx(struct luna_eth *ep, int budget)
 					2 * ETH_ALEN);
 				skb_pull(skb, RTL_CPU_TAG_LEN);
 			}
-			/* Drop our own egress that the switch flooded back to the CPU
-			 * port (source MAC == ours) so the bridge does not log
+			/* WAN demux FIRST: a frame that ingressed on the fibre is
+			 * user data off the data GEM and belongs to gpon0.  It has
+			 * to be decided before the self-source check below, because
+			 * that check is "is this frame MINE coming back" and the two
+			 * netdevs have DIFFERENT addresses -- asking eth0's question
+			 * about a WAN frame compares against the wrong one.  The
+			 * verdict itself is the family's. */
+			struct net_device *rdev = ndev;
+
+			if (ep->wan_ndev &&
+			    luna_gmac_rx_is_wan(ep->c->sw_map->rx_layout,
+						ep->rx_ring[i].opts3,
+						ep->c->sw_map->pon_port))
+				rdev = ep->wan_ndev;
+
+			/* Drop our own egress flooded back to the CPU port (source
+			 * MAC == this netdev's own) so the bridge does not log
 			 * "received packet ... with own address as source". */
 			if (skb->len >= 2 * ETH_ALEN &&
-			    ether_addr_equal(skb->data + ETH_ALEN, ndev->dev_addr)) {
+			    ether_addr_equal(skb->data + ETH_ALEN, rdev->dev_addr)) {
 				dev_kfree_skb_any(skb);
 			} else {
 				/* NAPI poll context: use the receive path, not netif_rx. */
-				skb->protocol = eth_type_trans(skb, ndev);
-				ndev->stats.rx_packets++;
-				ndev->stats.rx_bytes += len;
+				skb->protocol = eth_type_trans(skb, rdev);
+				rdev->stats.rx_packets++;
+				rdev->stats.rx_bytes += len;
 				napi_gro_receive(&ep->napi, skb);
 			}
 		}
 
-		if (eth_refill(ep, i)) {	/* re-arm with a fresh skb */
-			ndev->stats.rx_dropped++;
-			break;
-		}
+		/* re-arm with the skb secured above */
+		luna_rx_arm(ep->rx_ring, ep->rx_skb, ep->rx_buf_dma, i,
+			    RX_RING_SIZE, RX_BUF_SIZE, fresh, fresh_dma);
 		ep->rx_head = (i + 1) % RX_RING_SIZE;
 		done++;
 	}
@@ -1843,9 +2056,8 @@ static void eth_tx_reclaim(struct luna_eth *ep)
 				 DMA_TO_DEVICE);
 		ep->tx_dirty++;
 	}
-	/* ⚠ THE SAME RESERVE AS eth_xmit(), and it is not cosmetic: waking the
-	 * queue at a threshold the transmit path still refuses spins the stack
-	 * on NETDEV_TX_BUSY.  The two directions of one decision. */
+	/* The same reserve as eth_xmit(), and not cosmetic: waking the queue at a
+	 * threshold the transmit path still refuses spins on NETDEV_TX_BUSY. */
 	if (netif_queue_stopped(ep->ndev) &&
 	    !luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty,
 				     TX_RING_SIZE, LUNA_OMCI_RESV))
@@ -1898,9 +2110,25 @@ static void eth_backstop(struct timer_list *t)
 	mod_timer(&ep->backstop, jiffies + msecs_to_jiffies(backstop_ms));
 }
 
-static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
+/*
+ * Transmit one frame on shared ring 0, for whichever netdev owns it.
+ *
+ * @opts2/@opts3 are the descriptor's STEERING words and they are the ONLY
+ * difference between the two producers: zero for the LAN, where the switch
+ * forwards by L2 destination, and the family's cpu-tag direct-TX pair for the
+ * WAN, where the frame must reach a GEM stream that no L2 lookup knows about.
+ *
+ * @backpressure is the other one, and it is a policy rather than a mechanism.
+ * eth0 stops its queue and asks to be called again, which is what a bridge
+ * port should do.  gpon0 DROPS: it is the line-rate producer, the OMCI
+ * injector shares this ring behind LUNA_OMCI_RESV, and eth_tx_reclaim() wakes
+ * only eth0's queue -- a stopped WAN queue would have no waker at all.  DHCP
+ * and TCP retransmit; a wedged WAN does not recover.
+ */
+static netdev_tx_t eth_tx_frame(struct luna_eth *ep, struct net_device *ndev,
+				struct sk_buff *skb, u32 opts2, u32 opts3,
+				bool backpressure)
 {
-	struct luna_eth *ep = netdev_priv(ndev);
 	unsigned long flags;
 	unsigned int i, len = skb->len;
 	dma_addr_t da;
@@ -1914,24 +2142,43 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	}
 
 	spin_lock_irqsave(&ep->tx_lock, flags);
-	/* Ring-space test hoisted to luna_gmac_tx_ring_full() (flowcore): the
-	 * ring size is passed, and the reserve is ZERO because this shell has a
-	 * single producer on ring 0.  The reserve argument exists because the
-	 * family's other Ethernet shell shares this ring with an OMCI injector
-	 * and must stop that many slots early -- one of its five spellings was
-	 * measured carrying the wrong bound (rtl9602c_eth.c:1690-1702), which is
-	 * why the expression now lives in one place.  The wake-queue twin in
-	 * eth_tx_reclaim() is still spelled by hand and INVERTED; converting it
-	 * is the point of the helper and is left to the pass that may touch that
-	 * function. */
+	/* THE RINGS BELONG TO eth0 AND gpon0 OUTLIVES ITS ndo_stop, which is why
+	 * this guard is here and eth_xmit alone never needed it: the netdev core
+	 * cannot deliver to a closed device, but gpon0 stays up across an eth0
+	 * ifdown and would reach a freed ring.  eth_stop() sets @closing under
+	 * this same lock BEFORE freeing, so the flag is the barrier -- the shape
+	 * the OMCI injector already uses, and for the same reason. */
+	if (ep->closing || !ep->tx_ring ||
+	    (!backpressure && !luna_gpon_data_ready())) {
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+		ndev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
+	/* Ring-space test hoisted to luna_gmac_tx_ring_full() (flowcore). The
+	 * reserve holds LUNA_OMCI_RESV slots for the OMCI injector, which shares
+	 * this ring and must never be refused: a dropped US OMCI is the
+	 * churn-lock class of failure, while a dropped user-data frame is a
+	 * retransmit. */
 	if (luna_gmac_tx_ring_full(ep->tx_head, ep->tx_dirty, TX_RING_SIZE,
 				   LUNA_OMCI_RESV)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
-		netif_stop_queue(ndev);
-		return NETDEV_TX_BUSY;
+		if (backpressure) {
+			netif_stop_queue(ndev);
+			return NETDEV_TX_BUSY;
+		}
+		ndev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
 	}
 	i = tx_slot(ep->tx_head);
 	buf = ep->tx_buf[i];
+	if (!buf) {		/* a partly-failed eth_alloc_rings leaves holes */
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+		ndev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
 
 	/* Copy the WHOLE frame into the linear copy slot. Use skb_copy_bits, not a
 	 * flat memcpy(skb->data,...): non-linear/fragmented skbs (e.g. the ICMP echo
@@ -1969,14 +2216,12 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	ep->tx_buf_dma[i] = da;
 	ep->tx_buf_len[i] = len;
 	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
-	ep->tx_ring[i].opts2 = 0;	/* plain frame: switch forwards by L2 DA */
-	ep->tx_ring[i].opts3 = 0;
+	ep->tx_ring[i].opts2 = opts2;
+	ep->tx_ring[i].opts3 = opts3;
 	ep->tx_ring[i].opts4 = 0;
-	/* Body word composed by luna_gmac_txd_word0() (flowcore); the flag set,
-	 * the length mask and D_EOR are this shell's and are PASSED, never
-	 * re-spelled there.  D_OWN is deliberately NOT part of the composed word:
-	 * ownership is publish-order, so it is OR'd on at the store below, after
-	 * the barrier that orders the body ahead of it. */
+	/* Body word composed by luna_gmac_txd_word0() (flowcore); the flag set, the
+	 * length mask and D_EOR are passed, never re-spelled there. D_OWN is NOT
+	 * part of it: ownership is publish-order, OR'd on after the barrier. */
 	opts1 = luna_gmac_txd_word0(D_FS | D_LS | D_TXCRC, len, TXD_LEN_MASK,
 				    luna_gmac_slot_is_eor(i, TX_RING_SIZE),
 				    D_EOR);
@@ -1994,6 +2239,21 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	return NETDEV_TX_OK;
 }
 
+
+/* eth0: a plain frame the switch forwards by L2 destination -- except a
+ * multicast or broadcast one, which the switch would flood back at us.  See
+ * @lan_flood_direct. */
+static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
+{
+	struct luna_eth *ep = netdev_priv(ndev);
+	u32 opts2 = 0;
+
+	if (lan_flood_direct && ep->lan_flood_mask &&
+	    skb_headlen(skb) >= ETH_ALEN && is_multicast_ether_addr(skb->data))
+		opts2 = luna_gmac_cputag_txd_pmask(ep->lan_flood_mask);
+
+	return eth_tx_frame(ep, ndev, skb, opts2, 0, true);
+}
 static void eth_set_rx_mode(struct net_device *ndev)
 {
 	struct luna_eth *ep = netdev_priv(ndev);
@@ -2002,20 +2262,29 @@ static void eth_set_rx_mode(struct net_device *ndev)
 				 !!(ndev->flags & (IFF_PROMISC | IFF_ALLMULTI)));
 }
 
-/* Parse "xx:xx:xx:xx:xx:xx" into `out`. -> true on success.
- *
- * ★ It REFUSES anything that is not exactly six colon-separated octets, and it
- * refuses a multicast or all-zero address: a malformed parameter must leave the
- * fallback chain intact rather than half-programme an interface.
- */
+/* Defined with the WAN netdev below; eth0's address setter needs it because the
+ * WAN identity is derived from eth0's and must move when eth0's does. */
+static void luna_eth_wan_hwaddr(struct luna_eth *ep, u8 out[ETH_ALEN]);
+
 static int eth_set_mac_address(struct net_device *ndev, void *addr)
 {
 	struct luna_eth *ep = netdev_priv(ndev);
 	int ret = eth_mac_addr(ndev, addr);
 
-	if (!ret)
-		eth_set_hwaddr(ep, ndev->dev_addr);
-	return ret;
+	if (ret)
+		return ret;
+	eth_set_hwaddr(ep, ndev->dev_addr);
+	/* The WAN identity is DERIVED from this one, so it moves with it: the
+	 * board MAC is provisioned onto eth0 well after probe, and a gpon0 left
+	 * holding the placeholder it was created with would present the OLT an
+	 * address no longer related to the board's. */
+	if (ep->wan_ndev) {
+		u8 wmac[ETH_ALEN];
+
+		luna_eth_wan_hwaddr(ep, wmac);
+		eth_hw_addr_set(ep->wan_ndev, wmac);
+	}
+	return 0;
 }
 
 /* ---- open / stop ---------------------------------------------------------- */
@@ -2029,11 +2298,14 @@ static int eth_open(struct net_device *ndev)
 		eth_free_rings(ep);
 		return ret;
 	}
+	luna_gpon_nic_reset_begin();
 	ep->closing = false;
 
 	eth_hw_stop(ep);
 	eth_ipsel_cycle();
-	eth_switch_init(ep);		/* program forwarding before the DMA starts */
+	ret = eth_switch_init(ep);	/* program forwarding before the DMA starts */
+	if (ret)
+		goto fail;
 	eth_hw_program(ep);
 
 	if (ep->irq > 0) {
@@ -2051,14 +2323,44 @@ static int eth_open(struct net_device *ndev)
 	/* periodic real-link/rxpkts diagnostic (bring-up: locate the host's jack). */
 	ep->diag_left = diag_count;
 	timer_setup(&ep->diag, eth_diag_timer, 0);
+	INIT_WORK(&ep->diag_work, eth_diag_work);
 	if (diag_ms && diag_count > 0)
 		mod_timer(&ep->diag, jiffies + msecs_to_jiffies(diag_ms));
 
 	netif_start_queue(ndev);
 	netif_carrier_on(ndev);
+	/* The resurvey knob gets its subject only once the bring-up that gives
+	 * the reading a meaning has finished, and under the window's own lock,
+	 * which is what keeps a concurrent writer out of a half-built state. */
+	mutex_lock(&luna_gphy_lock);
+	survey_ep = ep;
+	mutex_unlock(&luna_gphy_lock);
 	netdev_info(ndev, "up: irq=%d rx_prefix=%d backstop=%ums copper_phy=%d rtl8221b=%d\n",
 		    ep->irq, rx_prefix, backstop_ms, copper_phy, rtl8221b_phy);
+	luna_gpon_nic_reset_end();
 	return 0;
+
+fail:
+	/*
+	 * A half-programmed switch must not be reported as an interface that is
+	 * up.  Nothing past the bring-up has been armed yet -- no IRQ, no NAPI,
+	 * no timer, no queue -- so what is owed is the door, the engine, the
+	 * GPON exclusion this function took, and the rings, in that order.
+	 */
+	{
+		unsigned long flags;
+
+		spin_lock_irqsave(&ep->tx_lock, flags);
+		ep->closing = true;
+		spin_unlock_irqrestore(&ep->tx_lock, flags);
+	}
+	eth_hw_stop(ep);
+	luna_gpon_nic_reset_end();
+	eth_free_rings(ep);
+	netdev_err(ndev,
+		   "switch bring-up failed (%d): eth0 stays DOWN rather than up on a half-programmed fabric\n",
+		   ret);
+	return ret;
 }
 
 static int eth_stop(struct net_device *ndev)
@@ -2078,6 +2380,13 @@ static int eth_stop(struct net_device *ndev)
 	ep->closing = true;
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 	timer_delete_sync(&ep->diag);
+	/* the timer is the only thing that arms this, and it is stopped */
+	cancel_work_sync(&ep->diag_work);
+	/* Withdraw the diagnostic's subject while the interface is down, so it
+	 * cannot report on a stopped port.  This is NOT the lifetime guarantee:
+	 * that is the devres action registered at probe, which runs in the
+	 * actual cleanup whether or not ndo_stop was ever reached. */
+	luna_eth_survey_withdraw(ep);
 	timer_delete_sync(&ep->backstop);
 	napi_disable(&ep->napi);
 	if (ep->irq > 0)
@@ -2096,7 +2405,131 @@ static const struct net_device_ops luna_eth_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
+/* ===== gpon0: the WAN data-GEM netdev ======================================
+ *
+ * The ONU's user-data port.  It shares eth0's rings, NAPI and lock -- there is
+ * one CPU-port GMAC on this SoC and one ring 0 -- and differs from eth0 in
+ * exactly two things: the TX descriptor steers to the data GEM's stream
+ * instead of being forwarded by L2 lookup, and it carries the WAN IDENTITY,
+ * the address the OLT and the ISP recognise this ONU by.
+ *
+ * ⚠ THE US STREAM IS INSTALLED BY SOMEBODY ELSE AND MAY NOT BE READY.  The
+ * OLT creates the data GEM over OMCI (ME 268) and luna_gpon.c installs it on
+ * GPON_DATA_FLOW; until then the US-NIC drops what this transmits.  Carrier is
+ * held up anyway so netifd runs its DHCP client, whose retries are exactly the
+ * right probe -- an interface that waited for the install would have nothing
+ * to wait on, since the OLT gates DOWNSTREAM user data on our own AVC.
+ *
+ * ⚠ AND WHAT A SILENT gpon0 MEANS IS NOT ESTABLISHED ON THIS DIE.  The RX
+ * demux keys on the ingress port (luna_gmac_rx_is_wan), which is how the
+ * vendor's own driver decides it on this generation; whether downstream data
+ * actually REACHES this GMAC that way, rather than draining through the PON-IP
+ * NIC as it does on the RTL9602C, is a question one boot with WAN traffic
+ * answers.  The ingress-port ledger in eth_rx() is what will say which.
+ */
+
+/* The WAN identity: eth0's address plus this product's offset.  Derived, never
+ * stored -- eth0's own address is only provisioned after this driver probes,
+ * so a value latched at creation would be a stale copy of a placeholder. */
+static void luna_eth_wan_hwaddr(struct luna_eth *ep, u8 out[ETH_ALEN])
+{
+	gpon_hwaddr_derive(out, ep->ndev->dev_addr, ep->c->wan_mac_offset);
+}
+
+static netdev_tx_t luna_eth_wan_xmit(struct sk_buff *skb,
+				     struct net_device *ndev)
+{
+	struct luna_eth *ep = *(struct luna_eth **)netdev_priv(ndev);
+
+	/* The SAME cpu-tag direct-TX pair the OMCC uses, with the data stream in
+	 * place of the OMCC's -- the whole point of the family helpers carrying a
+	 * stream id rather than a hard-coded flow. */
+	return eth_tx_frame(ep, ndev, skb,
+			    luna_gmac_cputag_txd_word2(ep->c->sw_map->pon_port),
+			    luna_gmac_cputag_txd_word3(GPON_DATA_FLOW),
+			    false);
+}
+
+static int luna_eth_wan_open(struct net_device *ndev)
+{
+	struct luna_eth *ep = *(struct luna_eth **)netdev_priv(ndev);
+	u8 wmac[ETH_ALEN];
+
+	if (is_valid_ether_addr(ep->ndev->dev_addr)) {
+		luna_eth_wan_hwaddr(ep, wmac);
+		eth_hw_addr_set(ndev, wmac);
+	}
+	netif_carrier_on(ndev);
+	netif_start_queue(ndev);
+	netdev_info(ndev, "WAN up: identity %pM (eth0 %pM + %u), US stream %u, fibre port %u\n",
+		    ndev->dev_addr, ep->ndev->dev_addr, ep->c->wan_mac_offset,
+		    GPON_DATA_FLOW, ep->c->sw_map->pon_port);
+	return 0;
+}
+
+static int luna_eth_wan_stop(struct net_device *ndev)
+{
+	netif_stop_queue(ndev);
+	netif_carrier_off(ndev);
+	return 0;
+}
+
+static const struct net_device_ops luna_eth_wan_ops = {
+	.ndo_open		= luna_eth_wan_open,
+	.ndo_stop		= luna_eth_wan_stop,
+	.ndo_start_xmit		= luna_eth_wan_xmit,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
+/* Create gpon0 beside eth0.  A failure is reported and LEFT non-fatal: eth0 and
+ * the OMCC are what keep the board reachable and ranged, and losing the LAN
+ * because the WAN could not be registered would turn a WAN defect into a brick. */
+static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
+{
+	struct net_device *wan;
+	u8 wmac[ETH_ALEN];
+
+	wan = devm_alloc_etherdev(dev, sizeof(struct luna_eth *));
+	if (!wan) {
+		dev_warn(dev, "gpon0 (WAN) allocation failed; no WAN datapath\n");
+		return;
+	}
+	*(struct luna_eth **)netdev_priv(wan) = ep;
+	SET_NETDEV_DEV(wan, dev);
+	strscpy(wan->name, "gpon0", IFNAMSIZ);
+	wan->netdev_ops = &luna_eth_wan_ops;
+	luna_eth_wan_hwaddr(ep, wmac);
+	eth_hw_addr_set(wan, wmac);
+	netif_carrier_off(wan);
+	if (devm_register_netdev(dev, wan)) {
+		dev_warn(dev, "gpon0 (WAN) register failed; no WAN datapath\n");
+		return;
+	}
+	ep->wan_ndev = wan;
+}
+
 /* ---- probe ---------------------------------------------------------------- */
+static int luna_eth_omci_send(void *cookie, const u8 *msg, unsigned int len)
+{
+	return luna_eth_omci_xmit(cookie, msg, len);
+}
+
+static void luna_eth_tx_fence(void *cookie)
+{
+	struct luna_eth *ep = cookie;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ep->tx_lock, flags);
+	spin_unlock_irqrestore(&ep->tx_lock, flags);
+}
+
+static void luna_eth_omci_release(void *cookie)
+{
+	WRITE_ONCE(g_ep, NULL);
+	luna_omci_detach(cookie);
+}
+
 static int luna_eth_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -2137,50 +2570,38 @@ static int luna_eth_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	/* MAC: DT/nvmem, else the value the boot loader programmed into the MAC
-	 * engine, else a random locally-administered address.
-	 *
-	 * ★★★ AND THE ENGINE'S VALUE IS NOT AUTOMATICALLY A BOARD MAC. MEASURED
-	 * on the LANLY G24W, 2026-08-20: with nothing in DT and no `ethaddr` in
-	 * this product's U-Boot environment, IDR0/IDR4 hold the SILICON BRING-UP
-	 * DEFAULT 00:e0:4c:86:70:01 -- a Realtek OUI address that
-	 * `is_valid_ether_addr()` accepts, so the random fallback never fired and
-	 * the board came up with it.
-	 *
-	 * ⚠ THAT IS A CROSS-BOARD COLLISION, NOT AN AESTHETIC PROBLEM. It is the
-	 * same value on EVERY board that boots this image, and this lab runs three
-	 * ONUs on ONE L2 segment. Two of them holding one MAC does not produce an
-	 * error anywhere -- it produces a switch that learns the address on
-	 * whichever port spoke last, and measurements on somebody else's bench
-	 * that fail for no visible reason.
-	 *
-	 * ⇒ the default is REFUSED and a random LAA is used instead, LOUDLY. A
-	 * random address is unique by construction; a shared one is wrong by
-	 * construction. This board's REAL MAC (5c:19:23:b3:ce:90 on the label)
-	 * lives in the vendor's `config` MTD partition MIB -- the vendor sets it
-	 * from userspace, `ifconfig eth0 hw ether ...`, not from the bootloader --
-	 * so recovering it is flash-reading work, and OWED. Until then a unique
-	 * wrong address beats a shared one.
-	 */
-	if (mac_param && luna_mac_from_param(mac_param, mac)) {
-		/* ★ FIRST RUNG, and it is the only one that can carry a PER-UNIT
-		 * value on this product today. Announced, because a MAC that
-		 * arrived from outside the device must be auditable in the log. */
+	 * engine, else a random locally-administered address. The engine's value is
+	 * NOT automatically a board MAC: measured on the G24W 2026-08-20 with no DT
+	 * and no U-Boot ethaddr, IDR0/IDR4 held the SILICON BRING-UP DEFAULT
+	 * 00:e0:4c:86:70:01, which is_valid_ether_addr() accepts -- the same value
+	 * on EVERY board booting this image, in a lab running three ONUs on one L2
+	 * segment. So that default is REFUSED and a random LAA used instead,
+	 * LOUDLY: unique by construction beats shared by construction. This board's
+	 * real MAC lives in the vendor config partition and recovering it is OWED. */
+	{
+		u8 dt[GPON_HWADDR_BYTES], eng[GPON_HWADDR_BYTES];
+		bool have_dt = of_get_mac_address(dev->of_node, dt) == 0;
+		enum gpon_hwaddr_src src;
+		bool eng_ok;
+
+		eth_get_hwaddr(ep, eng);
+		eng_ok = !luna_mac_is_bringup_default(eng);
+		src = gpon_hwaddr_resolve(mac_param, have_dt ? dt : NULL,
+					  eng_ok ? eng : NULL, mac);
 		eth_hw_addr_set(ndev, mac);
-		dev_info(dev, "MAC %pM taken from the `mac=` boot parameter\n", mac);
-	} else if (of_get_ethdev_address(dev->of_node, ndev)) {
-		eth_get_hwaddr(ep, mac);
-		if (is_valid_ether_addr(mac) && !luna_mac_is_bringup_default(mac)) {
-			eth_hw_addr_set(ndev, mac);
-		} else {
-			eth_hw_addr_random(ndev);
+
+		if (src == GPON_HWADDR_RANDOM)
 			dev_warn(dev,
-				 "MAC engine holds %pM: %s. Using a random locally-administered address %pM instead -- this board's real MAC lives in the vendor config partition and is not read yet\n",
-				 mac,
-				 is_valid_ether_addr(mac)
-				 ? "the SILICON BRING-UP DEFAULT, identical on every board of this family, which would collide on a shared segment"
-				 : "not a valid unicast address",
-				 ndev->dev_addr);
-		}
+				 "MAC engine holds %pM: %s. Using %s %pM instead -- this board's real MAC lives in the vendor config partition and is not read yet\n",
+				 eng,
+				 eng_ok
+				 ? "not a valid unicast address"
+				 : "the SILICON BRING-UP DEFAULT, identical on every board of this family, which would collide on a shared segment",
+				 gpon_hwaddr_src_name(src), ndev->dev_addr);
+		else
+			/* an address from outside the device must be auditable */
+			dev_info(dev, "MAC %pM from %s\n", ndev->dev_addr,
+				 gpon_hwaddr_src_name(src));
 	}
 
 	ndev->netdev_ops = &luna_eth_netdev_ops;
@@ -2191,20 +2612,29 @@ static int luna_eth_probe(struct platform_device *pdev)
 	if (ep->irq < 0)
 		ep->irq = -1;
 
+	ret = luna_omci_attach(&luna_eth_onu, ep, (u8)omci_mds_seed,
+			       luna_eth_omci_send, luna_eth_tx_fence,
+			       luna_eth_uni_admin_set);
+	if (ret)
+		return ret;
+	/* ★ IMMEDIATELY, BEFORE ANY OTHER FALLIBLE STEP.  The attachment now
+	 *   holds this cookie; a failure between the attach and its release
+	 *   action would return from probe, free the NIC, and leave the common
+	 *   owner calling into it. */
+	ret = devm_add_action_or_reset(dev, luna_eth_omci_release, ep);
+	if (ret)
+		return ret;
+	/* devres releases in REVERSE order, so this runs after the netdev is
+	 * unregistered (which stops it) and before @ep is freed. */
+	ret = devm_add_action_or_reset(dev, luna_eth_survey_withdraw, ep);
+	if (ret)
+		return ret;
+	WRITE_ONCE(g_ep, ep);
 	ret = devm_register_netdev(dev, ndev);
 	if (ret)
 		return ret;
+	luna_eth_wan_register(ep, dev);
 
-	g_ep = ep;
-	{
-		/* The identity is the PLOAM layer's, not a second copy here --
-		 * see gpon_onu_sn().  ONU-G (ME 256) must answer the same
-		 * Vendor-ID/Serial the OLT ranged. */
-		u8 sn[8];
-
-		gpon_onu_sn(sn);
-		omci_onu_init(&luna_eth_onu, sn, (u8)omci_mds_seed);
-	}
 	dev_info(dev, "%s NIC at %pR, MAC %pM, irq %d\n", ep->c->name,
 		 platform_get_resource(pdev, IORESOURCE_MEM, 0),
 		 ndev->dev_addr, ep->irq);
@@ -2221,65 +2651,66 @@ MODULE_DEVICE_TABLE(of, luna_eth_of_match);
 static struct platform_driver luna_eth_driver = {
 	.probe	= luna_eth_probe,
 	.driver	= {
-		.name		= "rtl960x-eth",
+		/* ★ THE FAMILY'S NAME, NOT A DIE'S.  This file serves the
+		 * RTL9603CVD and the RTL9607C, and the family was renamed
+		 * rtl960x_* -> luna_* in 2026-08-29; the driver identity was
+		 * the half that did not move.  Matching is by of_match_table,
+		 * so this string is the sysfs identity only -- nothing on this
+		 * bench reads it, checked before the rename. */
+		.name		= "luna-eth",
 		.of_match_table	= luna_eth_of_match,
 	},
 };
 module_platform_driver(luna_eth_driver);
 
 /*
- * GPON <-> NIC glue: the entry points the shared GPON FSM (gpon-luna.c) calls,
- * declared in rtl9602c_gpon_nic.h.
- *
- * ★★ THESE WERE SIX EMPTY STUBS UNTIL 2026-09-08, and the comment that stood
- * here said they were "enough for M3 (reach O5 + DS)".  They were not: with no
- * CPU-side OMCI datapath the ONU reaches O5, receives the OLT's OMCI, answers
- * nothing, and the OLT times its configuration out -- which is exactly what the
- * G24W did.  One of them, omci_rx_count(), returned a literal 0 and printed
- * `omcirx=0` into every activation log, which reads as "the OLT sent us no
- * OMCI"; it was read that way during the investigation while the PON-IP's own
- * counter was proving otherwise.  A shell with no path must say COULD NOT ASK,
- * never zero -- and the repair is to give it a path.
+ * GPON <-> NIC glue: the entry points the shared GPON FSM (luna_gpon.c) calls,
+ * declared in luna_gpon_nic.h. These were six empty stubs until 2026-09-08,
+ * and one of them, omci_rx_count(), returned a literal 0 that printed
+ * `omcirx=0` into every activation log and was read as "the OLT sent us no
+ * OMCI". A shell with no path must say COULD NOT ASK, never zero.
  */
 
 /*
  * Arm the OMCI trap for the OMCC stream the OLT just assigned.
  *
- * ★ THERE IS NOTHING TO PROGRAM IN THE GMAC HERE, and that is a chip fact, not
- * an omission.  On this generation the switch decides which stream is OMCI from
- * PON_OMCI_CFG.CFG_OMCI_SID (the GPON driver's ponmac init sets it) and stamps
- * the trapped frame with this chip's OMCI cpu-tag reason; the NIC's only job is
- * to recognise that reason.  The sibling chip needs a CPUTAG1CR write because
- * its GMAC selects the trapped SID itself.  What is stored is the SID the
- * RESPONSE must be steered back onto (opts3 tx_dst_stream_id).
+ * This used to program nothing in the GMAC, on the reasoning that on this
+ * generation the switch alone decides which stream is OMCI. Each die's own
+ * vendor source refutes it (tier 3): dal_rtl9603cvd_gpon.c and dal_rtl9607c_gpon.c
+ * both RMW GMAC0+0x50 [14:8] to 127, while the RTL9602C's identical block is
+ * `#if 0 -- move to NIC driver` because that die's NIC default is already right.
+ * So the two dies this shell serves are exactly the ones whose GPON init DOES
+ * program the selector. The SID comes from the caller, the ONE home.
  */
 void rtl9602c_eth_set_omci_sid(unsigned int sid)
 {
 	struct luna_eth *ep = g_ep;
+	u32 v;
 
 	if (!ep)
 		return;
 	ep->omci_sid = sid;
 	ep->omci_trap_on = true;
+
+	v = ep_rd(ep, R_CPUTAG1CR);
+	ep_wr(ep, R_CPUTAG1CR, (v & ~CPUTAG1CR_SID_MASK) | CPUTAG1CR_SID(sid));
+
 	netdev_info(ep->ndev,
-		    "OMCI trap armed: OMCC sid %u, DS cpu-tag reason %u, PON port %u\n",
-		    sid, ep->c->sw_map->omci_cpu_reason, ep->c->sw_map->pon_port);
+		    "OMCI trap armed: OMCC sid %u, DS cpu-tag reason %u, PON port %u, CPUTAG1CR 0x%08x -> 0x%08x\n",
+		    sid, ep->c->sw_map->omci_cpu_reason, ep->c->sw_map->pon_port,
+		    v, ep_rd(ep, R_CPUTAG1CR));
 }
 EXPORT_SYMBOL(rtl9602c_eth_set_omci_sid);
 
 /*
- * Provision the ONU identity into the responder's ME 256 (ONU-G).
- *
- * ⚠ IT WRITES THE CORE'S STORE AND KEEPS NO COPY.  probe() already seeded the
- * model from gpon_onu_sn(), but the PLOAM layer may only learn the real serial
- * later; re-seeding is how ONU-G comes to answer what the OLT actually ranged.
- * A second `omci_sn[8]` in this shell would be a third copy of one serial
- * number, which this tree has already paid for once.
+ * Provision the ONU identity into the responder's ME 256 (ONU-G). It writes the
+ * core's store and keeps no copy: probe() seeds the model from gpon_onu_sn(),
+ * but the PLOAM layer may only learn the real serial later, and a second
+ * omci_sn[8] here would be a third copy of one serial number.
  */
 void rtl9602c_eth_set_omci_identity(const u8 *sn8)
 {
-	if (sn8)
-		omci_onu_set_sn(&luna_eth_onu, sn8);
+	luna_omci_set_sn(sn8);
 }
 EXPORT_SYMBOL(rtl9602c_eth_set_omci_identity);
 
@@ -2296,17 +2727,26 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_rx_count);
 /*
  * gpon0 (WAN) RX packet count.
  *
- * ⚠ STILL "COULD NOT ASK", AND DELIBERATELY SO.  This shell has no WAN netdev
- * and no PON-port demux yet, so it counts no downstream user data.  Returning 0
- * would tell the GPON driver's provisioning watchdog "the OLT has forwarded us
- * nothing", which is a DEVICE finding drawn from an absent instrument -- the
- * same defect the omci_rx_count() stub committed.  It returns the unavailable
- * sentinel until the WAN datapath lands on this shell; the watchdog's own
- * `== 0` test therefore cannot fire on it.
+ * THREE STATES, NOT TWO.  No netdev at all is COULD NOT ASK
+ * (GPON_OMCI_RX_UNAVAIL, rendered -1) -- there is no instrument, and returning
+ * 0 would hand the provisioning watchdog a DEVICE finding nobody measured.
+ * With the netdev present the count is real, and 0 then means no downstream
+ * user data reached it.
+ *
+ * ⚠ AND 0 IS STILL NOT PROOF THE OLT SENT NOTHING, because it also happens if
+ * downstream data reaches this GMAC on a port the demux does not call the
+ * fibre.  The discriminator is not in this number and must not be invented
+ * into it: it is the per-ingress-port ledger eth_rx() prints, which names every
+ * port this die has ever delivered on beside the one we are treating as the
+ * fibre.  A reader who sees frames arriving on some other port has the answer
+ * in one line.
  */
 u32 rtl9602c_eth_wan_rx_count(void)
 {
-	return GPON_OMCI_RX_UNAVAIL;
+	struct luna_eth *ep = g_ep;
+
+	return (ep && ep->wan_ndev) ? (u32)ep->wan_ndev->stats.rx_packets
+				    : GPON_OMCI_RX_UNAVAIL;
 }
 EXPORT_SYMBOL(rtl9602c_eth_wan_rx_count);
 
@@ -2321,12 +2761,9 @@ u32 rtl9602c_eth_omci_tx_dirty(void)
 }
 EXPORT_SYMBOL(rtl9602c_eth_omci_tx_dirty);
 
-/* US-OMCI responses the ring REFUSED (full / closing / no buffer).
- *
- * ★ IT IS A SEPARATE NUMBER FROM THE QUEUED COUNT ON PURPOSE.  "we queued N"
- * and "the PON-IP transmitted 0" only becomes a diagnosis once you know
- * whether anything was dropped between them; folding the two would hide
- * exactly the case the reader needs. */
+/* US-OMCI responses the ring REFUSED (full / closing / no buffer). A separate
+ * number from the queued count on purpose: "we queued N" and "the PON-IP
+ * transmitted 0" only becomes a diagnosis once you know what was dropped. */
 u32 rtl9602c_eth_omci_tx_dropped(void)
 {
 	struct luna_eth *ep = g_ep;
@@ -2336,17 +2773,11 @@ u32 rtl9602c_eth_omci_tx_dropped(void)
 EXPORT_SYMBOL(rtl9602c_eth_omci_tx_dropped);
 
 /*
- * OLT-independent US-OMCI STEERING self-test: push one synthetic PDU through
- * the whole transmit path so the US-NIC's per-SID RX counters can be read at O5
- * without waiting for the OLT to send anything.
- *
- * ★ SYNTHETIC ON PURPOSE, AND NOT A PROTOCOL ACTION.  The US-NIC classifies by
- * the descriptor's stream id, never by content, so the payload is irrelevant to
- * what this measures -- and its caller is a DIAGNOSTIC (the trace-gated FSM
- * tick).  Emitting a real autonomous AVC from here would make a diagnostic
- * change what the OLT is told, which is a different thing from measuring the
- * datapath; report_oper_up() below is where a real AVC belongs.  Same shape and
- * same reasoning as the sibling shell's.
+ * OLT-independent US-OMCI steering self-test: push one synthetic PDU through the
+ * whole transmit path so the US-NIC's per-SID RX counters can be read at O5
+ * without waiting for the OLT. The US-NIC classifies by the descriptor's stream
+ * id and never by content, so the payload is irrelevant; emitting a real
+ * autonomous AVC from a diagnostic would change what the OLT is told.
  */
 void rtl9602c_eth_omci_selftest(void)
 {
@@ -2365,39 +2796,25 @@ void rtl9602c_eth_omci_selftest(void)
 EXPORT_SYMBOL(rtl9602c_eth_omci_selftest);
 
 /*
- * Report the HGU WAN egress (VEIP, ME 329) operational.
- *
- * WHY IT EXISTS: the OLT never GETs the data-plane MEs after creating them; its
- * per-class handlers wait for this autonomous AVC and gate DOWNSTREAM user data
- * on it.  A purely reactive responder leaves the OLT filling our downstream
- * with idle GEM.  The frame is the CORE's (TID 0 marks it autonomous); the
- * transmit is ours.
+ * Report the HGU WAN egress (VEIP, ME 329) operational. The OLT never GETs the
+ * data-plane MEs after creating them: its per-class handlers wait for this
+ * autonomous AVC and gate DOWNSTREAM user data on it, so a purely reactive
+ * responder leaves the OLT filling our downstream with idle GEM.
  */
 void rtl9602c_eth_omci_report_oper_up(void)
 {
-	struct luna_eth *ep = g_ep;
-	u8 msg[OMCI_LEN];
-	int n;
-
-	if (!ep || !ep->omci_trap_on)
-		return;
-	n = omci_onu_emit_veip_up_avc(&luna_eth_onu, msg);
-	if (n > 0)
-		luna_eth_omci_xmit(ep, msg, n);
+	luna_omci_report_oper_up();
 }
 EXPORT_SYMBOL(rtl9602c_eth_omci_report_oper_up);
 
 /*
- * Publish the live DDM optical levels into ME 263 (ANI-G) #10/#14.
- *
- * ★ THIS CLOSES A HOLE rtl9602c_gpon_nic.h NAMED IN ADVANCE: while this shell
- * had no responder the header supplied a no-op inline, with the note that the
- * day the board gained one, the stub "becomes a silent hole".  It has, so it is
- * a real function now and the header's gate admits this config.
+ * Publish the live DDM optical levels into ME 263 (ANI-G) #10/#14. This closes a
+ * hole luna_gpon_nic.h named in advance: its no-op inline was to become a
+ * silent hole the day this board gained a responder.
  */
 void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)
 {
-	omci_onu_set_optical(&luna_eth_onu, (u16)rx_level, (u16)tx_level);
+	luna_omci_set_optical((u16)rx_level, (u16)tx_level);
 }
 EXPORT_SYMBOL(rtl9602c_eth_omci_set_optical);
 

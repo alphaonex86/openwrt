@@ -1046,21 +1046,25 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 		if (changed & BSS_CHANGED_BEACON ||
 		    (changed & BSS_CHANGED_BEACON_ENABLED &&
 		     bss_conf->enable_beacon)) {
-			/* P4: re-assert the beacon bring-up idempotently on every
-			 * BEACON_ENABLED, not only the 0->1 edge. If the HW beacon
-			 * stalled (a reset, or a first-bring-up race) while
-			 * mac->beacon_enabled was already 1, the edge-only gate never
-			 * restarted it -> "AP enabled but not on-air until a wifi
-			 * reload". Re-running the interrupt-mask + beacon download is
-			 * harmless when the beacon is already going. */
-			if (mac->beacon_enabled == 0 ||
-			    (changed & BSS_CHANGED_BEACON_ENABLED &&
-			     bss_conf->enable_beacon)) {
+			/* The bring-up is idempotent on every BEACON_ENABLED, not
+			 * only the 0->1 edge: a HW beacon that stalled while
+			 * mac->beacon_enabled was already 1 was never restarted.
+			 * ⚠ A CONTENT change (BSS_CHANGED_BEACON alone -- a new SSID,
+			 * a new TIM) used to fall through this same gate and reach
+			 * nothing, so the hardware kept re-sending the frame from the
+			 * first bring-up: measured 2026-09-11 on the G24W, four SSID
+			 * changes accepted by the device and none of them on air.
+			 * The new frame is what a content change needs; the bring-up
+			 * is not, so they are separated rather than the gate widened.
+			 */
+			bool bringup = (mac->beacon_enabled == 0 ||
+					(changed & BSS_CHANGED_BEACON_ENABLED &&
+					 bss_conf->enable_beacon));
+
+			if (bringup) {
 				rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
 					"BSS_CHANGED_BEACON_ENABLED\n");
 
-				/*start hw beacon interrupt. */
-				/*rtlpriv->cfg->ops->set_bcn_reg(hw); */
 				mac->beacon_enabled = 1;
 				rtlpriv->cfg->ops->update_interrupt_mask(hw,
 						rtlpriv->cfg->maps
@@ -1068,8 +1072,8 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 
 				if (rtlpriv->cfg->ops->linked_set_reg)
 					rtlpriv->cfg->ops->linked_set_reg(hw);
-				send_beacon_frame(hw, vif);
 			}
+			send_beacon_frame(hw, vif);
 		}
 		if ((changed & BSS_CHANGED_BEACON_ENABLED &&
 		    !bss_conf->enable_beacon)) {

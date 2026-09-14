@@ -1,14 +1,47 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Shared interface between the RTL9602C GPON MAC driver
- * (gpon-rtl960x.c) and the NIC/switch driver
- * (rtl9602c_eth.c). Independent implementation from the SoC's register interface
+ * The Luna GPON<->NIC contract: what luna_gpon.c and whichever Ethernet
+ * shell the board builds (rtl9602c_eth.c on taroko, luna_eth.c on
+ * interaptiv) owe each other. Independent implementation from the SoC's
+ * register interface
  * and the G.984/G.988 protocols. Once the OLT assigns the OMCC GEM port and the
  * GPON driver installs the OMCC GEM datapath, it arms the NIC OMCI trap so that
  * downstream OMCI frames on the OMCC stream-id are delivered to the CPU netdev.
  */
-#ifndef _RTL9602C_GPON_NIC_H
-#define _RTL9602C_GPON_NIC_H
+#ifndef _LUNA_GPON_NIC_H
+#define _LUNA_GPON_NIC_H
+
+struct omci_onu;
+/*
+ * @uni_admin_set: drive ONE Ethernet UNI's administrative state onto its switch
+ *	port and PHY.  -> 0 applied, negative NOT applied, in which case the
+ *	obligation stays owed in the model and is retried.
+ *
+ * ★★ ONE PENDING/APPLY OWNER, TWO BACKENDS.  The bookkeeping -- which slot
+ *    changed, which port that is on this board, what is still owed -- lives
+ *    once in luna_gpon.c for both Luna boards.  Only the register work differs,
+ *    and it differs a lot: the G24W builds luna_eth.c and the X111W builds
+ *    rtl9602c_eth.c with CONFIG_LUNA_ETH=n, so a setter living in either one
+ *    closes exactly one board.  May be NULL, which means this board models and
+ *    answers the administrative state and never applies it.
+ */
+int luna_omci_attach(struct omci_onu *onu, void *cookie, u8 seed,
+		    int (*tx)(void *, const u8 *, unsigned int),
+		    void (*tx_fence)(void *),
+		    int (*uni_admin_set)(void *, unsigned int, bool));
+
+/* Ask the common owner to drive whatever the model has accepted and not yet
+ * had applied.  Safe from any context: it only schedules. */
+void luna_uni_apply_kick(void);
+void luna_omci_detach(void *cookie);
+int luna_omci_enqueue(void *cookie, const u8 *msg, unsigned int len);
+void luna_omci_set_sn(const u8 sn[8]);
+void luna_omci_set_optical(u16 rx, u16 tx);
+void luna_omci_rx_errors(u32 *bad_mic, u32 *runt);
+void luna_omci_report_oper_up(void);
+bool luna_gpon_data_ready(void);
+void luna_gpon_nic_reset_begin(void);
+void luna_gpon_nic_reset_end(void);
 
 /* Arm the GMAC OMCI trap for downstream stream-id @sid (the OMCC). Provided by
  * rtl9602c_eth.c; called from the GPON Configure_Port-ID handler. */
@@ -30,8 +63,20 @@ void rtl9602c_eth_set_omci_identity(const u8 *sn8);
 #define GPON_OMCI_RX_UNAVAIL	0xffffffffu
 u32 rtl9602c_eth_omci_rx_count(void);
 
-/* gpon0 (WAN) RX packet count; 0 => OLT forwarded us no downstream data (not
- * provisioned). Used by the GPON O5 provisioning watchdog. Defined in rtl9602c_eth.c. */
+/* gpon0 (WAN) RX packet count, used by the GPON O5 provisioning watchdog.
+ * Defined by whichever Ethernet shell this board builds.
+ *
+ * ★ THE SAME "COULD NOT ASK IS NOT ZERO" RULE AS THE OMCI COUNTER ABOVE: a
+ * shell with no WAN netdev returns GPON_OMCI_RX_UNAVAIL, never 0, because 0
+ * here reads as "the OLT forwarded us no downstream data" -- a DEVICE finding
+ * drawn from an absent instrument.  ⚠ THE TWO SHELLS DISAGREE TODAY: the
+ * LUNA_ETH one returns UNAVAIL when gpon0 is absent, the RTL9602C_ETH one still
+ * returns 0.  That is OWED A REPAIR on the 9602C side; it is recorded here
+ * rather than silently fixed because that file was held elsewhere.
+ *
+ * ⚠ AND A REAL 0 IS STILL TWO THINGS: no downstream data, or a demux that does
+ * not recognise the port it arrives on.  The counter cannot tell them apart and
+ * must not pretend to -- the shells' per-ingress-port log ledger is what does. */
 u32 rtl9602c_eth_wan_rx_count(void);
 
 /* US-OMCI TX-ring reclaim cursor ("dirty"): count of OMCC descriptors the HW has
@@ -56,7 +101,7 @@ static inline u32 rtl9602c_eth_omci_tx_dropped(void) { return 0; }
  * without the OLT sending DS OMCI. Defined in rtl9602c_eth.c. */
 void rtl9602c_eth_omci_selftest(void);
 
-/* Full PON US/DS-NIC + PBO bring-up (defined in gpon-rtl960x.c). Non-__init: also
+/* Full PON US/DS-NIC + PBO bring-up (defined in luna_gpon.c). Non-__init: also
  * re-run from rtl9602c_eth_open() after the GMAC IP-block reset so the US-NIC RX
  * engine re-latches against the freshly-reset GMAC (stock order: GMAC reset -> NIC). */
 void gpon_pbo_init(void);
@@ -65,12 +110,12 @@ void gpon_pbo_init(void);
  * (2's-complement s16, 0.002 dB referred to 1 mW): #10 RX signal level, #14 TX
  * level. Reads a cache refreshed on the periodic FSM tick from the RTL8290B's
  * calibrated SFF-8472 DDM page — no I2C in the (softirq) GET path. Defined in
- * gpon-rtl960x.c. */
+ * luna_gpon.c. */
 void gpon_anig_optical_omci(s16 *rx_level, s16 *tx_level);
 
 /* Faithful port of the stock SDK rtk_all_module_init() GPON datapath bring-up,
  * run on the quiescent switch in the eth reset path (after the GMAC reset + swcore
- * resync, before the GMAC is programmed/armed). Defined in gpon-rtl960x.c. */
+ * resync, before the GMAC is programmed/armed). Defined in luna_gpon.c. */
 void rtl9602c_datapath_tables_init(void);
 
 /* WAN data-GEM datapath. GPON_DATA_FLOW = the internal SID/flow the gpon0 WAN netdev
@@ -94,17 +139,9 @@ void rtl9602c_datapath_tables_init(void);
 #define GPON_MCAST_FLOW	2
 #define GPON_MCAST_GEM	0xfffu
 
-/* Install the WAN data GEM datapath (bridged, the OLT's gem-id on flow 1, riding the
- * OMCC T-CONT). Idempotent/one-shot; called from the eth OMCI GEM-Port-CTP (ME268) create
- * handler once the OMCC is up. Defined in gpon-rtl960x.c. Returns 0 on success,
- * -EAGAIN if the OMCC isn't installed yet. */
+/* Timer-owned data installation consumes the accepted common OMCI binding.
+ * The compatibility hint has no authorization or programming effect. */
 int gpon_install_data_gem(void);
-/* eth OMCI RX -> gpon: the OLT issued the GEM-CTP (ME268) Create. @port_id is G.988
- * ME 268 attribute 1, the WIRE gem-port-id (a Create's contents are attribute VALUES
- * from byte 8 with no mask, so it is msg[8]<<8 | msg[9]). It gates the data-GEM
- * install AND supplies the gem-port-id that install programs — the OLT chooses it,
- * we do not. The MULTICAST GEM (GPON_MCAST_GEM) arrives as an ME 268 Create too and
- * is refused here. */
 void gpon_omci_note_gem_create(u16 port_id);
 
 /* The OMCC GEM Port-ID currently installed (0 = none yet).  An INPUT to the
@@ -115,7 +152,7 @@ u16 gpon_omcc_gem(void);
  * Called from the GPON driver's 3 s optical workqueue.
  *
  * ⚠ THE CALLER AND THE CALLEE ARE BUILT UNDER DIFFERENT CONFIG SYMBOLS, and
- *   that broke a board. gpon-luna.c compiles under CONFIG_RTL9602C_GPON, which
+ *   that broke a board. luna_gpon.c compiles under CONFIG_LUNA_GPON, which
  *   both Luna boards set; this function is DEFINED in rtl9602c_eth.c, which
  *   compiles under CONFIG_RTL9602C_ETH -- and the G24W (interaptiv) sets
  *   `# CONFIG_RTL9602C_ETH is not set` because it has its own NIC. Declaring it
@@ -160,4 +197,4 @@ void rtl9602c_eth_omci_report_oper_up(void);
  */
 void gpon_onu_sn(u8 out[8]);
 
-#endif /* _RTL9602C_GPON_NIC_H */
+#endif /* _LUNA_GPON_NIC_H */

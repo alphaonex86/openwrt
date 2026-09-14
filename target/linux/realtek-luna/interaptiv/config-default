@@ -97,7 +97,7 @@ CONFIG_DYNAMIC_DEBUG=y
 # this unit's own GPON_SN. READ-ONLY: no program/erase driver exists here.
 #
 # CONFIG_RTL9602C_ETH is not set
-CONFIG_RTL9602C_GPON=y
+CONFIG_LUNA_GPON=y
 # The on-chip NIC + switch live under the Realtek vendor menu, so the kernel
 # only descends into drivers/net/ethernet/realtek/ when this umbrella is set.
 CONFIG_NET_VENDOR_REALTEK=y

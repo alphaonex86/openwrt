@@ -68,6 +68,34 @@
 };
 
 &spi_nor {
+	/*
+	 * The UNI panel this board presents over OMCI, MEASURED from its own
+	 * stock firmware (omcicli mib get 11/264, 2026-09-12, archived under
+	 * results/RTL9602C/HSGQ/X111W/uni-runtime-20260912/).
+	 *
+	 * TWO Ethernet UNIs here, not four -- this board has one GE and one FE
+	 * socket -- and FOUR UNI-Gs, two of which have no Ethernet UNI beside
+	 * them.  Its management capabilities are 1, 1, 2 and 0: the value is
+	 * not a flag, which is why it is carried per instance.
+	 * PhysicalPortId runs 1 then 0 over 0x0101, 0x0102.
+	 */
+	omci-uni {
+		ethernet-uni-instances = /bits/ 16 <0x0101 0x0102>;
+		/* The SWITCH PORT each of those instances is, from this board's own PhysicalPortId.  ⚠ WEAKER EVIDENCE than the other two:
+		 * no mapper replay has been run here, so this is what stock REPORTS.
+		 * ⚠ NEVER COMPUTED: the two Luna boards and the Cortina one run
+		 * their port order in OPPOSITE directions, and one numbers its
+		 * fourth UNI 0x0401, so no arithmetic on an instance id is
+		 * right on more than one board. */
+		ethernet-uni-ports = /bits/ 8 <1 0>;
+		/* G.988 plug-in type per instance, from this board's own stock:
+		 * 0x0101 is the GE port (47) and 0x0102 the FE one (24).  It states
+		 * what the UNI IS, so it does not follow the link. */
+		ethernet-uni-types = /bits/ 8 <47 24>;
+		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0202 0x0602>;
+		uni-g-management-capability = /bits/ 8 <1 1 2 0>;
+	};
+
 	partitions {
 		compatible = "fixed-partitions";
 		#address-cells = <1>;

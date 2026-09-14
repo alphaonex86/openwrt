@@ -282,37 +282,58 @@ struct luna_pcie_chip {
 
 static const struct luna_pcie_chip luna_pcie_9602c = {
 	.name = "RTL9602C", .root_compat = "realtek,rtl9602c",
-	/* ★★ AGGREGATOR INPUT 16, NOT 15.  Corrected 2026-09-01; 15 was here from
-	 * the start with no evidence recorded beside it -- the only field in this
-	 * struct that carried none.  Everything that CAN be checked says 16:
+	/* ★★★ AGGREGATOR INPUT 15, AND IT IS THE PORT THAT DECIDES -- NOT THE DIE.
+	 * There are TWO PCIe inputs on this aggregator, one per root-complex port,
+	 * and every other field in this entry already says this chip is on PORT 0
+	 * (.ip_mac_bit = IP_SEL_EN_PCIE0).  Only .hwirq said port 1.
 	 *
-	 *   - irq-luna.c documents the INTC's named inputs and states the
-	 *     numbering is the native GISR bit, SHARED BY BOTH CHIPS.  Its list
-	 *     contains "16 PCIe" and does not name 15 at all.
-	 *   - that map is corroborated STRUCTURALLY by this chip's OWN device
-	 *     tree, which independently declares uart0=49, timer=43 and nic=26 --
-	 *     exactly the map's "49..52 UART0..3", "43..48 TC0..TC5", "26 GMAC0".
-	 *     Three inputs, from a source that is structure and not prose.
-	 *   - the sibling RTL9603CVD uses 16 with TIER-1 evidence (its vendor
-	 *     kernel prints the translate table, row 16=>50, and the vendor WiFi
-	 *     driver prints virq 73 = 50 + the domain base 23).
+	 *	PCIe port 0 -> GISR input 15	PCIe port 1 -> GISR input 16
 	 *
-	 * ⚠ CHECKED AND REJECTED as a source: the vendor 5.10 tree's
-	 * arch/mips/rtl9607c/bspchip.h says BSP_IRQ_PCIE = ICTL_BASE + 7.  That
-	 * is the RTL9607C, which has a GIC and a small dense enumeration
-	 * (GMAC = base+9), NOT this chip's GISR bit numbering where GMAC0 is 26.
-	 * It does not transfer, and taking it would have been the sibling-SDK
-	 * trap this project already names.
+	 * TIER 1, MEASURED CAUSALLY ON THIS BOARD, 2026-09-10
+	 * (`ONU-test-case/pcie_intx_bind.py --board=RTL9602C/HSGQ/X111W`).  The
+	 * endpoint's OWN mask was the stimulus and the whole GISR word 0 was the
+	 * observation, twice: with the radio free to assert, GISR0 = 0x00008000;
+	 * with HIMR and HIMRE written to 0, GISR0 = 0x00000000; restored, bit 15
+	 * again.  Exactly one input follows the endpoint, bit 16 never sets in any
+	 * sample, and the whole word going to zero rules out a coincidental
+	 * neighbour.  Corroborated by the vendor's own map of THIS register
+	 * (bspchip_9607c.h at BSP_GIMR0_0 = 0xB8003000, the same address this
+	 * chip's DT gives the INTC): BSP_PCIE0_IE = BIT(15), BSP_PCIE1_IE = BIT(16).
 	 *
-	 * ⚠⚠ THIS CHANGE IS NOT SAFE ALONE, and that is why it ships with the
-	 * IRQ_NONE repair in rtlwifi/pci.c.  A wrong input is SILENT: request_irq
-	 * succeeds on a linear domain whatever the number, and the endpoint's
-	 * interrupt simply never arrives -- a deaf radio on a live board.  Point
-	 * the driver at the line that DOES fire while its ISR still returns
-	 * IRQ_HANDLED without clearing anything, and a deaf radio becomes a level
-	 * storm that takes the whole SoC down.  Land them together or not at all.
+	 * ⚠ WHY THE 2026-09-01 "CORRECTION" TO 16 WAS WRONG, because the reasoning
+	 * looked strong and will be met again.  Every source it cited was real; the
+	 * hole was in irq-luna.c's named-input list, which carried ONE entry
+	 * "16 PCIe" for what is a PAIR and did not name 15 at all.  A list that
+	 * omits an input cannot be used to argue that the input does not exist, and
+	 * the DT corroboration (uart0=49, timer=43, nic=26) confirmed three OTHER
+	 * inputs -- it never touched PCIe.  The sibling RTL9603CVD's tier-1 16 is
+	 * also correct AND CONSISTENT: that board is on port 1.  Both boards were
+	 * right about themselves; the axis was misread as the die.  The list is
+	 * fixed at its source, so the next reader meets the pair.
+	 *
+	 * ⚠⚠⚠ AND THE COMPANION REPAIR IS VERIFIED BEFORE THE BOARD IS COMMITTED,
+	 * NOT AFTER.  This field's previous comment said the change "is NOT safe
+	 * alone": point the driver at the line that DOES fire while its ISR still
+	 * returns IRQ_HANDLED without clearing anything, and a deaf radio becomes a
+	 * level storm that takes the whole SoC down -- the INTC implements only
+	 * mask/unmask (no .irq_ack, no .irq_eoi) and the root complex does no
+	 * bridge-side INTx acknowledge, so nothing else can rescue it.  On
+	 * 2026-09-10 the repair WAS present and the boot was fine, but it was
+	 * checked AFTERWARDS, which is luck rather than method.
+	 *
+	 *     python3 ONU-test-case/irq_claim_order_guard.py
+	 *
+	 * ⇒ a change whose own comment says it is unsafe alone gets its companion
+	 * VERIFIED FIRST.  The guard is one command and costs nothing; a level storm
+	 * costs the board, and it does not announce itself as this change's fault.
+	 *
+	 * ⚠⚠ A WRONG INPUT IS SILENT, which is why this cost weeks: request_irq
+	 * succeeds on a linear domain whatever the number, the endpoint's interrupt
+	 * simply never arrives, and nothing in the boot log, the driver or a
+	 * register dump can contradict it.  Only an experiment whose EFFECT is
+	 * observed elsewhere can -- hence the tool above, not another reading.
 	 */
-	.intc_compat = "realtek,rtl9602c-intc", .hwirq = 16,
+	.intc_compat = "realtek,rtl9602c-intc", .hwirq = 15,
 	.hostcfg = 0xb8b00000ul, .devcfg = 0xb8b10000ul, .hostext = 0xb8b01000ul,
 	.mem_phys = 0x19000000u, .mem_size = 0x01000000u,
 	.io_phys = 0x18c00000u, .io_size = 0x00010000u,

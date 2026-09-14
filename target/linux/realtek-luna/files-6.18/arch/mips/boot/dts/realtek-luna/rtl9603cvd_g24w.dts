@@ -8,7 +8,7 @@
  * WiFi, no GPON" and had been wrong for a week, which is worse than saying
  * nothing: a reader trusts it and stops looking.
  *   - Ethernet: WORKS. The board answers on its declared LAN address.
- *   - GPON: WIRED, and NOT working. gpon-luna.c selects this chip's own
+ *   - GPON: WIRED, and NOT working. luna_gpon.c selects this chip's own
  *     register map (`gpon_swc_9603cvd`, added 2026-08-26) and /proc/gpon
  *     exists, but activation stops at O1 and the far end reports the ONU
  *     offline. Measured both firmwares 2026-09-02: the vendor image reaches
@@ -87,7 +87,7 @@
 	/*
 	 * The laser driver's two enable pins are SoC GPIOs on this board, and
 	 * both must be driven LOW for the ONU to emit at all. Read by
-	 * gpon-luna.c (luna_laser_gpio_from_dt), which owns the pad because
+	 * luna_gpon.c (luna_laser_gpio_from_dt), which owns the pad because
 	 * it owns the laser.
 	 *
 	 * MEASURED (tier 1, 2026-09-06, this unit on its STOCK firmware at O5,
@@ -103,6 +103,34 @@
 	 * in this tree establishes what it drives, and a guessed name is worse
 	 * than an unnamed pin.
 	 */
+	/*
+	 * The UNI panel this board presents over OMCI, MEASURED from its own
+	 * stock firmware (omcicli mib get 11/264, 2026-09-13).
+	 *
+	 * ME 11 (PPTP Ethernet UNI) and ME 264 (UNI-G) are SEPARATE lists and
+	 * neither is derivable from the other.  This board has SIX UNI-Gs against
+	 * four Ethernet UNIs, and numbers its fourth Ethernet UNI 0x0401 -- a
+	 * low byte it shares with the first, 0x0101.  Its PhysicalPortId runs
+	 * 0,1,2,3 over those four, the OPPOSITE order to the X400AXF's.
+	 *
+	 * The ids are full 16-bit OMCI instance numbers, not port indices.
+	 */
+	omci-uni {
+		ethernet-uni-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0401>;
+		/* The SWITCH PORT each of those instances is, from this board's OWN inverse 0x31c00 and forward 0x31b30, round-tripping
+		 * against its captured gInfo, and agreeing with its own PhysicalPortId.
+		 * ⚠ NEVER COMPUTED: the two Luna boards and the Cortina one run
+		 * their port order in OPPOSITE directions, and one numbers its
+		 * fourth UNI 0x0401, so no arithmetic on an instance id is
+		 * right on more than one board. */
+		ethernet-uni-ports = /bits/ 8 <0 1 2 3>;
+		/* G.988 plug-in type per instance, from this board's own stock:
+		 * 0x0101..0x0103 are FE ports (24) and 0x0401 the GE one (47). */
+		ethernet-uni-types = /bits/ 8 <24 24 24 47>;
+		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0401 0x0601 0x0801>;
+		uni-g-management-capability = /bits/ 8 <1 1 1 1 0 1>;
+	};
+
 	pon-optics {
 		realtek,tx-disable-gpio = <2>;	/* driven 0 = laser may emit */
 		realtek,tx-power-gpio = <4>;	/* driven 0 = laser driver powered (active-low) */

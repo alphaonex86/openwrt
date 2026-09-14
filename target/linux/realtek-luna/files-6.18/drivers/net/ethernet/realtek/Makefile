@@ -55,20 +55,16 @@ ccflags-y += -I$(srctree)/drivers/net/gpon
 # call them, so their prototypes must resolve from here.
 ccflags-y += -I$(srctree)/drivers/net/flowcore
 
-# ★ THIS BOARD'S OMCI CAPACITIES. The core defaults (64 MEs / 72 MIB rows) are
-# the Elnath's; the Luna shell has always carried 128/200 and rebasing it onto
-# the common store at the smaller size would DROP provisioned MEs. The limit is
-# a per-board value, the store's logic is not -- so it is set here, next to the
-# board, and the common code stays one copy.
-ccflags-y += -DOMCI_STORE_MAX=128 -DOMCI_MIB_ROWS_MAX=200
+# OMCI capacities are selected by the common header from CONFIG_LUNA_GPON.
+# The NIC storage owner and the separately built responder must share one ABI.
 
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_eth.o
-obj-$(CONFIG_RTL9602C_GPON) += gpon-luna.o luna_ponmac.o
+obj-$(CONFIG_LUNA_GPON) += luna_gpon.o luna_ponmac.o
 obj-$(CONFIG_LUNA_ETH) += luna_eth.o
 # The datapath hot path keeps -O2 even under the size-optimized (-Os) kernel:
 # the NIC RX/TX + GEM/PON-MAC forwarding must not lose per-packet performance.
 CFLAGS_rtl9602c_eth.o += -O2
-CFLAGS_gpon-luna.o += -O2
+CFLAGS_luna_gpon.o += -O2
 CFLAGS_luna_eth.o += -O2
 CFLAGS_luna_ponmac.o += -O2
 obj-$(CONFIG_8139CP) += 8139cp.o

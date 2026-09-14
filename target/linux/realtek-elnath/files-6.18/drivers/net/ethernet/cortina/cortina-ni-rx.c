@@ -713,11 +713,20 @@ static u32 cortina_ni_rx_wptr(struct cortina_ni *ni)
  * A plain pointer store/load: the hook is set once at GPON probe and only
  * cleared at GPON remove, and the RX path tolerates either value.
  */
-static cortina_ni_pon_rx_fn cortina_ni_pon_rx_cb;
+static cortina_ni_pon_rx_fn __rcu cortina_ni_pon_rx_cb;
 
+/*
+ * ⚠ A BARE STORE IS NOT A WITHDRAWAL.  This published NULL and returned while
+ *   a NAPI callback could already hold the old function pointer, so the GPON
+ *   driver went on to free the context that pointer runs against.  Same
+ *   discipline the PON TX entry already uses: publish with
+ *   rcu_assign_pointer, and WAIT at the NULL publication.
+ */
 void cortina_ni_pon_rx_hook_set(cortina_ni_pon_rx_fn fn)
 {
-	WRITE_ONCE(cortina_ni_pon_rx_cb, fn);
+	rcu_assign_pointer(cortina_ni_pon_rx_cb, fn);
+	if (!fn)
+		synchronize_rcu();
 }
 EXPORT_SYMBOL_GPL(cortina_ni_pon_rx_hook_set);
 
@@ -1613,12 +1622,16 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 
 		if (unlikely(ca_ni_rx_pon_ctrl(buf + off, len, 0xfff1,
 					       CA_NI_PON_HDR_LEN, &pdu))) {
-			cortina_ni_pon_rx_fn fn =
-				READ_ONCE(cortina_ni_pon_rx_cb);
+			cortina_ni_pon_rx_fn fn;
 
+			/* the read side of the withdrawal above: the callback
+			 * runs INSIDE the section synchronize_rcu() waits on */
+			rcu_read_lock();
+			fn = rcu_dereference(cortina_ni_pon_rx_cb);
 			rx->pon_frames++;
 			if (fn && pdu.len)
 				fn(buf + off + pdu.off, pdu.len);
+			rcu_read_unlock();
 			return rpa;
 		}
 	}
@@ -2746,13 +2759,24 @@ static void cortina_ni_rx_fdb_append(struct cortina_ni *ni, const u8 *mac,
 		 mac, ldpid, idx, idx < 0 ? "(FAILED)" : "(HIT)");
 }
 
+/* No netdev, no key: this and cortina_ni_rx_mymac_trap() below used to fall
+ * back to a compiled-in 02:96:07:f0:00:01, which after the ladder repair would
+ * key hardware on an address the board does not hold. Both run only after
+ * cortina_ni_tx_probe() registered the netdev, so the refusal guards an
+ * ordering invariant.
+ */
 static void cortina_ni_rx_fdb_add_cpu(struct cortina_ni *ni)
 {
-	static const u8 def_mac[ETH_ALEN] = { 0x02, 0x96, 0x07, 0xf0, 0x00, 0x01 };
-	const u8 *mac = (ni->tx && ni->tx->netdev) ?
-			ni->tx->netdev->dev_addr : def_mac;
+	const u8 *mac;
 	u32 acc;
 	int ret;
+
+	if (!ni->tx || !ni->tx->netdev) {
+		dev_warn(ni->dev,
+			 "fdb-add: no netdev yet -- refusing to key the FDB on an address this board does not hold\n");
+		return;
+	}
+	mac = ni->tx->netdev->dev_addr;
 
 	/* (0) ★ one-time FDB engine INIT (opcode 0) - the hash table must be built
 	 * before the first APPEND, else APPEND silently no-ops.  No DATA; longer poll
@@ -2816,11 +2840,17 @@ static void cortina_ni_rx_fdb_add_cpu(struct cortina_ni *ni)
  */
 static void cortina_ni_rx_mymac_trap(struct cortina_ni *ni)
 {
-	static const u8 def_mac[ETH_ALEN] = { 0x02, 0x96, 0x07, 0xf0, 0x00, 0x01 };
-	const u8 *mac = (ni->tx && ni->tx->netdev) ?
-			ni->tx->netdev->dev_addr : def_mac;
 	bool l2_trap = !cortina_ni_hw_l3_fwd_active();
 	u32 det, ctrl, hi_p0;
+	const u8 *mac;
+
+	/* see the note above cortina_ni_rx_fdb_add_cpu(): no netdev, no key. */
+	if (!ni->tx || !ni->tx->netdev) {
+		dev_warn(ni->dev,
+			 "mymac: no netdev yet -- refusing to arm the comparator on an address this board does not hold\n");
+		return;
+	}
+	mac = ni->tx->netdev->dev_addr;
 
 	/* (A) NI-global my-MAC: CFG0=bytes0-3, CFG1[7:0]=byte4, PT[31:24]=byte5.
 	 *
@@ -2966,7 +2996,8 @@ static void cortina_ni_rx_mymac_trap(struct cortina_ni *ni)
  * intf_done no further link-up fires - leaving everything keyed on the probe
  * fallback 02:96:07:f0:00:01 (BOARD-MEASURED 2026-07-23: fdb-add/mymac-trap
  * logged the fallback at t=4.9s AND t=17.5s while br-lan answered LAN ARP
- * with the factory MAC).  A LAN transit frame to the factory gateway MAC then
+ * with the factory MAC; since 2026-09-10 that probe address is a random LAA).
+ * A LAN transit frame to the factory gateway MAC then
  * misses the FDB -> DLF flood -> CPU software forward, and never resolves to
  * L3_LAN, so it cannot enter the L3FE flow engine; an offloaded US flow would
  * also egress the stale fallback+1 SMAC (PP FIELD-CAM idx 1 via
@@ -3377,6 +3408,201 @@ static unsigned int deepq_voq_thrsh = CA_NI_L2TM_DEEPQ_PROFILE_PERMISSIVE;
 static bool deepq_cb_stock;
 /* set once the NI is probed, so a sysfs write can re-walk the tables */
 static struct cortina_ni *cortina_ni_deepq_ni;
+
+/*
+ * ★★★ THE UNI ADMINISTRATIVE LOCK IS A DESIRED STATE, NOT A ONE-SHOT WRITE.
+ *
+ * Four writers in this driver RESTORE a port whenever they run, and every one
+ * of them would undo a lock written once and walked away from:
+ *   - cortina_ni_rx_gphy_intf_establish() always clears BMCR_PDOWN, and the
+ *     1 Hz recovery_work calls it on a port fault while the first all-port
+ *     bring-up calls it for 0..3;
+ *   - cortina_ni_rx_link_up() clears PWR_DWN_RX and re-enables RXMAC on ALL
+ *     four ports on EVERY link-up;
+ *   - cortina_ni_tx_adjust_link() clears PWR_DWN_TX for the tracked port.
+ * So the desired mask is consulted INSIDE those writers.  A port the OLT has
+ * locked stays down across a PHY re-establish, a link bounce and a recovery
+ * cycle, because none of them is allowed to bring it back.
+ *
+ * ⚠ IT IS A PLAIN WORD, READ WITH READ_ONCE, ON PURPOSE.  Two of those writers
+ *   hold ni->mii->mdio_lock when they consult it, so anything that could sleep
+ *   here would deadlock the very paths this has to reach.
+ *
+ * ⚠ AND IT SAYS NOTHING ABOUT eth0.  The CPU port's carrier is not a
+ *   subscriber port; locking a socket must not take the board off the network.
+ */
+static u32 cortina_ni_uni_locked_ports;
+
+/*
+ * ★★★ ONE OUTERMOST LOCK, AND A NON-TORN WORD IS NOT ENOUGH.
+ *
+ * The hazard is not a torn read, it is a STALE DECISION: a restoring writer
+ * reads the mask, finds the port unlocked, and is preempted; the admin path
+ * then locks the port, closes its MAC and reports success; the old writer
+ * resumes and re-enables RXMAC on a port the OLT believes is down.  So the
+ * READ, the DECISION and the WRITE happen under this lock in every one of
+ * them, not merely the read.
+ *
+ * ★ IT IS ALSO THE LIFETIME LOCK.  cortina_ni_rx_unpublish() takes it before
+ *   nulling the publication, so a reader that already captured the pointer has
+ *   finished dereferencing it.  Nulling alone does not wait for anybody.
+ *
+ * ★ ORDER IS ALWAYS uni_lock -> mdio_lock.  The establish path takes mdio_lock
+ *   itself, so every caller that wants the mask honoured takes uni_lock FIRST;
+ *   the __locked variant exists so that nesting cannot deadlock on a mutex
+ *   that is not recursive.
+ */
+static DEFINE_MUTEX(cortina_ni_uni_lock);
+
+bool cortina_ni_uni_port_locked(unsigned int port)
+{
+	return port < CA_NI_GPHY_COUNT &&
+	       (READ_ONCE(cortina_ni_uni_locked_ports) & BIT(port));
+}
+EXPORT_SYMBOL_GPL(cortina_ni_uni_port_locked);
+
+/*
+ * One read-modify-write of a port's global config with the UNI lock bit decided
+ * INSIDE the critical section.
+ *
+ * ★ WHY IT IS NOT "ask, then write".  A caller that reads the mask, builds its
+ *   clr/set and then writes gives an administrative change a window to land in
+ *   between -- and that write, made from a stale decision, is precisely what
+ *   re-opens a socket the OLT was already told is down.
+ */
+void cortina_ni_uni_port_glb_rmw(struct cortina_ni *ni, unsigned int port,
+				 u32 clr, u32 set, u32 down_bit)
+{
+	mutex_lock(&cortina_ni_uni_lock);
+	if (cortina_ni_uni_port_locked(port)) {
+		set |= down_bit;
+		clr &= ~down_bit;
+	} else {
+		clr |= down_bit;
+		set &= ~down_bit;
+	}
+	ni_rmw(ni, CA_NI_PORT_GLB_CFG(port), clr, set);
+	mutex_unlock(&cortina_ni_uni_lock);
+}
+EXPORT_SYMBOL_GPL(cortina_ni_uni_port_glb_rmw);
+
+int cortina_ni_uni_admin_set(unsigned int port, bool locked)
+{
+	struct cortina_ni *ni;
+	void __iomem *gphy, *bank;
+	u32 want, val, glb, mac;
+	int rc = 0;
+
+	if (port >= CA_NI_GPHY_COUNT)
+		return -EINVAL;
+
+	mutex_lock(&cortina_ni_uni_lock);
+	/* ★ THE DESIRED STATE IS RECORDED FIRST AND UNCONDITIONALLY.  Even with
+	 *   no NI to drive yet, the next establish or link-up honours it -- so a
+	 *   lock the OLT set during probe is late, never lost. */
+	want = READ_ONCE(cortina_ni_uni_locked_ports);
+	want = locked ? (want | BIT(port)) : (want & ~BIT(port));
+	WRITE_ONCE(cortina_ni_uni_locked_ports, want);
+
+	/* ⚠ EVERY DEREFERENCE OF ni HAPPENS UNDER THIS LOCK, the dev_info
+	 *   included.  unpublish() takes the same lock before nulling the
+	 *   publication, so a captured pointer cannot outlive the object.
+	 *   Nulling a publication does not wait for anybody. */
+	ni = READ_ONCE(cortina_ni_deepq_ni);
+	if (!ni || !ni->mii) {
+		mutex_unlock(&cortina_ni_uni_lock);
+		return -ENODEV;		/* recorded, NOT applied: the caller retries */
+	}
+
+	/* ★★ BOTH DIRECTIONS, TOGETHER.  Driving only the RX gate leaves a
+	 *    measured hole: cortina_ni_tx_adjust_link() sets the TX power-down
+	 *    bit while the port is locked, and a later unlock that touches only
+	 *    RX never clears it -- phylib has no reason to run adjust_link again
+	 *    without a carrier transition, so TX stays down while this function
+	 *    reports the port restored.
+	 *
+	 * The port MAC first, then the PHY: a frame in flight meets a closed
+	 * RXMAC rather than a powered-down PHY it has already passed. */
+	if (locked) {
+		ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(port), CA_NI_PORT_RXMAC_RX_EN, 0);
+		ni_rmw(ni, CA_NI_PORT_GLB_CFG(port), 0,
+		       CA_NI_PORT_GLB_PWR_DWN_RX | CA_NI_PORT_GLB_PWR_DWN_TX);
+	} else {
+		ni_rmw(ni, CA_NI_PORT_GLB_CFG(port),
+		       CA_NI_PORT_GLB_PWR_DWN_RX | CA_NI_PORT_GLB_PWR_DWN_TX, 0);
+		ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(port), 0, CA_NI_PORT_RXMAC_RX_EN);
+	}
+
+	/* ★★ CONFIRMED, NOT ASSUMED.  An unconfirmed write reports success and
+	 *    the model then believes a port is down that is still forwarding.
+	 *    These are configuration bits that latch, so a read-back that does
+	 *    not agree means the write did not take -- and the safe answer is
+	 *    to leave the obligation PENDING rather than claim it applied. */
+	glb = readl(ni_base(ni) + CA_NI_PORT_GLB_CFG(port));
+	mac = readl(ni_base(ni) + CA_NI_PORT_RXMAC_CFG(port));
+	if (!!(glb & CA_NI_PORT_GLB_PWR_DWN_RX) != locked ||
+	    !!(glb & CA_NI_PORT_GLB_PWR_DWN_TX) != locked ||
+	    !!(mac & CA_NI_PORT_RXMAC_RX_EN) == locked) {
+		dev_err(ni->dev,
+			"UNI port %u: the MAC did not take the %s (glb=0x%08x rxmac=0x%08x)\n",
+			port, locked ? "lock" : "unlock", glb, mac);
+		rc = -EIO;
+	}
+
+	gphy = ni->win[CA_NI_WIN_GPHY];
+	if (!gphy) {
+		/* ⚠ NOT A SUCCESS.  This branch used to fall through and report
+		 *   the port driven; without the GPHY window the PHY half never
+		 *   happened at all. */
+		dev_err(ni->dev,
+			"UNI port %u: no GPHY window, the PHY half of the %s was not applied\n",
+			port, locked ? "lock" : "unlock");
+		rc = rc ? rc : -ENODEV;
+	} else {
+		bank = gphy + CA_NI_GPHY_BANK(port);
+		mutex_lock(&ni->mii->mdio_lock);
+		val = readl(bank + CA_NI_GPHY_BMCR);
+		writel(locked ? (val | CA_NI_GPHY_BMCR_PDOWN)
+			      : (val & ~CA_NI_GPHY_BMCR_PDOWN),
+		       bank + CA_NI_GPHY_BMCR);
+		val = readl(bank + CA_NI_GPHY_BMCR);
+		mutex_unlock(&ni->mii->mdio_lock);
+		if (!!(val & CA_NI_GPHY_BMCR_PDOWN) != locked) {
+			dev_err(ni->dev,
+				"UNI port %u: the PHY did not take the %s (bmcr=0x%08x)\n",
+				port, locked ? "lock" : "unlock", val);
+			rc = rc ? rc : -EIO;
+		}
+	}
+
+	if (!rc)
+		dev_info(ni->dev, "UNI port %u %s\n", port,
+			 locked ? "LOCKED (RXMAC off, RX and PHY powered down)"
+				: "unlocked");
+	mutex_unlock(&cortina_ni_uni_lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(cortina_ni_uni_admin_set);
+
+/* Stop serving the published NI.  ⚠ IT WAS PUBLISHED AND NEVER WITHDRAWN: the
+ * pointer outlived the devres free, so a sysfs write or an OMCI apply arriving
+ * after teardown wrote through freed memory. */
+void cortina_ni_rx_publish(struct cortina_ni *ni)
+{
+	mutex_lock(&cortina_ni_uni_lock);
+	WRITE_ONCE(cortina_ni_deepq_ni, ni);
+	mutex_unlock(&cortina_ni_uni_lock);
+}
+
+void cortina_ni_rx_unpublish(void)
+{
+	/* ⚠ UNDER THE SAME LOCK ITS READERS HOLD.  Nulling the publication only
+	 *   stops NEW readers; one that already captured the pointer is still
+	 *   inside, and devres frees the object the moment teardown returns. */
+	mutex_lock(&cortina_ni_uni_lock);
+	WRITE_ONCE(cortina_ni_deepq_ni, NULL);
+	mutex_unlock(&cortina_ni_uni_lock);
+}
 static DEFINE_MUTEX(cortina_ni_deepq_lock);
 
 /* Write the CURRENT parameter values into all 8 entries of BOTH per-VoQ threshold
@@ -3429,11 +3655,20 @@ static void cortina_ni_rx_deepq_thrsh_read(struct cortina_ni *ni, unsigned int i
 
 static int cortina_ni_rx_deepq_thrsh_reprogram(void)
 {
-	struct cortina_ni *ni = READ_ONCE(cortina_ni_deepq_ni);
+	struct cortina_ni *ni;
 
+	/* ⚠ THE CAPTURE AND THE USE ARE ONE CRITICAL SECTION.  This is a module
+	 *   parameter writer: it can run at any moment, including across a
+	 *   platform unbind, and it used to read the published pointer outside
+	 *   the lock -- so the unpublish had nothing to wait for and this walked
+	 *   an object devres was freeing.  Same uni -> deepq order the restoring
+	 *   paths already use. */
+	mutex_lock(&cortina_ni_uni_lock);
+	ni = READ_ONCE(cortina_ni_deepq_ni);
 	/* set before probe (bootarg / insmod): the init walk picks it up */
 	if (ni)
 		cortina_ni_rx_deepq_thrsh_program(ni);
+	mutex_unlock(&cortina_ni_uni_lock);
 	return 0;
 }
 
@@ -3502,7 +3737,13 @@ static void cortina_ni_rx_deepq_sched_init(struct cortina_ni *ni)
 	 * to be admitted at all.  The VALUE is the runtime-selectable queue depth
 	 * (deepq_voq_thrsh / deepq_cb_stock, default = the permissive shipping value);
 	 * table A = DQSCH VOQ (0x2e74/0x2e70), table B = CB VOQ (0x2da4+0x2da8/0x2da0). */
-	WRITE_ONCE(cortina_ni_deepq_ni, ni);
+	/* ⚠ THE PUBLICATION USED TO HAPPEN HERE, AND THIS IS A RESTORING PATH.
+	 *   It is reached from link_up -> steer_init, still alive through
+	 *   tx_withdraw's synchronize_rcu and only stopped at unregister_netdev,
+	 *   so it UNDID the teardown's unpublish; and during probe it ran before
+	 *   enable_internal_ports, so an apply could complete in between and be
+	 *   overwritten.  The NI is published once, from the real completed
+	 *   initialisation, and nothing restores that pointer. */
 	cortina_ni_rx_deepq_thrsh_program(ni);
 
 	/* (4) ARB_CTRL.dbuf_sel (bit1)=1 so a PDPID-8 frame takes the deep-buffer path */
@@ -3544,7 +3785,21 @@ static void cortina_ni_rx_enable_internal_ports(struct cortina_ni *ni)
 {
 	int p;
 
+	/* ★ A SIXTH RESTORING WRITER.  This runs during probe and enables RXMAC
+	 *   on every port above 0 unconditionally; a UNI locked before it ran
+	 *   came back up with no one reporting it.  Ports at or above the GPHY
+	 *   count are internal and never locked, so one check covers both.
+	 *   ⚠ THE CALLER HOLDS cortina_ni_uni_lock.  Taking it here would
+	 *     deadlock: this is reached from steer_init, and rx_link_up already
+	 *     holds it across its whole restoring body. */
 	for (p = 1; p < CA_NI_PORT_COUNT; p++) {
+		if (cortina_ni_uni_port_locked(p)) {
+			writel(CA_NI_PORT_TXMAC_EN_VAL,
+			       ni_base(ni) + CA_NI_PORT_TXMAC_CFG(p));
+			writel(CA_NI_PORT_RX_CNTRL_STOCK_VAL,
+			       ni_base(ni) + CA_NI_PORT_RX_CNTRL_CFG(p));
+			continue;
+		}
 		writel(CA_NI_PORT_RXMAC_EN_VAL,
 		       ni_base(ni) + CA_NI_PORT_RXMAC_CFG(p));
 		writel(CA_NI_PORT_TXMAC_EN_VAL,
@@ -5032,8 +5287,15 @@ static void cortina_ni_rx_fbm_fill(struct cortina_ni *ni)
  * named constants there. They now reference the constants, so the numbers live in
  * ONE place. The two WRITERS are deliberately left alone: they run from different
  * init paths at different times, and collapsing them would change WHEN the block is
- * programmed, which is a behavioural change nothing on this bench can currently test
- * (the power relay is dead, so there is no cold boot).
+ * programmed, which is a behavioural change that must be MEASURED on a cold boot
+ * rather than reasoned about.
+ * ⚠ THE REASON GIVEN HERE USED TO BLAME THE BENCH -- it claimed no cold boot was
+ * available because the switching hardware had failed.  That is REFUTED, and the
+ * claim is a DEFLECTION this project has made repeatedly without it ever being
+ * true: the relay is solid-state, and on 2026-09-10 a matrix
+ * over the seven non-empty pin subsets proved all three benches cut their own
+ * board, negative controls included.  The cold boot IS available; this is owed
+ * work, not a blocked step.
  *
  * ★ A TIER-3 VALUE JUST BECAME TIER-1-CONFIRMED. cortina_ni_rx_l3fe_axi_reo_init()
  * carries "the values are SDK-derived (aal_l3fe_axi_reo_init) - flag for stock
@@ -5291,8 +5553,8 @@ static void cortina_ni_rx_wrap_establish(struct cortina_ni *ni)
  * homes for one idea - they run back-to-back in the same tick, and folding
  * their !intf_done early-out into a shared helper would silently delete four
  * establish passes and ~800 ms of settle. */
-static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
-					      unsigned int port)
+static void cortina_ni_rx_gphy_intf_establish_locked(struct cortina_ni *ni,
+						    unsigned int port)
 {
 	void __iomem *gphy = ni->win[CA_NI_WIN_GPHY];
 	void __iomem *wrap = ni->win[CA_NI_WIN_GPHY_WRAP];
@@ -5335,9 +5597,15 @@ static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
 		writel(ni->rx->gphy_cal[port][i],
 		       bank + cortina_ni_rx_gphy_cal_off[i]);
 
-	/* power up + release hold on THIS bank */
+	/* power up + release hold on THIS bank -- unless the OLT has this UNI
+	 * locked, in which case the establish leaves it powered DOWN.  Without
+	 * this the 1 Hz recovery work undoes an administrative lock within a
+	 * second of it being applied, and nothing reports that it did. */
 	val = readl(bank + CA_NI_GPHY_BMCR);
-	writel(val & ~CA_NI_GPHY_BMCR_PDOWN, bank + CA_NI_GPHY_BMCR);
+	if (cortina_ni_uni_port_locked(port))
+		writel(val | CA_NI_GPHY_BMCR_PDOWN, bank + CA_NI_GPHY_BMCR);
+	else
+		writel(val & ~CA_NI_GPHY_BMCR_PDOWN, bank + CA_NI_GPHY_BMCR);
 	val = readl(bank + CA_NI_GPHY_HOLD);
 	writel(val & ~CA_NI_GPHY_HOLD_BIT, bank + CA_NI_GPHY_HOLD);
 
@@ -5351,6 +5619,15 @@ static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
 
 /* 1 Hz self-rearming poll, stock cadence ("recover check first").  Runs
  * between open and stop; each pass is one register read unless faulted. */
+/* The entry point for callers that do NOT already hold the UNI lock. */
+static void cortina_ni_rx_gphy_intf_establish(struct cortina_ni *ni,
+					      unsigned int port)
+{
+	mutex_lock(&cortina_ni_uni_lock);
+	cortina_ni_rx_gphy_intf_establish_locked(ni, port);
+	mutex_unlock(&cortina_ni_uni_lock);
+}
+
 static void cortina_ni_rx_recovery_work(struct work_struct *work)
 {
 	struct cortina_ni_rx *rx = container_of(to_delayed_work(work),
@@ -5520,6 +5797,13 @@ void cortina_ni_rx_link_up(struct cortina_ni *ni)
 	if (!rx)
 		return;		/* TX-only mode */
 
+	/* ★ HELD ACROSS THE WHOLE RESTORING BODY, not around each write.  This
+	 *   function exists to put every port back, so "is this one locked" and
+	 *   the writes that follow must not be separable by an administrative
+	 *   change landing in between -- a stale decision re-enables a socket
+	 *   the OLT was already told is down. */
+	mutex_lock(&cortina_ni_uni_lock);
+
 	/* ★ DIAGNOSTIC: dphy_rst reset-manager (GLB+0xa0) = internal digital-PHY
 	 * reset.  Ours boots 0x50302340 (many reset bits set), STOCK(working)=
 	 * 0x10000000 -> ours holds internal-GPHY/datapath sub-blocks in reset.
@@ -5560,7 +5844,7 @@ void cortina_ni_rx_link_up(struct cortina_ni *ni)
 			dev_info(ni->dev,
 				 "all GPHY banks patched -> establishing MAC<->GPHY interface on all ports (in link_up)\n");
 			for (p = 0; p < CA_NI_GPHY_COUNT; p++)
-				cortina_ni_rx_gphy_intf_establish(ni, p);
+				cortina_ni_rx_gphy_intf_establish_locked(ni, p);
 		}
 	}
 
@@ -5624,6 +5908,15 @@ void cortina_ni_rx_link_up(struct cortina_ni *ni)
 		unsigned int p;
 
 		for (p = 0; p < CA_NI_GPHY_COUNT; p++) {
+			/* a locked UNI is not re-armed by someone else's
+			 * link-up: it stays powered down with its RXMAC off */
+			if (cortina_ni_uni_port_locked(p)) {
+				ni_rmw(ni, CA_NI_PORT_GLB_CFG(p), 0,
+				       CA_NI_PORT_GLB_PWR_DWN_RX);
+				ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(p),
+				       CA_NI_PORT_RXMAC_RX_EN, 0);
+				continue;
+			}
 			ni_rmw(ni, CA_NI_PORT_GLB_CFG(p),
 			       CA_NI_PORT_GLB_PWR_DWN_RX, 0);
 			if (!rx_skip_portcfg)
@@ -5660,6 +5953,8 @@ void cortina_ni_rx_link_up(struct cortina_ni *ni)
 		netif_carrier_on(rx->netdev);
 
 	/* fault check now instead of waiting for the next 1 Hz tick */
+	mutex_unlock(&cortina_ni_uni_lock);
+
 	if (cortina_ni_rx_gphy(ni))
 		mod_delayed_work(system_wq, &rx->recovery_work, 0);
 }
@@ -5682,15 +5977,30 @@ void cortina_ni_rx_open(struct cortina_ni *ni)
 	/* port-0 MAC RX on (M2b left it off), stock pattern 0x3001:
 	 * rx_en + bit12/bit13 set, bit8 CLEAR.  (DIAGNOSTIC: rx_skip_portcfg leaves
 	 * U-Boot's working rxmac 0x1101 untouched to test the clobber hypothesis) */
-	if (!rx_skip_portcfg)
+	/* ★ THE FIFTH RESTORING WRITER.  A netdev REOPEN re-enables this port's
+	 *   RXMAC and clears its RX power-down, so an administrative lock
+	 *   applied before the open was undone by it -- outside the UNI lock,
+	 *   so not even racing with one, simply overriding it.
+	 *   ⚠ SAID PRECISELY: the PHY and the TX gate may still be down, so
+	 *     this is a MAC-gate violation and not a proven traffic leak. */
+	mutex_lock(&cortina_ni_uni_lock);
+	if (cortina_ni_uni_port_locked(CA_NI_RX_PORT)) {
 		ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(CA_NI_RX_PORT),
-		       CA_NI_PORT_RXMAC_STOCK_CLR,
-		       CA_NI_PORT_RXMAC_RX_EN | CA_NI_PORT_RXMAC_STOCK_SET);
-	else	/* leave U-Boot's rxmac bits, just ensure RX_EN on (-> 0x1101) */
-		ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(CA_NI_RX_PORT), 0,
-		       CA_NI_PORT_RXMAC_RX_EN);
-	ni_rmw(ni, CA_NI_PORT_GLB_CFG(CA_NI_RX_PORT),
-	       CA_NI_PORT_GLB_PWR_DWN_RX, 0);
+		       CA_NI_PORT_RXMAC_RX_EN, 0);
+		ni_rmw(ni, CA_NI_PORT_GLB_CFG(CA_NI_RX_PORT), 0,
+		       CA_NI_PORT_GLB_PWR_DWN_RX | CA_NI_PORT_GLB_PWR_DWN_TX);
+	} else {
+		if (!rx_skip_portcfg)
+			ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(CA_NI_RX_PORT),
+			       CA_NI_PORT_RXMAC_STOCK_CLR,
+			       CA_NI_PORT_RXMAC_RX_EN | CA_NI_PORT_RXMAC_STOCK_SET);
+		else	/* leave U-Boot's rxmac bits, just ensure RX_EN on */
+			ni_rmw(ni, CA_NI_PORT_RXMAC_CFG(CA_NI_RX_PORT), 0,
+			       CA_NI_PORT_RXMAC_RX_EN);
+		ni_rmw(ni, CA_NI_PORT_GLB_CFG(CA_NI_RX_PORT),
+		       CA_NI_PORT_GLB_PWR_DWN_RX, 0);
+	}
+	mutex_unlock(&cortina_ni_uni_lock);
 
 	cortina_ni_rx_irq_set(ni, true);
 
@@ -7302,6 +7612,23 @@ static int cortina_ni_rx_irqs_init(struct cortina_ni *ni)
 
 	if (rx->irq[0] < 0) {
 		dev_err(ni->dev, "RX interrupt 0 (SPI 0x54) unavailable\n");
+		/*
+		 * ⚠ GIVE BACK WHAT THIS FUNCTION TOOK, HERE. Interrupts 1..7 may
+		 *   already be REQUESTED and live, and every handler points at
+		 *   &rx->irqctx[i] and reaches ni->rx -- which the caller sets to
+		 *   NULL the moment this returns, while devres keeps both the
+		 *   handlers and rx itself until the device is released. A
+		 *   handler that fires in that window reads a pointer nobody
+		 *   cleared into memory nobody freed yet, and later one that is.
+		 *   devm_free_irq keeps devres's ownership consistent and
+		 *   free_irq synchronises, so no handler is running on return.
+		 */
+		for (i = 0; i < CA_NI_RX_NUM_IRQS; i++) {
+			if (rx->irq[i] < 0)
+				continue;
+			devm_free_irq(ni->dev, rx->irq[i], &rx->irqctx[i]);
+			rx->irq[i] = -1;
+		}
 		return -ENXIO;
 	}
 	dev_info(ni->dev, "RX: %d EPP interrupts requested (irq0=%d)\n",
@@ -7500,7 +7827,13 @@ int cortina_ni_rx_probe(struct cortina_ni *ni)
 	 * the pool must accept pushes (write-enable) before fill, and it uses our own
 	 * reserved buffers, not this L3QM cpu_eq=0 push.) */
 
+	/* steer_init reaches enable_internal_ports, which consults the UNI mask
+	 * WITHOUT locking -- its other caller, rx_link_up, already holds the
+	 * lock across its whole restoring body, so taking it there would
+	 * deadlock.  This caller supplies it instead. */
+	mutex_lock(&cortina_ni_uni_lock);
 	ret = cortina_ni_rx_steer_init(ni);
+	mutex_unlock(&cortina_ni_uni_lock);
 	if (ret) {
 		/* steer failed: RX can't deliver, but don't take TX down */
 		dev_err(ni->dev, "RX steer init failed (%d) - staying TX-only\n",

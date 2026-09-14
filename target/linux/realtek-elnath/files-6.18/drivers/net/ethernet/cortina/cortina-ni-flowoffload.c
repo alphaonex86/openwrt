@@ -1590,10 +1590,27 @@ void cortina_ni_flowoffload_router_mac_set(const u8 *mac)
  */
 void cortina_ni_gpon_data_path_set(u16 gem_id, u8 tcont_idx)
 {
-	if (!cn_l3e)
+	struct cn_l3e *l3e;
+
+	/*
+	 * ⚠ THE GLOBAL IS ACQUIRED INSIDE THE LOCK, not tested outside it. This
+	 *   used to read cn_l3e, find it non-NULL and write through it before
+	 *   taking any mutex -- and the context it names is freed by devres at
+	 *   teardown while this pointer stays published. Runs in the GPON
+	 *   isr_work context, which is sleepable, so the mutex is legal here.
+	 *
+	 * ⚠ THE OLD COMMENT CLAIMED THE KEEP-PATH TOOK NO LOCK. It does now, on
+	 *   every call: a shortcut that skips synchronisation to save a lock is
+	 *   exactly how a pointer gets used after the thing it names is gone.
+	 */
+	mutex_lock(&cn_flow_offload_mutex);
+	l3e = cn_l3e;
+	if (!l3e) {
+		mutex_unlock(&cn_flow_offload_mutex);
 		return;
-	WRITE_ONCE(cn_l3e->data_gem, gem_id);
-	WRITE_ONCE(cn_l3e->data_tcont, tcont_idx);
+	}
+	WRITE_ONCE(l3e->data_gem, gem_id);
+	WRITE_ONCE(l3e->data_tcont, tcont_idx);
 	pr_info("cortina-l3fe: live PON data-path gem=%u tcont=%u\n",
 		gem_id, tcont_idx);
 	/*
@@ -1607,11 +1624,9 @@ void cortina_ni_gpon_data_path_set(u16 gem_id, u8 tcont_idx)
 	 * context (sleepable), and only when something is actually armed, so the
 	 * proven same-{alloc,gem} keep-path takes no lock and no HW write.
 	 */
-	if (!gem_id && READ_ONCE(cn_l3e->data_pppoe_session)) {
-		mutex_lock(&cn_flow_offload_mutex);
-		cortina_ni_wan_pppoe_session_set(0);
-		mutex_unlock(&cn_flow_offload_mutex);
-	}
+	if (!gem_id && READ_ONCE(l3e->data_pppoe_session))
+		cortina_ni_wan_pppoe_session_set(0);	/* lock already held */
+	mutex_unlock(&cn_flow_offload_mutex);
 }
 EXPORT_SYMBOL_GPL(cortina_ni_gpon_data_path_set);
 
@@ -3436,6 +3451,12 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 {
 	struct cn_flow_priv *entry = priv;
 	struct cn_l3e_key key = {};
+	/* ⚠ THIS FLAG WAS WRITTEN IN TWO PLACES AND READ IN NONE, so calling it
+	 *   an admission gate was a claim about a variable nobody consulted. It
+	 *   is one now: the teardown clears it before retiring the table, and an
+	 *   install arriving after that is refused rather than racing the free. */
+	if (!READ_ONCE(cn_flow_table_ready))
+		return -ENODEV;
 	struct cn_l3e_act act = {};
 	struct net_device *odev = ctx->odev;
 	bool ds_leg = ctx->ds_leg, vlan_wan = false;
@@ -4522,11 +4543,60 @@ free:
  * which on this engine means an age-SRAM slot that is never re-armed and a FIB
  * row that keeps matching.
  */
+/*
+ * ⚠ CANCELLING THE SWEEP IS NOT ENOUGH, and that was the first cut of this.
+ *   Stopping the periodic actor left every RETAINED flow in place, and the
+ *   module-level exit then walked them -- gpon_flow_offload_free ->
+ *   gpon_flow_entry_drop -> cn_flow_remove, which dereferences
+ *   cn_l3e->entry_by_idx and touches MMIO -- after devres had freed the l3e
+ *   context. Unbinding without unloading reached the same state and simply
+ *   left the backend registered.
+ *
+ * So the whole retirement happens HERE, from the device's own teardown, while
+ * the context it walks is still alive. The order is admissions, then the
+ * actor, then the flows: closing the table first is what stops the sweep
+ * re-adding one between the cancel and the free.
+ */
+void cortina_ni_flowoffload_quiesce(void)
+{
+	/*
+	 * ⚠ THREE PHASES, AND THE LOCK IS HELD FOR TWO OF THEM.
+	 *
+	 *   Closing the gate OUTSIDE cn_flow_offload_mutex was not enough: the
+	 *   real tc callback (cn_setup_tc_block_cb) holds that mutex across
+	 *   replace/destroy/stats, so a callback that had ALREADY passed the
+	 *   gate could still be inside when the table was freed underneath it.
+	 *
+	 *   And the cancel may NOT happen under the lock: cn_l3e_sweep_work
+	 *   takes the same mutex, so waiting for it while holding it deadlocks.
+	 *   Hence close under the lock, drop it to cancel, take it back to
+	 *   retire.
+	 */
+	mutex_lock(&cn_flow_offload_mutex);
+	cn_flow_table_ready = false;		/* nothing new gets past here */
+	mutex_unlock(&cn_flow_offload_mutex);
+
+	cancel_delayed_work_sync(&cn_l3e_sweep);/* NOT under the lock it takes */
+
+	mutex_lock(&cn_flow_offload_mutex);
+	gpon_flow_offload_free(cn_fo);		/* entries dropped with MMIO  */
+	cn_fo = NULL;
+	/*
+	 * ⚠ AND THE PUBLISHED GLOBAL IS INVALIDATED. cn_l3e outlived devres as a
+	 *   non-NULL pointer, and cortina_ni_gpon_data_path_set() -- exported,
+	 *   called from the GPON side -- used to check and write through it
+	 *   before taking any lock at all.
+	 */
+	cn_l3e = NULL;
+	mutex_unlock(&cn_flow_offload_mutex);
+}
+
 void cortina_ni_flowoffload_exit(void)
 {
-	cn_flow_table_ready = false;
-	gpon_flow_offload_free(cn_fo);
-	cn_fo = NULL;
+	/* Idempotent by construction: gpon_flow_offload_free() returns on NULL,
+	 * so a module unload after a device teardown finds nothing to do -- and
+	 * an unload with no teardown still retires everything. */
+	cortina_ni_flowoffload_quiesce();
 }
 
 static int cn_flowoffload_init(void)
@@ -5422,14 +5492,12 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 ssize_t cortina_ni_l3fe_debug_write(struct file *file, const char __user *ubuf,
 				    size_t len, loff_t *ppos)
 {
-	struct cn_l3e *l3e = cn_l3e;
+	struct cn_l3e *l3e;
 	char buf[160], cmd[16] = {};
 	char sas[40], das[40], nsas[40] = {};
 	unsigned int sp, dp, proto, profile, mcgid = 0, nsp = 0;
 	int n, i, err;
 
-	if (!l3e)
-		return -ENODEV;
 	if (len >= sizeof(buf))
 		return -EINVAL;
 	if (copy_from_user(buf, ubuf, len))
@@ -5440,16 +5508,50 @@ ssize_t cortina_ni_l3fe_debug_write(struct file *file, const char __user *ubuf,
 		return -EINVAL;
 
 	mutex_lock(&cn_flow_offload_mutex);
+	/*
+	 * ⚠ THE GLOBAL IS ACQUIRED INSIDE THE LOCK, and the admission gate is
+	 *   consulted before anything MUTATES. This used to read cn_l3e at
+	 *   function entry and test it there, so a teardown that retired the
+	 *   backend could be followed by a manual install reprogramming it --
+	 *   and nothing on this path consulted cn_flow_table_ready at all,
+	 *   which is the gate the automatic path now honours. A read is still
+	 *   allowed: reporting state after a retirement is not reprogramming.
+	 */
+	l3e = cn_l3e;
+	if (!l3e) {
+		err = -ENODEV;
+		goto out;
+	}
+	if (strcmp(cmd, "read") && !READ_ONCE(cn_flow_table_ready)) {
+		err = -ENODEV;
+		goto out;
+	}
 
 	if (!strcmp(cmd, "del")) {
-		for (i = 0; i < CN_L3E_PROC_MAX_MANUAL; i++) {
-			if (cn_l3e_manual[i].valid) {
-				cn_l3e_flow_del(l3e, cn_l3e_manual[i].idx,
-						cn_l3e_manual[i].crc16);
-				cn_l3e_manual[i].valid = false;
-			}
-		}
 		err = 0;
+		for (i = 0; i < CN_L3E_PROC_MAX_MANUAL; i++) {
+			int drc;
+
+			if (!cn_l3e_manual[i].valid)
+				continue;
+			drc = cn_l3e_flow_del(l3e, cn_l3e_manual[i].idx,
+					      cn_l3e_manual[i].crc16);
+			/*
+			 * ⚠ A REFUSED DELETE KEEPS ITS OWNER. Clearing `valid`
+			 *   regardless made this the only record that the entry
+			 *   existed, so a backend that declined to remove it
+			 *   left it programmed with nobody left to retire it --
+			 *   and the command reported success.
+			 */
+			if (drc) {
+				pr_err("cortina-l3fe: manual entry %d (idx %u) was NOT deleted (%d) -- it stays OWNED here\n",
+				       i, cn_l3e_manual[i].idx, drc);
+				if (!err)
+					err = drc;
+				continue;
+			}
+			cn_l3e_manual[i].valid = false;
+		}
 		goto out;
 	}
 	if (!strcmp(cmd, "read")) {

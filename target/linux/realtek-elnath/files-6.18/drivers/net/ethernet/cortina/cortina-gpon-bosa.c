@@ -24,13 +24,15 @@
 
 #include <linux/device.h>
 #include <linux/errno.h>
+#include <linux/firmware.h>
 #include <linux/kernel.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
+
+#include "gn25l95_cal_logic.h"
 
 #include "cortina-i2c.h"
 #include "cortina-gpon-bosa.h"
-#include "cortina-gpon-bosa-cal.h"
-#include "cortina-gpon-bosa-seq.h"
 #include "cortina-gpon-ddm.h"
 
 #define BOSA_I2C_ADDR		0x51	/* SFF-8472 A2h address */
@@ -51,6 +53,8 @@
 #define BOSA_T1_WARN_EN		0xfc	/* warning enables (0xfc/0xfd) */
 #define BOSA_T2_SAFE_MODE	0xa0	/* safe-mode start-up */
 #define BOSA_T2_PASSWD_LVL	0xbb	/* bit0 = password level */
+/* The identification registers are NOT spelled here: they are the core's, in
+ * gn25l95_probe_ops(). A shell copy would be a second place to keep right. */
 #define BOSA_SAFE_MODE_START	0x6a
 
 /* pages (tables) of the 0x80-0xFF window */
@@ -68,18 +72,6 @@
 #define BOSA_PAGE_BIAS_LUT	0x04	/* table 4: bias-DAC LUT (label disputed, above) */
 #define BOSA_PAGE_MOD_LUT	0x05	/* table 5: modulation-DAC LUT (label disputed, above) */
 #define BOSA_PAGE_APD_LUT	0x06	/* table 6: APD LUT */
-
-/*
- * Calibration-image addressing: cg_bosa_cal[reg + delta].
- *   un-paged reg r (0x00-0xFF)          -> cal[r + 0x100]
- *   table 2 reg r (0x80-0xFF)           -> cal[r + 0x180]  (0x200-0x27f)
- *   table 4/5/6 reg r (0x80-0xFF)       -> cal[r + 0x200/0x280/0x300]
- */
-#define BOSA_CAL_A2		0x100
-#define BOSA_CAL_T2		0x180
-#define BOSA_CAL_T4		0x200
-#define BOSA_CAL_T5		0x280
-#define BOSA_CAL_T6		0x300
 
 static int bosa_wr(struct device *dev, u8 reg, u8 val)
 {
@@ -100,78 +92,203 @@ static int bosa_rd(struct device *dev, u8 reg, u8 *val)
 	return ret;
 }
 
+static int bosa_io_rd(void *ctx, u8 slave, u8 reg, u8 *val)
+{
+	int ret = cg_i2c_read_byte(slave, reg, val);
+
+	if (ret)
+		dev_err(ctx, "BOSA: read %02x:%02x failed (%d)\n", slave, reg, ret);
+	return ret;
+}
+
+static int bosa_io_wr(void *ctx, u8 slave, u8 reg, u8 val)
+{
+	int ret = cg_i2c_write_byte(slave, reg, val);
+
+	if (ret)
+		dev_err(ctx, "BOSA: write %02x:%02x=%02x failed (%d)\n",
+			slave, reg, val, ret);
+	return ret;
+}
+
 /*
- * Program the BOSA exactly as the stock boot does: a VERBATIM replay of the
- * stock rtkbosa on-wire i2c write sequence (684 writes, captured with
- * timestamps; continuous, no delays needed — see cortina-gpon-bosa-seq.h).
+ * POSITIVE identification. The sequence is the CORE's -- 11 bus events, three
+ * conditions, taken from both units' own stock detectors -- so adding the Luna
+ * boards costs a call and not a second opinion about what this part is.
  *
- * The earlier step-wise re-expression (LUT pages 4/5/6 + device page 2 +
- * alarm page 1 + unpaged thresholds) MISSED whole sections of the stock
- * sequence — pages 0x00/0x03/0x86/0x87/0xff never got programmed (⚠ measured
- * 2026-09-05 on the trace: stock only SELECTS those pages for its part-ID
- * reads, no register inside them is ever written) — and the
- * laser never armed (TX_CTL 0x6e stuck at 0x80, zero TX bias, OLT saw zero
- * upstream) even with every GPIO/pin-route register byte-matching stock.
- * Replay first, re-express into named steps only after ranging is proven.
+ * ⚠ AN ACK IS NOT AN IDENTIFICATION, and neither is one register. An unrouted
+ *   i2c pinmux fake-ACKs every write and answers 0x00; a LOCKED part answers
+ *   D1 perfectly well; and a GN28L9x can answer it too. This driver asked D1
+ *   alone until 2026-09-12 and would have accepted all three.
+ */
+static int bosa_identify(struct device *dev)
+{
+	struct gn_op probe[GN_PROBE_OPS];
+	u8 id[GN_PROBE_NOTES] = { 0 };
+	struct gn_io io = { .ctx = dev, .rd = bosa_io_rd, .wr = bosa_io_wr,
+			    .notes = id, .notes_max = GN_PROBE_NOTES };
+	struct gn_fail bad;
+	int n, ret;
+
+	n = gn25l95_probe_ops(probe, ARRAY_SIZE(probe));
+	if (n < 0)
+		return n;
+
+	ret = gn25l95_cal_apply(probe, (u32)n, &io, &bad);
+	if (ret) {
+		if (bad.err)
+			dev_err(dev, "BOSA: no answer to the identification probe at step %u (reg 0x%02x): %d - laser stays unprogrammed\n",
+				bad.op, bad.reg, bad.err);
+		else
+			dev_err(dev, "BOSA: not a usable GN25L95 - probe step %u: reg 0x%02x read 0x%02x, expected 0x%02x under mask 0x%02x\n",
+				bad.op, bad.reg, bad.got, bad.want, bad.mask);
+		return ret;
+	}
+	if (gn25l95_is_gn28l9x(id)) {
+		dev_err(dev, "BOSA: this part identifies as a GN28L9x (%02x %02x %02x), not a GN25L95 - refusing to program it\n",
+			id[0], id[1], id[2]);
+		return -ENODEV;
+	}
+	dev_info(dev, "BOSA: GN25L95 identified (unlocked, family id %02x %02x %02x)\n",
+		 id[0], id[1], id[2]);
+	return 0;
+}
+
+/*
+ * WHERE THE CALIBRATION COMES FROM, AND WHY THERE IS NO SECOND SOURCE.
+ *
+ * These numbers are PER UNIT: this optical subassembly's own bias, modulation
+ * and APD DAC tables, measured at the factory and stored on the board itself.
+ * Another unit's numbers drive the laser to the wrong operating point while
+ * every log line reads healthy -- there is no error to see, which is precisely
+ * why a fallback is not a safety net here but a silent fault.
+ *
+ * ⚠ THIS DRIVER SHIPPED A COMPILED COPY OF ONE UNIT'S CALIBRATION UNTIL
+ *   2026-09-12, and reached for it whenever the runtime file was absent,
+ *   short or unreadable. It is gone: absent, short or unreadable is now a
+ *   REFUSAL. A laser that does not burst is a fault anyone can see; a laser
+ *   burning another box's numbers is one nobody can.
+ *
+ * The file is staged by gpon-provision, which reads it out of this board's own
+ * factory partition -- the same store stock's rtkbosa reads.
+ */
+#define CG_BOSA_CAL_FW	"rtkbosa_k.bin"
+
+static const u8 *bosa_calibration(struct device *dev, const struct firmware **fw)
+{
+	int ret = request_firmware_direct(fw, CG_BOSA_CAL_FW, dev);
+
+	if (ret) {
+		dev_err(dev, "BOSA: %s is not on this filesystem (%d) - refusing to program the laser from anything else\n",
+			CG_BOSA_CAL_FW, ret);
+		*fw = NULL;
+		return NULL;
+	}
+	if ((*fw)->size != GN_CAL_LEN) {
+		dev_err(dev, "BOSA: %s is %zu bytes, expected %u - refusing it\n",
+			CG_BOSA_CAL_FW, (*fw)->size, GN_CAL_LEN);
+		release_firmware(*fw);
+		*fw = NULL;
+		return NULL;
+	}
+	return (*fw)->data;
+}
+
+/*
+ * Program the GN25L95 from this unit's calibration.
+ *
+ * The sequence itself is common code (drivers/net/flowcore/gn25l95_cal_logic.c)
+ * and is proven byte-for-byte against stock driving the real part: 646 bus
+ * events, same slave, register, value and ORDER -- see
+ * dev/rtl9607c-test/gn25l95_cal_diff_test.c.  What lives here is only the
+ * shell: the bus, the identification and the reporting.
+ *
+ * ⚠ HEAP, NOT STACK.  The plan is GN_OPS_MAX operations and this is a 32-bit
+ *   MIPS/ARM kernel with an 8 KiB thread stack; the plan alone is most of it.
  *
  * Idempotent; call before the GPON ranging FSM is enabled.
  */
 int cg_bosa_init(struct device *dev)
 {
-	unsigned int i;
-	u8 v;
-	int ret;
+	const struct firmware *fw = NULL;
+	struct gn_op *plan;
+	struct gn_fail bad;
+	const u8 *cal;
+	int n, ret;
 
 	ret = cg_i2c_init(dev);
 	if (ret)
 		return ret;
 
-	/* presence check: the GN25L95 must ACK before we stream 600+ writes */
-	ret = cg_i2c_read_byte(BOSA_I2C_ADDR, BOSA_REG_TX_CTL, &v);
-	if (ret) {
-		dev_err(dev, "BOSA: GN25L95 not responding at 0x%02x (%d) - laser stays unprogrammed\n",
-			BOSA_I2C_ADDR, ret);
+	ret = bosa_identify(dev);
+	if (ret)
 		return ret;
+
+	plan = kmalloc_array(GN_OPS_MAX, sizeof(*plan), GFP_KERNEL);
+	if (!plan)
+		return -ENOMEM;
+
+	cal = bosa_calibration(dev, &fw);
+	if (!cal) {
+		ret = -ENOENT;
+		goto out;
+	}
+	n = gn25l95_cal_ops(cal, GN_CAL_LEN, &gn_variant_x400axf, plan, GN_OPS_MAX);
+	if (n < 0) {
+		/* checked BEFORE the cast: a negative count read as unsigned is
+		 * a walk off the end of the plan. */
+		dev_err(dev, "BOSA: the calibration sequence could not be built (%d)\n", n);
+		ret = n;
+		goto out;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(cg_bosa_stock_seq); i++) {
-		ret = bosa_wr(dev, cg_bosa_stock_seq[i][0],
-			      cg_bosa_stock_seq[i][1]);
-		if (ret) {
-			dev_err(dev, "BOSA: stock-seq write %u/%zu (reg 0x%02x) failed (%d)\n",
-				i, ARRAY_SIZE(cg_bosa_stock_seq),
-				cg_bosa_stock_seq[i][0], ret);
-			return ret;
-		}
+	{
+		struct gn_io io = { .ctx = dev, .rd = bosa_io_rd, .wr = bosa_io_wr };
+
+		ret = gn25l95_cal_apply(plan, (u32)n, &io, &bad);
+	}
+	if (ret) {
+		if (bad.err)
+			dev_err(dev, "BOSA: stopped at operation %u of %d (reg 0x%02x): bus error %d\n",
+				bad.op, n, bad.reg, bad.err);
+		else
+			dev_err(dev, "BOSA: stopped at operation %u of %d: reg 0x%02x read 0x%02x, expected 0x%02x under mask 0x%02x - I2C bus dead / not programmed (pinmux?)\n",
+				bad.op, n, bad.reg, bad.got, bad.want, bad.mask);
+		goto out;
 	}
 
 	/*
-	 * Read-back verify: the sequence ends with page 2 selected and 0xbb
-	 * written 0x1c.  An UNROUTED i2c0 pinmux fake-ACKs every write and
-	 * reads back 0x00 — this catches the dead bus loud on every boot
-	 * instead of silently leaving the BOSA unprogrammed.
+	 * Report the laser gate state: TX_CTL bit6 == 0, PON_CTL == 0.
+	 *
+	 * ⚠ THE READS THEMSELVES ARE PART OF THE VERDICT, and their return codes
+	 *   were dropped: a bus that died immediately after the last write still
+	 *   returned 0 here, so the driver went on to range with the whole
+	 *   programming unconfirmed. What the BITS mean is a separate question
+	 *   and is left exactly as it was -- a WARNING, because nothing on this
+	 *   board's own stock has been measured to say otherwise. The proven
+	 *   fault is the ignored I/O failure, and that is what now propagates.
 	 */
-	ret = bosa_rd(dev, BOSA_T2_PASSWD_LVL, &v);
-	if (ret)
-		return ret;
-	if (v != 0x1c) {
-		dev_err(dev, "BOSA: post-replay verify failed (0xbb=0x%02x, want 0x1c) - I2C bus dead / not programmed (pinmux?)\n",
-			v);
-		return -EIO;
-	}
-
-	/* report the laser gate state: TX_CTL bit6 == 0, PON_CTL == 0 */
 	{
 		u8 tx = 0xff, pon = 0xff;
+		int rd = bosa_rd(dev, BOSA_REG_TX_CTL, &tx);
 
-		bosa_rd(dev, BOSA_REG_TX_CTL, &tx);
-		bosa_rd(dev, BOSA_REG_PON_CTL, &pon);
-		dev_info(dev, "BOSA: GN25L95 programmed (stock replay, %zu writes), tx_ctl=0x%02x pon_ctl=0x%02x\n",
-			 ARRAY_SIZE(cg_bosa_stock_seq), tx, pon);
+		if (!rd)
+			rd = bosa_rd(dev, BOSA_REG_PON_CTL, &pon);
+		if (rd) {
+			dev_err(dev, "BOSA: the part stopped answering right after programming (%d) - nothing here confirms the %d operation(s) landed\n",
+				rd, n);
+			ret = rd;
+			goto out;
+		}
+		dev_info(dev, "BOSA: GN25L95 programmed (%d operations, calibration from %s), tx_ctl=0x%02x pon_ctl=0x%02x\n",
+			 n, CG_BOSA_CAL_FW, tx, pon);
 		if ((tx & BOSA_TX_SOFT_DIS) || pon)
 			dev_warn(dev, "BOSA: laser gate NOT open after init\n");
 	}
-	return 0;
+out:
+	kfree(plan);
+	release_firmware(fw);
+	return ret;
 }
 
 /*
@@ -235,7 +352,8 @@ int cg_bosa_dump(struct device *dev)
 	char line[3 * 16 + 1];
 	u8 curpage = 0xee, v;
 	unsigned int p, r, i, rd_fail = 0;
-	int ret;
+	int ret, restore, sel;
+	int selected = -1;	/* the last page the part actually accepted */
 
 	ret = cg_i2c_init(dev);
 	if (ret)
@@ -250,13 +368,25 @@ int cg_bosa_dump(struct device *dev)
 	dev_info(dev, "BOSADUMP start, curpage=0x%02x\n", curpage);
 
 	for (p = 0; p < ARRAY_SIZE(pages); p++) {
-		ret = bosa_wr(dev, BOSA_REG_PAGE, pages[p]);
-		if (ret)
+		/* ⚠ A PAGE SELECT MAY NOT OVERWRITE AN EARLIER READ FAILURE.
+		 *   Assigning this to `ret` made every successful select erase the
+		 *   errno of a page whose reads had failed, so a dump that lost a
+		 *   whole page still returned 0 as long as the NEXT select worked. */
+		sel = bosa_wr(dev, BOSA_REG_PAGE, pages[p]);
+		if (sel) {
+			if (!ret)
+				ret = sel;
 			break;
+		}
+		selected = (int)pages[p];
 		for (r = 0; r < 0x100; r += 16) {
 			for (i = 0; i < 16; i++) {
-				if (cg_i2c_read_byte(BOSA_I2C_ADDR, r + i, &v)) {
+				int rd = cg_i2c_read_byte(BOSA_I2C_ADDR, r + i, &v);
+
+				if (rd) {
 					rd_fail++;
+					if (!ret)
+						ret = rd;	/* the FIRST one */
 					sprintf(line + 3 * i, " ??");
 				} else {
 					sprintf(line + 3 * i, " %02x", v);
@@ -267,9 +397,33 @@ int cg_bosa_dump(struct device *dev)
 		}
 	}
 
-	bosa_wr(dev, BOSA_REG_PAGE, curpage);
-	dev_info(dev, "BOSADUMP %s, rd_fail=%u (page restored to 0x%02x)\n",
-		 ret ? "FAILED" : "done", rd_fail, curpage);
+	/*
+	 * ⚠ RESTORE, THEN SAY WHETHER IT WORKED. This claimed "page restored to
+	 *   0x%02x" whatever the write returned, and returned 0 however many
+	 *   reads had failed -- so a dump over a dead bus reported a clean run
+	 *   and left the part on whichever page it had last selected, which is
+	 *   the state a concurrent calibration would then write into.
+	 *   Restoration is still ATTEMPTED after a read failure: the page is
+	 *   shared, and leaving it wrong is worse than the failure that got here.
+	 */
+	restore = bosa_wr(dev, BOSA_REG_PAGE, curpage);
+	if (restore) {
+		/* ⚠ SAY WHICH PAGE IT IS ACTUALLY ON, or say we do not know. The
+		 *   first cut named the LAST page of the table, which is only true
+		 *   when every select succeeded -- after an early select failure
+		 *   that sentence is a confident wrong answer about the part. */
+		if (selected >= 0)
+			dev_err(dev, "BOSADUMP page restore to 0x%02x FAILED (%d) - the part is left on page 0x%02x\n",
+				curpage, restore, selected);
+		else
+			dev_err(dev, "BOSADUMP page restore to 0x%02x FAILED (%d) - which page the part is on is NOT established\n",
+				curpage, restore);
+		if (!ret)
+			ret = restore;
+	}
+	dev_info(dev, "BOSADUMP %s, rd_fail=%u (page %s)\n",
+		 ret ? "FAILED" : "done", rd_fail,
+		 restore ? "NOT restored" : "restored");
 	return ret;
 }
 

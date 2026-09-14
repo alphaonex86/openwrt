@@ -44,6 +44,7 @@
 
 #include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
+#include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
 
 /* Fallback / revert destination for the eth0 LAN TX path, and the port whose
  * speed+duplex adjust_link mirrors.  eth0 TX is FE-bypass direct-TX: the
@@ -188,10 +189,15 @@ static u32 ca_ni_lan_tx_ports(struct cortina_ni_tx *tx, const u8 *da)
 	return pick.ports;
 }
 
-/* fallback MAC when the DT carries none (locally administered) */
-static const u8 cortina_ni_default_mac[ETH_ALEN] = {
-	0x02, 0x96, 0x07, 0xf0, 0x00, 0x01
-};
+/* The bootarg rung. Spelling for a board declaration is `cortina_ni.mac=<addr>`
+ * (KBUILD_MODNAME of the cortina_ni-y composite); a wrong module prefix is
+ * ignored in silence. Never spell an address here or in a DTS: it is per-unit.
+ */
+static char *mac_param;
+module_param_named(mac, mac_param, charp, 0444);
+MODULE_PARM_DESC(mac,
+	"the board's own MAC, handed in at boot (xx:xx:xx:xx:xx:xx). Empty = "
+	"fall back to DT/nvmem, then a random locally-administered one");
 
 static inline void __iomem *ni_base(struct cortina_ni *ni)
 {
@@ -979,7 +985,7 @@ static netdev_tx_t cortina_ni_start_xmit(struct sk_buff *skb,
 /* ------------------------------------------------------------------ */
 
 /* set once at TX probe; the GPON driver's responder calls in through it */
-static struct cortina_ni *cortina_ni_pon_tx_ni;
+static struct cortina_ni __rcu *cortina_ni_pon_tx_ni;
 
 /* 16-byte PON control-frame header (stock ca_ni_tx_encap_pon_control_packet,
  * disasm @0xa92ac: fixed DA/SA, link type 0xff 0xf1 = OMCI, byte [14] = 0,
@@ -991,9 +997,25 @@ static const u8 cortina_ni_pon_hdr[CA_NI_PON_HDR_LEN] = {
 	0xff, 0xf1, 0x00, 0x01,			/* OMCI link type + G3 cos>=7 flag */
 };
 
-int cortina_ni_pon_tx(const u8 *pdu, unsigned int len)
+/*
+ * ⚠ THE POINTER IS ACQUIRED INSIDE AN RCU READ-SIDE SECTION, and the whole use
+ *   happens inside it. A bare READ_ONCE is not enough for the writer's
+ *   synchronize_rcu() to mean anything: that only waits for read-side
+ *   sections, and the PON path has a PROCESS-CONTEXT caller --
+ *   cg_veip_avc_work drops omci_lock and reaches cg_omci_tx holding only a
+ *   mutex. Neither body sleeps, so holding the section across it is legal, and
+ *   the thin wrapper keeps every early return covered without rewriting them.
+ *
+ * ⚠ WHAT THIS IS NOT: a race demonstrated in TODAY'S image. This board builds
+ *   PREEMPT_NONE with TREE_RCU, where a non-sleeping reader is already inside
+ *   an implicit read-side section and the grace period does wait for it. The
+ *   explicit section is for the API's actual contract and for any preemptible
+ *   configuration this driver is meant to support -- correctness that does not
+ *   depend on a kernel option, not the repair of a measured fault.
+ */
+static int cortina_ni_pon_tx_rcu(const u8 *pdu, unsigned int len)
 {
-	struct cortina_ni *ni = READ_ONCE(cortina_ni_pon_tx_ni);
+	struct cortina_ni *ni = rcu_dereference(cortina_ni_pon_tx_ni);
 	struct cortina_ni_tx *tx;
 	struct cortina_ni_txq *q;
 	unsigned int frame_len, slot;
@@ -1084,6 +1106,16 @@ int cortina_ni_pon_tx(const u8 *pdu, unsigned int len)
 	mod_timer(&tx->reclaim_timer, jiffies + CA_NI_RECLAIM_INTERVAL);
 	return 0;
 }
+
+int cortina_ni_pon_tx(const u8 *pdu, unsigned int len)
+{
+	int ret;
+
+	rcu_read_lock();
+	ret = cortina_ni_pon_tx_rcu(pdu, len);
+	rcu_read_unlock();
+	return ret;
+}
 EXPORT_SYMBOL_GPL(cortina_ni_pon_tx);
 
 /*
@@ -1097,10 +1129,10 @@ EXPORT_SYMBOL_GPL(cortina_ni_pon_tx);
  * Descriptor bookkeeping: SOF slot releases the header-block scratch (pon =
  * 2+slot), EOF slot carries the skb (normal unmap+consume reclaim).
  */
-netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
-				   struct net_device *ndev)
+static netdev_tx_t cortina_ni_pon_data_tx_rcu(struct sk_buff *skb,
+					      struct net_device *ndev)
 {
-	struct cortina_ni *ni = READ_ONCE(cortina_ni_pon_tx_ni);
+	struct cortina_ni *ni = rcu_dereference(cortina_ni_pon_tx_ni);
 	struct cortina_ni_tx *tx;
 	struct cortina_ni_txq *q;
 	unsigned int len, slot;
@@ -1201,6 +1233,16 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 	mod_timer(&tx->reclaim_timer, jiffies + CA_NI_RECLAIM_INTERVAL);
 	return NETDEV_TX_OK;
 }
+
+netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb, struct net_device *ndev)
+{
+	netdev_tx_t ret;
+
+	rcu_read_lock();
+	ret = cortina_ni_pon_data_tx_rcu(skb, ndev);
+	rcu_read_unlock();
+	return ret;
+}
 EXPORT_SYMBOL_GPL(cortina_ni_pon_data_tx);
 
 /* ------------------------------------------------------------------ */
@@ -1241,8 +1283,12 @@ static void cortina_ni_tx_adjust_link(struct net_device *ndev)
 			set |= CA_NI_PORT_GLB_HALF_DUPLEX;
 		else
 			clr |= CA_NI_PORT_GLB_HALF_DUPLEX;
-		clr |= CA_NI_PORT_GLB_PWR_DWN_TX;
-		ni_rmw(ni, CA_NI_PORT_GLB_CFG(CA_NI_TX_PORT), clr, set);
+		/* ...but never power TX back up on a UNI the OLT has locked.
+		 * ★ THE DECISION AND THE WRITE ARE ONE CRITICAL SECTION: read
+		 *   outside it and an administrative lock landing in between is
+		 *   undone by this very write. */
+		cortina_ni_uni_port_glb_rmw(ni, CA_NI_TX_PORT, clr, set,
+					    CA_NI_PORT_GLB_PWR_DWN_TX);
 
 		/* every link-up (incl. each boot-time bounce): idempotently
 		 * re-arm the RX chain + run one GPHY fault-latch check (the
@@ -1461,36 +1507,38 @@ int cortina_ni_tx_debug_show(struct seq_file *m, void *v)
 /* probe                                                               */
 /* ------------------------------------------------------------------ */
 
+/* Byte sources only; the ladder is gpon_hwaddr_resolve(). Neither U-Boot nor
+ * the stock DTB fills the DT MAC on this board (live stock reads all-zero), so
+ * the usual outcome is a random LAA until 05_factory_mac applies the factory
+ * MAC through netifd and .ndo_set_mac_address re-keys the MAC-keyed HW tables.
+ */
 static void cortina_ni_tx_set_mac(struct cortina_ni *ni,
 				  struct net_device *ndev)
 {
+	u8 dt[GPON_HWADDR_BYTES], mac[GPON_HWADDR_BYTES];
 	struct device_node *child;
-	int ret = -ENODEV;
+	bool have_dt = false;
+	enum gpon_hwaddr_src src;
 
-	/* the "ethernet@0" child would carry a DT MAC; on this board neither
-	 * U-Boot nor the stock DTB fills it (live stock reads all-zero) */
 	child = of_get_child_by_name(ni->dev->of_node, "ethernet");
 	if (child) {
-		ret = of_get_ethdev_address(child, ndev);
+		have_dt = of_get_mac_address(child, dt) == 0;
 		of_node_put(child);
 	}
-	if (ret)
-		ret = of_get_ethdev_address(ni->dev->of_node, ndev);
-	if (ret || !is_valid_ether_addr(ndev->dev_addr)) {
-		/* LAA fallback only: the per-board factory MAC (base MAC =
-		 * ELAN_MAC_ADDR from the stock ubi_Config/config_hs.xml on
-		 * read-only NAND) is applied by the 05_factory_mac
-		 * uci-defaults script through netifd before the interface
-		 * comes up; .ndo_set_mac_address then re-keys the MAC-keyed
-		 * HW tables (cortina_ni_rx_mac_rearm) - the link-up re-arms
-		 * alone do NOT follow it, they all fire before netifd (the
-		 * tracked port-0 PHY is uncabled on this rig). */
-		eth_hw_addr_set(ndev, cortina_ni_default_mac);
-		dev_warn(ni->dev, "no MAC in DT, using default %pM\n",
-			 ndev->dev_addr);
-	} else {
-		dev_info(ni->dev, "MAC from DT: %pM\n", ndev->dev_addr);
-	}
+	if (!have_dt)
+		have_dt = of_get_mac_address(ni->dev->of_node, dt) == 0;
+
+	/* NULL engine: the NI has no station-address register to read. */
+	src = gpon_hwaddr_resolve(mac_param, have_dt ? dt : NULL, NULL, mac);
+	eth_hw_addr_set(ndev, mac);
+
+	if (src == GPON_HWADDR_RANDOM)
+		dev_warn(ni->dev,
+			 "no MAC in a boot parameter or DT -- using %s %pM until 05_factory_mac applies the factory one\n",
+			 gpon_hwaddr_src_name(src), ndev->dev_addr);
+	else
+		dev_info(ni->dev, "MAC %pM from %s\n", ndev->dev_addr,
+			 gpon_hwaddr_src_name(src));
 }
 
 int cortina_ni_tx_probe(struct cortina_ni *ni)
@@ -1548,14 +1596,75 @@ int cortina_ni_tx_probe(struct cortina_ni *ni)
 	ndev->max_mtu = ETH_DATA_LEN;	/* len field allows 2047 - keep std */
 	cortina_ni_tx_set_mac(ni, ndev);
 
-	ret = devm_register_netdev(ni->dev, ndev);
+	/*
+	 * ⚠ NOTHING IS REGISTERED OR PUBLISHED HERE. This is the FIRST of three
+	 *   probes; rx and the l3e context are allocated after it. Registering
+	 *   the netdev at this point makes it reachable -- and its ndo_stop
+	 *   reads ni->rx -- before rx exists, and leaves it registered over
+	 *   freed memory if a LATER probe fails and devres unwinds.
+	 *   cortina_ni_tx_publish() does both, once everything exists.
+	 */
+	return 0;
+}
+
+int cortina_ni_tx_publish(struct cortina_ni *ni)
+{
+	struct net_device *ndev = ni->tx->netdev;
+	int ret;
+
+	ret = register_netdev(ndev);
 	if (ret)
 		return dev_err_probe(ni->dev, ret, "register_netdev failed\n");
 
-	/* the dump is published from cortina_ni_debugfs_init() at end of probe */
-
-	WRITE_ONCE(cortina_ni_pon_tx_ni, ni);	/* open the PON TX entry */
+	ni->tx->netdev_registered = true;
+	/* the NI is fully initialised here, and cortina_ni_teardown is already
+	 * registered, so the unpublish covers everything this opens */
+	cortina_ni_rx_publish(ni);
+	rcu_assign_pointer(cortina_ni_pon_tx_ni, ni);	/* open the PON TX entry */
 	dev_info(ni->dev, "TX ready: %s -> LAN ports 0..%u (direct-TX, lan_tx_mode=%d)\n",
 		 ndev->name, CA_NI_LAN_PORT_COUNT - 1, lan_tx_mode);
 	return 0;
+}
+
+void cortina_ni_tx_withdraw(struct cortina_ni *ni)
+{
+	/*
+	 * The PON TX entry FIRST: it is a bare file-scope pointer that the GPON
+	 * side reads with READ_ONCE and that nothing ever cleared, so it kept
+	 * naming this device for as long as the module stayed loaded. Clearing
+	 * it and then waiting for readers is what makes the unregister below
+	 * safe rather than merely later.
+	 */
+	rcu_assign_pointer(cortina_ni_pon_tx_ni, NULL);
+	synchronize_rcu();
+
+	/*
+	 * ⚠ ALLOCATED IS NOT REGISTERED. The cleanup action is added BEFORE
+	 *   cortina_ni_tx_publish() runs -- deliberately, so it covers a failed
+	 *   publish -- which means this can be reached with a netdev that was
+	 *   allocated and never registered. unregister_netdev() on that is not a
+	 *   no-op.
+	 *
+	 * ⚠ THE TIMER IS STOPPED WHATEVER THE INTERFACE STATE. ndo_stop deletes
+	 *   it, and unregister only calls ndo_stop for an interface that is UP --
+	 *   but the OMCI path arms it through the PON TX entry, which does not
+	 *   need the LAN netdev up at all. A DOWN interface therefore left a live
+	 *   timer pointing into memory devres is about to free. It is stopped
+	 *   AFTER the PON entry is closed, so nothing can re-arm it.
+	 *
+	 * ⚠ AND THE NAPI IS UNLINKED HERE, not by the unregister. ndo_stop only
+	 *   DISABLES it; netif_napi_del appears once in this driver, in an
+	 *   IRQ-init failure path. The napi_struct is embedded in the rx context,
+	 *   devres frees rx BEFORE the netdev, and free_netdev() then walks the
+	 *   list it is still on.
+	 */
+	if (ni->tx) {
+		if (ni->tx->netdev && ni->tx->netdev_registered) {
+			unregister_netdev(ni->tx->netdev);
+			ni->tx->netdev_registered = false;
+		}
+		timer_delete_sync(&ni->tx->reclaim_timer);
+	}
+	if (ni->rx)
+		netif_napi_del(&ni->rx->napi);
 }

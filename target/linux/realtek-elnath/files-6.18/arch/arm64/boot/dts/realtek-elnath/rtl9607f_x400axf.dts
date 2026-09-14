@@ -548,6 +548,32 @@
 	 * project's stated stock behaviour.  LAN and FXS1 colours are assumed green
 	 * and are cosmetic — they affect only the sysfs name, never a pin.
 	 */
+	/*
+	 * The UNI panel this board presents over OMCI, MEASURED from its own
+	 * stock firmware (omcicli mib get 11/264, 2026-09-13).
+	 *
+	 * ME 11 (PPTP Ethernet UNI) and ME 264 (UNI-G) are SEPARATE lists and
+	 * neither is derivable from the other.  This board carries a fifth UNI-G,
+	 * 0x0604, with no Ethernet UNI beside it and management capability 0
+	 * where the other four report 1.  Its PhysicalPortId runs 3,2,1,0 over
+	 * 0x0101..0x0104 -- the OPPOSITE order to the G24W's, which is why no
+	 * code here computes a port from an instance.
+	 *
+	 * The ids are full 16-bit OMCI instance numbers, not port indices.
+	 */
+	omci-uni {
+		ethernet-uni-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0104>;
+		/* The SWITCH PORT each of those instances is, from this board's OWN mapper at 0x3bd08, replayed against its captured gInfo
+		 * for BOTH feature-50 states, and agreeing with its own PhysicalPortId.
+		 * ⚠ NEVER COMPUTED: the two Luna boards and the Cortina one run
+		 * their port order in OPPOSITE directions, and one numbers its
+		 * fourth UNI 0x0401, so no arithmetic on an instance id is
+		 * right on more than one board. */
+		ethernet-uni-ports = /bits/ 8 <3 2 1 0>;
+		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0104 0x0604>;
+		uni-g-management-capability = /bits/ 8 <1 1 1 1 0>;
+	};
+
 	leds {
 		compatible = "gpio-leds";
 

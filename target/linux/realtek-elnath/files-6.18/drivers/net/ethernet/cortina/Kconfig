@@ -33,6 +33,8 @@ config CORTINA_NI
 config CORTINA_NI_FLOWOFFLOAD
 	bool "Cortina-Access NI L3FE nf_flow_table hardware flow offload"
 	depends on CORTINA_NI
+	default y
+	select GPON_FLOW_OFFLOAD	# the COMMON TC lifecycle, drivers/net/gpon/
 	help
 	  Drive the NE L3FE "main hash" flow engine (64K-entry NAPT
 	  accelerator, mtk_ppe class) as an nf_flow_table hardware offload
@@ -67,7 +69,11 @@ config CORTINA_GPON
 	#: shared TC-offload lifecycle too.  A family without an engine simply
 	#: does not select this and carries none of it -- the operator's
 	#: "#ifdef" (2026-08-28), expressed where Kconfig can enforce it.
-	select GPON_FLOW_OFFLOAD
+	#: ★★★ BUT THE SELECT MOVED TO CORTINA_NI_FLOWOFFLOAD (2026-09-08).
+	#: Selecting it HERE welded the accelerator to the driver: the board
+	#: could not be built with the offload OFF, and the AQM-vs-offload
+	#: trade-off is an OPERATOR DECISION TAKEN WITH NUMBERS -- which needs
+	#: both states buildable.  The prompted symbol now owns the select.
 	help
 	  This driver supports the Cortina-Access GPON MAC (CA8277C class)
 	  found in the Realtek RTL9607F "Elnath" GPON ONU SoC: the PON-MAC

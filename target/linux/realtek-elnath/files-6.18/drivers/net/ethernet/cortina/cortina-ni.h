@@ -110,6 +110,35 @@ u32 cortina_ni_rx_cb_port_free_word(struct cortina_ni *ni, unsigned int port);
 /* -1 when the MDIO read failed: "could not ask" is not "no link". */
 int cortina_ni_rx_phy_link(struct cortina_ni *ni, unsigned int port);
 
+/* Is this switch port administratively LOCKED by the OLT?  Consulted by every
+ * writer in this driver that would otherwise restore a port. */
+bool cortina_ni_uni_port_locked(unsigned int port);
+
+/* One RMW of a port's global config with the administrative power-down bit
+ * decided inside the critical section, so a stale decision cannot undo a lock
+ * that landed between the read and the write. */
+void cortina_ni_uni_port_glb_rmw(struct cortina_ni *ni, unsigned int port,
+				 u32 clr, u32 set, u32 down_bit);
+
+/*
+ * Drive one UNI's administrative state.  -> 0 applied, negative NOT applied.
+ *
+ * The caller keeps the obligation on a failure (omci_uni_mark_changed) and
+ * retries: this returns -ENODEV before the NI has published itself, which is
+ * exactly the window an OLT can Set in.  @port is a switch port index, which
+ * the FAMILY derives from its own board declaration -- never from the OMCI
+ * instance id, whose low byte identifies nothing.
+ */
+int cortina_ni_uni_admin_set(unsigned int port, bool locked);
+
+/* Withdraw the published NI before devres frees it. */
+/* Publish the NI for the paths that reach it without a handle.  Called ONCE,
+ * from the real completed initialisation -- never from a restoring function,
+ * which would re-open a publication teardown had closed. */
+void cortina_ni_rx_publish(struct cortina_ni *ni);
+
+void cortina_ni_rx_unpublish(void);
+
 /*
  * The hand-debugging narratives.  They live beside the state they print; only
  * their PUBLICATION is central (cortina_ni_debugfs_init), so there is one place
@@ -197,6 +226,9 @@ struct cortina_ni_tx {
 	u64			pon_enq;
 	u64			pon_fail;
 	u64			pon_data_enq;	/* US WAN data frames enqueued */
+	/* register_netdev() succeeded. The teardown action is registered BEFORE
+	 * publication so it covers a failed publish, so it cannot assume it. */
+	bool			netdev_registered;
 };
 
 struct cortina_ni;
@@ -495,6 +527,16 @@ netdev_tx_t cortina_ni_pon_data_tx(struct sk_buff *skb,
 				   struct net_device *ndev);
 
 int cortina_ni_tx_probe(struct cortina_ni *ni);
+/*
+ * Close the PON TX entry and take the netdev down WHILE the rx and l3e
+ * contexts still exist. See cortina_ni_teardown() for why the order matters.
+ */
+void cortina_ni_tx_withdraw(struct cortina_ni *ni);
+/*
+ * Register the netdev and open the PON TX entry. Called ONLY once rx and the
+ * l3e context exist, because both are reachable the instant this returns.
+ */
+int cortina_ni_tx_publish(struct cortina_ni *ni);
 int cortina_ni_rx_probe(struct cortina_ni *ni);
 
 /*
@@ -549,11 +591,30 @@ int cortina_ni_l2fe_fdb_lookup_idx(void __iomem *base, const u8 *mac,
  * the engine; any failure is non-fatal - the offload stays disabled and
  * every request falls back to the software path.
  */
+/* ★★★ UNCONDITIONAL CPU-to-PON TRANSPORT, NOT OFFLOAD (moved out of the gate
+ * 2026-09-12). The implementation is cortina-ni-tx.c:810 and that object sits in
+ * `cortina_ni-y` (Makefile:30) -- built whatever CONFIG_CORTINA_NI_FLOWOFFLOAD
+ * says. The real TX path reads ca_ni_pon_data_tcont at :1168, and the GPON
+ * install (:3125) and reset (:2884) must update it in BOTH builds.
+ *
+ * ⚠ THIS IS WHY `=n` DID NOT BUILD, and the fault was in the #else block I had
+ *   just added to: the prototype sat INSIDE the offload gate, so the compile-off
+ *   side supplied a `static inline` no-op that REDEFINED a function the kernel
+ *   already had -- `error: redefinition of cortina_ni_pon_data_set_tcont`. My
+ *   stub was not the defect; the block it joined was already wrong.
+ * ⚠ AND GATING THE IMPLEMENTATION WOULD BE THE WRONG REPAIR: a single-Alloc OLT
+ *   puts DATA on the OMCC's T-CONT, so a build without this setter loses IPoE on
+ *   exactly those OLTs. The DECLARATION moves; the code does not.
+ */
+void cortina_ni_pon_data_set_tcont(u8 tcont);
+
 #if IS_ENABLED(CONFIG_CORTINA_NI_FLOWOFFLOAD)
 int cortina_ni_flowoffload_probe(struct cortina_ni *ni);
 int cortina_ni_setup_tc(struct net_device *dev, enum tc_setup_type type,
 			void *type_data);
 void cortina_ni_flowoffload_exit(void);
+/* Stop the periodic sweep and wait for it, while its context is still valid. */
+void cortina_ni_flowoffload_quiesce(void);
 /* true only when the hw_l3_fwd experiment is armed AND the L3FE engine init
  * succeeded; the GPON driver keys the DS data-GEM PDC route on it (LDPID
  * L3_WAN into the L3FE vs the proven CPU_0 + FE-bypass delivery). */
@@ -574,7 +635,6 @@ void cortina_ni_gpon_data_path_set(u16 gem_id, u8 tcont_idx);
 /* Steer the upstream DATA queue to a hw T-CONT at runtime.  Normally T-CONT 1;
  * a single-alloc OLT puts the data on the OMCC's T-CONT 0 (see cortina-ni-tx.c
  * and gpon_gem_us_ride_range() in the core). */
-void cortina_ni_pon_data_set_tcont(u8 tcont);
 /*
  * ★ LIVE DS (PON->host) PDC ROUTE push (GPON -> offload backend).  The DS data
  * GEM's PDC entry is written either as {LDPID L3_WAN, LSPID PON} - into the
@@ -669,9 +729,6 @@ static inline int cortina_l3fe_intf_add(void __iomem *ne, const u8 *lan_mac)
 static inline void cortina_ni_gpon_data_path_set(u16 gem_id, u8 tcont_idx)
 {
 }
-static inline void cortina_ni_pon_data_set_tcont(u8 tcont)
-{
-}
 static inline void cortina_ni_gpon_ds_route_set(bool into_l3fe)
 {
 }
@@ -683,6 +740,15 @@ static inline int cortina_ni_wan_pppoe_session_set(u16 session)
 static inline void cortina_ni_pppoe_punt_inspect(const u8 *f, unsigned int len)
 {
 }
+/* ★ THE ONE STUB THAT WAS MISSING FROM THIS #else (added 2026-09-12), and it
+ * is the difference between "the accelerator can be selected out" and a
+ * BUILD BREAK: cortina-ni.c:1403 calls this unconditionally from the module
+ * exit path, so with the symbol off the compile-off image -- the software
+ * half of the HW-vs-SW comparison the port owes -- could not be produced at
+ * all. Nine siblings here were stubbed and this one was not. */
+static inline void cortina_ni_flowoffload_exit(void) { }
+static inline void cortina_ni_flowoffload_quiesce(void) { }
+
 static inline void cortina_ni_flowoffload_router_mac_set(const u8 *mac)
 {
 }

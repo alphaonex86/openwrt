@@ -44,6 +44,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_net.h>	/* of_get_mac_address() -- the DT rung of the ladder */
 #include <linux/platform_device.h>
 #include <linux/proc_fs.h>
 #include <linux/ratelimit.h>
@@ -57,6 +58,8 @@
 #include "cortina-gpon-bosa.h"
 #include "cortina-gpon-ddm.h"	/* SFF-8472 A2h optical decode (functional core) */
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
+#include "gpon_range_gate.h"	/* may this ONU transmit, and what to change */
+#include "gpon_hwaddr.h"	/* the common station-address ladder */
 #include "cortina-access.h"	/* the ONE indirect transaction */
 #include "gpon_ind_rmw.h"	/* the core's ACCESS/DATA entry read-modify-write */
 #include "cortina-ni.h"		/* cortina_ni_pon_rx_hook_set + cortina_ni_pon_tx */
@@ -111,6 +114,7 @@
 #include "gpon_omci_core.h"	/* G.988 message layer: omci_onu_input()      */
 #include "gpon_omci_me.h"	/* G.988 ME model: struct omci_onu, the store */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log    */
+#include "gpon_omci_diag.h"	/* the ONE per-PDU trace line, every family */
 #include "gpon_omci_mic.h"	/* G.984.4 MIC dialect: gpon_omci_mic_conv() */
 #include "gpon_gem_us.h"	/* upstream GEM/T-CONT mapping + bind verdict */
 #include "gpon_data_plan.h"	/* armed-vs-provisioned reconcile + undo verdict */
@@ -380,7 +384,10 @@
 
 #define CG_REG_GPON_MAIN	0x0e0	/* hdr 0xc0: equalization delay (EqD) */
 #define CG_REG_OMCI_PORT	0x0e8	/* hdr 0xc8: omci_port id[11:0], en[12]; HW-filled */
-#define CG_OMCI_PORT_ID(v)	((v) & 0xfff)
+/* The id field of that register IS the on-wire GEM Port-ID, so its width is
+ * the core's fact and not this register map's: the name stays here beside
+ * CG_OMCI_PORT_EN, the 12-bit constant does not (gpon_gem_us.h). */
+#define CG_OMCI_PORT_ID(v)	gpon_gem_us_port_id(v)
 #define CG_OMCI_PORT_EN		BIT(12)
 #define CG_REG_T3_PREAMBLE	0x0f8	/* hdr 0xd8: extend[16], ranged[15:8], pre_range[7:0];
 					 * HW-latched from the OLT's Extended_Burst_Length PLOAM */
@@ -771,6 +778,7 @@ static_assert(GPON_GEM_US_RANGE_OK(CG_DATA_GEM_IDX, CG_PUC_QUEUE_PER_TCONT,
  */
 #define CG_REG_ONU_CTL		0x134
 #define CG_ONU_CTL_VAL		0x00460262	/* stock O5 value: en(bit1) + defaults */
+#define CG_ONU_CTL_EN		BIT(1)		/* the GO bit: HW starts ranging */
 /*
  * GPON_MAC_GPON_CTRL (hdr 0x1c4 -> silicon +0x1e4, dft 0x00430000).
  *   sw_random_en(16): SN random-delay engine.  Default ON = the engine keeps
@@ -786,14 +794,21 @@ static_assert(GPON_GEM_US_RANGE_OK(CG_DATA_GEM_IDX, CG_PUC_QUEUE_PER_TCONT,
 #define CG_MAC_CTRL_SW_RANDOM_EN BIT(16)
 #define CG_MAC_CTRL_PTI_OMCI	BIT(17)
 
-/* one post-O5 servicing event, snapshotted in hardirq, handled in the work */
+/* One observed order for IRQ snapshots and unaccepted baseline OMCI frames. */
+#define CG_EVT_IRQ	0
+#define CG_EVT_OMCI	1
+#define CG_EVT_RING_SZ	32
+#define CG_EVT_OMCI_LIMIT 16 /* reserve the original sixteen IRQ slots */
 struct cg_evt {
-	u32 intr;			/* INTERRUPT (0x8c) sources, already enable-masked */
-	u8 state;			/* onu.state at IRQ time */
-	u8 id;				/* onu.id at IRQ time */
+	u8 type;
+	union {
+		struct {
+			u32 intr;
+			u8 state, id;
+		};
+		u8 pdu[OMCI_LEN];
+	};
 };
-
-#define CG_EVT_RING_SZ		16	/* power of 2 */
 
 /*
  * Where the ONU's G.984.3 serial number came from, strongest first.  The serial
@@ -801,16 +816,24 @@ struct cg_evt {
  * whole service profile on it, so two units announcing the same serial number
  * collide on one PON.  It must therefore be read FROM THE BOARD and never be a
  * compiled-in literal -- see the cg_sn_* block below for the provisioning path.
+ *
+ * ★ THERE IS NO "FALLBACK" SOURCE ANY MORE (2026-09-10).  A CG_SN_FALLBACK
+ * value used to sit at the end of this list for the placeholder the timeout
+ * path installed, and its whole purpose was to let /proc/gpon admit that the
+ * serial being RANGED WITH was invented.  Ranging with an undefined serial is
+ * now refused outright, so the state it described cannot occur: an ONU either
+ * has an identity from one of the two real sources below, or it is parked.
+ * The enumerator is REMOVED rather than left unused, so no future path can
+ * quietly reach for it again.
  */
 enum cg_sn_src {
 	CG_SN_NONE = 0,		/* not provisioned yet: ranging is held off */
 	CG_SN_PARAM,		/* cortina_gpon.sn= (bring-up / A-B override) */
 	CG_SN_BOARD,		/* the board's own factory data, via /proc/gpon */
-	CG_SN_FALLBACK,		/* nothing readable: a placeholder, NOT an identity */
 };
 
 static const char *const cg_sn_src_name[] = {
-	"NONE", "module-param", "board", "FALLBACK",
+	"NONE", "module-param", "board",
 };
 
 struct cortina_gpon {
@@ -826,12 +849,16 @@ struct cortina_gpon {
 	spinlock_t evt_lock;		/* protects the ring, taken in hardirq */
 	struct cg_evt evt[CG_EVT_RING_SZ];
 	unsigned int evt_head, evt_tail;
+	u32 ingress_generation; /* rejects a producer delayed across identity reset */
+	bool ingress_open;
+	u32 omci_queue_drop;
 	struct work_struct isr_work;
 	u32 irq_count;			/* ISR entries that found PON work */
 	u32 evt_drop;			/* events lost to a full ring */
 	u8 last_state;			/* FSM tracker (0=O1 .. 6=O7) */
 	bool omcc_up;			/* OMCC channel bound + link signalled */
-	u16 omcc_alloc;			/* last alloc-id bound to T-CONT[0] */
+	u16 omcc_alloc;			/* confirmed or pending T-CONT[0] owner */
+	bool omcc_alloc_pending;		/* submitted write completion is unknown */
 	bool omcc_alloc_valid;		/* omcc_alloc actually carries a binding.
 					 * G.984.3 ONU-ID 0 is LEGAL, so 0 cannot
 					 * double as "never bound": without this
@@ -866,9 +893,21 @@ struct cortina_gpon {
 
 	/* Stage C: the G.988 OMCI responder + US OMCI TX */
 	struct omci_onu *omci;		/* responder context (kzalloc'd at probe) */
-	spinlock_t omci_lock;		/* RX hook (softirq) vs isr_work/AVC work */
-	bool omci_active;		/* ctx armed (OMCC up) */
+	spinlock_t omci_lock;		/* common model readers vs ordered worker */
+	bool omci_active;		/* transport permits requests */
+	bool omci_initialized;		/* accepted MIB survives same-identity LOS */
 	struct delayed_work veip_avc_work;	/* the ~31s post-O5 VEIP oper-up AVC */
+	/* drives the accepted UNI administrative state onto the ports; runs in
+	 * a work item because the apply sleeps and the OMCI path holds a
+	 * spinlock, and reschedules itself while an apply is still owed */
+	struct delayed_work uni_apply_work;
+	/* ★★ SET ONCE, AT TEARDOWN, BEFORE ANY CANCEL.  The producer graph here
+	 *    CYCLES -- the ISR work re-arms the coldstart work and the AVC, the
+	 *    coldstart work re-arms itself, /proc writes re-arm several -- so no
+	 *    ordering of cancels can be correct on its own: whatever is
+	 *    cancelled last can be re-armed by something cancelled earlier that
+	 *    was already running.  A gate is the only thing that closes a cycle. */
+	bool stopping;
 	unsigned int veip_avc_retry_ms;	/* backoff after a failed AVC TX; 0 = none pending */
 	struct delayed_work coldstart_work;	/* stuck-O1 US-lock-miss recovery */
 	int coldstart_tries;		/* re-rolls THIS stuck episode (reset on leaving O1) */
@@ -879,20 +918,11 @@ struct cortina_gpon {
 	u32 omci_ds_crc_bad;
 	u32 omci_rx_bad_mic;		/* DS frames DISCARDED on an invalid MIC */
 
-	/* Stage D: the OLT-provisioned WAN data path.  The shadow (dt_/dg_)
-	 * survives an O5 exit so a LOS re-range where the OLT does NOT
-	 * re-provision still re-installs (the X111W fiber-pull lesson); an
-	 * on-wire MIB-Reset clears it (fresh provisioning follows). */
-	u16 dt_alloc;			/* data T-CONT alloc-id (OMCI Set/Create ME 262) */
-	u16 dt_inst;			/* ..the ME instance it came on */
-	u16 dg_gem;			/* data GEM port-id (OMCI Create ME 268 attr 1) */
-	/* ★ THE INSTANCE THE GEM CAME ON.  Without it an ME 268 DELETE cannot be
-	 * matched at all: a Delete carries only the class and the instance, never
-	 * the attributes, so a snoop that stored port-id/tcont-ptr/dir but not the
-	 * instance had nothing to compare and could only ignore the message. */
-	u16 dg_inst;			/* ..the ME instance it came on */
-	u16 dg_tcont_ptr;		/* ME 268 attr 2 (diagnostic) */
-	u8 dg_dir;			/* ME 268 attr 3 direction (diagnostic) */
+	/* Desired binding lives only in the common accepted MIB. This identity
+	 * describes actual or partially completed hardware application. */
+	struct omci_data_binding hw_data_binding;
+	bool data_alloc_bound;
+	bool data_alloc_pending; /* write submitted, completion not established */
 	bool data_installed;
 	/* ★ the data rides the OMCC's T-CONT (single-alloc OLT).  A MODE, not a
 	 * failure: the dedicated T-CONT CAM is deliberately left alone and the
@@ -919,12 +949,37 @@ struct cortina_gpon {
 	 * vendor-id/vendor-specific registers and the OMCI responder's ME-256
 	 * serial number: they can no longer disagree by construction.
 	 */
-	struct mutex sn_lock;		/* serializes sn/sn_src/activated + activation */
+	struct mutex sn_lock;		/* activation, queued control, watchdog and AVC */
 	u8 sn[8];			/* wire order: 4 ASCII vendor-id + 4 VSSN bytes */
 	enum cg_sn_src sn_src;
 	bool activated;			/* cg_mac_activate() has run at least once */
 	struct delayed_work sn_wait_work;	/* bounded wait for the board's serial */
 };
+
+/* Arm a worker unless teardown has begun.  -> true if it was armed. */
+static bool cg_sched(struct cortina_gpon *cg, struct delayed_work *w,
+		     unsigned long delay)
+{
+	if (READ_ONCE(cg->stopping))
+		return false;
+	return schedule_delayed_work(w, delay);
+}
+
+static bool cg_sched_mod(struct cortina_gpon *cg, struct delayed_work *w,
+			 unsigned long delay)
+{
+	if (READ_ONCE(cg->stopping))
+		return false;
+	return mod_delayed_work(system_wq, w, delay);
+}
+
+static bool cg_sched_now(struct cortina_gpon *cg, struct work_struct *w)
+{
+	if (READ_ONCE(cg->stopping))
+		return false;
+	return schedule_work(w);
+}
+
 
 static struct cortina_gpon *cg_singleton;
 
@@ -1172,21 +1227,35 @@ MODULE_PARM_DESC(activate, "program the SN + start GPON ranging once the serial 
  * itself: userspace reads the board and pushes the value in.
  *   /etc/init.d/gpon-identity  ->  echo "sn XPON5C6CAFCB" > /proc/gpon
  * The driver holds ranging off until it has a serial number, then programs it and
- * starts the FSM.  If nothing arrives within CG_SN_WAIT_SECS it shouts and ranges
- * with a deliberately non-identity placeholder so the box never silently sits
- * dark; a real serial number arriving later re-activates with it.
+ * starts the FSM.  If nothing arrives within CG_SN_WAIT_SECS it shouts -- and it
+ * STAYS PARKED, because an ONU that does not know who it is may not announce
+ * itself; a real serial number arriving later activates with it.
+ *
+ * ★★★ RANGING IS PERMITTED ONLY ONCE THE SERIAL IS DEFINED (operator,
+ * 2026-09-10: *"tiene que permitir rangear una vez el serial definido"*).
+ * THIS IS A REPAIR, and the thing repaired was here: on the CG_SN_WAIT_SECS
+ * timeout the driver used to install a placeholder --
+ *
+ *	static const u8 cg_sn_unprovisioned[8] =
+ *		{ 'X', 'P', 'O', 'N', 0xff, 0xff, 0xff, 0xff };
+ *
+ * -- and call cg_activate_start() with it, i.e. it RANGED with a serial nobody
+ * had programmed.  The justification written beside it was "never leave the PON
+ * side dark", and that is the wrong trade: a placeholder is not a dark PON, it
+ * is a second ONU on the fibre wearing a made-up identity.  The 0xff half is
+ * the blank-flash/unburnt-efuse value, which is a same-class bug this project
+ * already catalogues, and it slipped past the common "is this serial set?"
+ * predicate because four of its eight bytes are perfectly good ASCII.
+ *
+ * ⇒ The gate is now gpon_sn_is_set() -- the SAME core predicate the Luna family
+ * consults at its own Upstream_Overhead edge (gpon_ploam.c), extended there to
+ * refuse a blank half.  Nothing Cortina-flavoured was written: the decision is
+ * eight bytes of protocol and it has one home.  What is per-family is only WHAT
+ * "parked" means in silicon -- on Luna the core FSM simply does not leave
+ * GPON_O1_INITIAL, and here the hardware FSM is never started, so onu.state
+ * stays 0 = O1 Initial.  Same state, same reason, one predicate.
  */
 #define CG_SN_WAIT_SECS		60
-
-/*
- * The placeholder used when the board's serial number cannot be read at all.
- * Vendor-id "XPON" is the fleet-wide vendor code (not per-unit) so the OLT still
- * logs a parseable unknown ONU; the all-ones VSSN is the blank-flash value and
- * can never be a factory-programmed unit, so this can never be mistaken for -- or
- * collide with -- a provisioned board.  It is always accompanied by a dev_err and
- * by "sn-source = FALLBACK" in /proc/gpon.
- */
-static const u8 cg_sn_unprovisioned[8] = { 'X', 'P', 'O', 'N', 0xff, 0xff, 0xff, 0xff };
 
 static char *cg_sn_param;
 module_param_named(sn, cg_sn_param, charp, 0444);
@@ -1549,7 +1618,7 @@ static int cg_puc_pvtbl_program(struct cortina_gpon *cg, u32 tcont, bool ena)
  * ours flushes while gpon0's carrier is off (nothing enqueues), so the plain
  * flush+poll suffices.
  */
-static void cg_puc_voq_flush(struct cortina_gpon *cg, u32 tcont)
+static int cg_puc_voq_flush(struct cortina_gpon *cg, u32 tcont)
 {
 	u32 q, v;
 
@@ -1557,10 +1626,12 @@ static void cg_puc_voq_flush(struct cortina_gpon *cg, u32 tcont)
 		v = BIT(31) | BIT(16) | ((tcont & 0x1f) << 8) |
 		    ((tcont * CG_PUC_QUEUE_PER_TCONT + q) & 0xff);
 		writel(v, cg->pon + CG_PUC_VOQFLUSH);
-		if (cg_go_poll(cg->pon + CG_PUC_VOQFLUSH, CG_TBL_TRIES, true) < 0)
+		if (cg_go_poll(cg->pon + CG_PUC_VOQFLUSH, CG_TBL_TRIES, true) < 0) {
 			dev_warn(cg->dev, "VoQ %u flush timed out\n",
 				 tcont * CG_PUC_QUEUE_PER_TCONT + q);
-	}
+			return -ETIMEDOUT;
+		}
+	}	return 0;
 }
 
 /*
@@ -1773,6 +1844,13 @@ static void cg_puc_cnt_work(struct work_struct *work)
 	struct cortina_gpon *cg = container_of(to_delayed_work(work),
 					       struct cortina_gpon, puc_cnt_work);
 
+	/* ★ ENTRY GUARD: a worker already running when teardown began keeps
+	 *   going, and its context is about to be freed.  ⚠ THIS ONE DOES NOT
+	 *   RE-ARM INTERRUPTS -- it samples and logs -- so the reason it stops
+	 *   is lifetime, not the interrupt mask. */
+	if (READ_ONCE(cg->stopping))
+		return;
+
 	cg_puc_ctrl_sample(cg);
 }
 
@@ -1784,11 +1862,32 @@ static void cg_puc_cnt_work(struct work_struct *work)
  * only configures + polls.  Serial number / config MUST be written while en=0.
  * (aal_gpon __gpon_common_init + aal_pon_mac_enable_set, GPON branch.)
  */
-static void cg_mac_activate(struct cortina_gpon *cg)
+/*
+ * -> 0 when the call did what the gate asked, a negative errno when it could
+ * not. `*armed` says whether the GO bit was actually asserted THIS call, which
+ * is a different question from rc: deliberately not ranging and re-confirming a
+ * live link are both successful calls that arm nothing. `cg->activated` is set
+ * here from the plan, because this is the only place that has it.
+ *
+ * ⚠ IT RETURNED void UNTIL 2026-09-12 and the BOSA failure was a dev_warn:
+ *   the laser stayed unprogrammed and onu_ctl.en was set anyway, so the board
+ *   announced it was ranging while nothing could burst upstream. A readiness
+ *   that cannot fail is not a readiness.
+ */
+static void cg_ingress_stop(struct cortina_gpon *cg);
+static void cg_transport_down(struct cortina_gpon *cg);
+
+static int cg_mac_activate(struct cortina_gpon *cg, bool identity_changed,
+			   bool *armed)
 {
 	void __iomem *mac = cg->mac;
+	struct gpon_range_request req;
+	struct gpon_range_action act;
 	u32 v;
-	int i;
+	int i, ret;
+
+	if (armed)
+		*armed = false;
 
 	/*
 	 * The PON/GPON reset release (PON_CNTL=0x30e, GPON_CNTL=0x3) happened at
@@ -1798,7 +1897,58 @@ static void cg_mac_activate(struct cortina_gpon *cg)
 	 */
 
 	/*
-	 * De-assert the laser TX-disable net BEFORE programming the BOSA: on
+	 * Program the external GN25L95 BOSA laser driver over per_i2c (bias/
+	 * mod/APD DAC tables, alarm thresholds, TX gate) BEFORE the ranging
+	 * FSM starts: out of power-on reset the BOSA is unprogrammed, the
+	 * upstream laser never bursts and the OLT reports "Laser out".  This
+	 * reproduces the stock boot's rtkbosa init in-kernel.
+	 */
+	/*
+	 * ⚠ THIS FUNCTION IS REACHED ON A LIVE ONU, NOT ONLY AT PROBE: a serial
+	 *   number CHANGED through /proc re-enters here with onu_ctl.en ALREADY
+	 *   SET. So a refusal must CLEAR the GO bit rather than merely decline to
+	 *   set it. The decision is the core's (gpon_range_gate), which is walked
+	 *   over every declared state on x86; this is only the hardware half.
+	 */
+	req.identity_defined = gpon_sn_is_set(cg->sn);
+	req.identity_changed = identity_changed;
+	req.ranging_now = !!(readl(mac + CG_REG_ONU_CTL) & CG_ONU_CTL_EN);
+	req.activation_wanted = cg_activate;
+	req.laser_wanted = cg_do_bosa_init;
+	gpon_range_plan(&req, &act);
+	if (act.quiesce || act.program) {
+		cg_ingress_stop(cg);
+		cg_transport_down(cg);
+	}
+
+	/* FIRST, and before ANY programming: the serial number and the MAC
+	 * config are write-while-en=0, and a live re-provision arrives with en
+	 * set. The laser's own bus traffic waits for this too. */
+	if (act.quiesce) {
+		u32 ctl = readl(mac + CG_REG_ONU_CTL);
+
+		writel(ctl & ~CG_ONU_CTL_EN, mac + CG_REG_ONU_CTL);
+		dev_info(cg->dev, "onu_ctl.en CLEARED (was 0x%08x) before %s\n", ctl,
+			 act.program ? "re-programming this ONU's identity"
+				     : gpon_range_reason_str(act.reason));
+	}
+	if (!act.program) {
+		cg->activated = act.activated;
+		if (act.result)
+			dev_err(cg->dev, "NOT ranging: %s\n",
+				gpon_range_reason_str(act.reason));
+		else
+			dev_info(cg->dev, "not ranging: %s\n",
+				 gpon_range_reason_str(act.reason));
+		return act.result;
+	}
+
+	/*
+	 * De-assert the laser TX-disable net BEFORE programming the BOSA, and
+	 * AFTER the quiesce above -- it is a hardware write like any other, so
+	 * leaving it ahead of the plan made the claimed order false for it and
+	 * drove the pin on the re-confirm path that is supposed to touch
+	 * nothing at all.  On
 	 * stock the GPIO pin-route/drive that pulls the net low is already set
 	 * up when rtkbosa runs (its on-wire init trace reads TX_CTL 0x6e with
 	 * bit7 CLEAR), so the GN25L95's safe-mode start executes with TX_DIS
@@ -1810,18 +1960,13 @@ static void cg_mac_activate(struct cortina_gpon *cg)
 	cg_laser_on(cg);
 	mdelay(10);	/* let the TX_DIS net settle before the i2c stream */
 
-	/*
-	 * Program the external GN25L95 BOSA laser driver over per_i2c (bias/
-	 * mod/APD DAC tables, alarm thresholds, TX gate) BEFORE the ranging
-	 * FSM starts: out of power-on reset the BOSA is unprogrammed, the
-	 * upstream laser never bursts and the OLT reports "Laser out".  This
-	 * reproduces the stock boot's rtkbosa init in-kernel.
-	 */
-	if (cg_do_bosa_init) {
-		if (cg_bosa_init(cg->dev))
-			dev_warn(cg->dev, "BOSA init failed - upstream laser will not burst\n");
-	} else {
-		dev_info(cg->dev, "BOSA init SKIPPED (bosa_init=0) - upstream laser will not burst\n");
+	ret = cg_bosa_init(cg->dev);
+	if (ret) {
+		cg->activated = false;
+		dev_err(cg->dev,
+			"REFUSING to range (%s, %d): nothing is transmitted upstream and onu_ctl.en is clear\n",
+			gpon_range_reason_str(GPON_RANGE_LASER_FAILED), ret);
+		return ret;
 	}
 
 	/* --- config while en=0 (serial number is range-critical) --- */
@@ -1869,6 +2014,9 @@ static void cg_mac_activate(struct cortina_gpon *cg)
 	 * corrupted the DS-PLOAM RX FIFO so the MAC never processed the OLT's ranging
 	 * PLOAMs and the FSM stalled at O1.  Removed (live-verified 2026-07-13). */
 	writel(CG_ONU_CTL_VAL, mac + CG_REG_ONU_CTL);	/* onu_ctl.en @ +0x134 */
+	cg->activated = true;
+	if (armed)
+		*armed = true;
 	/*
 	 * Freeze the SN random-delay engine (vendor aal_pon_mac_enable_set does
 	 * this right after aal_gpon_active_set: "stop random delay calculation
@@ -1881,6 +2029,7 @@ static void cg_mac_activate(struct cortina_gpon *cg)
 	writel(v & ~(CG_MAC_CTRL_SW_RANDOM_EN | CG_MAC_CTRL_PTI_OMCI),
 	       mac + CG_REG_GPON_MAC_CTRL);
 	/* (the laser TX-disable net was de-asserted before the BOSA init above) */
+	return 0;
 }
 
 /*
@@ -1892,17 +2041,64 @@ static void cg_mac_activate(struct cortina_gpon *cg)
  * wrote rather than a literal, so it catches a wrong window base OR a write that
  * did not stick, on any board.
  */
-static void cg_activate_start(struct cortina_gpon *cg)
+/*
+ * -> 0 when ranging was armed, a negative errno when it was NOT.
+ *
+ * ⚠ IT RETURNED void UNTIL 2026-09-12, and cg_sn_set() below returned 0
+ *   regardless -- so a /proc write of a perfectly good serial number reported
+ *   SUCCESS while activation had refused. gpon-identity retries until its
+ *   write succeeds, so that one lie ended the retry: a transient failure (a
+ *   calibration not staged yet, a busy bus) latched the serial forever and
+ *   nothing in the system ever tried again. The identity refusal below is the
+ *   same: it is a state the board can grow out of when a real serial arrives.
+ */
+static int cg_activate_start(struct cortina_gpon *cg, bool identity_changed)
 {
 	char sn_str[13];
+	bool armed = false;
 	u32 vid;
+	int ret;
 
 	gpon_sn_format(cg->sn, sn_str);
+
+	/*
+	 * ★★★ THE IDENTITY GATE, and it is HERE because this is the ONLY
+	 * function that starts ranging -- so no caller, present or future, can
+	 * reach the GO with an undefined serial.  gpon_sn_is_set() is the core's
+	 * predicate, shared with Luna; see the cg_sn_* block above for why the
+	 * placeholder this replaces was a defect and not a safety net.
+	 *
+	 * Parking means NOT setting cg->activated: the MAC's onu_ctl.en is never
+	 * asserted, its FSM stays at onu.state 0 = O1 Initial, and the
+	 * cold-start watchdog (which re-asserts en) is never armed.  Nothing
+	 * upstream is transmitted, which is the only G.984.3 encoding of "I do
+	 * not know who I am".
+	 */
+	if (!gpon_sn_is_set(cg->sn)) {
+		dev_err(cg->dev,
+			"REFUSING to range: %s is not a defined serial number (a 00000000/ffffffff half is blank storage, not an identity) - parked at O1, nothing transmitted. Push this board's own:  echo \"sn <VVVVHHHHHHHH>\" > /proc/gpon\n",
+			sn_str);
+		return -ENXIO;
+	}
+
 	dev_info(cg->dev, "activating with serial number %s (source: %s)\n",
 		 sn_str, cg_sn_src_name[cg->sn_src]);
 
-	cg_mac_activate(cg);
-	cg->activated = true;
+	/*
+	 * ⚠ `activated` IS THE PLAN'S ANSWER, NOT "rc was 0". Deliberately not
+	 *   ranging (activation switched off) is a SUCCESSFUL call that must
+	 *   leave the flag false, and this used to set it true on any rc 0 --
+	 *   so a board that had just been told to stop reported itself ready.
+	 *   cg_mac_activate owns the flag now, because it is the only place that
+	 *   has the plan.
+	 */
+	ret = cg_mac_activate(cg, identity_changed, &armed);
+	if (ret)
+		return ret;
+	if (!cg->activated)
+		return 0;	/* deliberately not ranging: nothing to supervise */
+	if (!armed)
+		return 0;	/* already ranging with this identity: untouched */
 
 	vid = readl(cg->mac + CG_REG_VENDOR);
 	if (vid != cg_sn_word(cg->sn))
@@ -1929,7 +2125,8 @@ static void cg_activate_start(struct cortina_gpon *cg)
 	 * the same reason as in cg_datapath_reset: a re-activation on a LIVE link
 	 * (a serial-number change through /proc) must get the full 15 s grace, not
 	 * whatever is left of the pending post-O5 supervisor's deadline. */
-	mod_delayed_work(system_wq, &cg->coldstart_work, 15 * HZ);
+	cg_sched_mod(cg, &cg->coldstart_work, 15 * HZ);
+	return 0;
 }
 
 /*
@@ -1943,6 +2140,30 @@ static void cg_activate_start(struct cortina_gpon *cg)
  * late is applied by re-running it -- but only when it actually DIFFERS, so a
  * duplicate provisioning write never disturbs a healthy link.
  */
+static int cg_identity_prepare(struct cortina_gpon *cg);
+static void cg_datapath_reset(struct cortina_gpon *cg);
+
+/* Caller holds sn_lock, including before removing an event from the ring. */
+static void cg_ingress_stop(struct cortina_gpon *cg)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cg->evt_lock, flags);
+	cg->ingress_open = false;
+	cg->ingress_generation++;
+	cg->evt_tail = cg->evt_head;
+	spin_unlock_irqrestore(&cg->evt_lock, flags);
+}
+
+static void cg_ingress_start(struct cortina_gpon *cg)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cg->evt_lock, flags);
+	cg->ingress_open = cg->activated;
+	spin_unlock_irqrestore(&cg->evt_lock, flags);
+}
+
 static int cg_sn_set(struct cortina_gpon *cg, const char *s, enum cg_sn_src src)
 {
 	u8 sn[8];
@@ -1956,6 +2177,18 @@ static int cg_sn_set(struct cortina_gpon *cg, const char *s, enum cg_sn_src src)
 			s ? s : "");
 		return ret;
 	}
+	/*
+	 * ★ WELL-FORMED IS NOT DEFINED.  "XPONFFFFFFFF" parses perfectly -- four
+	 * vendor characters and eight hex digits -- and is still a blank half.
+	 * Refuse it BEFORE it is latched, so the identity in force (possibly a
+	 * healthy one, on a live O5 link) is left exactly as it was; that is the
+	 * same contract gpon_sn_parse() keeps for a malformed string.
+	 */
+	if (!gpon_sn_is_set(sn)) {
+		dev_err(cg->dev, "rejected GPON serial number \"%s\": a 00000000/ffffffff half is blank storage, not this board's identity - ranging stays parked at O1\n",
+			s ? s : "");
+		return -EINVAL;
+	}
 
 	mutex_lock(&cg->sn_lock);
 	changed = cg->sn_src == CG_SN_NONE || memcmp(cg->sn, sn, sizeof(sn));
@@ -1963,47 +2196,88 @@ static int cg_sn_set(struct cortina_gpon *cg, const char *s, enum cg_sn_src src)
 	cg->sn_src = src;
 	gpon_sn_format(cg->sn, sn_str);
 
-	if (!cg_activate)
-		dev_info(cg->dev, "serial number %s latched (source: %s); activate=0, not ranging\n",
+	/*
+	 * ⚠ NO SHORTCUTS HERE. This used to decide for itself whether anything
+	 *   needed doing -- `if (!cg_activate)` and `else if (activated &&
+	 *   !changed)` -- and those two branches bypassed the gate entirely. A
+	 *   NEW serial pushed with activate=0 then latched into cg->sn while the
+	 *   hardware kept ranging under the OLD identity with en still set: the
+	 *   driver reported one identity and the fibre carried another. And a
+	 *   re-confirmed serial with the laser switched off left a live link up.
+	 *
+	 *   The healthy duplicate no-op is not lost: it is the gate's UNCHANGED
+	 *   arm, which touches no hardware at all. What changed is WHO decides.
+	 *
+	 * ⚠ SCOPE, STATED HONESTLY: both knobs are module parameters at 0444, so
+	 *   they cannot change while the driver runs and the divergent states
+	 *   above are not reachable on a shipped board today. This is INVARIANT
+	 *   HARDENING -- one place decides -- and not the repair of a measured
+	 *   live regression. It is recorded that way so nobody later cites it as
+	 *   a fixed field fault.
+	 */
+	if (cg->activated && changed)
+		dev_warn(cg->dev, "serial number CHANGED to %s (source: %s) - re-ranging\n",
 			 sn_str, cg_sn_src_name[src]);
-	else if (cg->activated && !changed)
-		dev_info(cg->dev, "serial number %s re-confirmed (source: %s) - link untouched\n",
-			 sn_str, cg_sn_src_name[src]);
-	else {
-		if (cg->activated)
-			dev_warn(cg->dev, "serial number CHANGED to %s (source: %s) - re-ranging\n",
-				 sn_str, cg_sn_src_name[src]);
-		cancel_delayed_work(&cg->sn_wait_work);
-		cg_activate_start(cg);
+	cancel_delayed_work(&cg->sn_wait_work);
+	/* A failed cleanup keeps the old model identity. A retry with the same
+	 * newly latched serial must finish that cleanup before activation. */
+	if (changed || (cg->omci_initialized &&
+			memcmp(cg->omci->sn, cg->sn, sizeof(cg->sn)))) {
+		ret = cg_identity_prepare(cg);
+		if (ret)
+			goto out;
 	}
+	ret = cg_activate_start(cg, changed);
+	cg_ingress_start(cg);
+out:
 	mutex_unlock(&cg->sn_lock);
-	return 0;
+	/*
+	 * ⚠ THE SERIAL IS LATCHED EITHER WAY, AND THAT IS DELIBERATE: it parsed,
+	 *   it is defined, and it is this board's identity whether or not the
+	 *   laser was ready this second. What the caller is told is whether
+	 *   RANGING STARTED, because that is what its retry is for.
+	 */
+	return ret;
 }
 
 /*
- * Nothing provisioned a serial number in time.  Never leave the PON side dark
- * and never guess this board's identity: shout, range with the non-identity
- * placeholder so the failure is visible at the OLT too, and stay ready for the
- * real serial number (a later /proc write re-ranges with it).
+ * Nothing provisioned a serial number in time.  SAY SO, LOUDLY, AND STAY
+ * PARKED: this ONU does not know who it is, and G.984.3 has no encoding for
+ * that other than silence.  A later /proc write activates with the real one.
+ *
+ * ★★★ THIS FUNCTION IS THE DEFECT THE 2026-09-10 RULING NAMES.  It used to
+ * memcpy() an { 'X','P','O','N', 0xff,0xff,0xff,0xff } placeholder into cg->sn
+ * and call cg_activate_start(), so a board whose provisioning script lost its
+ * race announced a made-up identity on a shared PON.  The reasoning written
+ * here -- "never leave the PON side dark" -- treated a placeholder as the safe
+ * side of the trade.  It is not: dark is a board nobody can see, a placeholder
+ * is a board pretending to be somebody.  Only the second one can collide.
+ *
+ * ⚠ AND IT IS NOT A SILENT STALL.  The dev_err below names the reason and the
+ * command that fixes it, /proc/gpon reports `sn = (not provisioned)` with
+ * `sn-source = NONE (ranging not started: no defined serial number)`, and the
+ * MAC's own onu.state stays 0 = O1 Initial, readable in the same file.
  */
 static void cg_sn_wait_work(struct work_struct *work)
 {
 	struct cortina_gpon *cg = container_of(to_delayed_work(work),
 					       struct cortina_gpon, sn_wait_work);
-	char sn_str[13];
+
+	/* ★ ENTRY GUARD: a worker already running when teardown began keeps
+	 *   going, and its context is about to be freed.  ⚠ THIS ONE DOES NOT
+	 *   RE-ARM INTERRUPTS -- it samples and logs -- so the reason it stops
+	 *   is lifetime, not the interrupt mask. */
+	if (READ_ONCE(cg->stopping))
+		return;
 
 	mutex_lock(&cg->sn_lock);
 	if (cg->sn_src != CG_SN_NONE) {		/* raced with a provisioning write */
 		mutex_unlock(&cg->sn_lock);
 		return;
 	}
-	memcpy(cg->sn, cg_sn_unprovisioned, sizeof(cg->sn));
-	cg->sn_src = CG_SN_FALLBACK;
-	gpon_sn_format(cg->sn, sn_str);
 	dev_err(cg->dev,
-		"NO per-board GPON serial number after %ds: is /etc/init.d/gpon-identity running, and is ubi0:ubi_Config mountable? Ranging with the placeholder %s - this is NOT this board's identity, the OLT will not admit it. Push the real one:  echo \"sn <VVVVHHHHHHHH>\" > /proc/gpon\n",
-		CG_SN_WAIT_SECS, sn_str);
-	cg_activate_start(cg);
+		"NO per-board GPON serial number after %ds: is /etc/init.d/gpon-identity running, and is ubi0:ubi_Config mountable? PARKED at O1 and transmitting NOTHING - an ONU that does not know its identity may not announce one. Push the real one:  echo \"sn <VVVVHHHHHHHH>\" > /proc/gpon\n",
+		CG_SN_WAIT_SECS);
 	mutex_unlock(&cg->sn_lock);
 }
 
@@ -2186,16 +2460,38 @@ static void cg_coldstart_work(struct work_struct *work)
 {
 	struct cortina_gpon *cg = container_of(to_delayed_work(work),
 					       struct cortina_gpon, coldstart_work);
-	u32 onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
-	u32 rgb8 = readl(cg->pon + CG_PSDS_RGB8);
-	u8 state = CG_ONU_STATE(onu);
-	bool ds_locked = cg_psds_ds_locked(rgb8);
+	u32 onu, rgb8;
+
+	u8 state;
+	bool ds_locked;
+
+	mutex_lock(&cg->sn_lock);
+	/* ★ THE GUARD IS INSIDE THE LOCK, and that is the whole point.  Read
+	 *   before taking it, this worker could see `not stopping`, be
+	 *   preempted, let teardown take the lock, set the flag and mask the
+	 *   interrupts, and then acquire the lock and re-arm the hardware it had
+	 *   already decided to touch.  Teardown sets the flag UNDER this same
+	 *   lock, so checking it here is an exclusion and not a hint. */
+	if (READ_ONCE(cg->stopping))
+		goto out;
+	if (cg->omci_initialized && memcmp(cg->omci->sn, cg->sn, sizeof(cg->sn))) {
+		if (!cg_identity_prepare(cg)) {
+			cg_activate_start(cg, true);
+			cg_ingress_start(cg);
+		}
+		cg_sched(cg, &cg->coldstart_work, 3 * HZ);
+		goto out;
+	}
+	onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
+	rgb8 = readl(cg->pon + CG_PSDS_RGB8);
+	state = CG_ONU_STATE(onu);
+	ds_locked = cg_psds_ds_locked(rgb8);
 
 	if (state != 0) {			/* left O1: ranging is progressing */
 		cg->coldstart_tries = 0;	/* fresh episode = fresh fast budget */
 		if (state != CG_STATE_OPERATION) {
-			schedule_delayed_work(&cg->coldstart_work, 5 * HZ);
-			return;
+			cg_sched(cg, &cg->coldstart_work, 5 * HZ);
+			goto out;
 		}
 		/*
 		 * O5 reached: this work does NOT stop, it becomes the slow
@@ -2256,10 +2552,10 @@ static void cg_coldstart_work(struct work_struct *work)
 			if (!cg->puc_ready)
 				cg_puc_init(cg);
 		}
-		schedule_work(&cg->isr_work);
-		schedule_delayed_work(&cg->coldstart_work,
+		cg_sched_now(cg, &cg->isr_work);
+		cg_sched(cg, &cg->coldstart_work,
 				      CG_O5_SUPERVISOR_SECS * HZ);
-		return;
+		goto out;
 	}
 	if (!ds_locked) {
 		/* No DS frame lock: the RX is still settling (cold boot) OR the
@@ -2269,8 +2565,8 @@ static void cg_coldstart_work(struct work_struct *work)
 		 * LOS/fiber-pull re-range.  The observed cold-start wedge ALWAYS
 		 * has DS LOCKED (rgb8=0x19c00), so only wait here: bounded rate,
 		 * never give up, until either light returns or DS locks. */
-		schedule_delayed_work(&cg->coldstart_work, 3 * HZ);
-		return;
+		cg_sched(cg, &cg->coldstart_work, 3 * HZ);
+		goto out;
 	}
 	/* state O1 with DS LOCKED = the stuck-O1 signature (no US PLOAM/burst). */
 	if (!cg_coldstart_wd) {
@@ -2278,8 +2574,8 @@ static void cg_coldstart_work(struct work_struct *work)
 		 * re-roll — the pre-watchdog wedge.  Flipping the param live
 		 * (/sys/module/.../coldstart_wd) lets the SAME wedged boot then
 		 * recover, isolating the re-roll as the fix. */
-		schedule_delayed_work(&cg->coldstart_work, 16 * HZ);
-		return;
+		cg_sched(cg, &cg->coldstart_work, 16 * HZ);
+		goto out;
 	}
 	cg->coldstart_tries++;
 	cg->coldstart_rolls++;
@@ -2295,17 +2591,22 @@ static void cg_coldstart_work(struct work_struct *work)
 	 * gearbox/framer + a clean SN/ranging re-arm.  Each attempt is
 	 * internally bounded (SerDes lock poll <=1 s, activate DS-wait <=8 s),
 	 * so the cadence below bounds the retry RATE; nothing bounds the count. */
+	cg_ingress_stop(cg);
+	cg_datapath_reset(cg);
 	cg_glb_reset(cg);
 	cg_psds_init(cg);
 	cg_mac_intr_arm(cg);	/* the GTC reset cleared the MAC int enables */
 	/* sn_lock so a serial number arriving from userspace mid-re-roll cannot be
 	 * half-applied: cg_mac_activate programs the identity out of cg->sn. */
-	mutex_lock(&cg->sn_lock);
-	cg_mac_activate(cg);	/* re-config + re-assert onu_ctl.en (SN/ranging) */
-	mutex_unlock(&cg->sn_lock);
-	schedule_delayed_work(&cg->coldstart_work,
+	/* re-config + re-assert onu_ctl.en. ⚠ BOTH DIRECTIONS: the first cut
+	 * cleared `activated` on failure and never set it again, so one failed
+	 * roll made every later SUCCESSFUL one read as not-activated. */
+	cg_mac_activate(cg, true, NULL);	/* same identity, retained MIB */
+	cg_ingress_start(cg);
+	cg_sched(cg, &cg->coldstart_work,
 			      cg->coldstart_tries >= CG_COLD_FAST_TRIES ?
-			      60 * HZ : 16 * HZ);
+			      60 * HZ : 16 * HZ);out:
+	mutex_unlock(&cg->sn_lock);
 }
 
 /*
@@ -2439,15 +2740,22 @@ static int cg_ind_timed_out(struct cortina_gpon *cg,
  * contract is kept as it was: any failure is -ETIMEDOUT.)
  */
 static int cg_tcont_cam_rmw(struct cortina_gpon *cg, u32 alloc,
-			    u32 clr, u32 set, const char *who)
+			    u32 clr, u32 set, const char *who, bool *write_issued)
 {
 	struct hwio io = cg_mac_io(cg);
 	u32 stuck = 0;
 
+	if (write_issued)
+		*write_issued = false;
 	alloc = gpon_gem_us_alloc_id(alloc);
 	if (gpon_ind_rmw(&io, &cg_tcont_cam_tbl, alloc, clr, set,
-			 ca_pause_none, &stuck) == 0)
+			 ca_pause_none, &stuck) == 0) {
+		if (write_issued)
+			*write_issued = true;
 		return 0;
+	}
+	if (write_issued)
+		*write_issued = !!(stuck & CG_TBL_WR);
 	cg_ind_timed_out(cg, &cg_tcont_cam_tbl, stuck);
 	if (who && (stuck & CG_TBL_WR))
 		dev_warn_ratelimited(cg->dev,
@@ -2554,7 +2862,8 @@ static int cg_us_gem_stamp_range(struct cortina_gpon *cg,
  * the OLT has since reassigned, which is exactly the hazard cg_omcc_tcont_bind
  * documents.  Say so to the caller; what the caller then does is its own call.
  */
-static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
+static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc,
+			   bool *write_issued)
 {
 	/* masked HERE too, not only inside the helper: the dev_info below prints
 	 * this value, and it printed the MASKED one before the extraction. */
@@ -2563,7 +2872,7 @@ static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
 			     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN |
 			     CG_TCONT_INDEX_MASK,	/* clear */
 			     0,				/* set nothing */
-			     NULL))			/* both callers dev_err on the
+			     NULL, write_issued))	/* both callers dev_err on the
 							 * failure themselves */
 		return -ETIMEDOUT;
 	dev_info(cg->dev, "T-CONT CAM[alloc %u] invalidated (stale)\n", alloc);
@@ -2594,6 +2903,8 @@ static int cg_tcont_unbind(struct cortina_gpon *cg, u32 alloc)
 static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 {
 	u16 old = cg->omcc_alloc;
+	bool write_issued = false;
+	int ret;
 
 	/* masked HERE too: alloc_id is printed, warned on and stored in the
 	 * shadow below, and all of those saw the MASKED value before. */
@@ -2603,24 +2914,44 @@ static int cg_omcc_tcont_bind(struct cortina_gpon *cg, u32 alloc_id)
 	 * live and able to burst into the reassigned grant slot.  The explicit
 	 * validity flag says exactly what was meant.  Behaviour is unchanged for
 	 * every non-zero id. */
-	/* A failure here is REPORTED but does not abort the rebind: the stale
-	 * entry is a hazard, and having no OMCC bound at all is a worse one --
-	 * that is no OMCI and therefore no service.  Loud, and it continues. */
-	if (cg->omcc_alloc_valid && old != alloc_id &&
-	    cg_tcont_unbind(cg, old))
-		dev_err(cg->dev,
-			"T-CONT CAM[alloc %u] could NOT be invalidated; it stays armed and may burst into the slot reassigned to alloc %u\n",
-			old, alloc_id);
+	/* Keep ownership of the old CAM until its invalidation completes.
+	 * A later supervisor attempt retries retirement before the new bind. */
+	if ((cg->omcc_alloc_valid || cg->omcc_alloc_pending) && old != alloc_id) {
+		ret = cg_tcont_unbind(cg, old, &write_issued);
+		if (ret) {
+			if (write_issued) {
+				cg->omcc_alloc_valid = false;
+				cg->omcc_alloc_pending = true;
+			}
+			cg_transport_down(cg);
+			dev_err(cg->dev,
+				"T-CONT CAM[alloc %u] could NOT be invalidated; retaining it for retry before binding alloc %u\n",
+				old, alloc_id);
+			return ret;
+		}
+		cg->omcc_alloc_valid = false;
+		cg->omcc_alloc_pending = false;
+		cg_transport_down(cg);
+	}
 
 	/* index = 0 (the OMCC T-CONT), omci_en + ploam_en on.  "OMCC" is the
 	 * label that keeps this site's two DISTINCT timeout messages -- read
 	 * half vs write half -- which a bare -ETIMEDOUT could not tell apart. */
-	if (cg_tcont_cam_rmw(cg, alloc_id,
-			     CG_TCONT_INDEX_MASK,		/* clear */
-			     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN,
-			     "OMCC"))
-		return -ETIMEDOUT;
+	ret = cg_tcont_cam_rmw(cg, alloc_id,
+			       CG_TCONT_INDEX_MASK,		/* clear */
+			       CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN,
+			       "OMCC", &write_issued);
+	if (ret) {
+		if (write_issued) {
+			cg->omcc_alloc = alloc_id;
+			cg->omcc_alloc_valid = false;
+			cg->omcc_alloc_pending = true;
+		}
+		cg_transport_down(cg);
+		return ret;
+	}
 
+	cg->omcc_alloc_pending = false;
 	cg->omcc_alloc = alloc_id;
 	cg->omcc_alloc_valid = true;	/* set ONLY here, after both table ops
 					 * succeeded: a bind that timed out leaves
@@ -2709,6 +3040,7 @@ static void cg_data_armed(const struct cortina_gpon *cg,
 			  struct gpon_data_armed *a)
 {
 	a->alloc = cg->hw_data_alloc;
+	a->alloc_bound = cg->data_alloc_bound || cg->data_alloc_pending;
 	a->gem = cg->hw_data_gem;
 	a->rides_omcc = cg->data_rides_omcc;
 	a->installed = cg->data_installed;
@@ -2724,7 +3056,88 @@ static void cg_data_armed(const struct cortina_gpon *cg,
  * decides WHEN this fires (only a genuine alloc/gem change or an OLT deprovision
  * — never a same-{alloc,gem} re-range).  Runs in the isr_work context.
  */
-static void cg_data_teardown(struct cortina_gpon *cg)
+
+/*
+ * The board's UNI panel, read from its own device tree.
+ *
+ * ★ IT IS PER BOARD AND IT IS NOT COMPUTABLE.  Both boards on this bench
+ *   report four PPTP Ethernet UNIs, and their PhysicalPortId runs 3,2,1,0 on
+ *   the X400AXF against 0,1,2,3 on the G24W -- OPPOSITE orders -- while the
+ *   G24W numbers its fourth instance 0x0401 and carries SIX UNI-Gs against its
+ *   four Ethernet UNIs.  Nothing here may derive one list from the other.
+ *
+ * ★ A BOARD THAT DECLARES NOTHING KEEPS THE CORE'S SINGLE-UNI DEFAULT, which
+ *   is what every board had before this and is never a silent downgrade: the
+ *   node is the declaration, and half a node is refused rather than guessed.
+ */
+/* This board's declared Ethernet UNIs, as SWITCH PORT indices, in the same
+ * order as the instance list.  Empty means the administrative state is
+ * modelled and answered but never applied -- said out loud, never guessed. */
+static u8 cg_uni_port[OMCI_UNI_MAX];
+static u8 cg_uni_port_n;
+
+static void cg_omci_declare_uni_panel(struct omci_onu *onu, struct device *dev)
+{
+	struct device_node *np = of_find_node_by_path("/omci-uni");
+	const void *pptp, *unig, *cap, *ports, *type;
+	int pptp_len = -1, type_len = -1, unig_len = -1, cap_len = -1, ports_len = -1;
+	const char *why = "";
+	enum omci_uni_decl decl;
+
+	if (!np)
+		return;
+	pptp = of_get_property(np, "ethernet-uni-instances", &pptp_len);
+	unig = of_get_property(np, "uni-g-instances", &unig_len);
+	cap = of_get_property(np, "uni-g-management-capability", &cap_len);
+	/* ★ THE SWITCH PORT PER INSTANCE, FROM THE BOARD -- never computed.
+	 *   This board's own mapper answers 0x0101->3 0x0102->2 0x0103->1
+	 *   0x0104->0; the G24W's answers 0x0101->0 .. 0x0401->3.  Opposite
+	 *   orders, one of them with a non-contiguous instance id, so nothing
+	 *   may derive one from the other and the low byte identifies neither. */
+	ports = of_get_property(np, "ethernet-uni-ports", &ports_len);
+	/* ★ THE PLUG-IN TYPE PER INSTANCE, FROM THE BOARD -- never computed.
+	 *   G.988 Expected/Sensed type states what the UNI IS, so a fixed
+	 *   integrated port answers the same byte with its link down; both Luna
+	 *   boards report 47 for their GE port and 24 for every FE one, and the
+	 *   model answered a single 47 for all of them. */
+	type = of_get_property(np, "ethernet-uni-types", &type_len);
+	/* ⚠ THE RETURNED LENGTH IS THE ANSWER, NOT THE POINTER.  of_get_property
+	 * leaves the length untouched when a property is ABSENT (so it stays
+	 * -1), and a PRESENT but empty one reports length 0 with a value
+	 * pointer that may legitimately be NULL.  Folding NULL back into -1
+	 * would re-create, out here, exactly the empty-versus-absent confusion
+	 * the core decoder exists to settle. */
+	/* The BYTES go to the core, which owns every length rule.  Reading the
+	 * properties as typed arrays here is what put four identical
+	 * malformed-input defects in both families at once: an odd byte count
+	 * silently lost its tail, a short or long capability list silently
+	 * became all-ones or was truncated, and an empty list was rejected as
+	 * absent -- restoring an instance the board does not have. */
+	decl = omci_onu_declare_unis_be(onu, pptp, pptp_len, type, type_len,
+					unig, unig_len, cap, cap_len, &why);
+	if (decl == OMCI_UNI_DECL_BAD)
+		dev_err(dev, "/omci-uni REFUSED: %s -- keeping the single-UNI default\n",
+			why);
+	cg_uni_port_n = 0;
+	if (decl == OMCI_UNI_DECL_OK && pptp_len) {
+		/* one byte per declared Ethernet UNI, in the SAME order.  Absent
+		 * or the wrong length, the administrative state is still
+		 * MODELLED and answered -- it is simply never APPLIED, and that
+		 * is said out loud rather than guessed at. */
+		if (ports && ports_len == pptp_len / 2 &&
+		    ports_len <= (int)ARRAY_SIZE(cg_uni_port)) {
+			memcpy(cg_uni_port, ports, ports_len);
+			cg_uni_port_n = (u8)ports_len;
+		} else {
+			dev_warn(dev,
+				 "/omci-uni has no usable ethernet-uni-ports (%d bytes for %d UNIs): the administrative state will be modelled and NEVER APPLIED\n",
+				 ports_len, pptp_len / 2);
+		}
+	}
+	of_node_put(np);
+}
+
+static int cg_data_teardown(struct cortina_gpon *cg)
 {
 	const struct gpon_gem_us_range *us_slots = &cg_us_data_slots;
 	struct hwio io = cg_mac_io(cg);
@@ -2732,88 +3145,66 @@ static void cg_data_teardown(struct cortina_gpon *cg)
 	struct gpon_data_armed armed;
 	struct gpon_data_undo undo;
 	u32 i;
+	int ret;
 
-	/*
-	 * ★ WHICH STEPS APPLY IS THE CORE'S; THE ORDER AND THE REGISTERS ARE
-	 * OURS.  Both guards below are one protocol invariant -- THE OMCC'S
-	 * T-CONT IS SACRED -- which this function used to restate imperatively
-	 * twice, in two different spellings, 28 lines apart.  It now comes back
-	 * as data from gpon_data_undo_plan(), and the drain-then-clear ORDER
-	 * stays here because gpon_gem_us.c:196-200 records it as a hardware
-	 * requirement the core may not own.
-	 */
+	if (!cg->data_alloc_bound && !cg->data_alloc_pending)
+		return 0;
+	cg->data_installed = false;
+	if (cg->wan_ndev)
+		netif_carrier_off(cg->wan_ndev);
 	cg_data_armed(cg, &armed);
 	gpon_data_undo_plan(&armed, cg->omcc_alloc, &undo);
-
-	/*
-	 * ★ THE TEARDOWN MUST UNDO WHAT THE INSTALL ACTUALLY DID, and in
-	 * ride-the-OMCC mode that is a DIFFERENT T-CONT and a DIFFERENT slot
-	 * run.  Deriving it from the same core call as the install keeps one
-	 * source of truth — a second copy of the split here would rot the day
-	 * the reserved count changes.
-	 */
 	if (cg->data_rides_omcc &&
 	    gpon_gem_us_ride_range(&cg_us_omcc_slots, &ride))
 		us_slots = &ride;
-
-	/* 1. drain/disable the data T-CONT's VoQs before touching the CAM.
-	 * ★ NEVER in ride mode: those VoQs belong to the OMCC's T-CONT, and
-	 * disabling its pvtbl would take OMCI and PLOAM down with the data
-	 * path.  Clearing the port stamps in step 2 is what stops the data
-	 * GEM riding; the queues themselves must stay served.  (undo.drain_tcont
-	 * IS that rule, decided in the core.) */
 	if (undo.drain_tcont) {
-		cg_puc_pvtbl_program(cg, CG_DATA_TCONT_IDX, false);
-		cg_puc_voq_flush(cg, CG_DATA_TCONT_IDX);
+		ret = cg_puc_pvtbl_program(cg, CG_DATA_TCONT_IDX, false);
+		if (ret)
+			goto failed;
+		ret = cg_puc_voq_flush(cg, CG_DATA_TCONT_IDX);
+		if (ret)
+			goto failed;
 	}
-
-	/* 2. clear the US GEM port stamps for the data VoQs (8..15), walking the
-	 * declared data slot run.  This is a WHOLE-REGISTER write and not the
-	 * read-modify-write the install path uses — US_PORT_DATA is id[11:0] and
-	 * nothing else, so the two are equivalent here; the asymmetry is
-	 * pre-existing and deliberately left as it was: gpon_ind_set() here,
-	 * gpon_ind_rmw() in cg_us_gem_stamp_range(), the same table
-	 * (cg_us_port_tbl) and the same bus stream each loop always emitted
-	 * (2026-09-05).  A stuck slot still stops the walk, after the same
-	 * "indirect access ... timed out" line cg_tbl_op_at() printed. */
 	for (i = 0; i < us_slots->count; i++) {
 		u32 stuck = 0;
 
-		if (gpon_ind_set(&io, &cg_us_port_tbl,
-				 gpon_gem_us_index(us_slots, i),
-				 GPON_GEM_US_PORT_NONE, ca_pause_none, &stuck)) {
+		ret = gpon_ind_set(&io, &cg_us_port_tbl,
+			gpon_gem_us_index(us_slots, i), GPON_GEM_US_PORT_NONE,
+			ca_pause_none, &stuck);
+		if (ret) {
 			cg_ind_timed_out(cg, &cg_us_port_tbl, stuck);
-			break;
+			goto failed;
 		}
 	}
-
-	/* 3. invalidate the DS GEM CAM (unicast data GEM + the broadcast GEM) */
-	if (undo.unbind_gem)
-		cg_ds_gem_unbind(cg, cg->hw_data_gem);
-	cg_ds_gem_unbind(cg, CG_MCAST_GEM_ID);
-
-	/* 4. finally invalidate the data T-CONT CAM entry — but NEVER the OMCC's:
-	 * on a single-alloc OLT the data path rides the OMCC alloc and its
-	 * T-CONT (index 0) must stay armed for OMCI/PLOAM. */
-	if (undo.unbind_alloc && cg_tcont_unbind(cg, cg->hw_data_alloc))
-		dev_err(cg->dev,
-			"data T-CONT CAM[alloc %u] could NOT be invalidated; the teardown below is INCOMPLETE\n",
-			cg->hw_data_alloc);
-
-	dev_info(cg->dev, "data path torn down (alloc %u, gem %u): VoQs drained, CAM cleared\n",
-		 cg->hw_data_alloc, cg->hw_data_gem);
+	if (undo.unbind_gem) {
+		ret = cg_ds_gem_unbind(cg, cg->hw_data_gem);
+		if (ret)
+			goto failed;
+	}
+	ret = cg_ds_gem_unbind(cg, CG_MCAST_GEM_ID);
+	if (ret)
+		goto failed;
+	if (undo.unbind_alloc) {
+		ret = cg_tcont_unbind(cg, cg->hw_data_alloc, NULL);
+		if (ret)
+			goto failed;
+	}
+	/* PON tables are retired. NI accelerator flush completion is a separate
+	 * contract: its current void notification cannot certify cache removal. */
+	cortina_ni_gpon_data_path_set(0, 0);
+	cortina_ni_pon_data_set_tcont(CG_DATA_TCONT_IDX);
+	cg->data_alloc_bound = false;
+	cg->data_alloc_pending = false;
 	cg->hw_data_alloc = 0;
 	cg->hw_data_gem = 0;
 	cg->data_rides_omcc = false;
-	/* the L3FE US hit-action must stop targeting the stale GEM */
-	cortina_ni_gpon_data_path_set(0, 0);
-	/* and TX goes back to the dedicated T-CONT, so a later re-provision on a
-	 * distinct alloc is not still steered at the OMCC's.  ★ Named with the
-	 * GPON shell's own constant, not the NI's CA_NI_PON_DATA_TCONT: this
-	 * file does not include cortina-ni-regs.h, and the shell is the side
-	 * that DECIDES the T-CONT — the NI merely follows what it is told, on
-	 * install and on teardown alike. */
-	cortina_ni_pon_data_set_tcont(CG_DATA_TCONT_IDX);
+	memset(&cg->hw_data_binding, 0, sizeof(cg->hw_data_binding));
+	return 0;
+failed:
+	dev_warn_ratelimited(cg->dev,
+		"data PON withdrawal failed (%d), retaining alloc %u/gem %u for retry\n",
+		ret, cg->hw_data_alloc, cg->hw_data_gem);
+	return ret;
 }
 
 /*
@@ -2836,16 +3227,18 @@ static void cg_data_teardown(struct cortina_gpon *cg)
  * same-{alloc,gem} state matches exactly and takes no branch (no HW writes ->
  * no re-provision churn — the proven LOS/fiber-pull keep-path).
  */
-static void cg_data_try_install(struct cortina_gpon *cg)
+static void cg_data_try_install(struct cortina_gpon *cg,
+				const struct omci_data_binding *binding)
 {
-	u32 alloc = READ_ONCE(cg->dt_alloc);
-	u32 gem = READ_ONCE(cg->dg_gem);
+	u32 alloc = binding->alloc_id;
+	u32 gem = binding->gem_present ? binding->gem_port : 0;
 	const struct gpon_gem_us_range *us_slots = &cg_us_data_slots;
 	u32 us_tcont = CG_DATA_TCONT_IDX;
 	bool rides_omcc = false;
 	struct gpon_gem_us_range ride;
 	struct gpon_data_armed armed;
 	struct gpon_data_want want;
+	enum gpon_data_plan plan;
 	u32 i;
 
 	/*
@@ -2878,23 +3271,26 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 	 */
 	cg_data_armed(cg, &armed);
 	want.alloc = (u16)alloc;
+	want.alloc_known = binding->alloc_known;
 	want.gem = (u16)gem;
 	want.omcc_alloc = cg->omcc_alloc;
 	want.omcc_up = cg->omcc_up;
 
-	switch (gpon_data_plan_decide(&armed, &want)) {
-	case GPON_DATA_WAIT:		/* no OMCC yet, or nothing provisioned */
-	case GPON_DATA_KEEP:		/* the proven LOS/fiber-pull keep-path:
-					 * no HW writes, no re-provision churn */
+	plan = gpon_data_plan_decide(&armed, &want);
+	switch (plan) {
+	case GPON_DATA_WAIT:
+		return;
+	case GPON_DATA_KEEP:
+		/* Logical ME provenance changed without changing the effective path. */
+		cg->hw_data_binding = *binding;
 		return;
 	case GPON_DATA_TEARDOWN:	/* deprovisioned: undo, nothing follows */
 		cg_data_teardown(cg);
-		cg->data_installed = false;
 		return;
 	case GPON_DATA_REPLACE:		/* a DIFFERENT identity is armed: the
 					 * stale CAM goes FIRST, then install */
-		cg_data_teardown(cg);
-		cg->data_installed = false;
+		if (cg_data_teardown(cg))
+			return;
 		break;
 	case GPON_DATA_INSTALL:
 		break;
@@ -2982,18 +3378,38 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 		 * failed install does get another attempt.  Whether that is
 		 * sufficient recovery is NOT established here -- it is a claim
 		 * nobody has measured, and it should not be written as if it were. */
-		if (cg_tcont_cam_rmw(cg, alloc,
-				     CG_TCONT_INDEX_MASK,	/* clear */
-				     CG_TCONT_INDEX(CG_DATA_TCONT_IDX) |
-				     CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN,
-				     NULL))
-			return;
+		{
+			bool write_issued;
+			int ret = cg_tcont_cam_rmw(cg, alloc, CG_TCONT_INDEX_MASK,
+				CG_TCONT_INDEX(CG_DATA_TCONT_IDX) |
+				CG_TCONT_OMCI_EN | CG_TCONT_PLOAM_EN,
+				NULL, &write_issued);
+
+			if (ret) {
+				/* A write timeout is not proof that the CAM stayed empty. */
+				if (write_issued) {
+					cg->data_alloc_pending = true;
+					cg->hw_data_alloc = gpon_gem_us_alloc_id(alloc);
+					cg->hw_data_gem = gpon_gem_us_port_id(gem);
+					cg->data_rides_omcc = false;
+					cg->hw_data_binding = *binding;
+				}
+				return;
+			}
+		}
 		break;
 	}
 
 	/* US: every VoQ of the SELECTED T-CONT stamps the data GEM port-id.
 	 * @us_slots is the declared data run, or the ride range when this ONU
 	 * rides the OMCC T-CONT -- the helper walks whichever it is given. */
+	cg->data_alloc_bound = true;
+	cg->data_alloc_pending = false;
+	cg->data_rides_omcc = rides_omcc;
+	cg->hw_data_alloc = gpon_gem_us_alloc_id(alloc);
+	cg->hw_data_gem = gpon_gem_us_port_id(gem);
+	cg->hw_data_binding = *binding;
+
 	if (cg_us_gem_stamp_range(cg, us_slots, gem, NULL))
 		return;
 
@@ -3038,17 +3454,17 @@ static void cg_data_try_install(struct cortina_gpon *cg)
 				 idx, cortina_ni_hw_l3_fwd_active(),
 				 cg_hw_l3_ds);
 		}
-		if (i == 0)
-			cortina_ni_gpon_ds_route_set(!(d0 & CG_PDC_D0_FE_BYPASS));
-
 		if (cg_pdc_map_write(cg, idx, d0, CG_PDC_D1_POL_ID(idx)))
 			return;
+		if (i == 0)
+			cortina_ni_gpon_ds_route_set(!(d0 & CG_PDC_D0_FE_BYPASS));
 	}
 
 	/* PUC: enable the data T-CONT's VoQs, then the flush workaround */
 	if (cg_puc_pvtbl_program(cg, us_tcont, true))
 		return;
-	cg_puc_voq_flush(cg, us_tcont);
+	if (cg_puc_voq_flush(cg, us_tcont))
+		return;
 
 	cg->data_installed = true;
 	cg->data_rides_omcc = rides_omcc;
@@ -3093,22 +3509,23 @@ static void cg_data_try_install(struct cortina_gpon *cg)
  * A same-{alloc,gem,onu-id} re-range matches on both paths and writes no HW —
  * byte-for-byte the proven keep-path.
  */
-static void cg_datapath_reset(struct cortina_gpon *cg)
+static void cg_transport_down(struct cortina_gpon *cg)
 {
 	cg->omcc_up = false;
-	/* disarm the responder: the next O5 re-inits it with a fresh MIB
-	 * (the OLT re-provisions after a deact/re-range) */
+	/* Disarm the transport while retaining the accepted same-identity MIB. */
 	spin_lock_bh(&cg->omci_lock);
 	cg->omci_active = false;
 	spin_unlock_bh(&cg->omci_lock);
 	cancel_delayed_work(&cg->veip_avc_work);
-	/* data path link down; the dt_/dg_ shadow AND the hw_data_* armed
-	 * identity SURVIVE so the O5 re-entry re-installs even when the OLT does
-	 * not re-provision (LOS re-range), and a genuine reconfig can still tell
-	 * armed-vs-new apart to invalidate only the stale entry. */
+	/* Accepted MIB and partial hardware ownership survive transport loss. */
 	cg->data_installed = false;
 	if (cg->wan_ndev)
 		netif_carrier_off(cg->wan_ndev);
+}
+
+static void cg_datapath_reset(struct cortina_gpon *cg)
+{
+	cg_transport_down(cg);
 	/* Re-arm the stuck-O1 recovery watchdog: the analog lock can be LOST
 	 * mid-uptime (long-LOS laser cool-down, OLT outage, EMI) and the ensuing
 	 * re-range can then wedge at O1 with no further events — the same
@@ -3125,17 +3542,70 @@ static void cg_datapath_reset(struct cortina_gpon *cg)
 	 * the !ds_locked branch only waits, but an OLT-driven Deactivate with the
 	 * fiber still lit is not).  mod_delayed_work() re-imposes exactly the 15 s
 	 * grace this path had before the supervisor existed. */
-	mod_delayed_work(system_wq, &cg->coldstart_work, 15 * HZ);
+	cg_sched_mod(cg, &cg->coldstart_work, 15 * HZ);
 	dev_warn(cg->dev, "O5 exit: datapath reset (OMCC + data down, CAM shadow kept)\n");
 }
 
 /* Try to bring the OMCC link up: needs O5 + HW-filled omci_port.en. */
+static int cg_identity_prepare(struct cortina_gpon *cg)
+{
+	int ret;
+
+	cg_ingress_stop(cg);
+	writel(cg_mac_rd(cg, CG_REG_ONU_CTL) & ~CG_ONU_CTL_EN,
+	       cg->mac + CG_REG_ONU_CTL);
+	cg->activated = false;
+	cg_transport_down(cg);
+	cancel_delayed_work(&cg->coldstart_work);
+	ret = cg_data_teardown(cg);
+	if (ret) {
+		cg_sched_mod(cg, &cg->coldstart_work, 15 * HZ);
+		return ret;
+	}
+	if (cg->omci) {
+		spin_lock_bh(&cg->omci_lock);
+		/* A re-arm keeps the declared UNI panel; a first one has none to
+		 * keep and may not read the object at all.  The flag is the only
+		 * thing that tells the two apart, which is why it decides here. */
+		if (cg->omci_initialized) {
+			omci_onu_reinit(cg->omci, cg->sn,
+					OMCI_MDS_POISON_SEED);
+		} else {
+			omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
+			cg_omci_declare_uni_panel(cg->omci, cg->dev);
+		}
+		cg->omci_initialized = true;
+		spin_unlock_bh(&cg->omci_lock);
+	}
+	return 0;
+}
+
+static void cg_data_reconcile(struct cortina_gpon *cg)
+{
+	struct omci_data_binding binding;
+
+	if (!cg->omci_initialized)
+		return;
+	spin_lock_bh(&cg->omci_lock);
+	omci_data_binding_snapshot(cg->omci, cg->omcc_gem,
+				   CG_MCAST_GEM_ID, &binding);
+	spin_unlock_bh(&cg->omci_lock);
+	cg_data_try_install(cg, &binding);
+}
+
 static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 {
-	u32 omci_port, want;
+	u32 omci_port, want, onu;
 
 	if (state != CG_STATE_OPERATION)
 		return;
+	onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
+	if (CG_ONU_STATE(onu) != CG_STATE_OPERATION ||
+	    !cg->omcc_alloc_valid || cg->omcc_alloc_pending ||
+	    cg->omcc_alloc != CG_ONU_ID(onu)) {
+		cg_transport_down(cg);
+		return;
+	}
 	omci_port = cg_mac_rd(cg, CG_REG_OMCI_PORT);
 	if (!(omci_port & CG_OMCI_PORT_EN)) {
 		/* an en=0 Configure_Port-ID transient: write NOTHING and keep the
@@ -3144,7 +3614,7 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 			 omci_port);
 		return;
 	}
-	want = gpon_gem_us_port_id(CG_OMCI_PORT_ID(omci_port));
+	want = CG_OMCI_PORT_ID(omci_port);
 
 	/* ★★★ A ONE-SHOT GUARD HERE GAVE UP ON EVERY LATER PORTID EVENT.  It read
 	 * `if (cg->omcc_up || state != ...) return;`, so an OLT that re-sent
@@ -3231,11 +3701,20 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 		 * UNCONDITIONALLY (rsync < 31 gate, measured on the Luna side).
 		 * ⚠ BEHAVIOUR CHANGE on this board; the X400AXF warm-readmit is the
 		 * validation it is owed. */
-		omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
+		if (!cg->omci_initialized) {
+			omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
+			cg_omci_declare_uni_panel(cg->omci, cg->dev);
+			cg->omci_initialized = true;
+		}
 		cg->omci_active = true;
 		spin_unlock_bh(&cg->omci_lock);
+		/* ★ RESUME ANY APPLY THE RESPONDER WAS NOT UP FOR.  The drain
+		 *   returns early while inactive without consuming anything, so
+		 *   without this the obligation waits for an unrelated OMCI
+		 *   message to arrive and carry it. */
+		cg_sched(cg, &cg->uni_apply_work, 0);
 		cg->veip_avc_retry_ms = 0;
-		schedule_delayed_work(&cg->veip_avc_work, 31 * HZ);
+		cg_sched(cg, &cg->veip_avc_work, 31 * HZ);
 		gpon_sn_format(cg->sn, sn_str);
 		dev_info(cg->dev, "OMCI responder armed (%u MIB rows, mds seed 200, sn %s)\n",
 			 cg->omci->nrows, sn_str);
@@ -3261,7 +3740,7 @@ static int cg_omci_tx(struct cortina_gpon *cg, const u8 *pdu48)
 		/* The frame is on its way to the PUC; read the OMCI-specific
 		 * control-packet counter once it has arrived, while its
 		 * clear-on-read window still holds it (cg_puc_ctrl_sample). */
-		schedule_delayed_work(&cg->puc_cnt_work,
+		cg_sched(cg, &cg->puc_cnt_work,
 				      msecs_to_jiffies(CG_PUC_CNT_TX_DELAY_MS));
 	}
 	/* Returned, not swallowed: a solicited response can be left to the OLT's
@@ -3385,6 +3864,7 @@ static void cg_veip_avc_work(struct work_struct *work)
 	/* Publish a live optical reading before the AVC: this fires ~31s after
 	 * O5, i.e. just as the OLT begins auditing ANI-G, so its first optical
 	 * GET already gets a measurement instead of the static fallback. */
+	mutex_lock(&cg->sn_lock);
 	cg_optic_sample(cg, NULL);
 
 	spin_lock_bh(&cg->omci_lock);
@@ -3396,12 +3876,12 @@ static void cg_veip_avc_work(struct work_struct *work)
 	}
 	spin_unlock_bh(&cg->omci_lock);
 	if (!emit)
-		return;
+		goto out;
 
 	if (!cg_omci_tx(cg, frame)) {
 		cg->veip_avc_retry_ms = 0;
 		dev_info(cg->dev, "VEIP oper-up AVC emitted (~31s post-O5)\n");
-		return;
+		goto out;
 	}
 
 	/* The TX failed.  The responder latches avc_veip_up_sent at EMIT time,
@@ -3427,8 +3907,9 @@ static void cg_veip_avc_work(struct work_struct *work)
 		: CG_VEIP_AVC_RETRY_MIN_MS;
 	dev_warn(cg->dev, "VEIP oper-up AVC TX failed; retrying in %u ms\n",
 		 cg->veip_avc_retry_ms);
-	schedule_delayed_work(&cg->veip_avc_work,
-			      msecs_to_jiffies(cg->veip_avc_retry_ms));
+	cg_sched(cg, &cg->veip_avc_work,
+			      msecs_to_jiffies(cg->veip_avc_retry_ms));out:
+	mutex_unlock(&cg->sn_lock);
 }
 
 /*
@@ -3477,24 +3958,24 @@ MODULE_PARM_DESC(omci_trace, "log one line per downstream OMCI PDU: message type
  * only decoded when a response exists — resp[] is otherwise uninitialised.
  */
 static void cg_omci_trace_one(struct cortina_gpon *cg, const u8 *pdu,
-			      unsigned int len, const u8 *resp, int n,
-			      const char *name)
+			      unsigned int len, const u8 *resp, int n)
 {
 	static DEFINE_RATELIMIT_STATE(rs, 5 * HZ, 512);
-	char det[80];
+	char line[128];
 
-	/* ★ THE DECODE IS THE CORE'S (gpon_omci_describe_get).  What stays here
-	 * is the POLICY -- the rate limit, the log level and the device -- which
-	 * is this board's fact and not G.988's.  The core FORMATS into a buffer
-	 * and cannot print, so it cannot flood a console. */
-	if (!__ratelimit(&rs))
+	/* ★★ THE WHOLE LINE IS THE CORE'S (gpon_omci_diag_line), 2026-09-11.
+	 * The DECODE moved to the core in 2026-09-10 and this LINE stayed, so
+	 * one idea had two spellings: this one, and the `len=.. mt=9(Get) ..
+	 * me=256/0` both Luna shells emit.  The suite reads a line, not a
+	 * decode, so it went blind on half the fleet -- with the lines sitting
+	 * in dmesg -- and blamed a module parameter that cannot exist there.
+	 * What stays HERE is the POLICY: the rate limit, the log level and the
+	 * device.  The core formats into a buffer and cannot print. */
+	if (!IS_ENABLED(CONFIG_GPON_OMCI_DIAG) || !__ratelimit(&rs))
 		return;
-	gpon_omci_describe_get(pdu, len, n == OMCI_LEN ? resp : NULL, n,
-			       det, sizeof(det));
-	dev_info(cg->dev, "OMCI DS: MT=0x%02x %s class=%u inst=%u len=%u%s\n",
-		 pdu[2], gpon_omci_is_get(pdu, len) ? "GET" : name,
-		 ((u16)pdu[4] << 8) | pdu[5], ((u16)pdu[6] << 8) | pdu[7],
-		 len, det);
+	gpon_omci_diag_line(pdu, len, n == OMCI_LEN ? resp : NULL, n,
+			    line, sizeof(line));
+	dev_info(cg->dev, "OMCI DS: %s\n", line);
 }
 
 /*
@@ -3513,11 +3994,14 @@ static void cg_omci_trace_one(struct cortina_gpon *cg, const u8 *pdu,
 static void cg_rx_omci(const u8 *pdu, unsigned int len)
 {
 	struct cortina_gpon *cg = READ_ONCE(cg_singleton);
-	const char *name;
 	u8 mt;
+	u32 generation;
+	unsigned long flags;
+	bool queued = false;
 
 	if (!cg)
 		return;
+	generation = READ_ONCE(cg->ingress_generation);
 	if (len < 8) {
 		cg->omci_rx_short++;
 		return;
@@ -3525,7 +4009,6 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 	cg->omci_rx++;
 
 	mt = pdu[2];
-	name = gpon_omci_mt_name(mt);	/* G.988 Table 11.2.2-1, in the core */
 	/* log the first PDUs + then 1-in-64 (the MIB-upload walk is chatty) */
 	if (cg->omci_rx <= 24 || !(cg->omci_rx & 63)) {
 		char det[96];
@@ -3616,211 +4099,146 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
 		return;
 	}
 
-	/* ---- Stage D: snoop the data-path-defining MEs (the responder still
-	 * answers them; the driver additionally installs the HW tables). ---- */
-	{
-		u16 class_id = ((u16)pdu[4] << 8) | pdu[5];
-		u16 inst = ((u16)pdu[6] << 8) | pdu[7];
-		u8 m = mt & 0x1f;
-		bool cfg = (m == 4 || m == 8 || m == 6);	/* Create/Set/Delete */
+	/* Admission precedes common acceptance; AR retransmission can retry a
+	 * refused frame without an acknowledged but unapplied mutation. */
+	spin_lock_irqsave(&cg->evt_lock, flags);
+	if (cg->ingress_open && generation == cg->ingress_generation &&
+	    cg->evt_head - cg->evt_tail < CG_EVT_OMCI_LIMIT) {
+		struct cg_evt *ev = &cg->evt[cg->evt_head % CG_EVT_RING_SZ];
 
-		/* body dump of the datapath/bridging MEs (bounded budget) —
-		 * the live source of truth for what THIS OLT provisions */
-		if (cfg && cg->omci_cfg_log < 48 && len >= 24) {
-			switch (class_id) {
-			case 45: case 47: case 84: case 130: case 171:
-			case 262: case 266: case 268: case 277: case 280:
-			case 281: case 309: case 329:
-				cg->omci_cfg_log++;
-				dev_info(cg->dev,
-					 "OMCI cfg mt=%u me=%u/0x%04x body=%*phN\n",
-					 m, class_id, inst, 16, pdu + 8);
-				break;
-			}
-		}
-
-		/* ME 262 T-CONT: the data alloc-id.  ★ THE PARSE AND THE
-		 * DECISION ARE THE CORE'S (omci_tcont_snoop, beside
-		 * omci_dgem_classify, 2026-09-02): the Set-vs-Create body
-		 * layout, the ★★ 0xffff G.988 deallocate (2026-08-05 -- the
-		 * evidence rides the core comment now) and the
-		 * against-the-shadow change test, exercised on x86 with no
-		 * board.  The ACTIONS -- the shadow writes and the isr_work
-		 * kick that reach the T-CONT CAM -- stay here.  The OMCC
-		 * alloc (= onu-id) never comes here. */
-		if (class_id == 262) {
-			u16 alloc = 0;
-
-			switch (omci_tcont_snoop(mt, pdu + 8, len - 8, inst,
-						 cg->dt_alloc, cg->dt_inst,
-						 &alloc)) {
-			case OMCI_TCONT_DEALLOC:
-				dev_info(cg->dev,
-					 "OMCI: data T-CONT me-inst 0x%04x DEALLOCATED (alloc-id 0xffff)\n",
-					 inst);
-				WRITE_ONCE(cg->dt_alloc, 0);
-				cg->data_installed = false;
-				schedule_work(&cg->isr_work);
-				break;
-			case OMCI_TCONT_ALLOC:
-				WRITE_ONCE(cg->dt_alloc, alloc);
-				cg->dt_inst = inst;
-				dev_info(cg->dev,
-					 "OMCI: data T-CONT me-inst 0x%04x alloc-id %u\n",
-					 inst, alloc);
-				schedule_work(&cg->isr_work);
-				break;
-			case OMCI_TCONT_NONE:
-				break;
-			}
-		}
-
-		/* ME 268 GEM-port-network-CTP Create: SBC body = port-id[0:1],
-		 * T-CONT ptr[2:3], direction[4] (1=US, 2=DS, 3=bidirectional).
-		 * THE data GEM is the BIDIRECTIONAL one (this OLT: gem 223,
-		 * tcont-ptr 0x8000, dir 3).  The OLT also creates a DS-only
-		 * broadcast CTP FIRST (gem 4095, tcont-ptr 0, dir 2) — that
-		 * one is covered by the fixed CG_MCAST_GEM_ID install, so it
-		 * must never claim the data-GEM slot (live-proven ordering). */
-		/* ★★ ME 268 DELETE TEARS THE DATA GEM DOWN (2026-08-05).  Before
-		 * that date a Delete was merely logged and the DS-GEM CAM stayed
-		 * armed on a port-id the OLT had removed - de-encapsulating
-		 * whatever the next subscriber is given on that GEM; only a
-		 * MIB-Reset cleared it.  ★ THE MATCH IS THE CORE'S
-		 * (omci_dgem_delete, 2026-09-02): a Delete carries just the
-		 * class and the instance, which is exactly why dg_inst had to be
-		 * latched on the Create - matched there, nothing else can be.
-		 * Clearing the shadow and kicking isr_work is the same teardown
-		 * the MIB-Reset path takes, so the stale HW CAM is invalidated in
-		 * process context rather than left to burst. */
-		if (class_id == 268 &&
-		    omci_dgem_delete(mt, inst, cg->dg_gem, cg->dg_inst)) {
-			dev_info(cg->dev,
-				 "OMCI: data GEM me-inst 0x%04x DELETED (port-id %u)\n",
-				 inst, cg->dg_gem);
-			WRITE_ONCE(cg->dg_gem, 0);
-			cg->dg_inst = 0;
-			cg->dg_tcont_ptr = 0;
-			cg->dg_dir = 0;
-			cg->data_installed = false;
-			schedule_work(&cg->isr_work);
-		}
-
-		/* ★★★ THE DECISION IS THE CORE'S, NOT THIS SHELL'S (2026-09-02).
-		 *
-		 * This block used to answer "is this ME 268 the WAN data GEM?"
-		 * privately, and Luna answered it privately too -- and the two
-		 * had DIVERGED: this side refused a uni-directional CTP, the
-		 * OMCC's own gem and Port-ID 0; Luna's copy refused none of the
-		 * three, and then lost its copy entirely when the responder it
-		 * lived in was replaced (836b76be01). Two boards, two answers,
-		 * one G.988 rule.
-		 *
-		 * omci_dgem_classify() is that rule, once, in the core, where
-		 * gpon_dgem_test exercises it on x86 with no board and the
-		 * emulated OLT drives the sequence that catches a first-match
-		 * scan. The GEOMETRY stays here -- which Port-ID this silicon
-		 * reserved for the OMCC and for broadcast are INPUTS.
-		 *
-		 * ⚠ TWO DELIBERATE BEHAVIOUR CHANGES, both toward the standard:
-		 *   - the Port-ID is masked to 12 bits (G.984.3), so a set
-		 *     reserved bit can no longer become a different port;
-		 *   - the broadcast gem is refused BY ITS PORT-ID as well as by
-		 *     its direction. This side relied on direction alone, which
-		 *     is correct for an OLT that marks 4095 DS-only and silent
-		 *     for one that does not.
-		 */
-		if (class_id == 268 && m == 4) {
-			u16 g = 0;
-			/* ⚠ CLAMP TO THE BASELINE FRAME, DO NOT CAST. The core
-			 * takes `u8 blen`, and `(u8)(len - 8)` WRAPS: len 264
-			 * became 0 -- read as a RUNT -- and len 512 became 248,
-			 * a plausible-looking body length that is simply wrong.
-			 * An OMCI baseline message is OMCI_LEN and its body is
-			 * what follows the 8-byte header; anything past that is
-			 * padding, so the length is BOUNDED, never truncated
-			 * modulo 256. Found by a neighbourhood audit 2026-09-02.
-			 */
-			u16 blen = len > OMCI_LEN ? OMCI_LEN : len;
-			int v = omci_dgem_classify(pdu + 8,
-						   blen > 8 ? (u8)(blen - 8) : 0,
-						   cg->omcc_gem, CG_MCAST_GEM_ID,
-						   &g);
-
-			if (v == OMCI_DGEM_YES && g != cg->dg_gem) {
-				WRITE_ONCE(cg->dg_gem, g);
-				cg->dg_inst = inst;	/* so a Delete can match */
-				cg->dg_tcont_ptr = ((u16)pdu[10] << 8) | pdu[11];
-				cg->dg_dir = pdu[12];
-				dev_info(cg->dev,
-					 "OMCI: data GEM port-id %u (tcont-ptr 0x%04x dir %u)\n",
-					 g, cg->dg_tcont_ptr, cg->dg_dir);
-				schedule_work(&cg->isr_work);
-			} else if (v != OMCI_DGEM_YES) {
-				/* ★ NAME THE REFUSAL. "not the data GEM" was one
-				 * message for five different facts, and a shell
-				 * that cannot say WHICH one fired cannot explain
-				 * a dead WAN. */
-				dev_info(cg->dev,
-					 "OMCI: GEM CTP me-inst 0x%04x is %s -- not the data GEM\n",
-					 inst, omci_dgem_name(v));
-			}
-		}
-
-		/* on-wire MIB-Reset: the OLT voided our provisioning.  Drop the
-		 * shadow so stale ids are never re-installed, and kick isr_work
-		 * so cg_data_try_install invalidates the now-stale HW data CAM
-		 * (armed hw_data_* != wiped shadow) in process context — closing
-		 * the window where a reassigned alloc could burst before fresh
-		 * provisioning arrives. */
-		if (m == 15) {
-			WRITE_ONCE(cg->dt_alloc, 0);
-			WRITE_ONCE(cg->dg_gem, 0);
-			cg->data_installed = false;
-			if (cg->wan_ndev)
-				netif_carrier_off(cg->wan_ndev);
-			schedule_work(&cg->isr_work);
-			/* ★★★ RE-ARM THE VEIP OPER-UP AVC.  This branch dropped
-			 * carrier and wiped the shadow but never re-scheduled the
-			 * work, so after a MID-SESSION MIB-Reset the OLT waited
-			 * forever for a port-up AVC that would never come again --
-			 * WAN gated, recoverable only by a deact/re-range churn the
-			 * production bar forbids.  The responder clears its
-			 * avc_veip_up_sent latch on the same event (its half); this
-			 * is the timer's half, and the two are needed together.
-			 *
-			 * ★ schedule_delayed_work on an ALREADY-PENDING work keeps
-			 *   the original expiry, so the proven 31 s-post-O5 boot
-			 *   cadence is untouched -- and cg_veip_avc_work is gated on
-			 *   `omci_active && !avc_veip_up_sent`, so a MIB-Reset that
-			 *   arrives before the first AVC re-arms into a no-op. */
-			schedule_delayed_work(&cg->veip_avc_work, 31 * HZ);
-		}
+		ev->type = CG_EVT_OMCI;
+		memcpy(ev->pdu, pdu, OMCI_LEN);
+		cg->evt_head++;
+		queued = true;
+	} else {
+		cg->omci_queue_drop++;
 	}
-
-	/* Stage C: answer with the responder + TX the reply upstream.  The
-	 * PDU is 48 bytes; clamp a padded frame so a Create body never
-	 * swallows trailing pad bytes. */
-	if (len > OMCI_LEN)
-		len = OMCI_LEN;
-	{
-		u8 resp[OMCI_LEN];
-		int n = 0;
-
-		spin_lock(&cg->omci_lock);
-		if (cg->omci_active)
-			/* CUT SITE: the whole G.988 responder — parse, dispatch, build the reply, stamp trailer +
-			 * MIC — MOVED to omci_onu_input() in drivers/net/gpon/gpon_omci_core.c */
-			n = omci_onu_input(cg->omci, pdu, len, resp);
-		spin_unlock(&cg->omci_lock);
-		if (n == OMCI_LEN)
-			cg_omci_tx(cg, resp);
-		if (unlikely(cg_omci_trace))
-			cg_omci_trace_one(cg, pdu, len, resp, n, name);
-	}
+	spin_unlock_irqrestore(&cg->evt_lock, flags);
+	if (queued)
+		cg_sched_now(cg, &cg->isr_work);
 }
 
 /* Bottom half: drain the event ring and run the FSM tracker + OMCC binds. */
+/*
+ * Apply what the model accepted, to the ports the board declared.
+ *
+ * ★★ OUR PHYSICAL BEHAVIOUR IS A DECISION, AND IT IS A DECLARED DELTA.  Own
+ *    stock does NOT do this uniformly: the G24W applies whatever the UNI-G
+ *    capability says, while THIS board's own handler SKIPS the physical writes
+ *    whenever that capability is 1 -- which all four of its stock Ethernet
+ *    rows report, so stock never drives a port here at all.  We apply on every
+ *    declared instance regardless, because "the OLT locks a subscriber port
+ *    and the port stops forwarding" is the capability being certified, and
+ *    copying the no-op would certify nothing while still ACKing the Set.
+ *
+ * ★ IT RUNS IN A WORK ITEM because the apply takes ni->mii->mdio_lock, and the
+ *   OMCI path that accepts the Set holds a spinlock.
+ *
+ * ★ AND A FAILED APPLY STAYS OWED: the slot is re-armed in the model and the
+ *   work is rescheduled.  The NI publishes itself after the GPON driver can
+ *   already be answering the OLT, so -ENODEV here is an ordinary early state,
+ *   not an error to drop.
+ */
+static void cg_uni_apply_work(struct work_struct *work)
+{
+	struct cortina_gpon *cg = container_of(to_delayed_work(work),
+					       struct cortina_gpon,
+					       uni_apply_work);
+	u8 changed, admin[OMCI_UNI_MAX], n, i;
+	bool retry = false;
+
+	/* ★★ HELD ACROSS THE SNAPSHOT AND THE SLEEPING APPLY.  cg_identity_prepare
+	 *    can re-initialise the model under this work, and a lock snapshotted
+	 *    from the OLD identity must not be driven onto a port after the NEW
+	 *    one is committed.  The OMCI spin section inside stays short. */
+	mutex_lock(&cg->sn_lock);
+	spin_lock_bh(&cg->omci_lock);
+	if (!cg->omci_active) {
+		/* Nothing is CONSUMED here, so nothing is lost -- and the
+		 * activation path schedules this work, so a lock Set before the
+		 * responder came up resumes without needing an unrelated OMCI
+		 * message to arrive and carry it. */
+		spin_unlock_bh(&cg->omci_lock);
+		mutex_unlock(&cg->sn_lock);
+		return;
+	}
+	changed = omci_uni_take_changed(&cg->omci->pptp_eth_uni);
+	n = cg->omci->pptp_eth_uni.n;
+	for (i = 0; i < n && i < OMCI_UNI_MAX; i++)
+		admin[i] = cg->omci->pptp_eth_uni.admin[i];
+	spin_unlock_bh(&cg->omci_lock);
+
+	if (!changed) {
+		mutex_unlock(&cg->sn_lock);
+		return;
+	}
+	for (i = 0; i < n && i < OMCI_UNI_MAX; i++) {
+		int rc;
+
+		if (!(changed & BIT(i)))
+			continue;
+		if (i >= cg_uni_port_n) {
+			dev_warn_once(cg->dev,
+				      "UNI slot %u has no declared switch port; its administrative state is modelled and not applied\n",
+				      i);
+			/* ⚠ RETAINED, AND STILL NOT SPUN ON.  Dropping it made
+			 * the text above a lie: the obligation was gone, so a
+			 * board whose port list is later corrected would never
+			 * apply what the OLT had already Set.  A permanent
+			 * configuration error keeps its obligation and earns no
+			 * retry timer. */
+			spin_lock_bh(&cg->omci_lock);
+			omci_uni_mark_changed(&cg->omci->pptp_eth_uni, i);
+			spin_unlock_bh(&cg->omci_lock);
+			continue;
+		}
+		rc = cortina_ni_uni_admin_set(cg_uni_port[i], admin[i] != 0);
+		if (rc) {
+			/* ⚠ RE-ARMED UNCONDITIONALLY.  It used to re-arm only
+			 * while omci_active, and the backend can SLEEP: a
+			 * datapath reset clearing that flag mid-apply (the MIB
+			 * itself is retained) made the obligation vanish. */
+			spin_lock_bh(&cg->omci_lock);
+			omci_uni_mark_changed(&cg->omci->pptp_eth_uni, i);
+			spin_unlock_bh(&cg->omci_lock);
+			retry = true;
+		}
+	}
+	if (retry)
+		cg_sched(cg, &cg->uni_apply_work, HZ);
+	mutex_unlock(&cg->sn_lock);
+}
+
+static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
+{
+	struct omci_accepted accepted = { .kind = OMCI_ACCEPT_NONE };
+	struct omci_data_binding binding;
+	u8 resp[OMCI_LEN];
+	bool uni_pending = false;
+	int n = 0;
+
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci_active) {
+		n = omci_onu_input_ex(cg->omci, pdu, OMCI_LEN, resp, &accepted);
+		if (accepted.kind != OMCI_ACCEPT_NONE)
+			omci_data_binding_snapshot(cg->omci, cg->omcc_gem,
+						   CG_MCAST_GEM_ID, &binding);
+		/* read, never drained here: the drain runs where it may sleep */
+		uni_pending = cg->omci->pptp_eth_uni.changed != 0;
+	}
+	spin_unlock_bh(&cg->omci_lock);
+	if (uni_pending)
+		cg_sched(cg, &cg->uni_apply_work, 0);
+	if (accepted.kind != OMCI_ACCEPT_NONE)
+		cg_data_try_install(cg, &binding);
+	if (accepted.kind == OMCI_ACCEPT_RESET)
+		cg_sched(cg, &cg->veip_avc_work, 31 * HZ);
+	if (n == OMCI_LEN)
+		cg_omci_tx(cg, resp);
+	if (unlikely(cg_omci_trace))
+		cg_omci_trace_one(cg, pdu, OMCI_LEN, resp, n);
+}
+
 static void cg_isr_work(struct work_struct *work)
 {
 	struct cortina_gpon *cg = container_of(work, struct cortina_gpon, isr_work);
@@ -3828,15 +4246,29 @@ static void cg_isr_work(struct work_struct *work)
 	unsigned long flags;
 
 	for (;;) {
+		mutex_lock(&cg->sn_lock);
+		/* ★ INSIDE THE LOCK, for the same reason as the coldstart work:
+		 *   a pre-lock read can go stale between the read and the lock,
+		 *   and teardown sets the flag holding exactly this lock. */
+		if (READ_ONCE(cg->stopping)) {
+			mutex_unlock(&cg->sn_lock);
+			return;
+		}
 		spin_lock_irqsave(&cg->evt_lock, flags);
 		if (cg->evt_tail == cg->evt_head) {
 			spin_unlock_irqrestore(&cg->evt_lock, flags);
+			mutex_unlock(&cg->sn_lock);
 			break;
 		}
 		ev = cg->evt[cg->evt_tail % CG_EVT_RING_SZ];
 		cg->evt_tail++;
 		spin_unlock_irqrestore(&cg->evt_lock, flags);
 
+		if (ev.type == CG_EVT_OMCI) {
+			cg_omci_process(cg, ev.pdu);
+			mutex_unlock(&cg->sn_lock);
+			continue;
+		}
 		if (ev.intr & CG_INT_ONU_ST_CHG) {
 			u8 last = cg->last_state;
 
@@ -3881,6 +4313,8 @@ static void cg_isr_work(struct work_struct *work)
 		 */
 		if (ev.intr & (CG_INT_PORTID | CG_INT_ONU_ST_CHG))
 			cg_omcc_try_up(cg, ev.state);
+		cg_data_reconcile(cg);
+		mutex_unlock(&cg->sn_lock);
 	}
 
 	/*
@@ -3918,7 +4352,17 @@ static void cg_isr_work(struct work_struct *work)
 	 * cg_coldstart_work and from /proc, so the documented wedge hazard of the
 	 * TX-PLOAM MIB pair does not apply.
 	 */
-	{
+	mutex_lock(&cg->sn_lock);
+	/* ★ THE SECOND SECTION RECHECKS TOO.  Teardown can set the gate between
+	 *   the empty-ring unlock above and this lock, and what follows
+	 *   reprograms hardware: without this the final body ran after teardown
+	 *   had begun, which is the same stale decision the entry guard closes
+	 *   at the top. */
+	if (READ_ONCE(cg->stopping)) {
+		mutex_unlock(&cg->sn_lock);
+		return;
+	}
+	if (cg->ingress_open) {
 		u32 onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
 		u8 live = CG_ONU_STATE(onu);
 		u8 id = CG_ONU_ID(onu);
@@ -3933,15 +4377,15 @@ static void cg_isr_work(struct work_struct *work)
 				cg->last_state = CG_STATE_OPERATION;
 			}
 			/* A lost Assign_ONU-ID leaves the OMCC T-CONT unbound, so
-			 * the ONU gets no US grant and can answer no OMCI - and
-			 * cg_omcc_try_up latches omcc_up on state + omci_port.EN
-			 * alone, never on this bind, so this must NOT be gated on
-			 * !omcc_up or the unbound case can never heal.  Binds only
+			 * the ONU gets no US grant and can answer no OMCI. Retire
+			 * pending allocation writes before trying to arm the transport;
+			 * the hardware O5 state does not prove CAM completion. Binds only
 			 * when the shadow really disagrees, so a converged link and
 			 * every same-id re-range write nothing (the proven
 			 * keep-path). */
 			if (id != CG_ONU_ID_NONE &&
-			    (!cg->omcc_alloc_valid || cg->omcc_alloc != id))
+			    (!cg->omcc_alloc_valid || cg->omcc_alloc_pending ||
+			     cg->omcc_alloc != id))
 				if (cg_omcc_tcont_bind(cg, id))
 					dev_warn_ratelimited(cg->dev,
 						"OMCC: T-CONT bind failed for alloc %u - the post-O5 supervisor retries\n",
@@ -3959,7 +4403,8 @@ static void cg_isr_work(struct work_struct *work)
 	/* Stage D: (re-)install the data path once the OMCC is up and both
 	 * provisioning halves are known (also re-run by cg_rx_omci kicking
 	 * this work when the OLT's ME 262/268 arrive). */
-	cg_data_try_install(cg);
+	cg_data_reconcile(cg);
+	mutex_unlock(&cg->sn_lock);
 }
 
 /*
@@ -3991,6 +4436,7 @@ static irqreturn_t cg_isr(int irq, void *data)
 	struct cortina_gpon *cg = data;
 	bool pending = false, queued = false;
 	u32 glb_ie, ie, top, src;
+	u32 generation = READ_ONCE(cg->ingress_generation);
 	int pass;
 
 	/* mask the PON aggregate at the GLB level (vendor __pon_top_intr_mask) */
@@ -4008,10 +4454,12 @@ static irqreturn_t cg_isr(int irq, void *data)
 				u32 onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
 
 				spin_lock(&cg->evt_lock);
-				if (cg->evt_head - cg->evt_tail < CG_EVT_RING_SZ) {
+				if (cg->ingress_open && generation == cg->ingress_generation &&
+				    cg->evt_head - cg->evt_tail < CG_EVT_RING_SZ) {
 					struct cg_evt *ev =
 						&cg->evt[cg->evt_head % CG_EVT_RING_SZ];
 
+					ev->type = CG_EVT_IRQ;
 					ev->intr = src;
 					ev->state = CG_ONU_STATE(onu);
 					ev->id = CG_ONU_ID(onu);
@@ -4044,7 +4492,7 @@ static irqreturn_t cg_isr(int irq, void *data)
 	writel(glb_ie | CG_PON_INT0_PON_MAC, cg->glb + CG_GLB_PON_INTEN0);
 
 	if (queued)
-		schedule_work(&cg->isr_work);
+		cg_sched_now(cg, &cg->isr_work);
 	if (!pending)
 		return IRQ_NONE;	/* shared line, not ours */
 	cg->irq_count++;
@@ -4102,13 +4550,21 @@ static void cg_intr_teardown(struct cortina_gpon *cg)
 		writel(0, cg->mac + CG_REG_INT_TOP_EN);
 		v = readl(cg->glb + CG_GLB_NE_ICTL_EN);
 		writel(v & ~CG_NE_ICTL_PON_LINE, cg->glb + CG_GLB_NE_ICTL_EN);
+		/* ⚠ MASKED IS NOT STOPPED.  An ISR already running on another CPU
+		 *   re-enables the PON aggregate and queues isr_work on its way
+		 *   out, so the flush below could race a handler that had not
+		 *   returned.  This waits for it. */
+		synchronize_irq(cg->irq);
 	}
 	/* ALWAYS flush the bottom half, IRQ or not: the DS OMCI RX hook and the
 	 * post-O5 supervisor queue isr_work even when the interrupt path was
 	 * never armed, so returning early here would leave a work item running
-	 * against a context devm is about to free.  cortina_gpon_remove() has
-	 * already cancelled coldstart_work at this point, so nothing can re-queue
-	 * after this flush. */
+	 * against a context devm is about to free.
+	 * ⚠ THE OLD CLAIM HERE -- "remove has already cancelled coldstart_work,
+	 *   so nothing can re-queue" -- IS STALE: this now runs BEFORE those
+	 *   cancels, deliberately, so that no ISR can queue while they happen.
+	 *   What stops a re-queue is the stopping gate, set under sn_lock before
+	 *   any of this, plus the synchronize_irq() above. */
 	cancel_work_sync(&cg->isr_work);
 }
 
@@ -4163,16 +4619,22 @@ static const struct net_device_ops cg_wan_ops = {
 #endif
 };
 
-/* Register gpon0.  MAC = a locally-administered FALLBACK one above eth0's
- * (02:96:07:f0:00:01).  The per-board factory MAC (base+1, mirroring stock
- * nas0_0 = ELAN_MAC_ADDR+1) is applied by userspace before the WAN comes up:
- * the 05_factory_mac uci-defaults script reads ELAN_MAC_ADDR from the stock
- * ubi_Config/config_hs.xml (read-only NAND) and netifd sets it via the
- * `device` macaddr.  Carrier tracks the data-path install. */
+/* gpon0's address comes off the common ladder (it used to be a compiled-in
+ * 02:96:07:f0:00:02). The +1 relation to eth0 is 05_factory_mac's and holds
+ * only when that script reads ELAN_MAC_ADDR; nothing else depends on it.
+ * Carrier tracks the data-path install.
+ */
 static void cg_wan_create(struct cortina_gpon *cg)
 {
-	static const u8 mac[ETH_ALEN] = { 0x02, 0x96, 0x07, 0xf0, 0x00, 0x02 };
+	u8 dt[GPON_HWADDR_BYTES], mac[GPON_HWADDR_BYTES];
+	enum gpon_hwaddr_src src;
 	struct net_device *ndev;
+	bool have_dt;
+
+	have_dt = of_get_mac_address(cg->dev->of_node, dt) == 0;
+	/* NULL bootarg/engine: no board declares one for gpon0, and the PON MAC
+	 * registers hold a GPON serial, not a station address. */
+	src = gpon_hwaddr_resolve(NULL, have_dt ? dt : NULL, NULL, mac);
 
 	ndev = alloc_etherdev(0);
 	if (!ndev)
@@ -4190,7 +4652,8 @@ static void cg_wan_create(struct cortina_gpon *cg)
 	cg->wan_ndev = ndev;
 	if (IS_REACHABLE(CONFIG_CORTINA_NI))
 		cortina_ni_pon_wan_ndev_set(ndev);
-	dev_info(cg->dev, "WAN netdev gpon0 registered (%pM)\n", mac);
+	dev_info(cg->dev, "WAN netdev gpon0 registered (%pM from %s)\n", mac,
+		 gpon_hwaddr_src_name(src));
 }
 
 /* Read the 4 ASCII bytes of the vendor-id register in wire order. */
@@ -4274,10 +4737,12 @@ static void cg_show_gpon_mib(struct seq_file *m, struct cortina_gpon *cg)
 
 static int cg_proc_show(struct seq_file *m, void *v)
 {
+	struct omci_data_binding binding = {0};
 	struct cortina_gpon *cg = m->private;
 	char vendor[5], sn_str[13];
 	u32 onu, alarm;
 
+	mutex_lock(&cg->sn_lock);
 	cg_read_vendor(cg, vendor);
 	onu = cg_mac_rd(cg, CG_REG_GPON_ONU);
 	alarm = cg_mac_rd(cg, CG_REG_ALARM);
@@ -4289,12 +4754,16 @@ static int cg_proc_show(struct seq_file *m, void *v)
 	seq_printf(m, "vendor-spec    = 0x%08x\n", cg_mac_rd(cg, CG_REG_VENDOR_SPEC));
 	/* The identity, and WHERE it came from: "board" is the only value that
 	 * means "read from this unit"; NONE = ranging is still held off waiting
-	 * for it, FALLBACK = a placeholder, not this board's serial number. */
+	 * for it.  ★ THE PARKED CASE SAYS WHY, so a board sitting at O1 is not a
+	 * mystery to whoever reads this file: ranging is refused until the
+	 * serial is DEFINED (gpon_sn_is_set), and onu(state+id) below shows the
+	 * MAC still at O1 as the independent second witness. */
 	gpon_sn_format(cg->sn, sn_str);
 	seq_printf(m, "serial-number  = %s\n",
 		   cg->sn_src == CG_SN_NONE ? "(not provisioned)" : sn_str);
 	seq_printf(m, "sn-source      = %s%s\n", cg_sn_src_name[cg->sn_src],
-		   cg->activated ? "" : " (ranging not started)");
+		   cg->activated ? "" :
+		   " (ranging not started: no defined serial number)");
 	seq_printf(m, "gpon_ds        = 0x%08x\n", cg_mac_rd(cg, CG_REG_GPON_DS));
 	seq_printf(m, "onu(state+id)  = 0x%08x\n", onu);
 	seq_printf(m, "main(eqd)      = 0x%08x\n", cg_mac_rd(cg, CG_REG_GPON_MAIN));
@@ -4306,8 +4775,8 @@ static int cg_proc_show(struct seq_file *m, void *v)
 		   cg_mac_rd(cg, CG_REG_GPON_MAC_CTRL));
 	/* post-O5 servicing (interrupts / FSM tracker / OMCC bind) */
 	seq_puts(m, "-- post-O5 servicing --\n");
-	seq_printf(m, "irq            = %d (count=%u, evt_drop=%u)\n",
-		   cg->irq, cg->irq_count, cg->evt_drop);
+	seq_printf(m, "irq            = %d (count=%u, evt_drop=%u, omci_queue_drop=%u)\n",
+		   cg->irq, cg->irq_count, cg->evt_drop, cg->omci_queue_drop);
 	seq_printf(m, "fsm            = %s (live id 0x%02x), tracked %s\n",
 		   cg_state_name[CG_ONU_STATE(onu)], CG_ONU_ID(onu),
 		   cg_state_name[cg->last_state & 7]);
@@ -4367,12 +4836,16 @@ static int cg_proc_show(struct seq_file *m, void *v)
 			   cg->omci->dup_replay, cg->omci->rx_extended,
 			   cg->omci->no_ack);
 	seq_putc(m, '\n');
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci_initialized)
+		omci_data_binding_snapshot(cg->omci, cg->omcc_gem, CG_MCAST_GEM_ID, &binding);
+	spin_unlock_bh(&cg->omci_lock);
 	seq_printf(m, "data           = %s alloc=%u (me 0x%04x) gem=%u (tcont-ptr 0x%04x dir %u) bcast=%u carrier=%d\n",
 		   cg->data_installed
 			? (cg->data_rides_omcc ? "INSTALLED(rides-omcc)" : "INSTALLED")
 			: "down",
-		   cg->dt_alloc, cg->dt_inst, cg->dg_gem, cg->dg_tcont_ptr,
-		   cg->dg_dir, CG_MCAST_GEM_ID,
+		   binding.alloc_id, binding.tcont_inst, binding.gem_port, binding.tcont_inst,
+		   binding.direction, CG_MCAST_GEM_ID,
 		   cg->wan_ndev ? netif_carrier_ok(cg->wan_ndev) : -1);
 	seq_printf(m, "omci_port      = 0x%08x (en=%d id=%u)\n",
 		   cg_mac_rd(cg, CG_REG_OMCI_PORT),
@@ -4433,6 +4906,7 @@ static int cg_proc_show(struct seq_file *m, void *v)
 				seq_printf(m, "+0x%03x=0x%08x\n", off, val);
 		}
 	}
+	mutex_unlock(&cg->sn_lock);
 	return 0;
 }
 
@@ -4477,15 +4951,35 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 
 		return ret ? ret : len;
 	}
-	/* one-shot full BOSA register dump to dmesg (cold-state diffing) */
+	/*
+	 * One-shot full BOSA register dump to dmesg (cold-state diffing).
+	 *
+	 * ⚠ UNDER sn_lock, THE WHOLE OPERATION -- the same lock the calibration
+	 *   and the identification probe hold. The i2c layer locks one TRANSFER,
+	 *   and that is not enough: this dump SELECTS pages, so a dump
+	 *   interleaved with a calibration leaves the calibration writing LUT
+	 *   bytes into whatever page the dump had selected. Demonstrated on the
+	 *   compiled executor with a page switch injected around the first eight
+	 *   table-4 writes: the sequence returns SUCCESS and the BB readback
+	 *   still passes, with eight LUT bytes wrong. A readback is not exclusion.
+	 *
+	 * ⚠ AND ITS ERROR IS THE WRITE'S ERROR. Returning `len` unconditionally
+	 *   told a reader the dump had happened when the bus had refused.
+	 */
 	if (strcmp(p, "bosa dump") == 0) {
-		cg_bosa_dump(cg->dev);
-		return len;
+		int ret;
+
+		mutex_lock(&cg->sn_lock);
+		ret = cg_bosa_dump(cg->dev);
+		mutex_unlock(&cg->sn_lock);
+		return ret ? ret : len;
 	}
 	/* manual SerDes CMU re-lock (the cold-start recovery primitive) -- for
 	 * validating it is non-destructive on a good O5 boot before relying on it */
 	if (strcmp(p, "relock") == 0) {
+		mutex_lock(&cg->sn_lock);
 		cg_psds_relock(cg);
+		mutex_unlock(&cg->sn_lock);
 		return len;
 	}
 	if (strncmp(p, "mib ", 4) != 0 || kstrtou32(strim(p + 4), 16, &sel))
@@ -4496,8 +4990,11 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 	 * diagnostic that bricks the link it is diagnosing is worse than no
 	 * diagnostic, and the operator cannot tell the wedge from a real ranging
 	 * failure.  Refuse rather than "helpfully" running it anyway. */
-	if (CG_ONU_STATE(cg_mac_rd(cg, CG_REG_GPON_ONU)) != CG_STATE_OPERATION)
+	mutex_lock(&cg->sn_lock);
+	if (CG_ONU_STATE(cg_mac_rd(cg, CG_REG_GPON_ONU)) != CG_STATE_OPERATION) {
+		mutex_unlock(&cg->sn_lock);
 		return -EBUSY;
+	}
 
 	writel(CG_TBL_GO | (sel & 0x3ff), cg->mac + CG_REG_PLM_MIB_ACCESS);
 	i = cg_go_poll(cg->mac + CG_REG_PLM_MIB_ACCESS, CG_MIB_TRIES, true);
@@ -4507,7 +5004,8 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 		 "one-shot PLM MIB sel=0x%03x: access=0x%08x data=0x%08x (go %s after %d polls)\n",
 		 sel, acc, data,
 		 i < 0 ? "STUCK" : "cleared", i < 0 ? (int)CG_MIB_TRIES : i);
-	return len;
+	mutex_unlock(&cg->sn_lock);
+	return i < 0 ? -ETIMEDOUT : len;
 }
 
 static const struct proc_ops cg_proc_ops = {
@@ -4549,6 +5047,7 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 	spin_lock_init(&cg->evt_lock);
 	INIT_WORK(&cg->isr_work, cg_isr_work);
 	INIT_DELAYED_WORK(&cg->veip_avc_work, cg_veip_avc_work);
+	INIT_DELAYED_WORK(&cg->uni_apply_work, cg_uni_apply_work);
 	INIT_DELAYED_WORK(&cg->coldstart_work, cg_coldstart_work);
 	INIT_DELAYED_WORK(&cg->sn_wait_work, cg_sn_wait_work);
 	INIT_DELAYED_WORK(&cg->puc_cnt_work, cg_puc_cnt_work);
@@ -4615,14 +5114,16 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 				 * THIS board's -- which lives in the factory config
 				 * volume and is pushed in from userspace (see the
 				 * cg_sn_* block).  A bad/absent module-param serial
-				 * number defers to that path, bounded by
-				 * cg_sn_wait_work so the PON side is never left dark.
+				 * number defers to that path; cg_sn_wait_work
+				 * bounds only how long we stay QUIET about it --
+				 * it shouts at CG_SN_WAIT_SECS and the board stays
+				 * parked at O1 until a defined serial arrives.
 				 */
 				if (!cg_sn_param ||
 				    cg_sn_set(cg, cg_sn_param, CG_SN_PARAM)) {
 					dev_warn(dev, "GPON serial number not known yet - MAC configured, ranging DEFERRED up to %ds for /etc/init.d/gpon-identity (echo \"sn <VVVVHHHHHHHH>\" > /proc/gpon)\n",
 						 CG_SN_WAIT_SECS);
-					schedule_delayed_work(&cg->sn_wait_work,
+					cg_sched(cg, &cg->sn_wait_work,
 							      CG_SN_WAIT_SECS * HZ);
 				}
 			}
@@ -4635,7 +5136,9 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 				 * Re-check frame_var each pass: covers cg_do_intr=0 and a
 				 * PLOAM event missed while the IRQ path was arming. */
 				for (i = 0; i < 30; i++) {
+					mutex_lock(&cg->sn_lock);
 					cg_frame_var_update(cg);
+					mutex_unlock(&cg->sn_lock);
 					dev_info(dev, "range t=%ds: onu=0x%08x rgb8=0x%08x superframe=0x%08x alarm=0x%08x us=0x%08x psds_init=0x%08x\n",
 						 i, cg_mac_rd(cg, CG_REG_GPON_ONU),
 						 readl(cg->pon + CG_PSDS_RGB8),
@@ -4677,21 +5180,60 @@ static void cortina_gpon_remove(struct platform_device *pdev)
 {
 	struct cortina_gpon *cg = platform_get_drvdata(pdev);
 
+	/* ★★★ ADMISSIONS CLOSE FIRST, IN ORDER, AND ONLY THEN IS ANYTHING
+	 *     CANCELLED.  Moving one cancel to the end fixed only isr -> uni.
+	 *     Everything else could still be re-armed by a producer that was
+	 *     already running when its own cancel returned, and the producer
+	 *     graph CYCLES (isr re-arms coldstart and the AVC, coldstart re-arms
+	 *     itself, a /proc write re-arms several), so no ordering of cancels
+	 *     closes it on its own.
+	 *
+	 *  1. the GATE -- taken UNDER sn_lock, which is what makes it a closure
+	 *     and not merely a flag.  A producer that read the gate as false and
+	 *     was then preempted would otherwise enqueue AFTER its target's
+	 *     cancel: coldstart passes the gate for isr_work, pauses, remove
+	 *     sets the flag and cancels isr, coldstart resumes and queues it,
+	 *     and the coldstart cancel then completes leaving isr alive.  Most
+	 *     enqueue sites hold sn_lock across that decision, so taking it here
+	 *     waits for each of them to finish.  It is RELEASED before anything
+	 *     below, which must not run under it. */
+	mutex_lock(&cg->sn_lock);
+	WRITE_ONCE(cg->stopping, true);
+	mutex_unlock(&cg->sn_lock);
+
+	/*  2. /proc, which is a producer in its own right through sn_set */
+	if (cg->proc) {
+		proc_remove(cg->proc);
+		cg->proc = NULL;
+	}
+
+	/*  3. the DS hook, and it WAITS for a NAPI callback already inside it --
+	 *     a bare store published NULL and returned while a reader still held
+	 *     the old function pointer */
 	if (IS_REACHABLE(CONFIG_CORTINA_NI)) {
 		cortina_ni_pon_wan_ndev_set(NULL);
 		cortina_ni_pon_rx_hook_set(NULL);
 	}
+
+	/*  4. the IRQ itself: masked and synchronised, so no new ISR can queue */
+	cg_intr_teardown(cg);
+
+	/*  5. only now, the workers */
 	cancel_delayed_work_sync(&cg->veip_avc_work);
 	cancel_delayed_work_sync(&cg->coldstart_work);
 	cancel_delayed_work_sync(&cg->sn_wait_work);
 	cancel_delayed_work_sync(&cg->puc_cnt_work);
-	cg_intr_teardown(cg);
 	if (cg->wan_ndev) {
 		unregister_netdev(cg->wan_ndev);
 		free_netdev(cg->wan_ndev);
 	}
-	if (cg->proc)
-		proc_remove(cg->proc);
+	/* ★★ THE CONSUMER IS CANCELLED LAST, AFTER EVERY PRODUCER IS STOPPED.
+	 *    It used to run first, and an isr_work ALREADY RUNNING re-queues it
+	 *    from cg_omci_process -- so the cancel raced a producer it had not
+	 *    stopped, and the proc entry, removed later still, kept a second one
+	 *    alive through sn_set.  Nothing here holds sn_lock, which the work
+	 *    itself takes. */
+	cancel_delayed_work_sync(&cg->uni_apply_work);
 	if (cg_singleton == cg)
 		cg_singleton = NULL;
 }

@@ -1209,6 +1209,19 @@ static void __maybe_unused cortina_ni_qm_reset(struct cortina_ni *ni)
 		 h_ni, h_tqm, readl(rst));
 }
 
+/*
+ * Close admissions, stop what is still running, and only then let devres free
+ * anything. Each step needs the context the NEXT one is about to release.
+ */
+static void cortina_ni_teardown(void *data)
+{
+	struct cortina_ni *ni = data;
+
+	cortina_ni_rx_unpublish();		/* no new reader of this ni     */
+	cortina_ni_tx_withdraw(ni);		/* PON entry, then the netdev   */
+	cortina_ni_flowoffload_quiesce();	/* the self-requeuing sweep     */
+}
+
 static int cortina_ni_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1323,6 +1336,35 @@ static int cortina_ni_probe(struct platform_device *pdev)
 	 * exists at all), and what a HUMAN reads is here.  Runs last in probe so
 	 * rx/tx/l3fe are already up and every dump has something to show. */
 	cortina_ni_debugfs_init(ni);
+
+	/*
+	 * ★★ THE ORDER OF TEARDOWN, AND IT IS REGISTERED LAST ON PURPOSE.
+	 *
+	 * devres releases in REVERSE registration order, so an action added here
+	 * runs FIRST -- before rx (devm_kzalloc in cortina_ni_rx_probe) and the
+	 * l3e context (in cortina_ni_flowoffload_probe) are freed. That is the
+	 * whole point: this driver has no .remove, and with the netdev managed
+	 * by devres its unregister ran LAST, after both were gone. Unregistering
+	 * an UP interface calls ndo_stop, and cortina_ni_rx_stop() reads ni->rx
+	 * -- a pointer nobody clears, to memory that no longer exists.
+	 *
+	 * CORTINA_NI is tristate and the unbind attribute is not suppressed, so
+	 * this path is reachable without unloading anything.
+	 */
+	/*
+	 * ★ PUBLICATION IS THE LAST THING, AND THE CLEANUP IS REGISTERED WITH IT.
+	 *   Registering the netdev inside tx_probe made it reachable before rx
+	 *   existed, and left it REGISTERED over devm-freed memory whenever a
+	 *   later probe failed -- a partial-probe unwind, which needs no unbind
+	 *   and no module unload to reach.
+	 */
+	ret = devm_add_action_or_reset(dev, cortina_ni_teardown, ni);
+	if (ret)
+		return ret;
+
+	ret = cortina_ni_tx_publish(ni);
+	if (ret)
+		return ret;
 
 	dev_info(dev, "M2c probe complete\n");
 	return 0;

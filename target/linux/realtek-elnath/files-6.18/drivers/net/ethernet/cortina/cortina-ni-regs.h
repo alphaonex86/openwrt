@@ -2574,9 +2574,16 @@ enum cortina_ni_win {
  * a write to a read-data port is INERT -- so the claim that the "LF_CFG
  * thresholds" unblocked the L3FE ingress FIFO remains a false attribution, and
  * whatever really unblocked it is still unidentified.  The writes are left in
- * place deliberately: they are on the shipping-proven boot path and no board can
- * be booted to test their removal while the bench relay is dead.  Removing them
- * is owed work, gated on a live read.  The offload backend's own copies of these
+ * place deliberately: they are on the shipping-proven boot path, so removing them
+ * changes a booting board and must be MEASURED rather than reasoned about.
+ * ⚠ THE REASON GIVEN HERE USED TO BLAME THE BENCH -- it claimed no board could
+ * be booted because the switching hardware had failed.  That is REFUTED, and it
+ * is not paraphrased loosely: the claim is a DEFLECTION this project has made in
+ * session after session and it has never once been true. the relay is solid-state and has never
+ * once been the cause, and on 2026-09-10 a matrix over the seven non-empty pin
+ * subsets proved ALL THREE benches cut their own board, each with the negative
+ * control (a board must NOT boot at a step leaving its pin HIGH).  So the test
+ * IS runnable.  Removing them is owed work, gated on a live read.  The offload backend's own copies of these
  * offsets (CN_L3E_GLB_DBG_IDX/DAT and CN_L3E_GLB_LATCH_*) only ever READ them.
  */
 #define CA_NI_L3FE_CLS_MON_CTRL		0x30b0

@@ -20,22 +20,29 @@
 # bringing them up; the cortina-ni driver re-programs its my-MAC comparator +
 # FDB CPU entry from dev_addr on every link-up, so the hardware follows.
 #
-# On any failure (volume absent/unreadable, no ELAN_MAC_ADDR) the drivers'
-# locally-administered fallbacks (02:96:07:f0:00:01/02) stay - fleet rule is
-# "factory MAC when the board provides one, LAA otherwise", never a per-board
-# hardcode in the image.
+# On any failure the drivers' random locally-administered addresses stay, so the
+# eth0/gpon0 +1 relation is THIS SCRIPT's and holds only when it succeeds.
 
 . /lib/functions/system.sh
 
 mnt="/tmp/.factory_cfg"
 mac=""
+could_read_config=0
 mkdir -p "$mnt"
 if mount -t ubifs -o ro ubi0:ubi_Config "$mnt" 2>/dev/null; then
+	could_read_config=1
 	mac=$(sed -n 's/.*Name="ELAN_MAC_ADDR"[^V]*Value="\([0-9a-fA-F]\{12\}\)".*/\1/p' \
 		"$mnt/config_hs.xml" 2>/dev/null | head -n1)
 	umount "$mnt"
 fi
 rmdir "$mnt" 2>/dev/null
+
+# uci_apply_defaults DELETES a script that exits 0, so "could not ask" must
+# exit non-zero or one failed mount costs the factory MAC on every later boot.
+if [ "$could_read_config" != "1" ]; then
+	logger -t factory-mac "could not mount ubi_Config - retrying next boot"
+	exit 1
+fi
 
 if [ "${#mac}" != "12" ]; then
 	logger -t factory-mac "no ELAN_MAC_ADDR in ubi_Config - keeping driver LAA MACs"

@@ -7316,6 +7316,13 @@ static_assert(GPON_GEM_US_RANGE_OK(GPON_DATA_FLOW, 1u, GEM_US_PORT_MAP_IDX_MAX),
  * downstream. */
 #define GPON_DATA_ALLOC		256u	/* OLT data Alloc-ID for THIS OLT (consistent; from ME262) */
 static int gpon_install_tcont(u8 tcont, u16 alloc);	/* fwd: data-GEM install binds the data T-CONT */
+/* fwd: the Assign_Alloc-ID handler binds the data T-CONT through it. DECLARED
+ * HERE and not only defined below, because the x86 native-FSM differential
+ * (rtl9607c-test/native_fsm_impl.h) includes a SLICE of this file: the body
+ * that calls it is inside the slice and the definition is not, so a
+ * definition-only helper compiles on MIPS and breaks the offline gate. That
+ * gate caught this the same hour the call landed. */
+static void luna_data_tcont_from_assign(u16 alloc, bool assigned);
 
 /* The CPU-side DS-OMCI count, or -1 when this board's Ethernet shell has no
  * OMCI datapath.  See GPON_OMCI_RX_UNAVAIL: an unported path must not print as

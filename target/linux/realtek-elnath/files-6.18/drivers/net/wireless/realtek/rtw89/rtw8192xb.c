@@ -394,10 +394,9 @@ static void rtw8192xb_sps_default_voltages(struct rtw89_dev *rtwdev)
  * the probe ended `failed to power on` / -ETIMEDOUT through BOTH of
  * rtw89_mac_pwr_on()'s attempts (on -> off -> on, no pause), while the SAME
  * probe re-bound 670 s later on the same chip state succeeded (fw 0.27.56.0,
- * rfe_type 50).  Every earlier boot of this board had been COLD (the bench
- * relay cut power until that day), which is why it had never been seen -- and
- * on a rig whose relay does not cut power every boot is warm, so the one
- * timeout refused a whole certification campaign at the startup gate.
+ * rfe_type 50).  It is specific to the WARM path, which is why a campaign
+ * booting that way meets it at the startup gate and a cold-booting one does
+ * not.
  *
  * So the handshake is RETRIED with a growing settle, bounded in COUNT by this
  * table and in TIME by its sum (1.5 s): a dead chip still fails within

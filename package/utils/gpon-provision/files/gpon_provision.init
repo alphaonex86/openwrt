@@ -9,6 +9,13 @@ USE_PROCD=1
 
 RTK=/usr/sbin/rtk_factory
 ENVFILE=/var/run/gpon.env
+BOSA_CAL_DST=/lib/firmware/rtkbosa_k.bin
+GPON_SN_PATHS="/sys/module/luna_gpon/parameters/onu_sn
+/sys/module/gpon_luna/parameters/onu_sn
+/sys/module/gpon_rtl9602c/parameters/onu_sn
+/sys/module/gpon/parameters/onu_sn"
+
+. /lib/functions/gpon-cal.sh
 
 log() { logger -t gpon_provision "$@"; }
 
@@ -114,27 +121,6 @@ provision() {
 		echo "PON_VENDOR_ID=$vid"
 	} > "$ENVFILE"
 
-	# Push the per-ONU serial number into the live GPON driver so PLOAM ranging
-	# uses the factory value. The driver boots with a placeholder and re-parses
-	# onu_sn on write (writable module param), so this takes effect on the next
-	# ranging cycle even though we run after module init. START=09 makes this land
-	# well before the OLT completes ranging.
-	if [ -n "$sn" ]; then
-		# The Luna driver is `gpon_luna` since the 2026-08-29 rename; the
-		# older spellings stay so an image built before it still provisions.
-		# MEASURED on the LANLY G24W 2026-09-06 (its boot log): without this
-		# path the driver kept its compiled-in placeholder -- the X111W's
-		# own serial -- and reached O3 announcing it, on the splitter the
-		# X111W was online on; the OLT listed the G24W's own serial nowhere.
-		# Since the same day the driver ships NO placeholder: it parks at
-		# O1 until this write lands, so a missing write is a silent PON,
-		# never a wrong identity.
-		for p in /sys/module/gpon_luna/parameters/onu_sn \
-			 /sys/module/gpon_rtl9602c/parameters/onu_sn \
-			 /sys/module/gpon/parameters/onu_sn; do
-			[ -w "$p" ] && { printf '%s' "$sn" > "$p"; break; }
-		done
-	fi
 	log "provisioned: MAC=$mac SN=${sn:-?} OLT_MODE=${olt:-?} (source=$source)"
 
 	apply_mac "$base" "$mac"
@@ -181,17 +167,85 @@ provision() {
 
 }
 
+# A failed stage must not leave older bytes available to request_firmware.
+# RTL8290B does not use this GN25L95 file; the physical probe in the driver
+# decides whether its absence prevents activation.
+try_identity() {
+	local part source sn p tmp staged=1
+
+	config_load gpon
+	config_get source identity source factory
+	config_get part storage config_part config
+	config_get sn identity sn
+	if [ "$source" = factory ]; then
+		sn=$("$RTK" -p "$part" sn) || return 1
+	fi
+	[ -n "$sn" ] || { log "no GPON serial available; will retry"; return 1; }
+
+	tmp=$(mktemp -d /tmp/gpon-cal.XXXXXX) || return 1
+	if "$RTK" -p "$part" bosa_cal "$tmp/cal" &&
+	   gpon_cal_stage "$tmp/cal" "$tmp/cal.md5" "$BOSA_CAL_DST" 1024; then
+		staged=0
+	fi
+	rm -f "$tmp/cal" "$tmp/cal.new" "$tmp/cal.md5" "$tmp/cal.md5.new" ||
+		log "could not remove calibration candidate files in $tmp"
+	rmdir "$tmp" || log "could not remove calibration candidate directory $tmp"
+	if [ "$staged" != 0 ]; then
+		rm -f "$BOSA_CAL_DST" || {
+			log "cannot withdraw stale GN25L95 calibration; not activating GPON"
+			return 1
+		}
+		log "GN25L95 calibration unavailable; activation requires a physical RTL8290B or a later successful retry"
+	fi
+
+	for p in $GPON_SN_PATHS; do
+		[ -w "$p" ] || continue
+		if printf '%s' "$sn" > "$p"; then
+			log "GPON serial accepted by driver"
+			return 0
+		fi
+		log "GPON activation rejected; will retry"
+		return 1
+	done
+	log "GPON serial endpoint not ready; will retry"
+	return 1
+}
+
+retry_identity() {
+	local interval=5
+	while :; do
+		sleep "$interval"
+		try_identity && return 0
+		interval=$((interval * 2))
+		[ "$interval" -le 300 ] || interval=300
+	done
+}
+
 start_service() {
 	provision
+	try_identity && return 0
+	procd_open_instance identity
+	procd_set_param command /bin/sh /etc/init.d/gpon_provision --retry-identity
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 }
 
 # LuCI 'Save & Apply' (Phase 1E): procd calls reload_service when /etc/config/gpon
 # changes -> re-provision live, no reboot.
 reload_service() {
-	provision
-	[ -x /etc/init.d/omci ] && /etc/init.d/omci reload 2>/dev/null
+	restart || return $?
+	if [ -x /etc/init.d/omci ]; then
+		/etc/init.d/omci reload 2>/dev/null
+	fi
 }
 
 service_triggers() {
 	procd_add_reload_trigger "gpon"
 }
+# The worker bypasses rc.common: sourcing procd.sh would retain its service
+# lock throughout retries and prevent stop/reload from acquiring that lock.
+if [ "${1:-}" = --retry-identity ]; then
+	. /lib/functions.sh
+	retry_identity
+fi

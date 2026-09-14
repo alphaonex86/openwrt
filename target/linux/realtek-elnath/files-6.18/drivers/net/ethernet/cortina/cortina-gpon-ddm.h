@@ -17,7 +17,7 @@
  * really does implement the standard A2h layout, not just the address:
  *
  *   - the stock bring-up trace (tier 2: this board's own captured on-wire
- *     rtkbosa sequence, replayed verbatim in cortina-gpon-bosa-seq.h) writes
+ *     rtkbosa sequence, and now the ftrace of it) writes
  *     un-paged registers 0x00-0x4F and then ONLY 0x6E, 0x6F, 0x72, 0x78, 0x79,
  *     0x7B-0x7E and 0x7F.  0x00-0x37 is exactly the A2h alarm/warning
  *     THRESHOLD block (bytes 0-55) and 0x38-0x4F the calibration-constant

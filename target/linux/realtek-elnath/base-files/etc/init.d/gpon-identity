@@ -26,8 +26,10 @@
 # bootloader fixup), the OTP (PCIe calibration only), static_conf (blank).
 #
 # The kernel cannot read UBIFS at probe time, so cortina-gpon holds ranging off
-# until this script pushes the value in (bounded: after 60 s the driver shouts
-# and ranges with a placeholder, and re-ranges when a real serial arrives).
+# until this script pushes the value in. After 60 s the driver SHOUTS, and it
+# STAYS PARKED at O1: ranging is permitted only once the serial is defined
+# (operator, 2026-09-10), so losing this race costs WAN, never a wrong identity
+# on the fibre. It activates the moment a defined serial arrives.
 #
 # FALLBACK, when the volume has no GPON_SN: derive one from the factory base MAC
 # (itself per-board, from ELAN_MAC_ADDR / eth0) as vendor-id "XPON" + the MAC's
@@ -50,10 +52,29 @@
 #   - /proc/gpon absent      -> cortina-gpon has not finished probing YET
 #   - the ubifs mount fails  -> ubi0:ubi_Config is not attached YET
 # and the consequence of losing that race was permanent: the driver waits
-# CG_SN_WAIT_SECS (60 s), shouts, and ranges with its placeholder, which the OLT
-# will not admit - so the unit sits with NO PON identity and NO WAN until a human
-# reboots it.  One lost race, one dead subscriber, nothing in the system trying
-# again.  Rate-bounded (5 s doubling to a RETRY_MAX ceiling), count-unbounded.
+# CG_SN_WAIT_SECS (60 s), shouts, and (until 2026-09-10) ranged with a
+# placeholder the OLT will not admit - so the unit sat with NO PON identity and
+# NO WAN until a human rebooted it.  The driver no longer ranges at all in that
+# state, which removes the bogus identity but NOT the dead subscriber: this
+# retry is still the only thing that ever fixes it.  One lost race, one dead
+# subscriber, nothing in the system trying again.  Rate-bounded (5 s doubling to
+# a RETRY_MAX ceiling), count-unbounded.
+#
+# ★★ IT ALSO STAGES THIS UNIT'S OPTICAL CALIBRATION, AND BEFORE THE SERIAL.
+# The driver programs the GN25L95 laser driver as part of activation, and
+# activation is what the serial-number write triggers - so the calibration has
+# to be in place first or the very first activation refuses. Same volume, same
+# mount, same retry: one pass over ubi0:ubi_Config yields both.
+#
+# The numbers are PER UNIT (this optical subassembly's own bias, modulation and
+# APD tables). Stock reads them from the same store: rtkbosa.sh prefers the
+# PON-mode file, falls back to the general one, and checks an md5 sidecar. We
+# copy that precedence - and DIVERGE on one point, deliberately: stock's last
+# resort is /var/config_static/rtkbosa_k.bin, which is per-unit only because the
+# vendor builds a per-unit image. Ours is ONE image for every board, so a
+# compiled copy would be some other unit's numbers. There is no fallback here;
+# an absent, short or mismatched file means the laser is not programmed, and
+# that is a fault someone can see rather than one nobody can.
 #
 # ★ A FAILED MOUNT IS NOT "THIS BOARD HAS NO GPON_SN".  The MAC-derived fallback
 # below exists for a volume that genuinely carries no serial number; taking it
@@ -65,8 +86,20 @@
 
 START=11
 
+. /lib/functions/gpon-cal.sh
+
 RETRY_FIRST=5		# seconds before the first re-attempt
 RETRY_MAX=300		# ceiling: keep looking ~every 5 min, forever
+
+BOSA_CAL_LEN=1024			# the GN25L95 calibration is exactly this
+BOSA_CAL_DST=/lib/firmware/rtkbosa_k.bin
+
+# The driver's command node and the factory volume, named ONCE. They are
+# constants on a board; they are variables so the ORDER of what this script
+# does to them can be executed and observed off the device, which is where the
+# staging bugs were caught. Nothing reassigns them here.
+GPON_PROC=/proc/gpon
+CFG_VOLUME=ubi0:ubi_Config
 
 # START=11 runs BEFORE /etc/init.d/log, so syslog may not be listening yet:
 # mirror every message into the kernel ring too, where it lands next to the
@@ -82,24 +115,74 @@ say() {
 	echo "gpon-identity: $1" > /dev/kmsg 2>/dev/null
 }
 
+# Stage this unit's optical calibration off an ALREADY-MOUNTED $1.
+# 0 = the file is in place; non-zero = it is not, and the caller must not range.
+stage_bosa_cal() {
+	local mnt="$1" src="" checksum=""
+
+	if [ -f "$mnt/rtkbosa_gpon_k.bin" ]; then
+		src="$mnt/rtkbosa_gpon_k.bin"
+	elif [ -f "$mnt/rtkbosa_k.bin" ]; then
+		src="$mnt/rtkbosa_k.bin"
+		checksum="$mnt/rtkbosa_k_checksum"
+	else
+		say "no calibration in $CFG_VOLUME - this unit's laser cannot be programmed" err
+		return 1
+	fi
+	gpon_cal_stage "$src" "$checksum" "$BOSA_CAL_DST" "$BOSA_CAL_LEN" || {
+		say "this unit's optical calibration could not be staged" err
+		return 1
+	}
+	say "optical calibration staged from ${src##*/} ($BOSA_CAL_LEN bytes)" "" always
+	return 0
+}
+
+
 # ONE attempt. 0 = the identity is set (or the board genuinely has none and the
 # fallback was applied); non-zero = TRANSIENT, ask again later.
 try_set() {
 	local mnt="/tmp/.gpon_identity"
-	local sn="" mac="" src="" mounted=0
+	local sn="" mac="" src="" mounted=0 cal=1
 
-	[ -e /proc/gpon ] || {
-		say "no /proc/gpon - the cortina-gpon driver has not probed yet; will retry" err
+	[ -e "$GPON_PROC" ] || {
+		say "no $GPON_PROC - the cortina-gpon driver has not probed yet; will retry" err
 		return 1
 	}
 
 	mkdir -p "$mnt"
-	if mount -t ubifs -o ro ubi0:ubi_Config "$mnt" 2>/dev/null; then
+	if mount -t ubifs -o ro "$CFG_VOLUME" "$mnt" 2>/dev/null; then
 		mounted=1
-		sn=$(sed -n 's/.*Name="GPON_SN"[^V]*Value="\([^"]\{12\}\)".*/\1/p' \
-			"$mnt/config_hs.xml" 2>/dev/null | head -n1)
-		mac=$(sed -n 's/.*Name="ELAN_MAC_ADDR"[^V]*Value="\([0-9a-fA-F]\{12\}\)".*/\1/p' \
-			"$mnt/config_hs.xml" 2>/dev/null | head -n1)
+		# ★ ONE CHECKED EXTRACTION, AND IT IS THE READ WHOSE RESULT IS USED.
+		#
+		# ⚠ A PIPELINE REPORTS ITS LAST COMMAND'S STATUS, so
+		#   `sed ... | head -n1` comes back 0 however the sed went: a
+		#   volume that mounts and whose XML cannot be read looked exactly
+		#   like a board carrying no serial number, and the script took the
+		#   MAC fallback, published a serial the OLT has never heard of and
+		#   returned 0 -- which ends the retry for good.
+		# ⚠⚠ AND PRE-CHECKING A DIFFERENT READ DOES NOT FIX IT. The first
+		#   cut of this repair ran a `cat` first and left the sed's status
+		#   discarded; a cat that succeeds followed by a sed that fails
+		#   still published a made-up identity. The status that matters is
+		#   the one of the command whose OUTPUT is used.
+		# The two inner picks below run on an in-memory string, where no
+		# I/O can fail, so their pipeline status carries no information.
+		if ! xml=$(sed -n \
+			-e 's/.*Name="GPON_SN"[^V]*Value="\([^"]\{12\}\)".*/SN=\1/p' \
+			-e 's/.*Name="ELAN_MAC_ADDR"[^V]*Value="\([0-9a-fA-F]\{12\}\)".*/MAC=\1/p' \
+			"$mnt/config_hs.xml" 2>/dev/null); then
+			umount "$mnt"
+			rmdir "$mnt" 2>/dev/null
+			say "$CFG_VOLUME mounted but config_hs.xml could not be read - will retry rather than invent an identity" err
+			return 1
+		fi
+		sn=$(printf '%s\n' "$xml" | sed -n 's/^SN=//p' | head -n1)
+		mac=$(printf '%s\n' "$xml" | sed -n 's/^MAC=//p' | head -n1)
+		# ⚠ STAGE IT EVERY TIME, from this board's own volume. Trusting
+		#   a file already at the destination because it is non-empty
+		#   meant a stale or truncated one was never replaced, so a unit
+		#   whose factory data was perfectly good refused forever.
+		stage_bosa_cal "$mnt"; cal=$?
 		umount "$mnt"
 	fi
 	rmdir "$mnt" 2>/dev/null
@@ -118,7 +201,7 @@ try_set() {
 		# Taking the fallback here would latch a serial the OLT has never
 		# been given and stop looking for the real one.
 		[ "$mounted" = 1 ] || {
-			say "ubi0:ubi_Config not mountable yet - will retry for the factory serial number" err
+			say "$CFG_VOLUME not mountable yet - will retry for the factory serial number" err
 			return 1
 		}
 		[ "${#mac}" = "12" ] || \
@@ -128,12 +211,20 @@ try_set() {
 			src="MAC-derived FALLBACK - unique but NOT the factory serial number"
 			say "no GPON_SN in ubi0:ubi_Config config_hs.xml - using $sn ($src); the OLT will not have this serial provisioned" err always
 		else
-			say "no GPON_SN and no base MAC readable - leaving the driver to its own placeholder; this ONU has NO valid PON identity" err
+			say "no GPON_SN and no base MAC readable - the driver has no identity to range with and stays parked at O1; this ONU has NO valid PON identity" err
 			return 1
 		fi
 	fi
 
-	if echo "sn $sn" > /proc/gpon 2>/dev/null; then
+	# The serial write is what STARTS activation, and activation programs the
+	# laser -- so a missing calibration is not something to discover halfway
+	# through it. Retry: the volume may have mounted before its files settled.
+	[ "$cal" = 0 ] || {
+		say "not pushing the serial number yet - this unit's optical calibration is not staged" err
+		return 1
+	}
+
+	if echo "sn $sn" > "$GPON_PROC" 2>/dev/null; then
 		say "GPON serial number $sn from $src" "" always
 	else
 		say "the driver REJECTED serial number '$sn' (see dmesg)" err

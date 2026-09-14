@@ -275,8 +275,18 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 	 * dynamic store would put an OPAQUE DUPLICATE of an inventory instance
 	 * there: uploaded twice, answered from the inventory, and holding a
 	 * store slot a provisioned ME then cannot have. */
+	/* ME 50 joins them for the same reason and a different mechanism: G.988
+	 * 9.3.4 makes the bridge TABLE ME the ONU's, created and deleted WITH
+	 * its bridge port below, so an OLT Create would shadow one the ONU owns. */
+	/* ME 79 is the third of that kind: G.988 9.3.3 makes the per-protocol
+	 * filter pre-assign table the ONU's, created and deleted WITH the same
+	 * bridge port, and stock's own plugin agrees -- its EntityId carries no
+	 * set-by-create bit at all, so nothing about it is the OLT's to
+	 * instantiate. */
 	if ((class_id == OMCI_ME_TCONT || class_id == OMCI_ME_PPTP_ETH_UNI ||
-	     class_id == OMCI_ME_UNI_G) &&
+	     class_id == OMCI_ME_UNI_G ||
+	     class_id == OMCI_ME_MAC_BRIDGE_TABLE ||
+	     class_id == OMCI_ME_PREASSIGN_FILTER) &&
 	    (mt == OMCI_MT_CREATE || mt == OMCI_MT_DELETE))
 		return OMCI_RC_NOT_SUPPORTED;
 
@@ -287,11 +297,41 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 		if (!omci_store_create(o, class_id, inst, msg + 8,
 				    (len > 8) ? (int)(len - 8) : 0))
 			return OMCI_RC_ATTR_FAILED;
+		/* The bridge port's own table ME, ATOMICALLY: a store with no
+		 * room for the companion undoes the port too, rather than
+		 * leaving a bridge port whose ME 50 the OLT can never Get. */
+		if (class_id == OMCI_ME_MAC_BRIDGE_PORT &&
+		    !omci_store_put(o, OMCI_ME_MAC_BRIDGE_TABLE, inst,
+				    NULL, 0)) {
+			omci_store_del(o, class_id, inst);
+			return OMCI_RC_ATTR_FAILED;
+		}
+		/* ...and its filter pre-assign table, the same way and for the
+		 * same reason.  It goes through omci_store_create() rather than
+		 * omci_store_put() because it HAS a dense layout: a zero-length
+		 * body would make every later Set fail the dense-length gate,
+		 * which is a refusal the OLT would read as a broken ONU. */
+		if (class_id == OMCI_ME_MAC_BRIDGE_PORT &&
+		    !omci_store_create(o, OMCI_ME_PREASSIGN_FILTER, inst,
+				       NULL, 0)) {
+			omci_store_del(o, OMCI_ME_MAC_BRIDGE_TABLE, inst);
+			omci_store_del(o, class_id, inst);
+			return OMCI_RC_ATTR_FAILED;
+		}
 		break;
 	case OMCI_MT_DELETE:
 		if (!e)
 			return OMCI_RC_UNKNOWN_INST;
 		omci_store_del(o, class_id, inst);
+		if (class_id == OMCI_ME_MAC_BRIDGE_PORT) {
+			omci_store_del(o, OMCI_ME_MAC_BRIDGE_TABLE, inst);
+			omci_store_del(o, OMCI_ME_PREASSIGN_FILTER, inst);
+		}
+		/* An ME 171 instance owns rows the dense store never held, so
+		 * deleting the instance must drop them too -- otherwise the
+		 * next instance with the same id inherits a stranger's VLAN. */
+		if (class_id == OMCI_ME_EXT_VLAN)
+			gpon_ext_vlan_del(&o->vlan, inst);
 		break;
 	default:					/* OMCI_MT_SET */
 		if (len < 10)		/* no attribute mask on the wire */
@@ -523,7 +563,14 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 			if (e) {
 				omci_put_be16(resp + 8, e->class_id);
 				omci_put_be16(resp + 10, e->inst);
-				if (e->class_id == OMCI_ME_GEM_CTP) {
+				/* ★ EVERY DENSE CLASS, not just ME 268.  A row
+				 * that announces an instance and serves an
+				 * EMPTY attribute mask tells the OLT the ME
+				 * exists and nothing about it -- which is all a
+				 * class with an opaque body can honestly say,
+				 * and is now the answer only for classes that
+				 * really are opaque. */
+				if (omci_me_dense_len(e->class_id)) {
 					omci_me_fill(o, e->class_id, e->inst, 0xffff,
 						     resp + 14, resp + 40, &wmask, &wknown);
 					omci_put_be16(resp + 12, wmask);

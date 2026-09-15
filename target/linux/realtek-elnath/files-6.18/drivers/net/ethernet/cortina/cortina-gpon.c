@@ -4139,13 +4139,47 @@ static void cg_rx_omci(const u8 *pdu, unsigned int len)
  *   already be answering the OLT, so -ENODEV here is an ordinary early state,
  *   not an error to drop.
  */
+/*
+ * The two doors the core's drain needs into this shell.  ★ THE DECISION IS NOT
+ * HERE: which slots to walk, what a permanent failure means and whether a retry
+ * timer is owed are omci_uni_apply_run()'s, shared with the Luna family.  A
+ * slot with no declared port keeps its obligation (a corrected port list must
+ * still apply what the OLT already Set) and earns no retry timer.
+ */
+static enum omci_uni_apply_rc cg_uni_apply_slot(void *sh, u8 slot, bool locked)
+{
+	struct cortina_gpon *cg = sh;
+
+	if (slot >= cg_uni_port_n) {
+		dev_warn_once(cg->dev,
+			      "UNI slot %u has no declared switch port; its administrative state is modelled and not applied\n",
+			      slot);
+		return OMCI_UNI_NO_PORT;
+	}
+	return cortina_ni_uni_admin_set(cg_uni_port[slot], locked) ?
+		OMCI_UNI_TRANSIENT : OMCI_UNI_APPLIED;
+}
+
+static void cg_uni_apply_rearm(void *sh, u8 slot)
+{
+	struct cortina_gpon *cg = sh;
+
+	spin_lock_bh(&cg->omci_lock);
+	omci_uni_mark_changed(&cg->omci->pptp_eth_uni, slot);
+	spin_unlock_bh(&cg->omci_lock);
+}
+
+static const struct omci_uni_apply_ops cg_uni_apply_ops = {
+	.apply = cg_uni_apply_slot,
+	.rearm = cg_uni_apply_rearm,
+};
+
 static void cg_uni_apply_work(struct work_struct *work)
 {
 	struct cortina_gpon *cg = container_of(to_delayed_work(work),
 					       struct cortina_gpon,
 					       uni_apply_work);
 	u8 changed, admin[OMCI_UNI_MAX], n, i;
-	bool retry = false;
 
 	/* ★★ HELD ACROSS THE SNAPSHOT AND THE SLEEPING APPLY.  cg_identity_prepare
 	 *    can re-initialise the model under this work, and a lock snapshotted
@@ -4168,43 +4202,14 @@ static void cg_uni_apply_work(struct work_struct *work)
 		admin[i] = cg->omci->pptp_eth_uni.admin[i];
 	spin_unlock_bh(&cg->omci_lock);
 
-	if (!changed) {
-		mutex_unlock(&cg->sn_lock);
-		return;
-	}
-	for (i = 0; i < n && i < OMCI_UNI_MAX; i++) {
-		int rc;
-
-		if (!(changed & BIT(i)))
-			continue;
-		if (i >= cg_uni_port_n) {
-			dev_warn_once(cg->dev,
-				      "UNI slot %u has no declared switch port; its administrative state is modelled and not applied\n",
-				      i);
-			/* ⚠ RETAINED, AND STILL NOT SPUN ON.  Dropping it made
-			 * the text above a lie: the obligation was gone, so a
-			 * board whose port list is later corrected would never
-			 * apply what the OLT had already Set.  A permanent
-			 * configuration error keeps its obligation and earns no
-			 * retry timer. */
-			spin_lock_bh(&cg->omci_lock);
-			omci_uni_mark_changed(&cg->omci->pptp_eth_uni, i);
-			spin_unlock_bh(&cg->omci_lock);
-			continue;
-		}
-		rc = cortina_ni_uni_admin_set(cg_uni_port[i], admin[i] != 0);
-		if (rc) {
-			/* ⚠ RE-ARMED UNCONDITIONALLY.  It used to re-arm only
-			 * while omci_active, and the backend can SLEEP: a
-			 * datapath reset clearing that flag mid-apply (the MIB
-			 * itself is retained) made the obligation vanish. */
-			spin_lock_bh(&cg->omci_lock);
-			omci_uni_mark_changed(&cg->omci->pptp_eth_uni, i);
-			spin_unlock_bh(&cg->omci_lock);
-			retry = true;
-		}
-	}
-	if (retry)
+	/* The WALK, the RETENTION of a failed obligation and the rule that only
+	 * a TRANSIENT failure earns a retry timer are G.988's, shared with the
+	 * Luna family in omci_uni_apply_run(); this shell supplies the port call
+	 * and the lock the model is kept under.  ⚠ THE RE-ARM IS
+	 * UNCONDITIONAL: it used to happen only while omci_active, and the
+	 * backend can SLEEP -- a datapath reset clearing that flag mid-apply
+	 * (the MIB itself is retained) made the obligation vanish. */
+	if (omci_uni_apply_run(&cg_uni_apply_ops, cg, changed, n, admin))
 		cg_sched(cg, &cg->uni_apply_work, HZ);
 	mutex_unlock(&cg->sn_lock);
 }

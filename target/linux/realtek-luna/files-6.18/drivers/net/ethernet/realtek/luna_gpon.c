@@ -7729,14 +7729,54 @@ static void luna_uni_apply_queue(unsigned long delay)
  *   its own bosa_lock acquisition waits for an active callback and then nulls
  *   the attachment, so the next run sees NULL and consumes nothing.
  */
+/*
+ * The two doors the core's drain needs into this shell.  ★ THE DECISION IS NOT
+ * HERE: which slots to walk, what a permanent failure means and whether a retry
+ * timer is owed are omci_uni_apply_run()'s, shared with the Cortina family.
+ * What IS here is the port call and the lock, both of which are this shell's.
+ */
+struct luna_uni_apply_ctx {
+	struct omci_onu *onu;
+	void *cookie;
+	int (*set)(void *, unsigned int, bool);
+};
+
+static enum omci_uni_apply_rc luna_uni_apply_slot(void *sh, u8 slot, bool locked)
+{
+	struct luna_uni_apply_ctx *c = sh;
+
+	if (!c->set || slot >= luna_uni_port_n) {
+		pr_warn_once("luna-gpon: UNI slot %u has no %s; its administrative state is modelled and not applied\n",
+			     slot, c->set ? "declared switch port" : "apply backend");
+		return OMCI_UNI_NO_PORT;
+	}
+	return c->set(c->cookie, luna_uni_port[slot], locked) ?
+		OMCI_UNI_TRANSIENT : OMCI_UNI_APPLIED;
+}
+
+static void luna_uni_apply_rearm(void *sh, u8 slot)
+{
+	struct luna_uni_apply_ctx *c = sh;
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	omci_uni_mark_changed(&c->onu->pptp_eth_uni, slot);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+}
+
+static const struct omci_uni_apply_ops luna_uni_apply_ops = {
+	.apply = luna_uni_apply_slot,
+	.rearm = luna_uni_apply_rearm,
+};
+
 static void luna_uni_apply_work_fn(struct work_struct *w)
 {
 	int (*set)(void *, unsigned int, bool);
 	u8 changed, admin[OMCI_UNI_MAX], n, i;
+	struct luna_uni_apply_ctx ctx;
 	struct omci_onu *onu;
 	unsigned long flags;
 	void *cookie;
-	bool retry = false;
 
 	(void)w;
 	mutex_lock(&bosa_lock);
@@ -7755,29 +7795,14 @@ static void luna_uni_apply_work_fn(struct work_struct *w)
 		admin[i] = onu->pptp_eth_uni.admin[i];
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 
-	for (i = 0; changed && i < n && i < OMCI_UNI_MAX; i++) {
-		int rc;
-
-		if (!(changed & BIT(i)))
-			continue;
-		if (!set || i >= luna_uni_port_n) {
-			pr_warn_once("luna-gpon: UNI slot %u has no %s; its administrative state is modelled and not applied\n",
-				     i, set ? "declared switch port" : "apply backend");
-			rc = -ENODEV;
-		} else {
-			rc = set(cookie, luna_uni_port[i], admin[i] != 0);
-		}
-		if (!rc)
-			continue;		/* applied: the obligation is discharged */
-		/* RE-ARMED ON FAILURE ONLY, on the very model the snapshot came
-		 * from: bosa_lock has kept it attached for the whole call. */
-		spin_lock_irqsave(&luna_omci_lock, flags);
-		omci_uni_mark_changed(&onu->pptp_eth_uni, i);
-		spin_unlock_irqrestore(&luna_omci_lock, flags);
-		if (set && i < luna_uni_port_n)
-			retry = true;	/* transient: the backend refused */
-	}
-	if (retry)
+	ctx.onu = onu;
+	ctx.cookie = cookie;
+	ctx.set = set;
+	/* The WALK and the re-arm rule are G.988's and live in the core; this
+	 * shell supplies only the port call and the lock the model is kept
+	 * under.  RE-ARMED ON THE VERY MODEL THE SNAPSHOT CAME FROM: bosa_lock
+	 * has kept it attached for the whole call. */
+	if (omci_uni_apply_run(&luna_uni_apply_ops, &ctx, changed, n, admin))
 		luna_uni_apply_queue(HZ);
 	mutex_unlock(&bosa_lock);
 }

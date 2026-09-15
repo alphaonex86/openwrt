@@ -953,6 +953,35 @@ void omci_uni_mark_changed(struct omci_uni_inv *inv, u8 slot)
 		inv->changed |= (u8)(1u << slot);
 }
 
+bool omci_uni_apply_run(const struct omci_uni_apply_ops *ops, void *sh,
+			u8 changed, u8 n, const u8 *admin)
+{
+	bool retry = false;
+	u8 i;
+
+	if (!ops || !ops->apply || !ops->rearm || !admin)
+		return false;
+	if (n > OMCI_UNI_MAX)
+		n = OMCI_UNI_MAX;
+	for (i = 0; i < n; i++) {
+		enum omci_uni_apply_rc rc;
+
+		if (!(changed & (u8)(1u << i)))
+			continue;
+		rc = ops->apply(sh, i, admin[i] != 0);
+		if (rc == OMCI_UNI_APPLIED)
+			continue;
+		/* NOT APPLIED ⇒ STILL OWED, both ways.  take_changed() has
+		 * already cleared the word, so anything not put back here is
+		 * gone: no later Set of the same value re-arms it and a
+		 * MIB-Reset only covers the unlock direction. */
+		ops->rearm(sh, i);
+		if (rc != OMCI_UNI_NO_PORT)
+			retry = true;
+	}
+	return retry;
+}
+
 /* A MIB-Reset returns every UNI to unlocked.  ⚠ AND FLAGS THE ONES THAT WERE
  * LOCKED: a port the OLT held down and then reset the MIB out from under must
  * come back up, and the changed word is the only thing that says so. */

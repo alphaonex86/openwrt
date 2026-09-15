@@ -2627,12 +2627,22 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 
 	/* Bring up the switch L3/L4 NAT engine (gated by the hw_nat ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 117. */
+	/* ★★★ THE DIAGNOSTIC IS REGISTERED WHATEVER THE GATE DOES.  It used to sit
+	 * inside the `if (hw_nat)` below, which put the one file that can say WHY
+	 * the engine installed nothing behind the very thing it diagnoses: with
+	 * the knob at its default 0 the node did not exist, and an absent file
+	 * reads as "this image carries no accelerator instrumentation" rather than
+	 * "the knob is off".  It is READ-ONLY and it changes no datapath
+	 * behaviour; `l34_proc_show()` reports the gate's state and returns before
+	 * touching a lock the closed gate never initialised.
+	 */
+	rtl9602c_l34_proc_init(&ep->l34);
+
 	if (hw_nat) {
 		if (rtl9602c_l34_init(&ep->l34, ep->sw)) {
 			dev_warn(dev, "L34 hw-nat init failed; software forwarding\n");
 		} else {
 			dev_info(dev, "L34 hw-nat engine initialised\n");
-			rtl9602c_l34_proc_init(&ep->l34);	/* bring-up harness */
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 			/* The COMMON lifecycle owns the cookie map and the entry; ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 118. */

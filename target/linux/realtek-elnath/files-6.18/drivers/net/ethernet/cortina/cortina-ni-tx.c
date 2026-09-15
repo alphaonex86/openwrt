@@ -1320,6 +1320,13 @@ int cortina_ni_tx_probe(struct cortina_ni *ni)
 		return ret;
 
 	ndev->netdev_ops = &cortina_ni_netdev_ops;
+	/* The kernel's offload paths key on the FEATURE BIT, not on the presence
+	 * of .ndo_setup_tc: without it `ethtool -k` says "hw-tc-offload: off
+	 * [fixed]", nft cannot build a hardware flowtable, fw4 falls back to
+	 * software silently, and the hook below is never called - which reads
+	 * exactly like a working accelerator. */
+	ndev->hw_features |= NETIF_F_HW_TC;
+	ndev->features |= NETIF_F_HW_TC;
 	/* the STANDARD counter + register-snapshot interface (cortina-ni-ethtool.c):
 	 * `ethtool -S` / `ethtool -d`.  It exists so a test can ask the same
 	 * question of the vendor firmware and of ours - the /proc nodes cannot,

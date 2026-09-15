@@ -1,35 +1,28 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * gpon_gtc_ploam.h -- the GTC downstream-PLOAM message buffer, read through
- * struct hwio: the word-unpack that luna_gpon.c's gpon_ploam_read() carried
- * beside its own MMIO until 2026-09-05.
+ * struct hwio: the word-unpack luna_gpon.c's gpon_ploam_read() carried beside
+ * its own MMIO until 2026-09-05.
  *
  * WHAT THE SILICON DOES.  The Luna GTC block latches each received downstream
- * PLOAM in an 8-word buffer (GPON_GTC_DS_PLOAM_MSG, 0x10a0 within the block
- * on the RTL9602C), TWO message octets per 32-bit word: octet 2i in [15:8],
- * octet 2i+1 in [7:0].  The 13 octets of a DS PLOAM (G.984.3: ONU-ID, type,
- * 10 data, CRC-8) therefore span seven words, the seventh carrying only the
- * CRC in [15:8].  gpon_send_cpu_ploam() in the shell PACKS the upstream
- * message into US_PLOAM_DATA with the same two-octets-per-word rule; this is
- * that rule's inverse, and the upstream half is its natural future sibling.
+ * PLOAM in an 8-word buffer (GPON_GTC_DS_PLOAM_MSG, 0x10a0 within the block on
+ * the RTL9602C), TWO message octets per 32-bit word: octet 2i in [15:8], octet
+ * 2i+1 in [7:0].  The 13 octets of a DS PLOAM (G.984.3: ONU-ID, type, 10 data,
+ * CRC-8) therefore span seven words, the seventh carrying only the CRC in
+ * [15:8].  gpon_send_cpu_ploam() PACKS the upstream message into US_PLOAM_DATA
+ * with the same rule; this is its inverse.
  *
- * ★ WHY A (hwio, offset) FUNCTION.  regtable.h's law: the reasoning -- which
- *   word, which byte lane -- is not board-specific, only the OFFSET and the
- *   accessor are, so the shell hands both in and the unpack is compiled once,
- *   fuzzable on x86 through a recording hwio (gpon_gtc_ploam_diff_test).  The
- *   offset comes as a PARAMETER, the transaction-layer shape of
- *   gpon_gtc_cam_xact() / gpon_gtc_cntr_read(): a `ds_ploam_msg` slot in
- *   struct gpon_gtc_regs plus a table wrapper is the owed next step, and it
- *   lands in regtable.h / luna_gpon_regs.h, not here.
+ * ★ WHY A (hwio, offset) FUNCTION -- regtable.h's law: which word and which
+ *   byte lane is not board-specific, only the OFFSET and the accessor are, so
+ *   the unpack is compiled once and fuzzed on x86 through a recording hwio
+ *   (gpon_gtc_ploam_diff_test).  OWED: a `ds_ploam_msg` slot in struct
+ *   gpon_gtc_regs plus a table wrapper, in regtable.h / luna_gpon_regs.h.
  *
- * ★ WHAT IS DELIBERATELY NOT HERE.  The buffer-empty ask (DS_PLOAM_IND
- *   BUF_EMPTY) and the DEQ strobe that surround this read in the shell's poll
- *   loop are the shell's QUEUE DISCIPLINE; a reader that advanced the queue
- *   itself would consume a message it was only asked to look at.  Nor is any
- *   claim about the Cortina family: its MAC parses DS PLOAM in silicon
- *   (cortina-gpon.c, "no SW DS-PLOAM parsing needed") and its DS FIFO is four
- *   registers (PLOAMD_FIFO0..3 in the stock register-name table), a layout
- *   this function does not model.
+ * ★ DELIBERATELY NOT HERE: the buffer-empty ask (DS_PLOAM_IND BUF_EMPTY) and
+ *   the DEQ strobe are the shell's QUEUE DISCIPLINE -- a reader that advanced
+ *   the queue itself would consume a message it was only asked to look at.  Nor
+ *   any claim about Cortina: its MAC parses DS PLOAM in silicon and its DS FIFO
+ *   is four registers (PLOAMD_FIFO0..3), a layout this does not model.
  */
 #ifndef _GPON_GTC_PLOAM_H
 #define _GPON_GTC_PLOAM_H

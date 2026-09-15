@@ -5,26 +5,18 @@
  * gpon_common.h.
  *
  * gpon_regseq -- a bring-up expressed as DATA, and the tiny interpreter that
- * runs it.
+ * runs it.  The ADDRESSES and VALUES are silicon facts and stay with the
+ * silicon; "write this word, set these bits, wait, poll that bit until it
+ * clears or give up" is the same algorithm on every PON MAC, and was written
+ * once per family only because interpreter and tables shared a file.
  *
- * ★ WHY THIS IS CORE AND NOT FAMILY.  The register ADDRESSES and VALUES of a
- * bring-up are silicon facts and stay with the silicon.  What runs them is not:
- * "write this word, then set these bits, then wait, then poll that bit until it
- * clears or give up" is the same algorithm on every PON MAC anyone has ever
- * shipped, and it was written once per family for no reason but that the
- * interpreter and the tables lived in one file.
- *
- * ★★ TIME IS AN EXPLICIT INPUT, and that is what made this movable at all.  The
- * family version called `mdelay()` and `udelay()` directly, which the core
- * forbids -- not as bureaucracy, but because a driver that sleeps cannot be run
- * on a host.  With the two delays as ops, the same interpreter that drives the
- * silicon can be driven by a FIXTURE clock in an offline test at thousands of
- * sequences per second, which is this project's stated preference over one
- * ~200 s board boot.
+ * ★★ TIME IS AN EXPLICIT INPUT, and that is what made this movable.  The family
+ * version called mdelay()/udelay() directly; with the two delays as ops the
+ * same interpreter can be driven by a FIXTURE clock at thousands of sequences
+ * per second instead of one ~200 s board boot.
  *
  * ⚠ THE POLL BUDGET IS IN ITERATIONS, NOT MILLISECONDS, and it is the caller's.
- * A core that decided the timeout would be deciding a hardware fact it cannot
- * know; a family that decides it is stating one it measured.
+ * A core deciding the timeout would be deciding a hardware fact it cannot know.
  */
 #ifndef GPON_REGSEQ_H
 #define GPON_REGSEQ_H
@@ -49,11 +41,10 @@ struct gpon_regseq_op {
 };
 
 /*
- * The shell's whole contract.  Four function pointers and nothing else: no
- * device, no lock, no allocator.  `rd`/`wr` take an ABSOLUTE address because
- * the sequences are expressed that way in the silicon's own documentation --
- * translating them would invent a second numbering nobody could check against
- * the vendor's tables.
+ * The shell's whole contract: four function pointers, no device, no lock, no
+ * allocator.  `rd`/`wr` take an ABSOLUTE address because the sequences are
+ * written that way in the silicon's own documentation -- translating them would
+ * invent a second numbering nobody could check against the vendor's tables.
  */
 /**
  * gpon_field_mask() - the mask for bits [@msb:@lsb]. -> u32

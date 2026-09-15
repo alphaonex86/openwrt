@@ -9,20 +9,18 @@
  * rule), the parse of a downstream request, the dispatch by message type, and
  * the construction of the upstream response, trailer and MIC included.
  *
- * It holds NO managed-entity storage.  The ME model lives in gpon_omci_me.h,
- * which this layer CALLS and never inlines, and the seam is deliberate: G.988
- * message rules are identical on every ONU ever built, while which MEs a
- * product serves is per board.
+ * It holds NO managed-entity storage: the ME model lives in gpon_omci_me.h,
+ * which this layer CALLS and never inlines.  G.988 message rules are identical
+ * on every ONU ever built; which MEs a product serves is per board.
  *
  * ⚠ realtek-luna does NOT compile this yet.  It ships a third, independently
  *   written responder (rtl9602c_eth.c) that DIVERGES ON THE WIRE, so switching
  *   it over changes Luna's emitted bytes and needs its own board gate
- *   (follow-ups F1/F2/F3).  Each divergence is named at the constant it
- *   concerns, below.
+ *   (follow-ups F1/F2/F3).  Each divergence is named at its own constant below.
  *
  * ENDIANNESS: all wire access is explicit byte math — ((u16)p[0] << 8) | p[1] —
- * never a cast over wire bytes and never htons/ntohs on a buffer.  That is the
- * reason ONE source emits the same octets on big-endian MIPS and LE ARM64.
+ * never a cast and never htons/ntohs on a buffer, which is why ONE source emits
+ * the same octets on big-endian MIPS and LE ARM64.
  */
 #ifndef GPON_OMCI_CORE_H
 #define GPON_OMCI_CORE_H
@@ -125,10 +123,9 @@ u32 omci_mic_compute(const u8 *msg);
 void omci_set_mic(u8 *msg);
 
 /* Stamp the G.988 baseline trailer (bytes 40..43 = 00 00 00 28) AND the MIC.
- * Call it LAST.  PUBLIC so a shell that builds a PDU of its own stamps it with
- * THE shipped stamper: the trailer length is G.988, not silicon, and a shell
- * that respells it is how this file's MIC convention came to be implemented
- * twice, under two different polynomials, on one board. */
+ * Call it LAST.  PUBLIC so a shell building its own PDU stamps it with THE
+ * shipped stamper: a shell that respells it is how the MIC convention came to
+ * be implemented twice, under two different polynomials, on one board. */
 void omci_finalize(u8 *msg);
 
 /* Autonomous VEIP (ME 329) operational-state-up AVC: the OLT never polls the
@@ -167,18 +164,15 @@ u16 omci_alarm_count(const struct omci_onu *o);
 
 /* The general autonomous-notification emitter behind the VEIP one above.
  * ★ EXPORTED 2026-09-01 FOR A SECOND CALLER, so nobody deletes it as unused:
- *   dev/OMCI-ONU-simulate raises AVCs this driver does not (ME 256, for one),
- *   and a second packer there would be a third copy of a wire format testing
- *   the OLT against OUR idea of an AVC.  The driver calls only the wrapper, so
- *   this costs no extra code in the image. */
+ *   dev/OMCI-ONU-simulate raises AVCs this driver does not (ME 256), and a
+ *   second packer there would test the OLT against OUR idea of an AVC. */
 void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		   const u8 *val, unsigned int vlen, u8 *out);
 
 /* Store a 16-bit field big-endian, by explicit byte math.
  * ★ IN THE HEADER BECAUSE A SECOND COPY ALREADY EXISTED: the Luna ethernet
  *   driver carried a byte-identical one purely because this was static inline
- *   inside the .c.  A helper that cannot be used is a helper that gets written
- *   again. */
+ *   inside the .c. */
 static inline void omci_put_be16(u8 *p, u16 v)
 {
 	p[0] = (u8)(v >> 8);

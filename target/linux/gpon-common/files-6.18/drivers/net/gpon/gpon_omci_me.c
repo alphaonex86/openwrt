@@ -13,96 +13,42 @@
  */
 /*
  * gpon_omci_me.c — the ITU-T G.988 MANAGED-ENTITY model and MIB store, common
- * to every OpenWrt GPON target in this tree.
+ * to every OpenWrt GPON target in this tree.  Three parts: the board identity
+ * pool plus the TABLE-DRIVEN attribute descriptors (one row per class+attribute)
+ * with the ONE generic filler GET and MIB-Upload-Next share, so both byte-match
+ * by construction; the STATIC MIB-Upload row table; and the DYNAMIC store of the
+ * instances the OLT created.  It never parses a PDU, dispatches a message type,
+ * builds a response envelope, stamps a trailer or computes a MIC — that is
+ * gpon_omci_core.c, the MESSAGE layer, which calls in here.
  *
- * WHAT THIS IS
- *   The data half of the ONU's OMCI responder, in three parts:
- *     1. the board identity fields + the TABLE-DRIVEN attribute descriptors
- *        (one row per (class, attribute): number, wire size, value source) and
- *        the ONE generic filler that walks them, shared by GET and
- *        MIB-Upload-Next so both byte-match by construction;
- *     2. the STATIC MIB-Upload row table — the ONU's statement of which
- *        instances exist, split so each row's attributes fit the 26-octet
- *        Upload-Next value area;
- *     3. the DYNAMIC store of instances the OLT created, plus the context
- *        initialiser.
- *   It never parses a PDU, dispatches a message type, builds a response
- *   envelope, stamps a trailer or computes a MIC — that is gpon_omci_core.c,
- *   the MESSAGE layer, which calls into here.  Correspondingly this file
- *   includes no crc32 header and touches no octet of a frame it did not fill.
+ * WHY IT IS COMMON — operator, 2026-08-05: "la idea es poner en común el código
+ * que corresponde para no tener mucho duplicado".  Compiled by realtek-elnath
+ * (RTL9607F, Cortina, aarch64 LITTLE-endian) and by dev/rtl9607c-test on x86-64
+ * under ASan+UBSan.  NOT yet by realtek-luna (MIPS BIG-endian): Luna's own model
+ * in rtl9602c_eth.c emits different bytes, so adopting this one is a behaviour
+ * change with its own board gate, not code motion.  See gpon_omci_me.h.
  *
- * WHY IT IS COMMON — and which targets and architectures compile it
- *   Operator, 2026-08-05: "en openwrt debería estar estructurado algo así:
- *   rtl960x* para la familia para tener código común" … "la idea es poner en
- *   común el código que corresponde para no tener mucho duplicado", and on the
- *   two per-target monoliths that each carry a private copy: "mal, poner en
- *   común".
- *   Compiled by:
- *     - realtek-elnath (RTL9607F, Cortina)   aarch64, LITTLE-endian  — today
- *     - realtek-luna   (RTL960xC, Luna)      MIPS32,  BIG-endian     — NOT yet;
- *       Luna's own model in rtl9602c_eth.c emits different bytes, so adopting
- *       this one is a behaviour change with its own board gate (F1/F2/F3), not
- *       code motion.  See gpon_omci_me.h.
- *     - dev/rtl9607c-test on x86-64 through fuzz_shims/, under ASan+UBSan
+ * THE CORE/SHELL RULE: it decides, it never does.  No MMIO, no lock, no
+ * allocation, no sleep, no clock — every byte of state lives in the
+ * caller-provided struct omci_onu, and the shell reaches in only through
+ * omci_onu_set_optical().  That purity is what lets the whole model be swept on
+ * x86 instead of on a ~200 s board boot.
  *
- * THE CORE/SHELL RULE IT OBEYS
- *   FUNCTIONAL CORE.  It decides; it never does.  No HW I/O, no locking (the
- *   caller serialises), no allocation, no sleeping, no clock read — every byte
- *   of state lives in the caller-provided struct omci_onu.  The imperative
- *   shell publishes the live optical measurement through omci_onu_set_optical()
- *   and reaches into the model no other way.
+ * ENDIANNESS: attribute integers are emitted big-endian by explicit byte math
+ * (omci_attr_bytes()), never a struct or pointer cast over wire bytes.
  *
- *   => THIS FILE MUST NEVER GAIN AN MMIO ACCESS.  No readl/writel, no ioremap,
- *   no msleep/udelay, no jiffies, no spin_lock/mutex, no kmalloc, no dev_ or
- *   netdev_ logging, no schedule_work.  The purity check greps for exactly that
- *   set and the gate goes red if one appears.  That property is what lets the
- *   whole model be swept on x86 — every attribute mask x every modelled class —
- *   instead of on a ~200 s board boot.
+ * WHAT PINS IT: the table walk is byte-for-byte equivalent to the hand-written
+ * filler it replaced over all 65536 attribute masks x every modelled
+ * class/instance (dev/rtl9607c-test/omci_me_table_test), and the cross-vendor
+ * G.988 behaviour by omci_conformance_test.  The CHECK COUNT is compared as
+ * well as the colour — a green costing fewer checks is not the same green.
  *
- * ENDIANNESS
- *   Attribute integers are emitted big-endian by explicit byte math
- *   (omci_attr_bytes(): shift MSB-first into a 4-byte scratch, take the
- *   right-aligned tail).  No struct or pointer cast over wire bytes, ever.
- *   One source, two byte orders, identical octets.
- *
- * WHAT PINS IT
- *   Byte-for-byte equivalence of the table walk with the hand-written filler it
- *   replaced is pinned exhaustively (all 65536 attribute masks x every modelled
- *   class/instance) by dev/rtl9607c-test/omci_me_table_test, and the G.988
- *   cross-vendor behaviour by dev/rtl9607c-test/omci_conformance_test.  Those
- *   run against THIS file after the move; a green that costs fewer checks than
- *   before is not the same green, so the count is compared, not just the
- *   colour.
- *
- * PROVENANCE
- *   Code motion, 2026-08-05, from realtek-elnath's omci_responder.c
- *   (lines 135-240, 242-474, 476-611, 613-764, 766-782) — the already-pure ME
- *   model of the driver that is at stock parity.  Logic byte-for-byte as it
- *   shipped.  The ONLY textual change is dropping `static` from the nine
- *   functions the message layer now calls across the file boundary; every
- *   contract comment stays at its definition, where it was.
- *
- * FOUND WHILE MOVING, NOT FIXED HERE (fixing during a move makes the
- * regression un-bisectable — the fix comes with its own failing-first case):
- *   - omci_store_nth() walks the store in ARRAY order, so a Delete landing
- *     between two MIB-Upload-Next requests RENUMBERS the remaining rows and the
- *     OLT's walk silently skips one.  Plan follow-up F11.
- *   - ME 257 attribute 1 (equipment ID) is "HSGQ-X411AXF" on a unit certified
- *     as X400AXF.  It is on the wire to the OLT.  Plan follow-up F18 — check it
- *     against the stock dump before anyone "corrects" it.
- *   - RESOLVED 2026-09-02: the identity pool's _Static_assert guarded only
- *     the TOTAL size.  The pool is now struct omci_identity — offsets come
- *     from offsetof() over named members and each member's wire size is
- *     pinned by its own assert, so a length drift is a build error naming
- *     the field, not a silent shift of every field after it.
- *   - omci_me_fill()'s `over` flag is currently UNOBSERVABLE.  It turns the
- *     return into OMCI_RC_ATTR_FAILED, and the only caller that reads the
- *     return tests it solely for OMCI_RC_UNKNOWN_ME; the MIB-Upload-Next caller
- *     discards it.  The truncation ITSELF is still reported — through
- *     @rmask_out, from which the message layer derives its "failed" mask — so
- *     nothing is lost on the wire today.  But a future caller that trusts the
- *     return code will get a distinction nothing pins: inverting `over` leaves
- *     the whole exhaustive differential green.  Not removed, not rewired here.
+ * PROVENANCE (code motion 2026-08-05 from realtek-elnath's omci_responder.c)
+ * and the follow-ups found while moving, still OPEN — F11 omci_store_nth()
+ * renumbering on a mid-upload Delete, F18 the "HSGQ-X411AXF" equipment ID on a
+ * unit certified X400AXF, the 2026-09-02 identity-pool repair, and
+ * omci_me_fill()'s unobservable `over` flag:
+ * dev/MEASURED-gpon-omci-me-provenance-and-followups-2026-08-05.md
  */
 #include <linux/string.h>
 

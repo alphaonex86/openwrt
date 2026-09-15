@@ -19,59 +19,18 @@
  * ceiling; the finest gives 168 ms.
  *
  * ---------------------------------------------------------------------------
- * WHERE THESE FACTS COME FROM, and how far each one is actually proven.  The
- * question "does this silicon even HAVE a watchdog" was open when this driver
- * was written, so the answer is recorded rather than assumed.
- *
- *  [1] LIVE, ON THIS SoC.  arch/mips/realtek-luna/setup.c has driven exactly
- *      these registers since bring-up: luna_machine_restart() writes WDT_CTRL
- *      at 0x18003268 with enable | scale 0 | PH1 = 1 and does NOT kick, and
- *      that is how this port reboots.  It works, which proves the block exists
- *      at that address, that WDT_E arms it, that the timeout really resets the
- *      chip, and that RESET_MODE 0 re-enters the boot ROM.
- *  [2] THIS BOARD'S OWN STOCK FIRMWARE.  The X111W vendor kernel image contains
- *      the string "arch/mips/bsp_rtl8686/luna_watchdog.c" together with
- *      "WDT_E=%d", "WDT_CLK_SC=%d", "PH1_TO=%d", "PH2_TO=%d",
- *      "WDT_RESET_MODE=%d" and "[BSP_WDT_PH1TO_IRQ #%d]", and its rootfs arms
- *      the thing on every boot -- /etc/init.d/rc34 does
- *      `echo 1 > /proc/luna_watchdog/watchdog_flag`.  The shipped product runs
- *      with this watchdog enabled.
- *  [3] THE FAMILY'S OWN BSP HEADERS.  TC_BASE 0xB8003200, the +0x60/+0x64/+0x68
- *      register triple, WDT_E and the kick at bit 31, and the 22/15/29 field
- *      shifts are declared once for the whole Luna family and are NOT
- *      chip-conditional, in a tree whose build variants include this chip.
- *
- *      *** CITATION CORRECTED 2026-08-26. ***  This paragraph used to add that
- *      the scale encoding "is named there too", i.e. in the BSP HEADERS.  It is
- *      NOT: bspchip.h declares only WDT_E, WDT_KICK, the 31 mask and the three
- *      shifts.  An audit that grepped the headers therefore reported the
- *      encoding as UNSOURCED and cast doubt on every window figure this driver
- *      has ever published.  THE CONSTANT WAS RIGHT AND THE CITATION WAS WRONG.
- *      The encoding is declared in a KCONFIG HELP TEXT, which is why a header
- *      grep missed it:
- *
- *        arch/mips/rtl9607c/Kconfig.hook:60-66
- *          config WDT_CLK_SC ... help: 0:2^25, 1:2^26, 2:2^27, 3:2^28
- *
- *      present in BOTH on-disk vendor copies, and corroborated twice more:
- *      vendor U-Boot swp_bootm_error_handler.c:24-30 tabulates ph1_to -> seconds
- *      as exactly (n+1) x 1.34 s (which also proves the field counts from ONE),
- *      and the vendor's own rtl819x_wdt.c for this block declares
- *      max_timeout = 43 with the comment "for LX bus 200MHz, time tick 1.34 s".
- *      That ceiling is a NUMERIC SIEVE no comment can fake: a 5-bit PH1 field is
- *      32 ticks, and 32 ticks = 43 s ONLY at base 2^25 (2^24 -> 21.5 s,
- *      2^26 -> 85.9 s).  Tier 3, from >= 2 independent sources.
- *
- *      The reset modes (0 = full chip, 1 = CPU + IPSec, 2 = software) ARE named
- *      in the BSP headers, as this paragraph said.
- *  [4] A LIVE READ ON A SIBLING PART.  A boot log from the RTL9607C reference
- *      board prints the three registers by address -- 0xb8003260, 0xb8003264,
- *      0xb8003268 -- with WDT_CTRL holding 0xe7c00000, which decodes under the
- *      layout below as scale 3, PH1 31, PH2 0, reset mode 0.  Every field lands
- *      where this file says it does.
- *
- * The one thing NOT established is the meaning of the middle register
- * (+0x04, the vendor calls it WDTINTRR).  Nothing here reads or writes it.
+ * WHERE THESE FACTS COME FROM, tier by tier, with the 2026-08-26 citation
+ * correction that the scale encoding lives in a Kconfig HELP TEXT and not in
+ * the BSP headers: dev/MEASURED-luna-wdt-provenance-2026-08-26.md.
+ * In short: [1] LIVE on this SoC (luna_machine_restart() has driven exactly
+ * these registers since bring-up, which is how this port reboots); [2] this
+ * board's own stock firmware, which arms it on every boot; [3] the family BSP
+ * headers for the register triple and the field shifts, the encoding
+ * corroborated three ways including a numeric sieve (32 ticks = 43 s ONLY at
+ * base 2^25); [4] a live read on the RTL9607C reference board, 0xe7c00000,
+ * every field where this file says it is.
+ * The middle register (+0x04, vendor WDTINTRR) is NOT established; nothing
+ * here reads or writes it.
  *
  * ---------------------------------------------------------------------------
  * ARMED IS NOT FIRED, AND THIS DRIVER REFUSES TO PRETEND OTHERWISE.

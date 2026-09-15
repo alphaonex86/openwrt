@@ -12,18 +12,14 @@
  * pure arithmetic over counters; every SIDE EFFECT leaves through
  * struct gpon_ploam_ops, and TIME IS AN EXPLICIT INPUT (now_ms).
  *
- * ★ HONEST SCOPE, MEASURED 2026-08-05: this file has exactly ONE kernel
- *   consumer.  Elnath has NO software PLOAM FSM — its MAC runs O1->O5 and
- *   auto-ACKs in silicon — so this is NOT justified by de-duplication.  It is
- *   justified by offline adversarial testing (the FSM becomes fuzzable on x86
- *   against an adversarial OLT with no board in the loop, which is this
- *   project's PRIMARY correctness gate) and by the roadmap.  Claiming a saving
- *   that does not exist would be the reassuring-direction reporting this
- *   project keeps paying for.
+ * ★ HONEST SCOPE, MEASURED 2026-08-05: exactly ONE kernel consumer.  Elnath has
+ *   NO software PLOAM FSM (its MAC runs O1->O5 and auto-ACKs in silicon), so
+ *   this is NOT justified by de-duplication -- it is justified by offline
+ *   adversarial testing, which is this project's PRIMARY correctness gate.
  *
  * PROVENANCE: code motion out of the Luna monolith, which is at stock parity.
- * Behaviour is intended to be BIT-IDENTICAL; a latent defect found while moving
- * is moved UNCHANGED and recorded as a follow-up at that site.
+ * Behaviour is intended BIT-IDENTICAL; a latent defect found while moving is
+ * moved UNCHANGED and recorded as a follow-up at that site.
  */
 #ifndef GPON_PLOAM_H
 #define GPON_PLOAM_H
@@ -36,18 +32,15 @@
 #include <stdbool.h>
 #include <string.h>
 /*
- * ★ TEMPORARY COMPATIBILITY SHIM — IT BELONGS IN gpon_common.h, NOT HERE, and
- * it exists because that header includes <linux/types.h> unconditionally, which
- * makes the common layer kernel-only.
+ * ★ TEMPORARY COMPATIBILITY SHIM — IT BELONGS IN gpon_common.h, which includes
+ * <linux/types.h> unconditionally and so makes the common layer kernel-only.
  *
- * ★ AND IT FAILS IN THE REASSURING DIRECTION, which is why it survived: on a
- *   glibc host <linux/types.h> RESOLVES — to the UAPI copy — so the include
- *   succeeds and the file looks portable.  That header defines __u8/__u32 but
- *   NOT the kernel-internal u8/u16/u32, so the build dies far below on the
- *   first struct member and reads like a typo rather than a missing host
- *   branch.  Delete this block the moment gpon_common.h grows its own
- *   #ifndef __KERNEL__ branch; a duplicate typedef of the identical type is
- *   legal C11, so the two can coexist meanwhile.
+ * ★ IT FAILS IN THE REASSURING DIRECTION, which is why it survived: on a glibc
+ *   host <linux/types.h> RESOLVES (to the UAPI copy), which defines __u8/__u32
+ *   but NOT the kernel-internal u8/u16/u32 -- so the build dies far below on
+ *   the first struct member and reads like a typo.  Delete this block when
+ *   gpon_common.h grows its own #ifndef __KERNEL__ branch; a duplicate typedef
+ *   of the identical type is legal C11, so the two may coexist meanwhile.
  */
 #ifndef GPON_HOST_TYPES_DEFINED
 #define GPON_HOST_TYPES_DEFINED
@@ -183,11 +176,10 @@ enum gpon_ploam_ev {
  *   write happens BEFORE the EqD write on the O3 edge, and the US-PLOAM flush
  *   happens AFTER the ranged BOH switch on the O4 edge.  A shell that reorders
  *   them changes behaviour.
- * ★ DELIBERATELY NOT struct gpon_shell_ops from the plan: that sketch drops the
+ * ★ DELIBERATELY NOT the plan's struct gpon_shell_ops: that sketch drops the
  *   US_PLOAM_IND queue selector (the urgent queue pre-empts the auto-SN burst,
- *   which is what gets an Acknowledge to the OLT before it raises LOAi) and its
- *   set_eqd implies the core packs the EqD REGISTER word, whose field layout is
- *   a register fact.  Both would be wire or behaviour changes. */
+ *   which is what gets an Acknowledge out before the OLT raises LOAi) and its
+ *   set_eqd implies the core packs the EqD register word, a register fact. */
 struct gpon_ploam_ops {
 	/* Enqueue one 12-byte US PLOAM on `queue` (PLM_US_QUEUE_*).  Replaces
 	 * gpon_send_cpu_ploam(). */
@@ -260,20 +252,19 @@ struct gpon_ploam_ops {
 
 /* ★★★ THE MANDATORY SET — C's answer to a C++ PURE VIRTUAL.  A designated
  * initialiser that omits a member is legal C and leaves it NULL, so a family
- * that forgets a callback gets a silent no-op at best and, at worst, a NULL
- * dereference the first time the FSM reaches that transition — minutes into a
- * boot, on a board with no console budget, reading like a silicon fault.
+ * that forgets a callback gets a silent no-op at best and a NULL dereference
+ * the first time the FSM reaches that transition at worst -- minutes into a
+ * boot, reading like a silicon fault.
  *
- * A callback is MANDATORY when gpon_ploam.c calls it WITHOUT a NULL check on a
- * path that runs.  Everything else is OPTIONAL for a stated reason: ->trace is
- * guarded by ev(), and every ->unsupported call goes through gpon_unsup_call(),
- * whose whole purpose is that the NULL check lives in ONE place.
+ * MANDATORY = gpon_ploam.c calls it WITHOUT a NULL check on a path that runs.
+ * The rest are OPTIONAL for a stated reason: ->trace is guarded by ev(), and
+ * every ->unsupported call goes through gpon_unsup_call(), whose whole purpose
+ * is that the NULL check lives in ONE place.
  *
- * ⚠ THE EVIDENCE IS THE CALL SITE, NOT THIS LIST, which can drift from the code
- *   it describes: dev/ONU-test-case/ploam_ops_mandatory_guard.py re-derives the
- *   split from gpon_ploam.c's own call sites and FAILS when it disagrees.  The
- *   :NNN pointers below are line numbers AS MEASURED ON 2026-09-09 — they say
- *   where the evidence WAS; the guard is what stays true. */
+ * ⚠ THE EVIDENCE IS THE CALL SITE, NOT THIS LIST:
+ *   dev/ONU-test-case/ploam_ops_mandatory_guard.py re-derives the split from
+ *   gpon_ploam.c's own call sites and FAILS when it disagrees.  The :NNN
+ *   pointers below are line numbers AS MEASURED ON 2026-09-09. */
 #define GPON_PLOAM_OPS_MANDATORY(X)					\
 	X(ploam_tx)		/* gpon_ploam.c:195  */			\
 	X(boh_write)		/* :395  */				\

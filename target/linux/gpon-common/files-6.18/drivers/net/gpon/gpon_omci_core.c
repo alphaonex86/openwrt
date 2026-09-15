@@ -1,67 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware:
- * no register access, no clock, no lock, no allocator, no device pointer.
- * One source compiles for MIPS big-endian, ARM64 little-endian and x86.
- * Role: G.988 OMCI baseline message layer.
+ * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware: no
+ * register access, no clock, no lock, no allocator, no device pointer.  One
+ * source compiles for MIPS big-endian, ARM64 little-endian and x86.
+ * Canonical tier rule and file map: "THE THREE TIERS" in gpon_common.h.
+ * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17)
+ * COMPILES this tier against stubs declaring no accessor, clock, lock or
+ * allocator, so impurity cannot build.
  *
- * Canonical tier rule, the file map and the guard name live in ONE place:
- * see "THE THREE TIERS" in gpon_common.h (this directory).
- * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17) —
- * it COMPILES this tier against stubs that declare no register accessor,
- * no clock, no lock and no allocator, so impurity cannot build.
- */
-/*
- * gpon_omci_core.c — the ITU-T G.988 OMCI baseline MESSAGE layer, common to
- * every OpenWrt GPON target in this tree.  See gpon_omci_core.h for the full
- * statement of what this file is; the short form, repeated here because this
- * is the file people edit:
+ * gpon_omci_core.c — the ITU-T G.988 OMCI baseline MESSAGE layer: parse a DS
+ * baseline PDU, dispatch by message type, build the US response (trailer +
+ * MIC).  NO managed-entity storage -- the ME model, the board identity, the
+ * MIB-Upload rows and the dynamic OLT-created instance store are the ME-model
+ * layer's, reached only through CONTRACT below.  Full statement:
+ * gpon_omci_core.h.
  *
- *   WHAT   parse a DS baseline PDU, dispatch it by message type, build the US
- *          response (trailer + MIC).  NO managed-entity storage: the ME model,
- *          the board identity data, the MIB-Upload rows and the dynamic
- *          OLT-created instance store are the ME-model layer's, and this file
- *          reaches them only through the calls listed under CONTRACT below.
+ * WHY (operator, 2026-08-05, on two per-target monoliths each carrying a
+ * private copy of G.988: *"mal, poner en común"*): G.988 is a specification,
+ * not a chip fact, so one copy.  Compiled by realtek-elnath (aarch64 LE), by
+ * realtek-luna (MIPS32 BE) once follow-ups F1/F2/F3 land, and by
+ * dev/rtl9607c-test on x86-64 through fuzz_shims/.
  *
- *   WHY    Operator, 2026-08-05: "en openwrt debería estar estructurado algo
- *          así: rtl960x* para la familia para tener código común" … "la idea es
- *          poner en común el código que corresponde para no tener mucho
- *          duplicado"; on the two per-target monoliths each carrying a private
- *          copy of G.988: "mal, poner en común".  G.988 is a specification, not
- *          a chip fact, so one copy.  Compiled by realtek-elnath (RTL9607F /
- *          Cortina, aarch64 LITTLE-endian), by realtek-luna (RTL960xC / Luna,
- *          MIPS32 BIG-endian) once follow-ups F1/F2/F3 land, and by
- *          dev/rtl9607c-test on x86-64 through fuzz_shims/.
+ * RULE: it decides, it never does.  ⇒ NEVER GAIN AN MMIO ACCESS -- no
+ * readl/writel, ioremap, msleep/udelay, jiffies, spin_lock/mutex, kmalloc, or
+ * dev_/netdev_ logging.  The purity check greps for that exact set.  All wire
+ * access is explicit byte math: one source, two endiannesses, same octets.
  *
- *   RULE   FUNCTIONAL CORE — it decides, it never does.  No device pointer, no
- *          lock (the caller serialises), no allocation, no sleep, no clock.
- *          All state lives in the caller's struct omci_onu.
- *          ⇒ THIS FILE MUST NEVER GAIN AN MMIO ACCESS.  No readl/writel, no
- *          ioremap, no msleep/udelay, no jiffies, no spin_lock/mutex, no
- *          kmalloc, no dev_ or netdev_ logging.  The purity check greps for
- *          that exact set; one of them turns the offline gate red.  That
- *          property is what makes this layer host-compilable, fuzzable and
- *          portable across both architectures at once.
+ * PROVENANCE: CODE MOTION, not a redesign.  Every function body came unchanged
+ * from the responder live on Elnath at stock parity, proven end-to-end
+ * (Online/normal + WAN) against the HSGQ-G008 OLT.  The layout rule: message
+ * contents start at octet 8, and only a response carrying a RESULT code spends
+ * that octet on it.  Where Luna's independent responder disagrees the
+ * divergence is named at the line it concerns with its follow-up id; NOTHING
+ * was converged here, because converging changes bytes on a wire.
  *
- *   BYTES  All wire access is explicit byte math, never a struct or pointer
- *          cast over wire bytes.  One source, two endiannesses, same octets.
- *
- * PROVENANCE.  This is CODE MOTION, not a redesign: every function body below
- * came unchanged from the responder that is live on Elnath at stock parity
- * (realtek-elnath .../cortina/omci_responder.c), whose wire layout was itself
- * proven end-to-end — Online/normal + WAN — against the HSGQ-G008 OLT.  The
- * layout rule the whole thing follows: message contents start at octet 8, and
- * only a response that carries a RESULT code spends that octet on the result.
- * Where Luna's independent responder disagrees, the divergence is named at the
- * line it concerns with its follow-up id; NOTHING was converged here, because
- * converging changes bytes on a wire and this refactor may not.
- *
- * CONTRACT — what this layer requires from the ME-model layer (gpon_omci_me.h):
- *   types      struct omci_onu, struct omci_me_inst, struct omci_mib_row
- *   store      omci_store_find, omci_store_has_class, omci_store_nth,
- *              omci_store_put, omci_store_merge, omci_store_del
- *   model      omci_me_fill, omci_inst_exists, omci_class_modelled
- * All are pure.  Nothing here calls anything else outside libc-equivalents.
+ * CONTRACT — what this layer needs from gpon_omci_me.h, all pure:
+ *   types  struct omci_onu, struct omci_me_inst, struct omci_mib_row
+ *   store  omci_store_find, omci_store_has_class, omci_store_nth,
+ *          omci_store_put, omci_store_merge, omci_store_del
+ *   model  omci_me_fill, omci_inst_exists, omci_class_modelled
  */
 #include <linux/crc32.h>
 #include <linux/string.h>
@@ -73,57 +50,41 @@
  * MIC (bytes 44..47) = the I.363.5 / AAL5 CRC-32 over bytes 0..43 (G.984.4
  * baseline trailer): NON-reflected polynomial 0x04C11DB7 MSB-first, init
  * all-ones, final complement — the kernel's crc32_be — stored big-endian.
- * LIVE-PROVEN on this OLT: the DS OMCI frames' MIC matches ~crc32_be(~0,
- * msg, 44) and NOT the reflected zlib crc32_le (the DS MIC self-check in
- * cortina-gpon.c logs which variant each received frame carries).  Computed
- * in SOFTWARE: the GPON MAC's own OMCI CRC engine stays enabled
- * (onu_cfg.omci_crc_dis = 0, the stock value) — if the HW also inserts, it
- * writes the same correct bytes.  A zero/wrong MIC = the OLT silently drops
- * every response and loops its GET audit (proven failure class).
+ * LIVE-PROVEN on this OLT: the DS frames' MIC matches ~crc32_be(~0, msg, 44)
+ * and NOT the reflected zlib crc32_le.  Computed in SOFTWARE with the MAC's own
+ * OMCI CRC engine left enabled (onu_cfg.omci_crc_dis = 0, the stock value): if
+ * the HW also inserts, it writes the same bytes.  A zero/wrong MIC = the OLT
+ * silently drops every response and loops its GET audit (proven failure class).
  *
  * DIVERGENCE, follow-up F3 — NOT resolved here, deliberately.  Luna computes
- * the OTHER variant: rtl9602c_eth.c's rtl9602c_omci_set_mic() does
- * crc32_le(~0, msg, 44) ^ ~0, the reflected zlib CRC-32.  G.984.4 says AAL5
- * and the Elnath form is the one measured on the wire, yet Luna reaches O5 and
- * provisions against that same OLT — which nothing in either tree explains
- * (does its MAC also insert?  does the OLT not validate US?).  The host oracle
- * computes no MIC at all and therefore cannot arbitrate.  Picking on the
- * strength of a comment would change Luna's emitted bytes on a hunch, so when
- * Luna joins this engine the variant becomes a per-chip config selector and
- * each target keeps the bytes it emits today.  The measurement that settles
- * it: capture X111W's US OMCI and compare bytes 44..47 against both variants,
- * exactly as the Elnath DS self-check already does for the downstream.
+ * the reflected zlib variant (rtl9602c_eth.c: crc32_le(~0, msg, 44) ^ ~0) and
+ * still reaches O5 and provisions against the same OLT, which nothing in either
+ * tree explains.  The host oracle computes no MIC and cannot arbitrate, so when
+ * Luna joins this engine the variant becomes a per-chip selector and each
+ * target keeps the bytes it emits today.  The measurement that settles it:
+ * capture the X111W's US OMCI and compare bytes 44..47 against both variants.
  */
 /*
- * ★★★ A DS FRAME WHOSE MIC DOES NOT VERIFY IS DISCARDED (G.988: an
- * invalid-MIC message is discarded).  Until this existed EVERY frame reached
- * the responder, including 8..47-byte runts that cannot carry a MIC, and the
- * consequences were not theoretical:
+ * ★★★ A DS FRAME WHOSE MIC DOES NOT VERIFY IS DISCARDED (G.988).  Until this
+ * existed EVERY frame reached the responder, runts included, and the
+ * consequences were not theoretical: a corrupted Set was APPLIED and ACKed with
+ * the OLT's own TID, so MDS stayed in LOCKSTEP with its lsync and no ME2 audit
+ * could detect the divergence; a garbage alloc-id so latched reaches the HW
+ * T-CONT CAM, worst case bursting into ANOTHER ONU's grant slot; a corrupted mt
+ * byte faked a whole MIB-Reset teardown.
  *
- *   - a corrupted Set was APPLIED and ACKed with the OLT's own TID, so the OLT
- *     never retransmitted and MDS stayed in LOCKSTEP with its lsync -- no ME2
- *     audit could ever detect the divergence;
- *   - a garbage alloc-id so latched reaches the HW T-CONT CAM, worst case
- *     bursting into ANOTHER ONU's grant slot, which is the never-wedge-the-PON
- *     bar this project holds itself to;
- *   - a corrupted mt byte faked a whole MIB-Reset teardown.
+ * Recovery is the OLT's own -- its AR-timeout retransmit (typically x3), and a
+ * lost non-AR config still surfaces at the next ME2 MDS audit.  Both self-heal
+ * layers proven live on this HG08.
  *
- * The recovery is the OLT's own: its AR-timeout retransmit (typically x3) is
- * the fast path, and a lost non-AR config still surfaces at the next ME2 MDS
- * audit because our un-bumped MDS then mismatches lsync.  TWO OLT-driven
- * self-heal layers, both proven live on this HG08.
- *
- * ★ NO NEW CONVENTION RISK: omci_set_mic below already commits us to AAL5-BE
- *   on TX and this OLT accepts those MICs, so RX enforces the SAME convention.
+ * ★ NO NEW CONVENTION RISK: omci_set_mic already commits us to AAL5-BE on TX
+ *   and this OLT accepts those MICs, so RX enforces the SAME convention.
  */
-/* ★ THE ONE PLACE THE AAL5-BE CONVENTION IS SPELLED.
- *
- * It used to be spelled three times -- twice in this file (verify and stamp)
- * and once more in the Cortina shell's downstream self-check.  Three spellings
- * of one convention is how a tree ends up with two: this exact CRC had already
- * diverged once, when rtl9602c_eth.c stamped the reflected zlib crc32_le while
- * this file verified crc32_be, and every frame that ONU sent was rejected by
- * an OLT that was behaving correctly.
+/* ★ THE ONE PLACE THE AAL5-BE CONVENTION IS SPELLED.  It used to be spelled
+ * three times -- verify and stamp here, plus the Cortina shell's DS self-check
+ * -- and this exact CRC had already diverged once, when rtl9602c_eth.c stamped
+ * the reflected zlib crc32_le while this file verified crc32_be and a correctly
+ * behaving OLT rejected every frame that ONU sent.
  *
  * I.363.5 / AAL5: non-reflected CRC-32, init all-ones, final complement, over
  * bytes 0..43, stored big-endian at 44..47.  LIVE-PROVEN against this OLT.

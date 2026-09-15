@@ -58,7 +58,7 @@
 #include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN.
 				 * NOT the OMCI_MT_* codes any more: this shell
 				 * stopped decoding message types on 2026-09-10 */
-#include "gpon_omci_me.h"	/* struct omci_onu, omci_onu_init, the common ME store */
+#include "gpon_omci_me.h"	/* struct omci_onu, the common ME store */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the board-side log */
 
 /* ---- bring-up knobs (live-tunable; the datapath framing is HW-uncertain on

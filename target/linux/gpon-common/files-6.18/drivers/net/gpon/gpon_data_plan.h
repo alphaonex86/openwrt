@@ -8,15 +8,15 @@
  * once instead of three times.
  *
  * ★★★ THE SAME QUESTION WAS ANSWERED IN THREE PLACES, EACH COVERING A DIFFERENT
- *     SUBSET, AND NONE COULD CALL ANOTHER (measured 2026-09-04 by reading all
- *     three): the core's own re-arm notices only the GEM MOVING; Luna's only
- *     stale-clear fires on an explicit OLT Deallocate, so a REASSIGNMENT
- *     without one is invisible to it; the Cortina shell is the widest and the
- *     only one carrying both clauses below.  G.984.3 lets the OLT reassign an
- *     Alloc-ID or a GEM Port-ID at any time, so an ONU that latches "installed"
- *     and never re-asks will burst a stale GEM into a grant slot that now
- *     belongs to somebody else.  WHICH REGISTERS hold the binding is silicon;
- *     WHETHER THE BINDING IS STILL RIGHT is protocol.
+ *     SUBSET, AND NONE COULD CALL ANOTHER (measured 2026-09-04): the core's own
+ *     re-arm notices only the GEM MOVING; Luna's stale-clear fires only on an
+ *     explicit OLT Deallocate, so a REASSIGNMENT without one is invisible to
+ *     it; the Cortina shell is the widest and the only one carrying both
+ *     clauses below.  G.984.3 lets the OLT reassign an Alloc-ID or a GEM
+ *     Port-ID at any time, so an ONU that latches "installed" and never re-asks
+ *     bursts a stale GEM into a grant slot that now belongs to somebody else.
+ *     WHICH REGISTERS hold the binding is silicon; WHETHER IT IS STILL RIGHT is
+ *     protocol.
  *
  * ★ THE TWO CLAUSES THAT EXIST IN NEITHER OTHER COPY — the reason this file is
  *   not just a rename:
@@ -30,24 +30,20 @@
  *       user traffic silently follows whatever Alloc-ID the OMCC moved to.
  *       Neither {alloc, gem} comparison can see this: neither value changed.
  *
- * ★ IT DECIDES AND NEVER DOES, and it does not even ASK for a teardown through
- *   an op table: the upstream teardown ORDER is a hardware requirement (drain
- *   the VoQs first), and the tree contains ZERO instances of struct
- *   gpon_shell_ops (checked 2026-09-04), so the core cannot today CALL one.
- *   Everything below is a PURE VERDICT the shell asks for.
+ * ★ IT DECIDES AND NEVER DOES, and does not even ASK for a teardown through an
+ *   op table: the upstream teardown ORDER is a hardware requirement (drain the
+ *   VoQs first), and the tree contains ZERO instances of struct gpon_shell_ops
+ *   (checked 2026-09-04).  Everything below is a PURE VERDICT.
  *
- * ★ HEADER-ONLY, ON PURPOSE — static inline in a .h, so it needs no Makefile
- *   line and no object.  ⚠ THE CONSEQUENCE MUST BE SAID OUT LOUD: the
- *   strict-subset host-build gate walks a list of .c files and does NOT reach
- *   this header.  Its host-build coverage is
- *   dev/rtl9607c-test/gpon_data_plan_diff_test.c, which includes this file and
- *   compiles it on x86 — that binary IS the purity proof, and deleting it would
- *   silently remove one.
+ * ★ HEADER-ONLY, ON PURPOSE — static inline, so no Makefile line and no object.
+ *   ⚠ THE CONSEQUENCE: the strict-subset host-build gate walks a list of .c
+ *   files and does NOT reach this header.  Its host-build coverage is
+ *   dev/rtl9607c-test/gpon_data_plan_diff_test.c, which includes and compiles
+ *   it on x86 -- that binary IS the purity proof, and deleting it removes one.
  *
- * ★ THE HONEST CAVEAT: the RECONCILE half below is the load-bearing one.  The
- *   UNDO half has exactly ONE consumer today (Luna has no data teardown at
- *   all), so its value is preventing a future re-derivation, not deduplicating
- *   an existing copy.  That is weaker, and it is not claimed to be more.
+ * ★ THE HONEST CAVEAT: the RECONCILE half is the load-bearing one.  The UNDO
+ *   half has ONE consumer today (Luna has no data teardown at all), so its
+ *   value is preventing a future re-derivation, not deduplicating a copy.
  */
 #ifndef GPON_DATA_PLAN_H
 #define GPON_DATA_PLAN_H

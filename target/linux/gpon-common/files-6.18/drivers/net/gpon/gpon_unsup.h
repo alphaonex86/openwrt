@@ -2,21 +2,18 @@
 /*
  * gpon_unsup.h — REPORT ANYTHING THE FIRMWARE DID NOT UNDERSTAND, WITHOUT
  * FLOODING, AND CARRY ENOUGH OF IT TO IMPLEMENT SUPPORT (operator, 2026-08-20).
- * Two purposes, and the second is why the dump is mandatory rather than nice:
- * DIAGNOSIS (the X111W alloc-CAM wall used grants for T-CONTs it had never
- * configured and said nothing; the symptom surfaced weeks later at the OLT as
- * LOAi) and SUPPORTING A NEW OLT (with the dump, the report IS the
- * specification for implementing what arrived).
+ * The dump is mandatory rather than nice because of the second purpose: with it
+ * the report IS the specification for supporting what arrived.  Without it, the
+ * X111W alloc-CAM wall used grants for T-CONTs it had never configured, said
+ * nothing, and surfaced weeks later at the OLT as LOAi.
  *
  * TIER: see "THE THREE TIERS" in gpon_common.h.
- * ★★ WHY A pr_* MAY LIVE IN THIS DIRECTORY — read before "fixing" it.  The
- *    purity rule binds the CORE OBJECTS, and its guard is a COMPILER, not a
- *    grep: gpon_layer_hostbuild_test.sh compiles this directory's dot-c sources
- *    against stubs that declare no accessor, clock, lock or allocator.  A
- *    HEADER is not an object and is not a subject of that gate.  Nothing in
- *    this directory includes this file: it is included by SHELLS, which are
- *    allowed hardware and logs.  The core reaches the same reporting through
- *    ->unsupported in gpon_common.h, which carries no printk at all.
+ * ★★ WHY A pr_* MAY LIVE HERE — read before "fixing" it.  The purity rule binds
+ *    the core OBJECTS and its guard is a COMPILER: gpon_layer_hostbuild_test.sh
+ *    compiles this directory's dot-c sources against stubs declaring no
+ *    accessor, clock, lock or allocator.  A HEADER is not an object.  Nothing
+ *    here includes this file -- SHELLS do, and they are allowed logs; the core
+ *    reaches the same reporting through ->unsupported in gpon_common.h.
  *
  * THE LINE — ONE SPELLING, and dev/ONU-test-case/unsup_scan.py's regexes are
  * the contract:
@@ -25,24 +22,21 @@
  *
  * ⚠ `want=` IS PARSED UP TO THE FIRST SPACE, so every want token is space-free.
  * ⚠ `class=` IS A CLOSED SET: an out-of-enum class renders "unclassified", not
- *   "unknown" — defaulting would file a possible DEFECT as support work, which
- *   is the reassuring direction.
+ *   "unknown" — defaulting would file a possible DEFECT as support work, the
+ *   reassuring direction.
  *
  * "WITHOUT FLOODING", AND pr_*_ratelimited DOES NOT MEET IT.  This prints
  * occurrence 1, 2, 4, 8 … PER SITE, so a flood of N costs log2(N) lines and
- * `n=` still carries the TRUE cumulative count: suppression must never HIDE.
- * The kernel's own version DROPS lines within a window telling nobody how many,
- * and shares one token bucket, so a noisy old site can exhaust the budget a NEW
- * site needed.
+ * `n=` still carries the TRUE count: suppression must never HIDE.  The kernel's
+ * version drops lines within a window telling nobody how many, and shares one
+ * token bucket, so a noisy old site can exhaust a NEW site's budget.
  *
- * WHY THE HEX IS RENDERED HERE AND NOT WITH %*phN: that is a KERNEL vsnprintf
- * extension, and on the x86 host the same format renders a POINTER followed by
- * the literal "hN" — so the offline case proving the emitted line matches the
- * reader would be proving a shim's emulation instead of the shipped code.
- * MEASURED with realtek-luna's own cross compiler at its own flags (re-take
- * with dev/rtl9607c-test/gpon_unsup_size.sh, which prices both side by side):
- * this spelling 728 B .text at 11 sites, %*phN 1948 B.  That was not the reason
- * for the choice; it is the number the choice is owed.
+ * The hex is rendered here and not with %*phN because that is a KERNEL vsnprintf
+ * extension: on x86 the same format renders a POINTER followed by "hN", so the
+ * offline case would prove a shim's emulation instead of the shipped code.
+ * MEASURED with realtek-luna's own cross compiler and flags (re-take with
+ * dev/rtl9607c-test/gpon_unsup_size.sh): this spelling 728 B .text at 11 sites,
+ * %*phN 1948 B.
  */
 #ifndef GPON_UNSUP_H
 #define GPON_UNSUP_H
@@ -58,19 +52,15 @@
 #define GPON_UNSUP_SUBSYS	"gpon"
 #endif
 
-/* `noinline` and `__maybe_unused` for the HOST builds only; in kernel context
- * compiler_attributes.h already defines both.
- * ★ noinline IS THERE FOR FOOTPRINT, MEASURED (gpon_unsup_size.sh): without it
- *   gcc inlines the backoff, the hex loop and the eight-argument printk into
- *   every site — 164 B once + 228 B per site = 2672 B at 11 sites, against
- *   368 B + 32 B = 728 B out of line.  1944 B on a 3 MB NAND kernel, for code
- *   that runs once per unmodelled event and is on no per-packet path.
- * ★ __maybe_unused IS REQUIRED, NOT DEFENSIVE, and -Werror is why.  Below is a
- *   plain `static`, NOT `static inline`: inline plus noinline is -Wattributes,
- *   and both target kernels set CONFIG_WERROR=y.  A plain `static` a TU
- *   includes without calling then trips -Wunused-function instead.  This
- *   attribute closes both, and the strict-flags probe in gpon_x86_harness.mk
- *   compiles this header with exactly those flags and no call site. */
+/* HOST builds only; in kernel context compiler_attributes.h defines both.
+ * ★ noinline IS FOR FOOTPRINT, MEASURED (gpon_unsup_size.sh): inlined, the
+ *   backoff + hex loop + eight-argument printk cost 164 B once + 228 B per site
+ *   = 2672 B at 11 sites, against 368 B + 32 B = 728 B out of line.
+ * ★ __maybe_unused IS REQUIRED, NOT DEFENSIVE: below is a plain `static`, NOT
+ *   `static inline` (inline plus noinline is -Wattributes and both kernels set
+ *   CONFIG_WERROR=y), and a plain `static` a TU includes without calling trips
+ *   -Wunused-function.  gpon_x86_harness.mk compiles this header at exactly
+ *   those flags with no call site. */
 #ifndef noinline
 # if defined(__GNUC__)
 #  define noinline	__attribute__((__noinline__))

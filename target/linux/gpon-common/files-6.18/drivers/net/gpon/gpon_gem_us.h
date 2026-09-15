@@ -16,13 +16,9 @@
  *
  * ★ NO GEM HEADER BUILD, FRAGMENTATION OR HEC HERE, and nothing to hoist:
  *   measured 2026-08-05, the GEM Transmission Convergence layer is SILICON on
- *   both shipping targets (elnath's MAC encapsulates and fragments from BTCCFG
- *   register fields; luna's GTC does, once the driver writes the port-map stamp
- *   and the reassembly timer).  The INDEPENDENT model of what that silicon does
- *   lives in dev/rtl9607c-oracle/ (gem_tc.c, gem_us_encap.c) and MUST stay
- *   there: a reference merged into the thing it checks can no longer fail.  A
- *   future target whose MAC does less needs a real software framer, written
- *   against the oracle as its own gpon_gem_tc.c — not invented speculatively.
+ *   both shipping targets.  The INDEPENDENT model of it lives in
+ *   dev/rtl9607c-oracle/ (gem_tc.c, gem_us_encap.c) and MUST stay there -- a
+ *   reference merged into the thing it checks can no longer fail.
  */
 #ifndef GPON_GEM_US_H
 #define GPON_GEM_US_H
@@ -57,17 +53,15 @@
 
 /* The upstream index slots that carry ONE GEM Port-ID, DECLARED by the shell.
  *
- * ★ DECLARED, NEVER COMPUTED — the whole reason this struct exists.  The two
- *   families number their slots on incompatible principles: on elnath the slot
- *   IS the VoQ (CG_DATA_GEM_IDX = CG_DATA_TCONT_IDX * 8, 8 queues per T-CONT),
- *   on luna it is a fixed GTC flow/SID per role with no relation to any T-CONT.
- *   So `index = tcont * 8` is TRUE on Cortina and FALSE on Luna, and there is
- *   deliberately no function here that derives a base from a T-CONT.
+ * ★ DECLARED, NEVER COMPUTED — the reason this struct exists.  On elnath the
+ *   slot IS the VoQ (CG_DATA_GEM_IDX = CG_DATA_TCONT_IDX * 8, 8 queues per
+ *   T-CONT); on luna it is a fixed GTC flow/SID per role with no relation to a
+ *   T-CONT.  `index = tcont * 8` is TRUE on Cortina and FALSE on Luna, so no
+ *   function here derives a base from a T-CONT.
  * @index_max is the last slot the chip's array ACTUALLY has (luna 127, elnath
- * 255), carried so the range is checked against the array's extent rather than
- * a remembered maximum: a count, a maximum, a stride and an index space are
- * four different quantities, and a write past the end of the port-map array
- * lands in an unrelated register and is accepted without complaint. */
+ * 255): a count, a maximum, a stride and an index space are four different
+ * quantities, and a write past the end of the port-map array lands in an
+ * unrelated register and is accepted without complaint. */
 struct gpon_gem_us_range {
 	u16	base;		/* first upstream slot that stamps the Port-ID */
 	u16	count;		/* how many consecutive slots (>= 1)           */
@@ -111,22 +105,19 @@ enum gpon_gem_us_bind {
 
 /* ★★★ SINGLE-ALLOC OLTs: THE DATA RIDES THE OMCC T-CONT.
  *
- * BIND_IS_OMCC says what must NOT happen and not what to do instead, and a
- * shell that only WARNED then fell through was the defect: it stamped the data
- * GEM into a dedicated T-CONT that had no CAM entry, so no grant ever drained
- * it.  Every upstream frame queued forever, carrier-on lied to udhcpc, and the
- * latch blocked any retry — a silent permanent dead WAN on the WHOLE
- * single-alloc OLT class.
+ * BIND_IS_OMCC says what must NOT happen, not what to do instead, and a shell
+ * that only WARNED then fell through was the defect: it stamped the data GEM
+ * into a dedicated T-CONT with no CAM entry, so no grant ever drained it --
+ * every upstream frame queued forever, carrier-on lied to udhcpc, and the latch
+ * blocked any retry.  A silent permanent dead WAN on the WHOLE single-alloc OLT
+ * class.  The recovery is 9602C-PROVEN on this lab OLT class (30/30 soak,
+ * 354/354 DNS): stamp the data GEM into the OMCC T-CONT's own upstream slots,
+ * using the ones the US OMCI does not need, and steer data TX there.
  *
- * The recovery is 9602C-PROVEN on this lab OLT class (30/30 soak, 354/354 DNS):
- * stamp the data GEM into the OMCC T-CONT's own upstream slots, using the ones
- * the US OMCI does not need, and steer data TX there.
- *
- * ★ OMCI KEEPS THE TOP SLOTS, and that is why the split is at the top: the chip
- *   serves a T-CONT's queues by STRICT PRIORITY, so a saturated data flow can
- *   never starve a PLOAM/OMCI response.  Reversing the split would make an OMCI
- *   timeout a function of user traffic, which is how an ONU gets deactivated
- *   under load.  The GEOMETRY is the shell's; the SPLIT is protocol. */
+ * ★ OMCI KEEPS THE TOP SLOTS: the chip serves a T-CONT's queues by STRICT
+ *   PRIORITY, so a saturated data flow can never starve a PLOAM/OMCI response.
+ *   Reversing the split would make an OMCI timeout a function of user traffic.
+ *   The GEOMETRY is the shell's; the SPLIT is protocol. */
 #define GPON_GEM_US_OMCI_RESERVED_SLOTS	2	/* the top two: OMCI + PLOAM */
 
 /* Derive the sub-range of @omcc the data GEM may use.  -> false when the OMCC
@@ -145,17 +136,16 @@ enum gpon_gem_us_bind gpon_gem_us_tcont_decide(u16 alloc, u16 omcc_alloc,
 /* One-line name for a verdict, for logs and for test failure messages. */
 const char *gpon_gem_us_bind_name(enum gpon_gem_us_bind v);
 
-/* ★★★ ONE PROTOCOL RULE THAT WAS WRITTEN THREE TIMES — inline in the core PLOAM
- * FSM, again in the Luna native FSM (the copy that SHIPS), and a third time in
- * the Cortina shell, none able to call another (2026-09-03).
+/* ★★★ ONE PROTOCOL RULE THAT WAS WRITTEN THREE TIMES — the core PLOAM FSM, the
+ * Luna native FSM (the copy that SHIPS) and the Cortina shell, none able to
+ * call another (2026-09-03).
  *
  * ⚠ THE COST IS MEASURED: as a ONE-SHOT guard ("already installed, do nothing")
- *   an OLT that moves the OMCC to another GEM after O5 leaves the ONU bound to
- *   the old port.  DS de-encap follows the MAC's own re-latch, so DS keeps
- *   working while our upstream OMCI replies ride a port the OLT no longer
- *   accepts: its audit times out, it DEACTIVATES us, and a full re-range is the
- *   only way back.  The Luna copy carried that for weeks after the other two
- *   were repaired, because nothing made them one decision. */
+ *   an OLT that moves the OMCC to another GEM after O5 leaves us bound to the
+ *   old port.  DS de-encap follows the MAC's own re-latch, so DS keeps working
+ *   while our upstream OMCI replies ride a port the OLT no longer accepts: its
+ *   audit times out, it DEACTIVATES us, and only a full re-range recovers.  The
+ *   Luna copy carried that for weeks after the other two were repaired. */
 enum gpon_omcc_action {
 	GPON_OMCC_IGNORE,	/* enable=0: a Configure_Port-ID transient. Write
 				 * NOTHING and keep the link; the following
@@ -187,12 +177,11 @@ enum gpon_omcc_action gpon_omcc_decide(bool port_en, u16 want_gem,
 /* One-line name for a verdict, for logs and for test failure messages. */
 const char *gpon_omcc_action_name(enum gpon_omcc_action a);
 
-/* ★★★ THE SECOND OMCC RULE THAT WAS WRITTEN TWICE: gpon_omcc_decide() above
- * settled WHICH GEM the OMCC rides; this is the other half, from
- * Assign_ONU-ID — WHICH ALLOC-ID the OMCC's management T-CONT binds to.  Still
- * spelled twice with different variable names on 2026-09-10, and the copy that
- * BOOTS was the Luna one, exactly the asymmetry that let the Configure_Port-ID
- * one-shot defect survive in the shipping FSM. */
+/* ★★★ THE SECOND OMCC RULE THAT WAS WRITTEN TWICE: gpon_omcc_decide() settled
+ * WHICH GEM the OMCC rides; this is the other half, from Assign_ONU-ID — WHICH
+ * ALLOC-ID the OMCC's management T-CONT binds to.  Still spelled twice with
+ * different variable names on 2026-09-10, and the copy that BOOTS was the Luna
+ * one -- the same asymmetry that hid the Configure_Port-ID one-shot defect. */
 struct gpon_omcc_tcont_plan {
 	u16  alloc;		/* Alloc-ID to bind the OMCC's own T-CONT to  */
 	bool bind_alt;		/* ALSO bind @alloc to the ALTERNATE T-CONT   */

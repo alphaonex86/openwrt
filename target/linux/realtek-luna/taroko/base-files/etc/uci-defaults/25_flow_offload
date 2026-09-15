@@ -30,4 +30,21 @@ uci -q batch <<-EOF
 	set firewall.@defaults[0].flow_offloading_hw='1'
 	commit firewall
 	EOF
+
+# ★★★ AND RELOAD IT IF IT IS ALREADY RUNNING. MEASURED 2026-09-15 on the X111W,
+# on TWO boots of two different images: after a fresh boot the live ruleset
+# carried a flowtable with NO `flags offload`, while `fw4 print` emitted the flag
+# correctly and `uci get ... flow_offloading_hw` read 1. An explicit
+# `fw4 reload` put the flag in immediately -- and `binds` in /proc/flowdump went
+# 12 -> 28, i.e. the hardware flowtable bind reached the driver for the first
+# time. So the VALUE was right and the running ruleset did not have it: whatever
+# fw4 read at boot, it was not this commit.
+#
+# ⚠ CONSERVATIVE ON PURPOSE: only when the service is ALREADY running. A bare
+#   reload would START the firewall early, which changes boot ordering for a
+#   board whose owner did not ask for that -- the same reasoning that keeps this
+#   whole file in the subtarget rather than target-wide.
+/etc/init.d/firewall running 2>/dev/null && \
+	/etc/init.d/firewall reload >/dev/null 2>&1
+
 exit 0

@@ -520,6 +520,67 @@ u8 omci_uni_take_changed(struct omci_uni_inv *inv);
  */
 void omci_uni_mark_changed(struct omci_uni_inv *inv, u8 slot);
 
+/*
+ * ★★★ DRAINING THE OBLIGATION IS G.988 WORK, AND IT WAS WRITTEN TWICE
+ * (measured 2026-09-14).  `luna_uni_apply_work_fn` and `cg_uni_apply_work` are
+ * two spellings of one rule: walk the taken changed-mask, drive each flagged
+ * slot, and — the half that is easy to get wrong — put the obligation BACK
+ * whenever the port did not take it, arming a retry timer only when the
+ * failure can still go away.  Nothing in that decision is per-silicon: which
+ * slots are flagged is the model's, what a permanent failure means is G.988's,
+ * and only the CALL and the LOCK around it belong to a shell.
+ *
+ * ⚠ THE TWO COPIES HAD ALREADY DRIFTED IN THEIR PROSE.  Cortina's carried a
+ * note that dropping the obligation on a permanent error "made the text above
+ * a lie"; Luna's arrived at the same behaviour through a different expression
+ * (`retry` gated on the backend existing) and said nothing about it.  Two
+ * bodies agreeing today with no shared statement of WHY is the state a repair
+ * to one of them ends.
+ */
+enum omci_uni_apply_rc {
+	/* the port took the administrative state: the obligation is discharged */
+	OMCI_UNI_APPLIED = 0,
+	/* THIS BOARD HAS NO PORT for that slot — permanent.  The obligation is
+	 * retained (a corrected port list must still apply what the OLT Set)
+	 * and it earns NO retry timer: spinning on it would never converge. */
+	OMCI_UNI_NO_PORT,
+	/* the backend refused and may not next time: retained AND retried. */
+	OMCI_UNI_TRANSIENT,
+};
+
+/**
+ * struct omci_uni_apply_ops - the two doors the drain needs into a shell
+ * @apply: drive UNI slot @slot to @locked (G.988: 1 = locked).  The shell maps
+ *         its own backend's failure onto the enum; the core never sees an
+ *         errno, a port number or a register.
+ * @rearm: put slot @slot's obligation back — omci_uni_mark_changed() under
+ *         whatever lock that shell keeps the model under, which is why the
+ *         core cannot do it itself.
+ *
+ * Both are MANDATORY: a drain with no way to re-arm silently loses a lock the
+ * OLT has already been told took effect.
+ */
+struct omci_uni_apply_ops {
+	enum omci_uni_apply_rc (*apply)(void *sh, u8 slot, bool locked);
+	void (*rearm)(void *sh, u8 slot);
+};
+
+/**
+ * omci_uni_apply_run() - drive one drained changed-mask onto the ports
+ * @ops:     the shell's two doors; a NULL member makes this a no-op that
+ *           re-arms nothing, because losing the obligation silently is worse
+ *           than not draining it.
+ * @sh:      opaque shell handle, handed back to every op
+ * @changed: the mask omci_uni_take_changed() returned
+ * @n:       how many slots the inventory declares
+ * @admin:   the snapshot of the administrative states, @n entries
+ *
+ * Return: true when a RETRY TIMER is owed — at least one slot failed in a way
+ * that can still succeed.  A board with no port for a slot never sets it.
+ */
+bool omci_uni_apply_run(const struct omci_uni_apply_ops *ops, void *sh,
+			u8 changed, u8 n, const u8 *admin);
+
 /* The ME-model API the MESSAGE layer calls.  These nine were `static` while the
  * model and the message rules shared one translation unit; the split is the only
  * reason they are declared here, and the contract of each stays written at its

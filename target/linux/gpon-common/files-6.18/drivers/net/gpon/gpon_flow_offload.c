@@ -30,6 +30,7 @@ struct gpon_flow_offload {
 	void				*sh;
 	struct rhashtable		table;
 	bool				table_ready;
+	GPON_FLOW_TALLY_FIELD
 };
 
 static const struct rhashtable_params gpon_flow_ht_params = {
@@ -83,7 +84,8 @@ void gpon_flow_offload_free(struct gpon_flow_offload *fo)
 /* ── the ACTION decode ... -- dev/MEASURED-gpon_flow_offload.c.md sec 2. */
 int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 			  bool ds_leg, struct gpon_flow_act *act,
-			  struct net_device **odev_out)
+			  struct net_device **odev_out,
+			  enum gpon_flow_refusal *why)
 {
 	struct flow_action_entry *fa;
 	bool got_dmac_lo = false, got_dmac_hi = false;
@@ -103,8 +105,11 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				 * dev/MEASURED-gpon_flow_offload.c.md sec 3. */
 				if (fa->mangle.offset !=
 				    (ds_leg ? offsetof(struct iphdr, daddr)
-					    : offsetof(struct iphdr, saddr)))
+					    : offsetof(struct iphdr, saddr))) {
+					if (why)
+						*why = GPON_FLOW_REF_NAT_OFFSET;
 					return -EOPNOTSUPP;
+				}
 				act->nat_valid = 1;
 				act->nat_is_da = ds_leg;
 				act->nat_addr = ntohl(fa->mangle.val);
@@ -114,8 +119,11 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				/* The port rewrite is ONE big-endian 32-bit word at offset 0: ...
 				 * dev/MEASURED-gpon_flow_offload.c.md sec 4. */
 				if (fa->mangle.offset != 0 ||
-				    (fa->mangle.mask == ~htonl(0xffff)) != ds_leg)
+				    (fa->mangle.mask == ~htonl(0xffff)) != ds_leg) {
+					if (why)
+						*why = GPON_FLOW_REF_PORT_SHAPE;
 					return -EOPNOTSUPP;
+				}
 				act->nat_port = ds_leg ?
 					(ntohl(fa->mangle.val) & 0xffff) :
 					(ntohl(fa->mangle.val) >> 16);
@@ -138,6 +146,8 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				}
 				break;
 			default:
+				if (why)
+					*why = GPON_FLOW_REF_MANGLE_HTYPE;
 				return -EOPNOTSUPP;
 			}
 			break;
@@ -156,8 +166,12 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				fo->ops->note_vlan_action(fo->sh, ds_leg,
 					fa->id == FLOW_ACTION_VLAN_PUSH ?
 					fa->vlan.vid : 0);
+			if (why)
+				*why = GPON_FLOW_REF_VLAN_ACTION;
 			return -EOPNOTSUPP;
 		default:
+			if (why)
+				*why = GPON_FLOW_REF_ACTION_ID;
 			return -EOPNOTSUPP;
 		}
 	}
@@ -168,8 +182,11 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 	 * Keep to the proven shape: a full inline NAT rewrite plus a redirect.
 	 * Anything less cannot be expressed as one entry.
 	 */
-	if (!*odev_out || !act->nat_valid || !act->port_valid)
+	if (!*odev_out || !act->nat_valid || !act->port_valid) {
+		if (why)
+			*why = GPON_FLOW_REF_INCOMPLETE;
 		return -EOPNOTSUPP;
+	}
 	return 0;
 }
 
@@ -185,19 +202,28 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	struct gpon_flow_ctx ctx = {};
 	struct gpon_flow_act act = {};
 	struct gpon_flow_key key = {};
+	enum gpon_flow_refusal why = GPON_FLOW_OK;
 	int err;
 
-	if (!fo || !fo->table_ready)
+	if (!fo)
 		return -EOPNOTSUPP;
+	if (!fo->table_ready) {
+		GPON_FLOW_NOTE(fo, GPON_FLOW_REF_NO_ENGINE);
+		return -EOPNOTSUPP;
+	}
 
 	/* The other direction may already hold this cookie. Refusing ...
 	 * dev/MEASURED-gpon_flow_offload.c.md sec 7. */
-	if (rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params))
+	if (rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params)) {
+		GPON_FLOW_NOTE(fo, GPON_FLOW_REF_DUP_COOKIE);
 		return -EEXIST;
+	}
 
-	err = gpon_flow_key_from_tc(rule, &key);
-	if (err)
+	err = gpon_flow_key_from_tc(rule, &key, &why);
+	if (err) {
+		GPON_FLOW_NOTE(fo, why);
 		return err;
+	}
 
 	/* ★ The block-cb device is NOT the flow's ingress -- every ...
 	 * dev/MEASURED-gpon_flow_offload.c.md sec 8. */
@@ -211,12 +237,13 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 			ctx.ds_leg = !fo->ops->is_lan_side(fo->sh, ctx.idev);
 	}
 
-	err = gpon_flow_act_from_tc(fo, rule, ctx.ds_leg, &act, &ctx.odev);
+	err = gpon_flow_act_from_tc(fo, rule, ctx.ds_leg, &act, &ctx.odev, &why);
 	if (err)
 		goto out_put;
 
 	entry = kzalloc(sizeof(*entry) + fo->ops->priv_size, GFP_KERNEL);
 	if (!entry) {
+		why = GPON_FLOW_REF_NOMEM;
 		err = -ENOMEM;
 		goto out_put;
 	}
@@ -227,8 +254,10 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	 * dev/MEASURED-gpon_flow_offload.c.md sec 11. */
 	err = fo->ops->install(fo->sh, &key, &act, &ctx, entry_priv(entry),
 			       &entry->idx);
-	if (err)
+	if (err) {
+		why = GPON_FLOW_REF_ENGINE;
 		goto out_free;
+	}
 
 	err = rhashtable_insert_fast(&fo->table, &entry->node,
 				     gpon_flow_ht_params);
@@ -236,9 +265,11 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 		/* the ONE unwind path: the flow is in hardware and would
 		 * otherwise be unreachable by cookie, i.e. leaked for good */
 		fo->ops->remove(fo->sh, entry->idx, entry_priv(entry));
+		why = GPON_FLOW_REF_TABLE_INSERT;
 		goto out_free;
 	}
 
+	GPON_FLOW_NOTE(fo, GPON_FLOW_OK);
 	if (ctx.idev)
 		dev_put(ctx.idev);
 	return 0;
@@ -246,9 +277,28 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 out_free:
 	kfree(entry);
 out_put:
+	GPON_FLOW_NOTE(fo, why);
 	if (ctx.idev)
 		dev_put(ctx.idev);
 	return err;
+}
+
+/* CONFIG_GPON_FLOW_DIAG: the lifecycle's own line.  With the flag off the
+ * facility is ABSENT and says so -- it never prints zeros nobody measured. */
+int gpon_flow_offload_diag(const struct gpon_flow_offload *fo,
+			   const struct gpon_flow_diag *d, char *out, size_t sz)
+{
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+	if (!fo)
+		return gpon_flow_diag_line(NULL, d, out, sz);
+	return gpon_flow_diag_line(&fo->tally, d, out, sz);
+#else
+	(void)fo; (void)d;
+	if (!out || !sz)
+		return 0;
+	return scnprintf(out, sz,
+			 "flow: diagnostics not compiled in (CONFIG_GPON_FLOW_DIAG=n)");
+#endif
 }
 
 void gpon_flow_offload_flush(struct gpon_flow_offload *fo)

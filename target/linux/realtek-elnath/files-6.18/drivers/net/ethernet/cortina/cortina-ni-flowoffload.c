@@ -28,6 +28,7 @@
 #include <net/netfilter/nf_flow_table.h>
 
 #include "gpon_flow.h"	/* the core's TC->5-tuple decode */
+#include "gpon_flow_offload.h"	/* ...and the lifecycle's own diag line */
 #include "gpon_flow_offload.h"	/* the core TC-offload lifecycle */
 #include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
@@ -740,9 +741,11 @@ MODULE_PARM_DESC(hw_ds_deepq,
  * word5 mcgid field).  Used only by hw_ds_probe=2. */
 #define CN_L3E_CPU0_MCGID		0x10
 
-/* NI_HV per-interface RX packet counters - read-only witnesses
+/* ★ __maybe_unused below: read ONLY by the CONFIG_GPON_FLOW_DIAG-gated
+ * cortina_ni_l3fe_debug_show(), so =n leaves them unused and WERROR fails.
+ * NI_HV per-interface RX packet counters - read-only witnesses
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 29. */
-static u64 cn_l3e_ni_rx_prev[2];
+static u64 __maybe_unused cn_l3e_ni_rx_prev[2];
 
 /*
  * ★★ L3FE GLOBAL DEBUG / MONITOR BLOCK - the engine's OWN per-stage
@@ -798,13 +801,14 @@ enum {
 	CN_L3E_STG_STG3_PE,	/* frames at STG3 / the packet editor */
 	CN_L3E_STG_N
 };
-static const char * const cn_l3e_stage_name[CN_L3E_STG_N] = {
+static const char * const __maybe_unused cn_l3e_stage_name[CN_L3E_STG_N] = {
 	"l3fe_in", "l3fe_out", "t1_t2", "stg3_pe"
 };
-static u16 cn_l3e_stage_prev[CN_L3E_STG_N];
-static bool cn_l3e_stage_seen;
+static u16 __maybe_unused cn_l3e_stage_prev[CN_L3E_STG_N];
+static bool __maybe_unused cn_l3e_stage_seen;
 
-static void cn_l3e_stage_read(struct cn_l3e *l3e, u16 c[CN_L3E_STG_N])
+static void __maybe_unused cn_l3e_stage_read(struct cn_l3e *l3e,
+					     u16 c[CN_L3E_STG_N])
 {
 	u32 w[2];
 	int i;
@@ -832,7 +836,8 @@ static void cn_l3e_latch_arm(struct cn_l3e *l3e)
 	writel(v, l3e->ne_base + CN_L3E_GLB_LATCH_TRIG);
 }
 
-static void cn_l3e_latch_read(struct cn_l3e *l3e, int vector, u32 *w, int n)
+static void __maybe_unused cn_l3e_latch_read(struct cn_l3e *l3e, int vector,
+					     u32 *w, int n)
 {
 	int i;
 
@@ -845,7 +850,7 @@ static void cn_l3e_latch_read(struct cn_l3e *l3e, int vector, u32 *w, int n)
 
 /* latch read-out buffer + which vector is staged, filled on the /proc read
  * after `echo latch [vector] > /proc/cortina_l3fe` armed a capture */
-static u32 cn_l3e_latch_buf[CN_L3E_LATCH_WORDS];
+static u32 __maybe_unused cn_l3e_latch_buf[CN_L3E_LATCH_WORDS];
 static int cn_l3e_latch_vec = -1;	/* -1 = not armed */
 
 /* ★★ PER-ENTRY TRAFFIC BITMAP - a NON-DESTRUCTIVE hit ...
@@ -1591,7 +1596,8 @@ static int cn_aft_fib_program(struct cn_l3e *l3e, u8 idx, u16 vid,
 
 /* cn_aft_fib_read() - read one L2FIB entry back OUT of the ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 71. */
-static int cn_aft_fib_read(struct cn_l3e *l3e, u8 idx, u32 *d0, u32 *d1, u32 *d2)
+static int __maybe_unused cn_aft_fib_read(struct cn_l3e *l3e, u8 idx,
+					  u32 *d0, u32 *d1, u32 *d2)
 {
 	unsigned long flags;
 	int err;
@@ -2858,6 +2864,9 @@ void cortina_ni_flowoffload_stats(u64 out[CA_L3FE_STAT_COUNT])
 
 /* The offload engine's own narrative. debugfs ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 109. */
+/* ★ CONFIG_GPON_FLOW_DIAG gates the READ only.  The bring-up WRITE below is a
+ * control, not a measurement -- this family REPORTS, it never decides. */
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
 int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 {
 	struct cn_l3e *l3e = cn_l3e;
@@ -2871,6 +2880,24 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 	}
 
 	mutex_lock(&cn_flow_offload_mutex);
+	/* ★ THE CORE'S OWN LINE, identical on every family: which of the
+	 * lifecycle's sixteen refusal causes fired.  `offered=n/a` is honest --
+	 * this shell counts REFUSALS by errno and has never counted OFFERS, and
+	 * a zero there would read as "the kernel offered nothing". */
+	{
+		struct gpon_flow_diag d = {
+			.valid = GPON_FDIAG_HAS_LIVE |
+				 GPON_FDIAG_HAS_CAPACITY |
+				 GPON_FDIAG_HAS_HITS,
+			.live = atomic_read(&cn_flow_installed),
+			.capacity = CN_L3E_ENTRIES,
+			.hw_hits = atomic_read(&cn_l3e_hw_hits),
+		};
+		char line[256];
+
+		gpon_flow_offload_diag(cn_fo, &d, line, sizeof(line));
+		seq_printf(m, "%s\n", line);
+	}
 	cache_cnt = readl(l3e->ne_base + CN_L3E_HS_CACHE_CNT);
 	seq_printf(m,
 		   "install_ok=%d auto_flows=%d hw_hits=%d HS_CACHE_CNT(0x38c0)=%u(PHANTOM,do-not-use) live_pon{gem=%u tcont=%u} pppoe_sess=%#x gran(0x3924)=0x%08x\n",
@@ -3322,6 +3349,16 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 	mutex_unlock(&cn_flow_offload_mutex);
 	return 0;
 }
+#else	/* the facility is ABSENT, and the node says so rather than printing
+	 * counters nobody measured */
+int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
+{
+	(void)v;
+	seq_puts(m,
+		 "l3fe: diagnostics not compiled in (CONFIG_GPON_FLOW_DIAG=n); the bring-up write still works\n");
+	return 0;
+}
+#endif
 
 /* The engine's WRITE side: manual flow install/delete, the ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 125. */

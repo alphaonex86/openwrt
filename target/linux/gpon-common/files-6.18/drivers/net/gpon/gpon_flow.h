@@ -6,6 +6,8 @@
 
 #include <linux/types.h>
 
+#include "gpon_flow_diag.h"
+
 struct flow_rule;
 
 /* The 5-tuple, in HOST byte order and with no hardware in ...
@@ -21,6 +23,9 @@ struct gpon_flow_key {
 
 /* Decode one TC flow rule into a key. -> 0, or -EOPNOTSUPP. ★ ...
  * dev/MEASURED-gpon_flow.h.md sec 3. */
-int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key);
+/* @why (optional) receives the NAMED cause -- the four refusals here all
+ * return -EOPNOTSUPP, so the errno alone cannot tell them apart. */
+int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key,
+			  enum gpon_flow_refusal *why);
 
 #endif /* GPON_FLOW_H */

@@ -300,6 +300,12 @@ obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow.o
 # neither object.
 obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow_offload.o
 
+# gpon_flow_diag.o -- WHY a flow was not accelerated, named where the refusal is
+# actually decided.  Sixteen causes that share three errnos; the families used to
+# count them by errno and could name none of the ten that are -EOPNOTSUPP.
+# Formats INTO A BUFFER only; the family owns the node and the level.
+obj-$(CONFIG_GPON_FLOW_DIAG) += gpon_flow_diag.o
+
 # gpon_edge.o -- the router EDGE (WAN address/MAC, next hop, LAN subnet) read
 # out of the LIVE kernel, once for every family.  Gated with the lifecycle:
 # only a board with an accelerator has anything to tell, and this tree ships to

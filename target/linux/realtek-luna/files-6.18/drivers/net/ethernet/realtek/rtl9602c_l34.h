@@ -102,6 +102,8 @@ enum l34_tbl {
 
 /* Per-flow programming request, filled by the flow-offload glue (endian-safe:
  * addresses/ports are kept in host order here and packed with explicit math). */
+struct gpon_flow_offload;
+
 struct l34_flow {
 	u8	l4proto;		/* IPPROTO_TCP / IPPROTO_UDP */
 	u32	orig_sip, orig_dip;	/* ingress (original-direction) 5-tuple */
@@ -127,7 +129,7 @@ struct rtl9602c_l34 {
 	u32		ds_legs;	/* reply legs declined -- an EXPECTED non-event */
 	u32		binds;		/* flowtable blocks this driver accepted	*/
 	u32		offered;	/* per-flow requests that REACHED this driver */
-	u32		core_refused;	/* ...that the common lifecycle declined first */
+	struct gpon_flow_offload *fo;	/* the COMMON lifecycle, for its diag line */
 	u32		vlan_refused;	/* ...of those, ones carrying a VLAN tag */
 	u16		vlan_refused_vid;
 	const char	*refuse_why;	/* ...and the reason for the last one	*/

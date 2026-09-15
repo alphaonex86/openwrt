@@ -201,19 +201,16 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 
 	mutex_lock(&rtl9602c_l34_tc_mutex);
 	switch (f->command) {
-	case FLOW_CLS_REPLACE: {
-		/* ⚠ WHO REFUSED IS DECIDED BY WHAT MOVED DURING *THIS* CALL. ...
-		 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 15. */
-		u32 before = ep->l34.refusals + ep->l34.ds_legs;
-
+	case FLOW_CLS_REPLACE:
+		/* ★ WHO REFUSED IS NOW MEASURED, NOT INFERRED.  This used to watch
+		 * whether its own counters moved during the call and attribute the
+		 * remainder to the core -- which could name the culprit but never
+		 * the CAUSE, because eleven of the core's refusals are one errno.
+		 * CONFIG_GPON_FLOW_DIAG names them at the point of refusal
+		 * (gpon_flow_offload_diag(), rendered in the flowdump node). */
 		ep->l34.offered++;
 		err = gpon_flow_offload_replace(ep->fo, f, dev);
-		/* -EEXIST is the other leg's cookie, not a refusal */
-		if (err < 0 && err != -EEXIST &&
-		    ep->l34.refusals + ep->l34.ds_legs == before)
-			ep->l34.core_refused++;
 		break;
-	}
 	case FLOW_CLS_DESTROY:
 		err = gpon_flow_offload_destroy(ep->fo, f);
 		break;

@@ -49,13 +49,17 @@
 #include "gpon_omci_vlan.h"
 
 /* ★★ A CAPACITY IS A PER-BOARD VALUE, THE LOGIC IS COMMON ...
- * dev/MEASURED-gpon_omci_me.h.md sec 1. */
+ * dev/MEASURED-gpon_omci_me.h.md sec 1.
+ * ★★ 64 WAS TOO SMALL AND IT COST THE X400AXF ITS WAN (MEASURED 2026-09-15).
+ * The lab OLT's script creates 47 instances, six of them MAC bridge ports, and
+ * a bridge port costs FOUR slots (ME 47 + its ME 50/79/84 companions) -- 65.
+ * At 64 the sixth Create is NAKed rc=9, the OLT abandons provisioning THERE and
+ * never reaches the data T-CONT/GEM, so the board holds O5 with no WAN while
+ * the OLT shows `fail`/`Initial`/`Laser out`.  One number for both families now:
+ * the store is 32 bytes an entry, so the whole array is 4 kB.
+ * Pinned by rtl9607c-test/omci_olt_script_fits_test. */
 #ifndef OMCI_STORE_MAX
-#if defined(CONFIG_LUNA_GPON) || defined(CONFIG_LUNA_GPON_MODULE)
 #define OMCI_STORE_MAX 128
-#else
-#define OMCI_STORE_MAX 64
-#endif
 #endif
 
 /* A dynamic ME instance the OLT provisioned (Create). Stored ...

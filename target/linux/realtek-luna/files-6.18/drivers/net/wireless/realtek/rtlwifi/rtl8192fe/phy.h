@@ -23,13 +23,7 @@
 
 #define RT_CANNOT_IO(hw)			false
 
-/* IQK / LCK working-set sizes.  The RTL8192F keeps a small ADDA/MAC/BB
- * backup window and runs the calibration three times for candidate
- * selection.  wifi.h defines IQK_ADDA_REG_NUM (=16, the max-width of the
- * shared rtl_phy::adda_backup[16] buffer) and IQK_MAC_REG_NUM (=4); the
- * 8192F only touches 2 ADDA registers during IQK, so override the count to
- * size this driver's local adda_reg[] table (2 <= 16, fits the buffer).
- */
+/* IQK / LCK working-set sizes. The RTL8192F keeps a small ... -- dev/MEASURED-phy.h.md sec 1. */
 #undef IQK_ADDA_REG_NUM
 #undef IQK_MAC_REG_NUM
 #define IQK_ADDA_REG_NUM			2

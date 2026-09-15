@@ -1,94 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware: no
- * register access, no clock, no lock, no allocator, no device pointer.  One
- * source compiles for MIPS big-endian, ARM64 little-endian and x86.
- * Canonical tier rule and file map: "THE THREE TIERS" in gpon_common.h.
- * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17)
- * COMPILES this tier against stubs declaring no accessor, clock, lock or
- * allocator, so impurity cannot build.
- *
- * gpon_omci_core.c — the ITU-T G.988 OMCI baseline MESSAGE layer: parse a DS
- * baseline PDU, dispatch by message type, build the US response (trailer +
- * MIC).  NO managed-entity storage -- the ME model, the board identity, the
- * MIB-Upload rows and the dynamic OLT-created instance store are the ME-model
- * layer's, reached only through CONTRACT below.  Full statement:
- * gpon_omci_core.h.
- *
- * WHY (operator, 2026-08-05, on two per-target monoliths each carrying a
- * private copy of G.988: *"mal, poner en común"*): G.988 is a specification,
- * not a chip fact, so one copy.  Compiled by realtek-elnath (aarch64 LE), by
- * realtek-luna (MIPS32 BE) once follow-ups F1/F2/F3 land, and by
- * dev/rtl9607c-test on x86-64 through fuzz_shims/.
- *
- * RULE: it decides, it never does.  ⇒ NEVER GAIN AN MMIO ACCESS -- no
- * readl/writel, ioremap, msleep/udelay, jiffies, spin_lock/mutex, kmalloc, or
- * dev_/netdev_ logging.  The purity check greps for that exact set.  All wire
- * access is explicit byte math: one source, two endiannesses, same octets.
- *
- * PROVENANCE: CODE MOTION, not a redesign.  Every function body came unchanged
- * from the responder live on Elnath at stock parity, proven end-to-end
- * (Online/normal + WAN) against the HSGQ-G008 OLT.  The layout rule: message
- * contents start at octet 8, and only a response carrying a RESULT code spends
- * that octet on it.  Where Luna's independent responder disagrees the
- * divergence is named at the line it concerns with its follow-up id; NOTHING
- * was converged here, because converging changes bytes on a wire.
- *
- * CONTRACT — what this layer needs from gpon_omci_me.h, all pure:
- *   types  struct omci_onu, struct omci_me_inst, struct omci_mib_row
- *   store  omci_store_find, omci_store_has_class, omci_store_nth,
- *          omci_store_put, omci_store_merge, omci_store_del
- *   model  omci_me_fill, omci_inst_exists, omci_class_modelled
- */
+/* TIER: CORE (prefix gpon_) — protocol only. NEVER touches ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 1. */
 #include <linux/crc32.h>
 #include <linux/string.h>
 
 #include "gpon_omci_core.h"
 #include "gpon_omci_me.h"	/* struct omci_onu + the ME model / dynamic store */
 
-/*
- * MIC (bytes 44..47) = the I.363.5 / AAL5 CRC-32 over bytes 0..43 (G.984.4
- * baseline trailer): NON-reflected polynomial 0x04C11DB7 MSB-first, init
- * all-ones, final complement — the kernel's crc32_be — stored big-endian.
- * LIVE-PROVEN on this OLT: the DS frames' MIC matches ~crc32_be(~0, msg, 44)
- * and NOT the reflected zlib crc32_le.  Computed in SOFTWARE with the MAC's own
- * OMCI CRC engine left enabled (onu_cfg.omci_crc_dis = 0, the stock value): if
- * the HW also inserts, it writes the same bytes.  A zero/wrong MIC = the OLT
- * silently drops every response and loops its GET audit (proven failure class).
- *
- * DIVERGENCE, follow-up F3 — NOT resolved here, deliberately.  Luna computes
- * the reflected zlib variant (rtl9602c_eth.c: crc32_le(~0, msg, 44) ^ ~0) and
- * still reaches O5 and provisions against the same OLT, which nothing in either
- * tree explains.  The host oracle computes no MIC and cannot arbitrate, so when
- * Luna joins this engine the variant becomes a per-chip selector and each
- * target keeps the bytes it emits today.  The measurement that settles it:
- * capture the X111W's US OMCI and compare bytes 44..47 against both variants.
- */
-/*
- * ★★★ A DS FRAME WHOSE MIC DOES NOT VERIFY IS DISCARDED (G.988).  Until this
- * existed EVERY frame reached the responder, runts included, and the
- * consequences were not theoretical: a corrupted Set was APPLIED and ACKed with
- * the OLT's own TID, so MDS stayed in LOCKSTEP with its lsync and no ME2 audit
- * could detect the divergence; a garbage alloc-id so latched reaches the HW
- * T-CONT CAM, worst case bursting into ANOTHER ONU's grant slot; a corrupted mt
- * byte faked a whole MIB-Reset teardown.
- *
- * Recovery is the OLT's own -- its AR-timeout retransmit (typically x3), and a
- * lost non-AR config still surfaces at the next ME2 MDS audit.  Both self-heal
- * layers proven live on this HG08.
- *
- * ★ NO NEW CONVENTION RISK: omci_set_mic already commits us to AAL5-BE on TX
- *   and this OLT accepts those MICs, so RX enforces the SAME convention.
- */
-/* ★ THE ONE PLACE THE AAL5-BE CONVENTION IS SPELLED.  It used to be spelled
- * three times -- verify and stamp here, plus the Cortina shell's DS self-check
- * -- and this exact CRC had already diverged once, when rtl9602c_eth.c stamped
- * the reflected zlib crc32_le while this file verified crc32_be and a correctly
- * behaving OLT rejected every frame that ONU sent.
- *
- * I.363.5 / AAL5: non-reflected CRC-32, init all-ones, final complement, over
- * bytes 0..43, stored big-endian at 44..47.  LIVE-PROVEN against this OLT.
- */
+/* MIC (bytes 44..47) = the I.363.5 / AAL5 CRC-32 over bytes ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 2. */
 u32 omci_mic_compute(const u8 *msg)
 {
 	return ~crc32_be(~0u, msg, 44);
@@ -108,12 +28,8 @@ bool omci_mic_ok(const u8 *msg, unsigned int len)
 	       msg[46] == (u8)(c >> 8)  && msg[47] == (u8)c;
 }
 
-/* ★ EXPORTED so a host test STAMPS WITH THE SHIPPED STAMPER instead of a copy.
- * The MIC gate above means an unstamped frame is now correctly discarded, and
- * several host tests were building PDUs with no MIC at all -- they model an OLT,
- * and a real OLT always stamps.  Handing them this function rather than letting
- * each grow its own keeps ONE convention: if AAL5-BE ever changed, the tests
- * would follow instead of silently testing the old one. */
+/* ★ EXPORTED so a host test STAMPS WITH THE SHIPPED STAMPER ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 3. */
 void omci_set_mic(u8 *msg)
 {
 	u32 c = omci_mic_compute(msg);
@@ -124,18 +40,8 @@ void omci_set_mic(u8 *msg)
 	msg[47] = (u8)c;
 }
 
-/* Stamp the baseline trailer (40..43 = 00 00 00 28) + MIC.  Call LAST.
- *
- * ★ NOT static any more (2026-09-10).  The 0x0028 trailer length is a G.988
- * constant, so by this tree's tiering rule exactly one copy of it may exist --
- * and a second one had grown in a CHIP file: rtl9602c_omci_finalize() in
- * realtek-luna/.../rtl9602c_eth.c respelled these same four stores next to a
- * call to our omci_set_mic().  That is the identical shape that produced the
- * two-MIC-polynomial defect on this very function (see the note beside
- * omci_set_mic above): a shell copy of a spec constant, correct on the day it
- * was written, with nothing able to notice when the spec side moves.
- * Publishing it is the REBASE -- the home already existed, so no new core file
- * was added. */
+/* Stamp the baseline trailer (40..43 = 00 00 00 28) + MIC. ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 4. */
 void omci_finalize(u8 *msg)
 {
 	msg[40] = 0x00;
@@ -145,30 +51,8 @@ void omci_finalize(u8 *msg)
 	omci_set_mic(msg);
 }
 
-/*
- * GET-response filler: result(8) + attr-mask(9,10) + values(11..35) + the two
- * masks G.988 RESERVES at 36..39 even on a success reply — the optional-
- * attribute ("unsupported") mask and the attribute-execution ("failed") mask.
- * So the value area is 25 octets, not 29: ONU-G attrs 1|2|3 are 4+14+8 = 26
- * bytes and a conformant OLT decoder would read a serial number short by its
- * last byte plus a bogus non-zero unsupported mask.
- *
- * Three masks decide the answer:
- *   requested (@mask), known (what the ME models), returned (what fit)
- *   unsupported = requested & ~known      -> named at 36..37
- *   failed      = requested & known & ~returned -> named at 38..39
- *   result      = 0x09 when either is set, else 0x00
- * "result 0 with a short attribute mask" is the audit-loop generator: the OLT
- * has no way to learn which attributes to stop asking for, so it re-GETs
- * forever.  Naming them is what ends the loop.
- *
- * Falls back to the dynamic store for OLT-created MEs (a GET of a provisioned
- * ME must not answer UNKNOWN_ME, which aborts the OLT's config load).
- *
- * DIVERGENCE, follow-up F2 — Luna's rtl9602c_omci_get_fill() passes resp + 40
- * as the end of the value area (29 octets) and so overwrites BOTH reserved
- * masks.  Not changed here; changing it changes Luna's wire bytes.
- */
+/* GET-response filler: result(8) + attr-mask(9,10) + ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 5. */
 static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 			u8 *resp)
 {
@@ -193,11 +77,8 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 					OMCI_RC_UNKNOWN_INST :
 					OMCI_RC_UNKNOWN_ME;
 		}
-		/* Opaque set-by-create/set body: no descriptor table exists for
-		 * an OLT-created class, so the bytes are replayed as-is and the
-		 * requested mask is echoed (best-effort, bounded by the 25-octet
-		 * area).  Naming them unsupported instead would make the OLT
-		 * abandon a ME it just provisioned. */
+		/* Opaque set-by-create/set body: no descriptor table exists ...
+		 * dev/MEASURED-gpon_omci_core.c.md sec 19. */
 		memcpy(resp + 11, e->body, e->blen > 25 ? 25 : e->blen);
 		rmask = mask;
 		known = mask;
@@ -211,46 +92,16 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	return (unsup | failed) ? OMCI_RC_ATTR_FAILED : OMCI_RC_OK;
 }
 
-/*
- * Create / Set / Delete: APPLY or NAK, and move MIB-Data-Sync ONLY when the
- * MIB actually changed.  An ACK the ONU did not honour is worse than a NAK:
- * the OLT stops retrying AND its lsync still matches our MDS, so the ME 2
- * audit can never discover the divergence.
- *   Create: duplicate instance -> 0x07, full store -> 0x09 (frozen MDS lets
- *           the OLT's own audit self-heal), else store + MDS+1.
- *   Delete: absent instance -> 0x05.
- *   Set:    unknown class -> 0x04, known class + absent instance -> 0x05.
- * Mapped classes validate masks atomically before changing state. Other
- * classes keep their existing compatibility behavior, including ME 131.
- */
+/* Create / Set / Delete: APPLY or NAK, and move MIB-Data-Sync ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 6. */
 static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 			    const u8 *msg, unsigned int len, u8 *resp)
 {
 	struct omci_me_inst *e = omci_store_find(o, class_id, inst);
 	u16 mask;
 
-	/* T-CONTs, PPTP Ethernet UNIs and UNI-Gs are all auto-instantiated: the
-	 * ONU presents them and the OLT Sets and Gets them.  Own-stock action
-	 * mask 0x300 permits Set/Get, not opaque Create/Delete shadow
-	 * instances -- and for the two UNI classes a Create reaching the
-	 * dynamic store would put an OPAQUE DUPLICATE of an inventory instance
-	 * there: uploaded twice, answered from the inventory, and holding a
-	 * store slot a provisioned ME then cannot have. */
-	/* ME 50 joins them for the same reason and a different mechanism: G.988
-	 * 9.3.4 makes the bridge TABLE ME the ONU's, created and deleted WITH
-	 * its bridge port below, so an OLT Create would shadow one the ONU owns. */
-	/* ME 79 is the third of that kind: G.988 9.3.3 makes the per-protocol
-	 * filter pre-assign table the ONU's, created and deleted WITH the same
-	 * bridge port, and stock's own plugin agrees -- its EntityId carries no
-	 * set-by-create bit at all, so nothing about it is the OLT's to
-	 * instantiate. */
-	/* ★★ ME 49 is the fourth, and here the vendor states it outright rather
-	 * than by omission: the ACTION MASK its own plugin registers with the
-	 * framework is 0x04000300 -- Set, Get and Get-Next -- where ME 47 and ME
-	 * 268, the two the OLT really does create, carry 0x350 =
-	 * Create|Delete|Set|Get.  Read statically from each mibTable_init and
-	 * IDENTICAL on both Luna dies, so refusing a Create of 49 is not our
-	 * policy, it is stock's declared one. */
+	/* T-CONTs, PPTP Ethernet UNIs and UNI-Gs are all ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 7. */
 	if ((class_id == OMCI_ME_TCONT || class_id == OMCI_ME_PPTP_ETH_UNI ||
 	     class_id == OMCI_ME_UNI_G ||
 	     class_id == OMCI_ME_MAC_BRIDGE_TABLE ||
@@ -275,11 +126,8 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 			omci_store_del(o, class_id, inst);
 			return OMCI_RC_ATTR_FAILED;
 		}
-		/* ...and its filter pre-assign table, the same way and for the
-		 * same reason.  It goes through omci_store_create() rather than
-		 * omci_store_put() because it HAS a dense layout: a zero-length
-		 * body would make every later Set fail the dense-length gate,
-		 * which is a refusal the OLT would read as a broken ONU. */
+		/* and its filter pre-assign table, the same way and for the
+		 * dev/MEASURED-gpon_omci_core.c.md sec 20. */
 		if (class_id == OMCI_ME_MAC_BRIDGE_PORT &&
 		    !omci_store_create(o, OMCI_ME_PREASSIGN_FILTER, inst,
 				       NULL, 0)) {
@@ -287,13 +135,8 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 			omci_store_del(o, class_id, inst);
 			return OMCI_RC_ATTR_FAILED;
 		}
-		/* ...and its MAC filter table, the third companion.  Through
-		 * omci_store_put() like ME 50 rather than omci_store_create()
-		 * like ME 79, because ME 49 has NO dense attribute at all --
-		 * its one attribute is the row table, which lives in the VLAN /
-		 * classification model beside ME 171's rows.  An instance with
-		 * an empty body is exactly what the Set path wants: the dense
-		 * gate is skipped for a class whose dense length is zero. */
+		/* and its MAC filter table, the third companion. Through ...
+		 * dev/MEASURED-gpon_omci_core.c.md sec 8. */
 		if (class_id == OMCI_ME_MAC_BRIDGE_PORT &&
 		    !omci_store_put(o, OMCI_ME_MAC_BRIDGE_FILTER, inst,
 				    NULL, 0)) {
@@ -387,24 +230,8 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 	if (accepted)
 		memset(accepted, 0, sizeof(*accepted));
 
-	/*
-	 * ★ A BASELINE OMCI PDU IS 48 BYTES, FULL STOP (G.988 A.3).  This gate
-	 * used to be `len < 8` — enough to READ the header — so a truncated
-	 * frame was answered with a full 48-byte response built from bytes the
-	 * OLT never sent.  MEASURED 2026-08-30: every length 8..47 drew a
-	 * reply, and the oracle mirrored the same wrong rule, so the
-	 * differential reported ZERO divergence on 1276 malformed frames.  Two
-	 * independent implementations agreeing on a defect is exactly the case
-	 * a differential cannot see, and it is why this needed a spec reading
-	 * rather than a comparison.
-	 *
-	 * ★ COUNTED SEPARATELY FROM rx_bad_mic, because "too short to be a
-	 * message" and "a message whose MIC failed" are different facts about
-	 * the link: the first is a framing or GEM-reassembly fault upstream of
-	 * OMCI, the second is corruption on an otherwise well-framed PDU.
-	 * Collapsing them would make a broken GEM reassembler look like a noisy
-	 * fibre.
-	 */
+	/* ★ A BASELINE OMCI PDU IS 48 BYTES, FULL STOP (G.988 A.3). ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 9. */
 	if (len < OMCI_LEN) {
 		o->rx_runt++;
 		return 0;
@@ -415,36 +242,22 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 	inst = ((u16)msg[6] << 8) | msg[7];
 
 	if (devid != 0x0a) {
-		/* Only the BASELINE message set is modelled.  An extended-format
-		 * request (devid 0x0b) cannot be answered in baseline format —
-		 * the response device identifier must match — so it is counted
-		 * and dropped rather than answered wrongly.  ONU2-G attribute 2
-		 * (OMCC version) therefore advertises 0x80 = G.984.4 BASELINE:
-		 * a conformant OLT never sends an extended frame to us, and the
-		 * counter says loudly if one ever does. */
+		/* Only the BASELINE message set is modelled. An ...
+		 * dev/MEASURED-gpon_omci_core.c.md sec 10. */
 		if (devid == 0x0b)
 			o->rx_extended++;
 		return 0;
 	}
 
-	/* ★ THE MIC GATE, BEFORE THE REPLAY CACHE.  A corrupted frame must not be
-	 * served from the cache either: the cache is keyed on bytes 0..39, so a
-	 * frame whose corruption lies there would miss it anyway, and one whose
-	 * corruption lies in 40..47 would be REPLAYED as though it were the good
-	 * request.  Counted so a link going bad is visible rather than silent. */
+	/* ★ THE MIC GATE, BEFORE THE REPLAY CACHE. A corrupted frame ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 21. */
 	if (!omci_mic_ok(msg, len)) {
 		o->rx_bad_mic++;
 		return 0;
 	}
 
-	/* G.988 11.2.2.1 retained last response: the OMCC is stop-and-wait, so
-	 * a byte-identical repeat of the request we last answered is a
-	 * RETRANSMISSION (our US response was lost — cg_omci_tx drops on NI
-	 * ring-busy, and a US burst can die on the wire).  Replay the stored
-	 * response instead of re-executing: re-execution bumps MDS a second
-	 * time for ONE OLT transaction, and ONU mds = OLT lsync + 1 costs a
-	 * full MIB-Reset/re-provision churn window at the next ME 2 audit.
-	 * Bytes 40..47 (trailer + MIC) are derived, so 0..39 is the identity. */
+	/* G.988 11.2.2.1 retained last response: the OMCC is ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 11. */
 	if (o->have_last && len >= 40 && !memcmp(msg, o->last_req, 40)) {
 		memcpy(resp, o->last_resp, OMCI_LEN);
 		o->dup_replay++;
@@ -473,15 +286,8 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		/* a provisioning event is the walk's GOAL, reached: rearm it */
 		o->audit_reads = 0;
 		o->mds_tries = 0;
-		/* ★★★ AND THE VEIP OPER-UP AVC MUST BE RE-EMITTED.  A MIB-Reset
-		 * wipes the OLT's view, so it will wait for the port-up AVC
-		 * again -- but the latch said "already sent" and the ~31 s work
-		 * never re-ran, leaving the WAN GATED FOREVER with no recovery
-		 * short of a deact/re-range churn the production bar forbids.
-		 * The boot path only ever worked because the OLT's MIB-Reset
-		 * happens to land BEFORE the 31 s timer fires; a mid-session
-		 * one had nothing behind it.  Clearing the latch here is the
-		 * responder's half; the shell re-arms the timer (its own half). */
+		/* ★★★ AND THE VEIP OPER-UP AVC MUST BE RE-EMITTED. A MIB-Reset
+		 * dev/MEASURED-gpon_omci_core.c.md sec 12. */
 		o->avc_veip_up_sent = false;
 		resp[8] = OMCI_RC_OK;
 		if (accepted)
@@ -516,15 +322,8 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		}
 		break;
 	case OMCI_MT_GET_ALL_ALARMS:
-		/* Alarm-entry count at contents[8..9], NO result byte — same
-		 * shape as MIB-Upload.  (At 9..10 the count's high byte lands
-		 * where the OLT reads a result code: latent while the count is
-		 * always 0, wrong the moment an alarm is reported.) */
-		/* ★★ WHAT IS ACTUALLY ASSERTED, not a constant. This answered a
-		 * hardcoded 0 until 2026-09-02, so the ONU told every OLT that
-		 * nothing was wrong however loudly the silicon disagreed -- and
-		 * the comment above was the only record that the byte layout was
-		 * correct BY ACCIDENT while the count could not be non-zero. */
+		/* Alarm-entry count at contents[8..9], NO result byte — same ...
+		 * dev/MEASURED-gpon_omci_core.c.md sec 13. */
 		omci_put_be16(resp + 8, omci_alarm_count(o));
 		break;
 	case OMCI_MT_MIB_UPLOAD_NX: {
@@ -553,13 +352,8 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 			if (e) {
 				omci_put_be16(resp + 8, e->class_id);
 				omci_put_be16(resp + 10, e->inst);
-				/* ★ EVERY DENSE CLASS, not just ME 268.  A row
-				 * that announces an instance and serves an
-				 * EMPTY attribute mask tells the OLT the ME
-				 * exists and nothing about it -- which is all a
-				 * class with an opaque body can honestly say,
-				 * and is now the answer only for classes that
-				 * really are opaque. */
+				/* ★ EVERY DENSE CLASS, not just ME 268. A row that announces ...
+				 * dev/MEASURED-gpon_omci_core.c.md sec 14. */
 				if (omci_me_dense_len(e->class_id)) {
 					omci_me_fill(o, e->class_id, e->inst, 0xffff,
 						     resp + 14, resp + 40, &wmask, &wknown);
@@ -584,28 +378,12 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		break;
 	case OMCI_MT_GET_ALL_ALRM_NX:
 	case OMCI_MT_GET_NEXT:
-		/* Get Next walks a TABLE attribute.  ⚠ THE MODEL NOW DEFINES
-		 * TWO -- ME 171 #6, the subscriber VLAN rows, and ME 49 #1, the
-		 * per-bridge-port MAC filter -- and BOTH ARE HELD, with the
-		 * rows readable through gpon_ext_vlan_raw() /
-		 * gpon_mac_filter_raw().  What is still missing is the
-		 * ENCODING: how many rows a reply carries, how the sequence
-		 * number indexes them, and what the last one answers.  So the
-		 * answer stays "end of table" -- result 0x00 with empty
-		 * contents -- and an OLT that AUDITS one of those tables
-		 * re-writes it instead of reading it back, which is idempotent
-		 * on both.  OWED, and it is a READ-BACK, never a write:
-		 * RE libomci_mib.so's Get/Get-Next handler, which is on disk.
-		 * Get-All-Alarms-Next likewise: no alarm table to walk.
-		 * resp is already zero. */
+		/* Get Next walks a TABLE attribute. ⚠ THE MODEL NOW DEFINES ...
+		 * dev/MEASURED-gpon_omci_core.c.md sec 15. */
 		break;
 	default:
-		/* A message type with no ONU-side action.  Answer result 0x00
-		 * with EMPTY contents, never 0x02 and never silence: stock
-		 * behaves this way, an unanswered OLT request is a documented
-		 * deactivation trigger, and 0x02 has been seen to abort a
-		 * foreign OLT's config load.  Counted so /proc shows if an OLT
-		 * ever sends one (spy-capability rule). */
+		/* A message type with no ONU-side action. Answer result 0x00 ...
+		 * dev/MEASURED-gpon_omci_core.c.md sec 16. */
 		o->unhandled++;
 		break;
 	}
@@ -621,15 +399,8 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 	}
 	omci_finalize(resp);
 
-	/*
-	 * Refresh the retransmission cache.  It may only ever hold the response
-	 * to the request we answered MOST RECENTLY: when this request produced
-	 * no response (AR clear) or is too short to be identified by its first
-	 * 40 bytes, the previous entry must be DROPPED — the MIB may just have
-	 * changed underneath it, and replaying it would answer a later
-	 * transaction with a pre-change reply (an AR=0 Set followed by a repeat
-	 * of the ME 2 audit GET would report the OLD MIB-Data-Sync).
-	 */
+	/* Refresh the retransmission cache. It may only ever hold the ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 17. */
 	if ((msg[2] & 0x40) && len >= 40) {
 		memcpy(o->last_req, msg, 40);
 		memcpy(o->last_resp, resp, OMCI_LEN);
@@ -654,21 +425,15 @@ int omci_onu_input(struct omci_onu *o, const u8 *msg, unsigned int len, u8 *resp
 	return omci_onu_input_ex(o, msg, len, resp, NULL);
 }
 
-/*
- * Autonomous AVC (MT 0x11, TID 0): report that (class, inst)'s attributes in
- * @mask changed to @val.  The OLT never GETs the data-plane MEs after
- * creating them — its per-class AVC handlers gate DOWNSTREAM user-data
- * forwarding on the ONU's operational report. */
+/* Autonomous AVC (MT 0x11, TID 0): report that (class, ...
+ * dev/MEASURED-gpon_omci_core.c.md sec 22. */
 void omci_onu_set_alarms(struct omci_onu *o, u16 class_id, u16 inst,
 			 u16 bitmap)
 {
 	if (!o)
 		return;
-	/* ★ ONE ME'S WORTH TODAY, and the shape says so rather than pretending
-	 * otherwise: both shipping families report their PON conditions against
-	 * a single ME. A second asserting ME needs a small array here, not a
-	 * different design -- the message, the edge and the count are already
-	 * per-instance. */
+	/* ★ ONE ME'S WORTH TODAY, and the shape says so rather than ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 23. */
 	o->alarm_class = class_id;
 	o->alarm_inst = inst;
 	o->alarm_active = bitmap;
@@ -700,12 +465,8 @@ int omci_onu_emit_alarm(struct omci_onu *o, u8 *out)
 	omci_put_be16(out + 4, o->alarm_class);
 	omci_put_be16(out + 6, o->alarm_inst);
 
-	/* Contents (octets 8..39). G.988 clause 11.2.2: the alarm BITMAP occupies
-	 * the first 28 octets, alarm number N living in bit (7 - N % 8) of octet
-	 * N / 8 -- alarm 0 is the MOST significant bit of the first octet. The
-	 * remaining octets are reserved, and the LAST octet of the contents area
-	 * carries the alarm SEQUENCE NUMBER, which is how an OLT detects that it
-	 * missed one. */
+	/* Contents (octets 8..39). G.988 clause 11.2.2: the alarm ...
+	 * dev/MEASURED-gpon_omci_core.c.md sec 18. */
 	out[8] = (u8)(o->alarm_active >> 8);
 	out[9] = (u8)(o->alarm_active & 0xff);
 

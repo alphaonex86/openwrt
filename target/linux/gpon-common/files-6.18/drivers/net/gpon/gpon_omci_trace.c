@@ -8,29 +8,8 @@
 #include "gpon_omci_core.h"	/* OMCI_MT_*: the ONE numbering of Table 11.2.2-1 */
 #include "gpon_omci_trace.h"
 
-/*
- * G.988 Table 11.2.2-1.  32 entries because the message type is 5 bits.
- *
- * ★★★ INDEXED BY THE CORE'S OWN OMCI_MT_* NAMES, NOT BY BARE NUMBERS, AND THE
- *   TWO SPELLINGS DISAGREED (found 2026-09-05).  This table used to write the
- *   numbering a SECOND time, in decimal, and it said
- *
- *	[5] = "Delete"
- *
- *   while gpon_omci_core.h:80 says OMCI_MT_DELETE 0x06 -- and so does the
- *   independent oracle (rtl9607c-oracle/omci_msg.h:90) and G.988 itself, where
- *   5 is a deprecated type no OLT sends.  So every Delete this ONU actually
- *   received printed as unknown, and the one code that would have printed
- *   "Delete" is one that never arrives.  A tracer that mislabels the message
- *   the OLT sent is worse than one that says nothing: it is read as evidence.
- *
- *   The differential could not see it -- its "before" half calls this same
- *   table, so both sides were wrong together.  What finds this shape is not a
- *   test, it is refusing to let one fact have two spellings.
- *
- *   ⇒ with the index written as OMCI_MT_*, a disagreement of this kind is no
- *   longer expressible: there is one numbering and this file reads it.
- */
+/* G.988 Table 11.2.2-1. 32 entries because the message type ...
+ * dev/MEASURED-gpon_omci_trace.c.md sec 1. */
 static const char *const gpon_omci_mt[32] = {
 	[OMCI_MT_CREATE]		= "Create",
 	[OMCI_MT_DELETE]		= "Delete",

@@ -164,20 +164,6 @@ err_free:
 	return ret;
 }
 
-/*
- * ⚠ THE FILE WAS RENAMED; THE COMPATIBLE WAS NOT, AND MUST NOT BE.
- *
- * This driver was called `timer-rtl9602c.c` while being family code -- its own
- * struct is already `luna_timer` and it carries no chip conditional at all --
- * so the FILE now says what it is.  The DT string is a different kind of thing:
- * it is a CONTRACT with every device tree in this target, and the RTL9603CVD
- * reaches this driver through it as a FALLBACK
- * (`"realtek,rtl9603cvd-timer", "realtek,rtl9602c-timer"`).  Renaming it would
- * unbind that board's timer with both files still individually correct.
- *
- * ★ OPEN, and recorded rather than touched: the RTL9607C's own .dtsi asks for
- * `"realtek,otto-timer"`, which NOTHING here declares.  Either that chip is
- * meant to use a different timer driver, or its node never binds.  It is not
- * this rename's business and it is not guessed at.
- */
+/* ⚠ THE FILE WAS RENAMED; THE COMPATIBLE WAS NOT, AND MUST ...
+ * dev/MEASURED-timer-luna.c.md sec 1. */
 TIMER_OF_DECLARE(rtl9602c_timer, "realtek,rtl9602c-timer", luna_timer_of_init);

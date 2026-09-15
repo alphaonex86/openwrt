@@ -1,44 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware: no
- * register access, no clock, no lock, no allocator, no device pointer.  One
- * source compiles for MIPS big-endian, ARM64 little-endian and x86.
- * Canonical tier rule and file map: "THE THREE TIERS" in gpon_common.h.
- * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17)
- * COMPILES this tier against stubs declaring no accessor, clock, lock or
- * allocator, so impurity cannot build.
- *
- * gpon_ploam.c — the G.984.3 PLOAM activation state machine (O1..O7): DS PLOAM
- * dispatch, the O1->O5 transitions, the upstream message builders
- * (Serial_Number, Password, Acknowledge, Encryption_Key, No_message), the
- * burst-overhead and equalization-delay computations, and the periodic-poll
- * decisions (SN re-offer, O5 keepalive, DS-LOS re-range debounce, O5
- * provisioning watchdog).  Full contract: gpon_ploam.h.
- *
- * WHY IT IS COMMON (operator, 2026-08-05: *"la idea es poner en común el código
- * que corresponde para no tener mucho duplicado"*).  Measured honestly: only
- * realtek-luna consumes it TODAY -- Elnath's MAC runs PLOAM in silicon -- so it
- * earns its place through offline adversarial testing and the roadmap, not
- * through de-duplication.
- *
- * PROVENANCE: pure code motion out of realtek-luna's luna_gpon.c, which is at
- * stock parity.  Nothing was "improved" on the way: a defect found while moving
- * was moved UNCHANGED, because a fix folded into a move makes the next
- * regression un-bisectable.
- * ⚠ The shell has been renamed TWICE (gpon-rtl9602c.c / gpon-rtl960x.c until
- *   2026-08-29, gpon-luna.c until 2026-09-10).  The `:NNN` pointers below were
- *   re-found BY TEXT at that rename (citation_repair.py), so they name today's
- *   content; a bare sed would have turned a dated record into a false claim
- *   about the current file.
- *
- * ★ THE OPEN FOLLOW-UPS (P1, P4..P7) AND THE THREE SESSION-STATE FIXES that
- *   closed P2/P3 are recorded verbatim in
- *   dev/MEASURED-gpon-ploam-followups-and-session-state-2026-09-14.md.
- *   P1 and P4..P7 are OPEN, not retired.  The fixes are pinned by
- *   dev/rtl9607c-test/gpon_data_bind_test.c (step 19), SEEN to fail on the
- *   pre-fix source, and by gpon_data_bind_policy_test.c (step 19b) over the
- *   shipping Luna driver.
- */
+/* TIER: CORE (prefix gpon_) — protocol only. NEVER touches ...
+ * dev/MEASURED-gpon_ploam.c.md sec 1. */
 
 #include "gpon_sn.h"	/* the one ONU-SN codec */
 #include "gpon_ploam.h"
@@ -60,14 +22,8 @@
 #define GPON_PLOAM_BOH_PTN_DEFAULT	0xaa
 #define GPON_PLOAM_BOH_DELIM_DEFAULT	{ 0xab, 0x59, 0x83 }
 
-/* ---------------------------------------------------------------------------
- * Small internal helpers. No file-scope state: everything hangs off `o`.
- * ------------------------------------------------------------------------- */
-
-/* Wrap-safe "is a strictly after b" on the 32-bit millisecond clock the shell
- * supplies — the same signed-difference idiom the kernel's time_after() uses,
- * written in UNSIGNED arithmetic so it needs neither a kernel header nor a
- * host one, and so it cannot depend on signed overflow. */
+/* Small internal helpers. No file-scope state: everything ...
+ * dev/MEASURED-gpon_ploam.c.md sec 2. */
 static bool ms_after(u32 a, u32 b)
 {
 	u32 diff = a - b;
@@ -81,17 +37,8 @@ static void ev(const struct gpon_ploam *o, enum gpon_ploam_ev e, u32 a, u32 b)
 		o->ops->trace(o->sh, e, a, b);
 }
 
-/*
- * The core's outlet for "we received something we do not model, or out of
- * range".  Same shape as ev() above and the same contract -- NULL is legal and
- * changes no decision and no emitted byte -- but it carries the DATUM, which
- * ev() cannot: two u32s can report that an unhandled type went by, and cannot
- * report WHAT went by.  The reader on the far end is
- * dev/ONU-test-case/unsup_scan.py; the shell renders the line (gpon_unsup.h).
- *
- * @want is parsed up to the first SPACE by that reader, so every want token
- * passed here is space-free.
- */
+/* The core's outlet for "we received something we do not ...
+ * dev/MEASURED-gpon_ploam.c.md sec 3. */
 static void unsup(const struct gpon_ploam *o, const char *kind,
 		  enum gpon_unsup_class cls, u32 val, const char *want,
 		  const u8 *d, unsigned int len)
@@ -111,11 +58,8 @@ static void ploam_tx(struct gpon_ploam *o, u8 queue,
 	o->tx_total++;
 }
 
-/* ---------------------------------------------------------------------------
- * Upstream message builders. Pure byte assembly; the hardware appends the CRC.
- * ------------------------------------------------------------------------- */
-
-/* Serial_Number_ONU (US type 0x01). From luna_gpon.c:5762-5108. */
+/* Upstream message builders. Pure byte assembly; the hardware ...
+ * dev/MEASURED-gpon_ploam.c.md sec 39. */
 static void send_sn(struct gpon_ploam *o)
 {
 	u8 m[GPON_PLOAM_US_LEN];
@@ -130,17 +74,8 @@ static void send_sn(struct gpon_ploam *o)
 	o->sn_tx++;
 }
 
-/*
- * Password (US type 0x02), from luna_gpon.c:5788-5132.
- *
- * GROUND TRUTH (OLT poll 2026-06-13): the OLT sits at O5 spamming
- * Request_Password / Encrypted_Port-ID, never advancing to Configure_Port-ID or
- * Assign_Alloc-ID, and deactivates with alarm LOAi (Loss Of Acknowledge) —
- * because this reply was never sent. The OLT is SN-authenticated so the VALUE
- * is ignored, but the activation handshake stalls without the message. Sent
- * three times on the urgent queue: G.984.3 repeats the Password in consecutive
- * upstream slots for reliability over the unacknowledged channel.
- */
+/* Password (US type 0x02), from luna_gpon.c:5788-5132. GROUND ...
+ * dev/MEASURED-gpon_ploam.c.md sec 4. */
 static int send_password(struct gpon_ploam *o)
 {
 	u8 p[GPON_PLOAM_US_LEN] = { 0 };
@@ -154,15 +89,8 @@ static int send_password(struct gpon_ploam *o)
 	return 3;
 }
 
-/*
- * Acknowledge (US type 0x09), from luna_gpon.c:5809-5154.
- *
- * The OLT arms a post-ranging timer waiting for this; with no reply it
- * Deactivates the ONU (~43 s) — this is what stops the ONU staying online after
- * O5. `ds` points at the full downstream message (ds[0]=ONU-ID, ds[1]=type,
- * ds[2..]=payload); the acknowledgement echoes it. Urgent queue, so it
- * pre-empts the SN burst.
- */
+/* Acknowledge (US type 0x09), from luna_gpon.c:5809-5154. The ...
+ * dev/MEASURED-gpon_ploam.c.md sec 5. */
 static int send_ack(struct gpon_ploam *o, const u8 *ds)
 {
 	u8 a[GPON_PLOAM_US_LEN] = { 0 };
@@ -177,20 +105,8 @@ static int send_ack(struct gpon_ploam *o, const u8 *ds)
 	return 1;
 }
 
-/*
- * Encryption_Key (US type 0x05), from luna_gpon.c:5861-5224.
- *
- * Generate a 128-bit AES key and send it in two fragments (m[2]=key index,
- * m[3]=row, m[4..11]=8 key bytes; row 0 = key[0..7], row 1 = key[8..15]), the
- * same key three times = 6 PLOAMs, matching stock. The upstream PLOAM channel
- * is lossy and the OLT re-issues Request_key rapidly when it does not receive a
- * complete key, stalling config. THEN load the same key into the hardware
- * staged bank — the OLT waits for that before it will proceed to OMCI.
- *
- * ★ ORDER IS PRESERVED FROM THE DRIVER: all six fragments are transmitted
- * BEFORE the staged-bank load, which is why the transmit is an op called inline
- * here rather than a deferred tx-log drained by the caller.
- */
+/* Encryption_Key (US type 0x05), from luna_gpon.c:5861-5224. ...
+ * dev/MEASURED-gpon_ploam.c.md sec 6. */
 static int send_key(struct gpon_ploam *o)
 {
 	u8 m[GPON_PLOAM_US_LEN];
@@ -224,35 +140,8 @@ static void build_nomsg(u8 m[GPON_PLOAM_US_LEN])
 	m[1] = PLM_US_NO_MESSAGE;	/* 0x04 */
 }
 
-/* ---------------------------------------------------------------------------
- * Burst overhead and equalization delay: the two computations the OLT dictates.
- * ------------------------------------------------------------------------- */
-
-/*
- * Burst-overhead build, from luna_gpon.c:6942-5999.
- *
- * Extended_Burst_Length (0x14) sets the Type-3 lengths: t3pre for the
- * pre-ranged (SN/ranging) burst, t3ranged for the ranged (operation) burst:
- *   LENGTH = rep + t3{pre,ranged} + 3   (G.984.3 upstream-overhead length).
- * Without 0x14 (t3 == 0) fall back to the 96-bit / 12-byte default.
- *
- * The delimiter goes at the TRUE end of the burst (oh[size-3..size-1]), not at
- * a fixed oh[9..11]: the RANGED burst the OLT dictates is usually SHORTER than
- * 12 bytes, and with BOH_LENGTH < 12 the hardware emits only BOH_LENGTH bytes,
- * so a delimiter parked at oh[9..11] is CUT OFF — the O5 burst goes out with no
- * delimiter, the OLT's burst receiver cannot frame it, and the link dies with
- * LOAi / "Laser out" -> Deactivate.
- *
- * BOH_REPEAT is NOT guard/8: it is the stored-byte index of the LAST preamble
- * byte before the 3-byte delimiter, i.e. (size - 4). That is the pointer the
- * burst builder replicates from when it extends the stored <= 12 bytes out to
- * the full BOH_LENGTH. With size = 12 this is 8, matching the live-stock golden
- * O5 dump BOH_CFG = 0x083f (REPEAT 8, LENGTH 63). Writing guard/8 instead
- * mis-positions the delimiter in the synthesized ranged burst, so the OLT never
- * locks the O5 grant burst. The pre-ranged SN burst tolerates it (size ==
- * LENGTH == 12, no synthesis, wide acquisition window), which is exactly why
- * ranging used to succeed while O5 failed.
- */
+/* Burst overhead and equalization delay: the two computations ...
+ * dev/MEASURED-gpon_ploam.c.md sec 7. */
 static void apply_boh(struct gpon_ploam *o, bool ranged)
 {
 	u8 oh[GPON_PLOAM_BOH_LEN];
@@ -266,23 +155,8 @@ static void apply_boh(struct gpon_ploam *o, bool ranged)
 		guard = 32;
 	rep = guard / 8;			/* boh_repeat = whole guard bytes */
 
-	/* ★ FOLLOW-UP P4, DISCHARGED 2026-09-02.  This read
-	 *	boh_len = (u8)(t3 ? (rep + t3 + 3) : ...);
-	 * so the sum was TRUNCATED into a u8 before the clamp could look at it,
-	 * and a value that had already wrapped clamped to itself.  `t3` comes
-	 * STRAIGHT OFF THE WIRE (Extended_Burst_Length d[1]) with no bound, so
-	 * this is an OLT-supplied value driving a hardware field.
-	 *
-	 * MEASURED by ploam_fsm_diff (t3 = 253): the native driver produced
-	 * BOH_CFG 0x8fc / length 252 and REPORTED the out-of-range value; this
-	 * core copy produced 0x004 -- a 4-byte burst with the delimiter in the
-	 * wrong place -- silently.  The native driver had been repaired at step
-	 * 19g; the core kept the pre-fix form because it was "moved verbatim",
-	 * which is the mirror image of the OMCC rebind that was fixed in the
-	 * core while the native copy kept the defect.
-	 *
-	 * Widen first, report, then clamp -- the same order and the same
-	 * evidence fields as the native driver. */
+	/* ★ FOLLOW-UP P4, DISCHARGED 2026-09-02. This read boh_len = ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 8. */
 	want = t3 ? (unsigned int)rep + t3 + 3 : GPON_PLOAM_BOH_LEN;
 	if (want > GPON_PLOAM_BOH_MAX_LEN) {
 		u8 dmp[2] = { guard, t3 };
@@ -311,18 +185,8 @@ static void apply_boh(struct gpon_ploam *o, bool ranged)
 	ev(o, GPON_PLOAM_EV_BOH, ranged ? 1 : 0, cfg_word);
 }
 
-/*
- * Upstream equalization delay, from luna_gpon.c:7012-6026.
- *
- * The OLT-visible burst time is `value` plus the local MIN_DELAY1 scaled to
- * bits (x16 x8 = x128), then split across the 19440x8-bit upstream frame into a
- * multiframe count and an in-frame offset. Pre-ranging (value 0) yields
- * 290 * 128 = 37120 (0x9100), the correct burst position before the OLT hands
- * us a ranging EqD.
- *
- * MIN_DELAY1 is the ONE hardware value a decision here needs, so it arrives
- * through an op; the register field packing of the result belongs to the shell.
- */
+/* Upstream equalization delay, from luna_gpon.c:7012-6026. ...
+ * dev/MEASURED-gpon_ploam.c.md sec 9. */
 static void set_eqd(struct gpon_ploam *o, u32 value)
 {
 	u32 min_delay1 = o->ops->get_min_delay(o->sh);
@@ -361,11 +225,8 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		o->los_run = 0;		/* fresh LOS debounce on every transition */
 	o->state = st;
 
-	/* ★ The EARLY clock, armed AFTER the state is really set -- and that
-	 * placement is the point. Above the `hold` early-return it would arm a
-	 * dwell for a state the FSM then refuses to enter, and the report would
-	 * name O2 while the board sat at O1: a diagnostic that lies about which
-	 * state it is describing is worse than none. */
+	/* ★ The EARLY clock, armed AFTER the state is really set -- ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 40. */
 	if (st <= GPON_O3_SERIAL) {
 		if (prev != st || !o->early_entry_tick)
 			o->early_entry_tick = o->ticks ? o->ticks : 1;
@@ -376,11 +237,8 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		o->early_report_tick = 0;
 
 	if (st == GPON_O5_OPERATION && prev != GPON_O5_OPERATION) {
-		/* Re-range completion: if we had dropped below O5 (fibre LOS,
-		 * Deactivate, watchdog) this O5 re-entry closes the outage.
-		 * Count it, record the duration and report ONE flap-damped
-		 * summary — the fibre-pull "did it recover" witness. The data
-		 * GEM re-installs a moment later from the poll. */
+		/* Re-range completion: if we had dropped below O5 (fibre LOS, ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 41. */
 		if (o->rerange_start_ms) {
 			o->rerange_cnt++;
 			o->last_outage_ms = now_ms - o->rerange_start_ms;
@@ -390,27 +248,16 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 					     GPON_PLOAM_RERANGE_LOG_MS)) {
 				ev(o, GPON_PLOAM_EV_RERANGE_DONE,
 				   o->rerange_cnt, o->last_outage_ms);
-				/* FOLLOW-UP P8: stored raw, exactly as the
-				 * driver stores jiffies at :6099 — so the one
-				 * instant where the clock reads 0 is
-				 * indistinguishable from "never logged" and
-				 * costs one extra summary line. The driver
-				 * guards the OTHER sentinel (:6123) and not
-				 * this one; the inconsistency is moved as
-				 * found rather than tidied, and it is
-				 * diagnostic-only either way. */
+				/* FOLLOW-UP P8: stored raw, exactly as the driver stores ...
+				 * dev/MEASURED-gpon_ploam.c.md sec 10. */
 				o->rerange_last_log_ms = now_ms;
 			}
 		}
 		o->o5_entry_tick = o->ticks ? o->ticks : 1;
 		o->avc_sent = 0;	/* re-report oper-up on each online */
 
-		/* Re-apply the O5 packed-burst gate cluster and re-arm the
-		 * hardware auto-No_message keepalive on EVERY O5 entry, not
-		 * only at init: a re-range performs a GMAC/SerDes reset that
-		 * can clear these upstream registers, so a re-ranged O5 must
-		 * not run on reset defaults. Upstream-side only, harmless to
-		 * the downstream and to ranging. */
+		/* Re-apply the O5 packed-burst gate cluster and re-arm the ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 11. */
 		if (o->cfg->o5_rearm_burst_gate) {
 			u8 nomsg[GPON_PLOAM_US_LEN];
 
@@ -432,20 +279,8 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 	o->ops->set_hw_state(o->sh, st);
 }
 
-/* ---------------------------------------------------------------------------
- * Activation teardowns.
- *
- * ★ FOUR PATHS, WRITTEN OUT IN FULL AND DELIBERATELY NOT FACTORED. They have
- * diverged three ways on data_gem_solicited (FOLLOW-UP P3) and one way on the
- * serializer re-seat, and the divergence is the point: two of the four are
- * documented decisions and two are silent. A shared helper would hide that and
- * would make the eventual convergence look like it had already happened.
- * Converging them is a separate step, after the code motion, with its own gate.
- * ------------------------------------------------------------------------- */
-
-/* ---------------------------------------------------------------------------
- * Downstream PLOAM dispatch, from luna_gpon.c:6750-6553.
- * ------------------------------------------------------------------------- */
+/* Activation teardowns. ★ FOUR PATHS, WRITTEN OUT IN FULL AND ...
+ * dev/MEASURED-gpon_ploam.c.md sec 12. */
 int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_ms)
 {
 	u32 tx0 = o->tx_total;
@@ -469,39 +304,15 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	    type != PLM_DS_EXT_BURST_LENGTH)
 		ev(o, GPON_PLOAM_EV_DS, onu_id, type);
 
-	/*
-	 * ★★★ NO DEFINED SERIAL, NO PARTICIPATION -- AND IT IS THE WHOLE
-	 * DISPATCH, NOT ONE EDGE (2026-09-10).  "Tiene que permitir rangear una
-	 * vez el serial definido" (operator): an ONU that does not know who it
-	 * is stays at O1 and answers nothing.
-	 *
-	 * ⚠ THIS USED TO BE A CHECK ON THE Upstream_Overhead CASE ALONE, and
-	 * that is not the same rule -- MEASURED by sim_ploam the day this was
-	 * written.  Parking the O1->O3 edge stops us OFFERING a serial, but
-	 * Assign_ONU-ID matches on `o->sn` and an OLT that names those bytes
-	 * (a blank ffffffff/00000000 pattern is exactly the kind a far end or a
-	 * fuzzer can name) walked the FSM O1 -> O4 -> O5 anyway, upstream PLOAM
-	 * and all.  So the gate for "may this ONU take part in activation" has
-	 * to sit where activation is DISPATCHED, once, rather than once per
-	 * message type where the next case added quietly escapes it.
-	 *
-	 * The trace above is deliberately BEFORE this return: we still SEE the
-	 * OLT, which is what makes "parked" distinguishable from "deaf" to
-	 * whoever reads the log. What we do not do is answer.
-	 */
+	/* ★★★ NO DEFINED SERIAL, NO PARTICIPATION -- AND IT IS THE ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 13. */
 	if (!gpon_sn_is_set(o->sn))
 		return 0;
 
 	switch (type) {
 	case PLM_DS_UPSTREAM_OVERHEAD:
-		/* The OLT is acquiring ONUs (it broadcasts this continuously).
-		 * On the O1/O2 -> O3 edge, program the burst overhead and the
-		 * pre-ranging EqD the OLT dictates BEFORE the first Serial
-		 * Number, then move to O3; the SN is re-sent, throttled, from
-		 * the poll so the upstream PLOAM queue is not flooded.
-		 * G.984.3 payload: d[0]=guard bits, d[3]=Type-3 preamble
-		 * pattern, d[4..6]=delimiter, d[7] bit5 = pre-EqD present with
-		 * value d[8:9] (x32 x8 bits). */
+		/* The OLT is acquiring ONUs (it broadcasts this continuously)
+		 * dev/MEASURED-gpon_ploam.c.md sec 14. */
 		if (o->state < GPON_O3_SERIAL) {
 			u32 pre_eqd = ((d[7] >> 5) & 1) ?
 				(((u32)d[8] << 8) | d[9]) * 32 * 8 : 0;
@@ -515,11 +326,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			set_eqd(o, pre_eqd);
 			set_state(o, GPON_O2_STANDBY, now_ms);
 			set_state(o, GPON_O3_SERIAL, now_ms);
-			/* Re-lock the TX CMU PLL now the downstream optics are
-			 * stable, before the first upstream burst: a fresh
-			 * power-on under strong downstream light can assert
-			 * signal-detect before the CMU has settled and latch the
-			 * TX PLL onto the wrong rate (~50% "Laser out"). */
+			/* Re-lock the TX CMU PLL now the downstream optics are ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 42. */
 			o->ops->analog_relock(o->sh);
 			if (o->cfg->o3_feed_reset) {
 				/* The relock re-parks the GEM-US feed run-state.
@@ -542,15 +350,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 			o->onu_id = d[0];
 			o->ops->set_hw_onu_id(o->sh, o->onu_id);
-			/* Bind the OMCC's T-CONT to its management Alloc-ID.
-			 * ★ THE RULE ITSELF LIVES IN THE CORE'S OWN DECISION
-			 * LAYER (gpon_omcc_tcont_decide, gpon_gem_us.c): it is
-			 * G.984.3, and the Luna native FSM -- the copy that
-			 * actually BOOTS -- spelled it out a second time with
-			 * its own variable names.  What stays HERE is the
-			 * op-table call that CARRIES the plan out.
-			 * See FOLLOW-UP P5: the long comment upstream describes
-			 * a capture-from-Assign_Alloc-ID that no longer exists. */
+			/* Bind the OMCC's T-CONT to its management Alloc-ID. ★ THE ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 15. */
 			gpon_omcc_tcont_decide(o->cfg->omcc_alloc_override,
 					     o->onu_id, o->cfg->omcc_alt_bind,
 					     &plan);
@@ -560,12 +361,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 				break; /* Keep O3: the next matching Assign retries. */
 			ev(o, GPON_PLOAM_EV_CAM_READBACK, o->cfg->omcc_tcont,
 			   tcont16_alloc);
-			/* NON-STOCK double-bind (default off): binding the same
-			 * alloc ALSO to the alternate T-CONT makes the GTC
-			 * alloc-CAM resolve a BWMAP grant to the EMPTY T-CONT,
-			 * so the DBRu reports zero occupancy for it while the
-			 * real T-CONT holds the pages — the OLT grants once then
-			 * stops. Stock binds the OMCC T-CONT only. */
+			/* NON-STOCK double-bind (default off): binding the same alloc ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 16. */
 			if (plan.bind_alt &&
 			    o->ops->install_tcont(o->sh, o->cfg->omcc_tcont_alt,
 						  tcont16_alloc))
@@ -586,12 +383,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 			set_eqd(o, eqd);
 			apply_boh(o, true);	/* switch to the ranged burst */
-			/* Flush any pre-ranged-format upstream PLOAM still
-			 * latched in the single shared CPU TX buffer before the
-			 * first ranged grant fires, so the OLT's NARROW ranged
-			 * burst-receive window never has to frame a stale
-			 * pre-ranged burst. Stock flushes at exactly this
-			 * O4-EqD edge. */
+			/* Flush any pre-ranged-format upstream PLOAM still latched in ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 17. */
 			o->ops->us_ploam_flush(o->sh);
 			ev(o, GPON_PLOAM_EV_RANGING_TIME, eqd, 0);
 			set_state(o, GPON_O5_OPERATION, now_ms);
@@ -599,16 +392,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_DISABLE_SN:
-		/* Disable_Serial_Number (G.984.3): d[0] is the disable/enable
-		 * code, d[1..8] the target SN; the OLT broadcasts it. ONLY a
-		 * real DISABLE resets us: 0xff for OUR serial number, or 0x0f
-		 * (disable all). An ENABLE (0x00 for our SN = the OLT
-		 * RE-ALLOWING a previously disabled SN) must NOT reset — the
-		 * old code reset on every 0x06 and fought the OLT's re-enable,
-		 * trapping the ONU in a re-range loop.
-		 * FOLLOW-UP P7: G.984.3 puts a disabled ONU in O7; falling
-		 * through to O1 here re-announces the serial number the OLT
-		 * just disabled. Unchanged: a wire behaviour change. */
+		/* Disable_Serial_Number (G.984.3): d[0] is the disable/enable ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 18. */
 		if (!((d[0] == 0xff && !memcmp(&d[1], o->sn, 8)) || d[0] == 0x0f))
 			break;		/* enable / not our SN -> keep activating */
 		ev(o, GPON_PLOAM_EV_DISABLE_SN, d[0], 0);
@@ -621,17 +406,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	case PLM_DS_DEACTIVATE_ONU:
 		if (onu_id == o->onu_id || onu_id == 0xff) {
 			ev(o, GPON_PLOAM_EV_DEACT, o->onu_id, 0);
-			/* --- TEARDOWN 1 of 4: OLT Deactivate / Disable_SN.
-			 * FULL reset to O1. Clearing only the software ONU-ID
-			 * and key used to leave the one-shot install guards
-			 * TRUE and the hardware ONU-ID registers stale, so
-			 * under OLT deactivate-churn the second and later
-			 * re-ranges SKIPPED the OMCC/T-CONT install and the ONU
-			 * never rebuilt its OMCI datapath.
-			 * The OLT DEPROVISIONED us, so it will re-send its
-			 * ME 268 on re-admit: data_gem_solicited is cleared
-			 * here (fix 2), and so is the data T-CONT binding,
-			 * whose Alloc-ID the OLT is free to change (fix 1). */
+			/* TEARDOWN 1 of 4: OLT Deactivate / Disable_SN. FULL reset to ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 19. */
 			o->onu_id = 0xff;
 			o->omcc_installed = false;
 			o->omcc_gem = 0;
@@ -644,15 +420,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			o->aes_switch_time = 0xffffffff;
 			o->key_staged = false;
 			o->ops->set_hw_onu_id(o->sh, 0xff);
-			/* Re-seat the serializer ONLY when the prior O5 was
-			 * short/marginal (a real upstream burst-quality fault).
-			 * A healthy, long-provisioned O5 that the OLT
-			 * deactivated is NOT a serializer fault — re-rolling it
-			 * there only manufactures a fresh re-range the OLT must
-			 * re-admit, feeding the OLT's churn-lock. Stock
-			 * re-acquires gently and never re-rolls the CDR on a
-			 * deactivate. ~500 ticks (~5 s) of held O5 marks a
-			 * healthy provision. */
+			/* Re-seat the serializer ONLY when the prior O5 was ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 20. */
 			if (o->cfg->cdr_reseat_on_reactivate &&
 			    !(o->state == GPON_O5_OPERATION && o->o5_entry_tick &&
 			      (o->ticks - o->o5_entry_tick) > GPON_PLOAM_HEALTHY_O5_TICKS)) {
@@ -667,11 +436,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	case PLM_DS_EXT_BURST_LENGTH:
 		/* Extended_Burst_Length: d[0] = Type-3 preamble length for the
-		 * PRE-RANGED (SN/ranging) burst, d[1] = for the ranged
-		 * (operation) burst. The OLT broadcasts this during
-		 * acquisition; honouring d[0] lengthens our SN-burst preamble
-		 * so the OLT's burst receiver can lock and range us. Re-armed
-		 * only while still broadcast-addressed / pre-ranging. */
+		 * dev/MEASURED-gpon_ploam.c.md sec 21. */
 		o->boh_t3ranged = d[1];		/* applied at the O5 transition */
 		if (o->onu_id == 0xff && o->boh_t3pre != d[0]) {
 			o->boh_t3pre = d[0];
@@ -682,24 +447,13 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_CONFIG_PORT:
-		/* Configure_Port-ID: the OLT assigns the OMCC GEM port for OMCI
-		 * (d[0] bit0 = enable, gem = (d[1]<<4)|(d[2]>>4)). Install the
-		 * OMCC GEM datapath (one-shot) so downstream OMCI reaches the
-		 * CPU, THEN Acknowledge — the ONU is receive-ready before the
-		 * OLT proceeds.
-		 * The WAN data GEM is NOT installed here: doing it at PLOAM
-		 * config time, before the OLT had created its own GEM, made the
-		 * OLT unable to reconcile ours on a second admit and
-		 * churn-lock. It is driven from the poll, gated on the OLT's
-		 * own ME 268 Create. */
+		/* Configure_Port-ID: the OLT assigns the OMCC GEM port for ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 22. */
 		if (onu_id == o->onu_id) {
 			u16 gem = ((u16)d[1] << 4) | (d[2] >> 4);
 
-			/* ★ REBIND ON CHANGE, not once. A one-shot install drops
-			 * an OLT that moves the OMCC to another GEM after O5 --
-			 * the ONU keeps binding the old port and management dies
-			 * with nothing to read. The Elnath shell already had this
-			 * shape; this FSM did not, and no test watched it. */
+			/* ★ REBIND ON CHANGE, not once. A one-shot install drops an ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 43. */
 			enum gpon_omcc_action act =
 				gpon_omcc_decide(d[0] & 0x1, gem,
 						 o->omcc_installed,
@@ -719,21 +473,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_ASSIGN_ALLOC_ID:
-		/* Assign_Alloc-ID: alloc = (d[0]<<4)|(d[1]>>4);
-		 * d[2] 0x01 = allocate, 0xff = deallocate. Then Acknowledge.
-		 *
-		 * ★ ROOT-CAUSE FIX (2026-07-03), do not regress it: this
-		 * carries a DATA Alloc-ID (this OLT sends 0x100; >= 255 is a
-		 * data alloc per G.984.3, below that is OMCC-implicit). The
-		 * OMCC T-CONT rides the LIVE ONU-ID, bound at Assign_ONU-ID,
-		 * and is NEVER reassigned here. The old code bound this alloc
-		 * to the OMCC T-CONT, overwriting the ONU-ID, so the OLT's
-		 * default-alloc grants missed the alloc-CAM and the OMCC
-		 * T-CONT became unreachable — the months-long upstream wall.
-		 * Bind it to the DATA T-CONT; the OMCC T-CONT stays = ONU-ID.
-		 * (The dead gpon_proto.c fork still carries the pre-fix
-		 * binding; that is one reason it is deleted rather than
-		 * revived.) */
+		/* Assign_Alloc-ID: alloc = (d[0]<<4)|(d[1]>>4); d[2] 0x01 = ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 23. */
 		if (onu_id == o->onu_id) {
 			u16 alloc = ((u16)d[0] << 4) | (d[1] >> 4);
 
@@ -789,13 +530,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_KEY_SWITCH:
-		/* Key_Switching_Time: the OLT supplies the 30-bit superframe
-		 * count at which the hardware promotes the staged AES key to
-		 * active. Arm the comparator and Acknowledge. The OLT will not
-		 * advance to OMCI until this handshake completes, so a missing
-		 * handler leaves it re-cycling Request_Key / Configure_Port-ID
-		 * forever. De-duplicated per superframe (the OLT re-sends every
-		 * cycle). */
+		/* Key_Switching_Time: the OLT supplies the 30-bit superframe ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 24. */
 		if (onu_id == o->onu_id || onu_id == 0xff) {
 			u32 fc = ((u32)(d[0] & 0x3f) << 24) | ((u32)d[1] << 16) |
 				 ((u32)d[2] << 8) | d[3];
@@ -836,11 +572,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_BER_INTERVAL:
-		/* BER_interval: the OLT configures the upstream BER reporting
-		 * interval and REQUIRES an Acknowledge. Stock also arms a timer
-		 * that periodically emits Remote_Error_Indication; the ACK is
-		 * the part that prevents LOAi, so send it. Broadcast accepted,
-		 * like stock. */
+		/* BER_interval: the OLT configures the upstream BER reporting ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 44. */
 		if (onu_id == o->onu_id || onu_id == 0xff) {
 			send_ack(o, m);
 			ev(o, GPON_PLOAM_EV_ACK, type, 0);
@@ -848,23 +581,12 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	default:
-		/* Anything addressed to us that we do not model: report it so a
-		 * missing acknowledge-required type is visible instead of a
-		 * silent drop into LOAi. PEE / Power_Level / PST /
-		 * Ranging_Adjustment do NOT require an ACK in G.984.3; if a
-		 * reported type turns out to need one, add an explicit case. */
+		/* Anything addressed to us that we do not model: report it so ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 45. */
 		if (onu_id == o->onu_id || onu_id == 0xff) {
 			ev(o, GPON_PLOAM_EV_UNHANDLED, type, onu_id);
-			/* ...and say WHAT it was.  GPON_PLOAM_EV_UNHANDLED
-			 * carries the type and the ONU-ID and no message
-			 * bytes, so on its own it can only report that
-			 * something went by.  A downstream PLOAM a foreign
-			 * OLT sends and we do not model is the exact input
-			 * this facility exists to turn into implementable
-			 * information, so the whole 13-octet message rides
-			 * along.  class=unknown, never range: not modelling a
-			 * type is a gap in US, and publishing another
-			 * vendor's OLT as a broken device would be wrong. */
+			/* and say WHAT it was. GPON_PLOAM_EV_UNHANDLED carries the ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 25. */
 			unsup(o, "ds_ploam_type", GPON_UNSUP_UNKNOWN, type,
 			      "G.984.3-DS-type-this-ONU-models",
 			      m, GPON_PLOAM_DS_LEN);
@@ -876,34 +598,16 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	return (int)(o->tx_total - tx0);
 }
 
-/* ---------------------------------------------------------------------------
- * Poll islands. Called by the shell at exactly the points the original blocks
- * sat at — see the ordering note in gpon_ploam.h. Merging them would change
- * which shell blocks run on the tick a re-range fires.
- * ------------------------------------------------------------------------- */
-
-/* :6559 — the single tick source. */
+/* Poll islands. Called by the shell at exactly the points the ...
+ * dev/MEASURED-gpon_ploam.c.md sec 26. */
 u32 gpon_ploam_tick(struct gpon_ploam *o)
 {
 	o->ticks++;
 	return o->ticks;
 }
 
-/*
- * :6564-6579 — the serial number was (re)provisioned after ranging had begun
- * (the driver starts with a placeholder SN, which the OLT auto-ranges as a
- * phantom that never matches the provisioned ONU). Drop to O1 and re-offer.
- *
- * TEARDOWN 2 of 4. It does NOT re-seat the serializer (the re-range is our own
- * doing, not a burst-quality fault), but it DOES clear data_gem_solicited: this
- * is an IDENTITY change, so whatever ME 268 the OLT holds belongs to the serial
- * number we have just stopped being. Keeping it made the new identity install
- * its data GEM the moment it reached O5 — proactively, ahead of the new
- * session's own ME 268, which is the second-admit churn-lock the solicited gate
- * exists to prevent — and, once the Port-ID became a wire value, on the PREVIOUS
- * identity's GEM port. The two ONU-initiated re-ranges below are the opposite
- * case and deliberately KEEP it.
- */
+/* 6564-6579 — the serial number was (re)provisioned after ...
+ * dev/MEASURED-gpon_ploam.c.md sec 27. */
 int gpon_ploam_sn_changed(struct gpon_ploam *o, u32 now_ms)
 {
 	u32 tx0 = o->tx_total;
@@ -930,19 +634,8 @@ int gpon_ploam_sn_changed(struct gpon_ploam *o, u32 now_ms)
 	return (int)(o->tx_total - tx0);
 }
 
-/*
- * :6604-6613 — two O5 gates that must stay adjacent and in this order.
- *
- * 1. Install the WAN data GEM once the OLT has issued its own ME 268 (GEM-CTP)
- *    Create — idempotently over the OLT's GEM, never proactively ahead of it
- *    (that was the second-admit churn cause). Driven from the poll so the
- *    upstream NIC modeset stays off the OMCI receive softirq.
- * 2. Report the WAN-egress (VEIP) operational up to the OLT. Must fire AFTER
- *    config-apply finishes AND after the OLT has created its ME 329, ~2500
- *    ticks (~31 s) after O5; firing earlier, during config, DISRUPTED config.
- *    The OLT never polls the data MEs it creates — it un-gates downstream user
- *    data only when the ONU reports the port up. Re-armed on each O5 entry.
- */
+/* 6604-6613 — two O5 gates that must stay adjacent and in ...
+ * dev/MEASURED-gpon_ploam.c.md sec 28. */
 int gpon_ploam_poll_provision(struct gpon_ploam *o, u32 now_ms)
 {
 	(void)now_ms;
@@ -961,56 +654,17 @@ int gpon_ploam_poll_provision(struct gpon_ploam *o, u32 now_ms)
 	return 0;		/* emits no upstream PLOAM */
 }
 
-/*
- * :6650-6671 — O5 provisioning watchdog. A boot that reached O5 locally but
- * that the OLT never provisioned (WAN receive still zero well past the slow
- * lease window) is stuck on a non-frameable upstream serializer phase with no
- * OLT Deactivate to recover it. Self-re-range to RE-ROLL the phase, mirroring
- * the Deactivate path including the re-seat that actually changes the lock.
- * WAN receive is above zero on any working or slow-leasing link, so this fires
- * only on a genuinely dead link.
- *
- * TEARDOWN 3 of 4. It deliberately KEEPS data_gem_solicited, for the same
- * reason the LOS path does: this re-range is ONU-INITIATED, the OLT never
- * deactivated us, so it holds our OMCI/GEM provisioning across the outage and
- * does NOT re-send its ME 268 on re-admit. Clearing the flag here would leave
- * the data GEM waiting for a create that never arrives. The data T-CONT
- * binding IS cleared, because the Alloc-ID is the OLT's to reissue and the
- * install guard must not refuse the new one.
- */
+/* 6650-6671 — O5 provisioning watchdog. A boot that reached ...
+ * dev/MEASURED-gpon_ploam.c.md sec 29. */
 int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 {
 	u32 tx0 = o->tx_total;
 
-	/* ★★★ THE EARLY DWELL REPORT, AND IT ACTS ON NOTHING (2026-09-08).
-	 * Every other activation event is a TRANSITION, so a board that never
-	 * leaves O1 emits nothing at all and the stall can only be guessed at
-	 * -- measured on the G24W, which sits at O1 and produced no line to
-	 * read. This fires on a cadence while the FSM is at O1, O2 or O3 and
-	 * returns to exactly the state it found: a diag REPORTS, it does not
-	 * change behaviour, which is the whole contract of the CONFIG_GPON_*_DIAG
-	 * family. A family that leaves the cadence at 0 gets total silence, so
-	 * nothing that works today can move.
-	 * ⚠ It deliberately does NOT time out. Deciding that O1 has lasted too
-	 * long is a POLICY, and a policy hidden inside a diagnostic is how a
-	 * board starts re-ranging because someone wanted a log line. */
-	/* ★★★ THERE IS NO `&& o->early_entry_tick` HERE, AND THAT IS THE FIX
-	 * (2026-09-08). gpon_ploam_init() assigns `o->state = GPON_O1_INITIAL`
-	 * DIRECTLY -- it never calls set_state() -- so after a cold start the
-	 * stamp is still 0 from the memset. With that guard the dwell NEVER
-	 * FIRED on the one path it was written for. Zero is a perfectly good
-	 * "entered at tick 0"; it is only `state` that decides whether we are
-	 * early. Caught by test_h in gpon_lifetime_test, not by reading. */
+	/* ★★★ THE EARLY DWELL REPORT, AND IT ACTS ON NOTHING ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 30. */
 	if (o->cfg->early_dwell_report_ticks && o->state <= GPON_O3_SERIAL) {
-		/* ⚠ DEFENSIVE, AND SAID PLAINLY. set_state() stamps the entry
-		 * tick with this file's "armed" sentinel `x ? x : 1`, so a
-		 * stamp of 1 taken at tick 0 would make the plain subtraction
-		 * yield 0xFFFFFFFF -- ~497 days at a 10 ms tick -- as the FIRST
-		 * line this diagnostic ever prints. No CURRENT path reaches it
-		 * (init bypasses set_state, and every set_state(O1) is a
-		 * timeout that runs well after tick 0), so this is a guard
-		 * against the shape, not a repair of a live defect: I first
-		 * wrote that it WAS live, and the mutation showed otherwise. */
+		/* ⚠ DEFENSIVE, AND SAID PLAINLY. set_state() stamps the entry ...
+		 * dev/MEASURED-gpon_ploam.c.md sec 31. */
 		u32 held = o->ticks >= o->early_entry_tick
 			 ? o->ticks - o->early_entry_tick : 0;
 		u32 since = o->ticks >= o->early_report_tick
@@ -1023,11 +677,8 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 		}
 	}
 
-	/* ★★ THE RANGING TIMER (G.984.3). An ONU-ID has been assigned but no
-	 * Ranging_Time followed, so this ONU is invisible to the OLT's ranging
-	 * and can only be deactivated. Going back to O1 makes onu_id 0xff again,
-	 * which is what re-arms poll_sn_reoffer() -- that is the whole point of
-	 * the state change, not the state itself. */
+	/* ★★ THE RANGING TIMER (G.984.3). An ONU-ID has been assigned ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 46. */
 	if (o->cfg->o4_ranging_timeout_ticks &&
 	    o->state == GPON_O4_RANGING && o->o4_entry_tick &&
 	    (o->ticks - o->o4_entry_tick) > o->cfg->o4_ranging_timeout_ticks) {
@@ -1061,22 +712,8 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 	return (int)(o->tx_total - tx0);
 }
 
-/*
- * :6680-6724 — autonomous downstream-LOS recovery (fibre pull / loss of
- * downstream light). The OLT cannot send a Deactivate when downstream light is
- * gone, so the ONU must notice the sustained optical LOS itself, tear down to
- * O1 and re-acquire when light returns. Without this the FSM sits stale at O5
- * after a fibre pull and never re-ranges on reconnect.
- *
- * Real light loss = the GTC optical LOS AND the SoC SerDes signal-detect both
- * gone. An I2C pad steal perturbs the optical LOS alone (signal-detect stays
- * up); an internal SerDes re-seat can blip signal-detect alone (optical LOS
- * stays clear); only a true fibre pull drops BOTH. Requiring the AND lets the
- * debounce be short without false-tripping on either transient. Once at O1 the
- * state gate stops counting until the FSM climbs back past O1 on relight.
- *
- * TEARDOWN 4 of 4.
- */
+/* 6680-6724 — autonomous downstream-LOS recovery (fibre pull ...
+ * dev/MEASURED-gpon_ploam.c.md sec 32. */
 int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark,
 			u32 now_ms)
 {
@@ -1096,21 +733,8 @@ int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark,
 				 * session state and goes with the rest. */
 				o->data_tcont_installed = false;
 				o->data_alloc = 0;
-				/* ★2026-07-05: do NOT clear data_gem_solicited
-				 * on a fibre-LOS re-range. This re-range is
-				 * ONU-initiated: the OLT never Deactivated us,
-				 * so it KEEPS our OMCI/GEM provisioning across
-				 * the brief outage and does NOT re-send the
-				 * ME 268 on re-admit. Clearing it made the data
-				 * GEM wait forever for a create that never
-				 * arrives — "internet doesn't come back after I
-				 * reconnect the fiber". Keeping it re-installs
-				 * the GEM the OLT still holds as soon as O5 is
-				 * re-reached. This does NOT re-introduce the
-				 * second-admit churn: that was a fresh admit
-				 * where the OLT had not yet created the GEM.
-				 * A true deprovision (OLT Deactivate) still
-				 * clears it in that handler. */
+				/* ★2026-07-05: do NOT clear data_gem_solicited on a fibre-LOS ...
+				 * dev/MEASURED-gpon_ploam.c.md sec 33. */
 				o->aes_switch_time = 0xffffffff;
 				o->key_staged = false;
 				o->ops->set_hw_onu_id(o->sh, 0xff);
@@ -1138,15 +762,8 @@ int gpon_ploam_poll_sn_reoffer(struct gpon_ploam *o, u32 now_ms)
 	return (int)(o->tx_total - tx0);
 }
 
-/*
- * :6845-6854 — periodic O5 upstream-PLOAM keepalive. Once ranged the FSM
- * otherwise emits ZERO upstream PLOAM, and the shared buffer's auto-No_message
- * template can be stale-clobbered by intervening ACK/SN sends. Emitting a fresh
- * No_message keeps a valid PLOAM in the OLT's granted slots each window,
- * defeating a PLOAM/ack-liveness timeout that fires Deactivate ~25-35 s after
- * provision. Mirrors the unranged SN cadence; upstream PLOAM only, does not
- * touch the downstream or OMCI. Default off, matching stock.
- */
+/* 6845-6854 — periodic O5 upstream-PLOAM keepalive. Once ...
+ * dev/MEASURED-gpon_ploam.c.md sec 34. */
 int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
 {
 	u32 tx0 = o->tx_total;
@@ -1163,27 +780,8 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
 	return (int)(o->tx_total - tx0);
 }
 
-/* ---------------------------------------------------------------------------
- * Identity and lifecycle.
- * ------------------------------------------------------------------------- */
-
-/* ★★ THE SERIAL-NUMBER CODEC IS NOT IN THIS FILE, AND ITS ERROR CONTRACT IS THE
- * OPPOSITE OF WHAT THIS BLOCK USED TO SAY. A parser lived here, carrying the
- * Luna behaviour verbatim: an invalid hex digit contributed hex_to_bin()'s -1,
- * so a typo yielded 0xf in that nibble instead of being refused, and the note
- * called converging with Elnath's validating decoder "FOLLOW-UP P7".
- *
- * THAT CONVERGENCE IS DONE (2026-08-27/28). There is now ONE codec,
- * gpon_sn_parse() in gpon_sn.c, it is the VALIDATING one, it REFUSES a
- * malformed string and leaves the caller's bytes untouched on refusal, and
- * both families are rebased onto it (Elnath through cg_sn_parse()'s -EINVAL
- * adapter, Luna through gpon_parse_sn_into()). gpon_sn_test pins that
- * behaviour on x86.
- *
- * The comment is kept rather than deleted because it stated a REFUTED premise
- * about our own error handling in the file that owns PLOAM identity, and a
- * reader who acts on "a bad digit yields 0xf" writes different code. What this
- * layer takes is 8 bytes that are ALREADY DECODED. */
+/* Identity and lifecycle. ★★ THE SERIAL-NUMBER CODEC IS NOT ...
+ * dev/MEASURED-gpon_ploam.c.md sec 35. */
 
 void gpon_ploam_set_sn(struct gpon_ploam *o, const u8 sn[8])
 {
@@ -1197,18 +795,8 @@ void gpon_ploam_set_data_gem_solicited(struct gpon_ploam *o, bool solicited,
 	o->data_gem_solicited = solicited;
 	if (!solicited)
 		return;
-	/* ★★ THE MULTICAST GEM IS NOT THE WAN DATA GEM (G.988). The OLT
-	 * provisions the multicast/broadcast GEM as an ME 268 Create too
-	 * (inst=1, Port-ID GPON_MCAST_GEM_PORT, paired with ME 281). It has its
-	 * own flow and its own downstream routing, so adopting it here would
-	 * point the WAN at the broadcast port.
-	 *
-	 * ⚠ THIS REFUSAL LIVED ONLY IN THE LUNA SHELL until 2026-09-03, while
-	 * the core carried GPON_MCAST_GEM_PORT and USED IT NOWHERE: the core had
-	 * the protocol NAME and the family had the protocol RULE. Today's only
-	 * caller filters before calling, so this was LATENT, not live -- the
-	 * point is that the core must be right for the NEXT caller, and it is
-	 * the half that also runs on x86 and on the other family. */
+	/* ★★ THE MULTICAST GEM IS NOT THE WAN DATA GEM (G.988). The ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 36. */
 	if ((port_id & GPON_GEM_US_PORT_MASK) == GPON_MCAST_GEM_PORT) {
 		o->data_gem_solicited = false;
 		return;
@@ -1227,18 +815,8 @@ void gpon_ploam_set_data_installed(struct gpon_ploam *o, bool installed)
 	o->data_installed = installed;
 }
 
-/*
- * ★★★ THE PURE-VIRTUAL ANALOGUE.  C cannot make a missing table member a
- * compile error -- a designated initialiser that omits one is legal and
- * leaves it NULL -- so the refusal happens at the ONE point a usable context
- * can be built, and the compiler is used for the half it CAN enforce: the
- * caller may not discard the answer (GPON_MUST_CHECK on the declaration).
- *
- * The list lives in gpon_ploam.h; this walks it.  X() expands once per
- * MANDATORY op, and the name it yields is the one the shell prints -- so a
- * family driver's refusal message names the exact callback it forgot instead
- * of "-EINVAL", and does it before a single register is touched.
- */
+/* ★★★ THE PURE-VIRTUAL ANALOGUE. C cannot make a missing ...
+ * dev/MEASURED-gpon_ploam.c.md sec 37. */
 const char *gpon_ploam_ops_missing(const struct gpon_ploam_ops *ops)
 {
 	if (!ops)
@@ -1259,12 +837,8 @@ const char *gpon_ploam_init(struct gpon_ploam *o,
 	static const u8 delim_default[3] = GPON_PLOAM_BOH_DELIM_DEFAULT;
 	const char *missing = gpon_ploam_ops_missing(ops);
 
-	/* ★ REFUSE BEFORE INSTALLING ANYTHING.  The context is left zeroed with
-	 * ops == NULL, so there is no half-wired object for a later tick to
-	 * dereference: the failure is the shell's probe returning an error, not
-	 * an oops minutes into a boot at the first transition that reaches the
-	 * hole.  memset first so a REFUSED init also cannot leave a previous
-	 * context's pointers in place. */
+	/* ★ REFUSE BEFORE INSTALLING ANYTHING. The context is left ...
+	 * dev/MEASURED-gpon_ploam.c.md sec 38. */
 	memset(o, 0, sizeof(*o));
 	if (missing)
 		return missing;

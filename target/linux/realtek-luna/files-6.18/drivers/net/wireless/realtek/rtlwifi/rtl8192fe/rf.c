@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2026  Realtek RTL8192FE clean-room driver authors. */
-
-/*
- * RF6052 radio bring-up and per-rate TX-power programming for the
- * Realtek RTL8192F (2T2R 802.11n PCIe).  Structure follows the mainline
- * rtlwifi rtl8192ee / rtl8723be sub-drivers; the register addresses,
- * field positions and numeric constants are the documented RTL8192F
- * values.  Written clean-room from the public register map and the
- * device's observable behaviour.
- */
+/* RF6052 radio bring-up and per-rate TX-power programming for ... -- dev/MEASURED-rf.c.md sec 1. */
 
 #include "../wifi.h"
 #include "reg.h"
@@ -19,13 +11,7 @@
 
 static bool _rtl92fe_phy_rf6052_config_parafile(struct ieee80211_hw *hw);
 
-/*
- * Program the radio channel-bandwidth bits (RF reg 0x18, bits[11:10]) for
- * 20 MHz vs 20/40 MHz on every active RF path.  The 8192F is a 2T2R part,
- * so both path A and path B are written.  The cached channel value in
- * rfreg_chnlval[0] mirrors the on-air register so callers that touch the
- * channel later keep the bandwidth selection coherent.
- */
+/* Program the radio channel-bandwidth bits (RF reg 0x18, ... -- dev/MEASURED-rf.c.md sec 2. */
 void rtl92fe_phy_rf6052_set_bandwidth(struct ieee80211_hw *hw, u8 bandwidth)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -50,13 +36,7 @@ void rtl92fe_phy_rf6052_set_bandwidth(struct ieee80211_hw *hw, u8 bandwidth)
 	rtl_set_rfreg(hw, RF90_PATH_B, RF_CHNLBW, RFREG_OFFSET_MASK, chnlval);
 }
 
-/*
- * Surface the thermal TX-power-tracking trim that dm.c maintains as a simple
- * direction (1 = add, 2 = subtract, 0 = none) plus a packed 4-lane magnitude
- * suitable for adding to/subtracting from an AGC word.  The 8192F carries the
- * fine per-rate swing inside dm.c's tracking callback; this hook applies the
- * remaining whole-step offset to the CCK/OFDM base so both paths stay in sync.
- */
+/* Surface the thermal TX-power-tracking trim that dm.c ... -- dev/MEASURED-rf.c.md sec 3. */
 static void _rtl92fe_txpower_track_trim(struct ieee80211_hw *hw,
 					  u8 *direction, u32 *value)
 {
@@ -69,12 +49,8 @@ static void _rtl92fe_txpower_track_trim(struct ieee80211_hw *hw,
 	if (!rtlpriv->dm.txpower_tracking || !rtlpriv->dm.txpower_track_control)
 		return;
 
-	/*
-	 * remnant_ofdm_swing_idx[] holds the leftover swing (in power-index
-	 * steps) that did not fit the BB swing table; fold it back into the
-	 * RF6052 AGC word.  Path A is representative for the shared base.
-	 * TODO(8192f): validate the swing-index-to-AGC-step scaling on hardware.
-	 */
+	/* remnant_ofdm_swing_idx[] holds the leftover swing (in ...
+	 * dev/MEASURED-rf.c.md sec 4. */
 	remnant = rtlpriv->dm.remnant_ofdm_swing_idx[RF90_PATH_A];
 	if (remnant == 0)
 		return;
@@ -104,12 +80,7 @@ static u32 _rtl92fe_clamp_txagc(u32 val)
 	       ((u32)lane[1] << 8)  |  (u32)lane[0];
 }
 
-/*
- * CCK TX-power: build a per-path word where all four rate lanes carry the
- * same base power index, then split it across the 8192F CCK AGC registers.
- * During an active scan the rates are forced to max unless the regulatory
- * domain requests the turbo-scan-off behaviour, matching the mainline flow.
- */
+/* CCK TX-power: build a per-path word where all four rate ... -- dev/MEASURED-rf.c.md sec 5. */
 void rtl92fe_phy_rf6052_set_cck_txpower(struct ieee80211_hw *hw,
 					  u8 *ppowerlevel)
 {
@@ -139,11 +110,8 @@ void rtl92fe_phy_rf6052_set_cck_txpower(struct ieee80211_hw *hw,
 		for (idx = RF90_PATH_A; idx <= RF90_PATH_B; idx++)
 			tx_agc[idx] = ppowerlevel[idx] * 0x01010101;
 
-		/*
-		 * Regulatory mode 0 (the device's default "better
-		 * performance" behaviour): fold the per-rate offsets
-		 * cached from the PG table into the CCK base word.
-		 */
+		/* Regulatory mode 0 (the device's default "better ...
+		 * dev/MEASURED-rf.c.md sec 9. */
 		if (rtlefuse->eeprom_regulatory == 0) {
 			tmpval = rtlphy->mcs_txpwrlevel_origoffset[0][6] +
 				 (rtlphy->mcs_txpwrlevel_origoffset[0][7] << 8);
@@ -158,11 +126,8 @@ void rtl92fe_phy_rf6052_set_cck_txpower(struct ieee80211_hw *hw,
 	for (idx = RF90_PATH_A; idx <= RF90_PATH_B; idx++)
 		tx_agc[idx] = _rtl92fe_clamp_txagc(tx_agc[idx]);
 
-	/*
-	 * Apply the thermal TX-power-tracking trim.  On the 8192F the tracking
-	 * state is maintained by dm.c; _rtl92fe_txpower_track_trim() reads
-	 * the current swing direction/magnitude from that state.
-	 */
+	/* Apply the thermal TX-power-tracking trim. On the 8192F the ...
+	 * dev/MEASURED-rf.c.md sec 10. */
 	_rtl92fe_txpower_track_trim(hw, &direction, &pwrtrac_value);
 	if (direction == 1) {
 		tx_agc[0] += pwrtrac_value;
@@ -189,11 +154,7 @@ void rtl92fe_phy_rf6052_set_cck_txpower(struct ieee80211_hw *hw,
 	rtl_set_bbreg(hw, RTXAGC_B_CCK1_55_MCS32, 0xffffff00, tmpval);
 }
 
-/*
- * Replicate the per-path OFDM and HT base indices into a packed 4-lane word
- * so the by-regulatory stage can add per-rate offsets uniformly.  ofdmbase
- * carries the legacy-OFDM base, mcsbase the HT base for the active bandwidth.
- */
+/* Replicate the per-path OFDM and HT base indices into a ... -- dev/MEASURED-rf.c.md sec 11. */
 static void _rtl92fe_get_power_base(struct ieee80211_hw *hw,
 				      u8 *ppowerlevel_ofdm,
 				      u8 *ppowerlevel_bw20,
@@ -217,13 +178,7 @@ static void _rtl92fe_get_power_base(struct ieee80211_hw *hw,
 	}
 }
 
-/*
- * Resolve the final 4-lane write value for an OFDM/HT register index per RF
- * path, honouring the efuse regulatory mode.  Modes 0/1 add the cached PG
- * offset to the base; mode 2 uses the base alone; mode 3 applies the
- * customer per-channel limit before adding the base.  A dynamic BT high-power
- * level finally backs the value off by a fixed step.
- */
+/* Resolve the final 4-lane write value for an OFDM/HT ... -- dev/MEASURED-rf.c.md sec 6. */
 static void _rtl92fe_get_txpower_writeval_by_regulatory(struct ieee80211_hw *hw,
 							  u8 channel, u8 index,
 							  u32 *powerbase0,
@@ -322,13 +277,7 @@ static void _rtl92fe_get_txpower_writeval_by_regulatory(struct ieee80211_hw *hw,
 	}
 }
 
-/*
- * Commit one OFDM/HT register index for both RF paths.  The index selects a
- * register from the per-path AGC tables below; each 4-lane value is clamped
- * to the 6-bit per-rate maximum before the dword write.  Register addresses
- * are the documented RTL8192F BB locations (path A 0xE00..0xE1C, path B
- * 0x830..0x868).
- */
+/* Commit one OFDM/HT register index for both RF paths. The ... -- dev/MEASURED-rf.c.md sec 7. */
 static void _rtl92fe_write_ofdm_power_reg(struct ieee80211_hw *hw,
 					    u8 index, u32 *pvalue)
 {
@@ -363,11 +312,7 @@ static void _rtl92fe_write_ofdm_power_reg(struct ieee80211_hw *hw,
 	}
 }
 
-/*
- * OFDM + HT TX-power: derive the per-path base words, then for each of the
- * six AGC register indices resolve the regulatory write value, apply the
- * thermal-tracking trim, and program both RF paths.
- */
+/* OFDM + HT TX-power: derive the per-path base words, then ... -- dev/MEASURED-rf.c.md sec 12. */
 void rtl92fe_phy_rf6052_set_ofdm_txpower(struct ieee80211_hw *hw,
 					   u8 *ppowerlevel_ofdm,
 					   u8 *ppowerlevel_bw20,
@@ -401,11 +346,7 @@ void rtl92fe_phy_rf6052_set_ofdm_txpower(struct ieee80211_hw *hw,
 	}
 }
 
-/*
- * Load the RadioA/RadioB register tables.  The 8192F is 2T2R, so both paths
- * are configured; rf_type only collapses to a single path on a binned 1T1R
- * variant.
- */
+/* Load the RadioA/RadioB register tables. The 8192F is 2T2R, ... -- dev/MEASURED-rf.c.md sec 13. */
 bool rtl92fe_phy_rf6052_config(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -419,13 +360,7 @@ bool rtl92fe_phy_rf6052_config(struct ieee80211_hw *hw)
 	return _rtl92fe_phy_rf6052_config_parafile(hw);
 }
 
-/*
- * Per-path RF6052 table apply.  For each path the 3-wire RFENV interface is
- * latched (saved, forced to the serial mode, address/data lengths zeroed),
- * the RadioA/RadioB array is written through the BB serial port, and the
- * RFENV bit is restored.  rtl92fe_phy_config_rf_with_headerfile() is
- * provided by phy.c and walks the RTL8192FE radio arrays.
- */
+/* Per-path RF6052 table apply. For each path the 3-wire RFENV ... -- dev/MEASURED-rf.c.md sec 8. */
 static bool _rtl92fe_phy_rf6052_config_parafile(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);

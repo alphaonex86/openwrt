@@ -1,57 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * Realtek "Luna" SoC watchdog timer (RTL960x family).
- *
- * The block is three 32-bit registers sitting at the top of the SoC timer/
- * counter (TC) block, at TC_BASE + 0x60 -- physically 0x18003260 on every Luna
- * part looked at so far, including the RTL9602C "Europa" this target ships on.
- * It is a TWO-PHASE watchdog:
- *
- *	phase 1 expires  -> the block raises its own timeout interrupt, so a
- *			    vendor kernel can dump state while still running;
- *	phase 2 expires  -> the SoC is RESET, in the mode selected by
- *			    WDT_RESET_MODE.
- *
- * Both phases restart together when the counter is kicked, so the time from the
- * last kick to the reset is (PH1 + 1 + PH2 + 1) ticks, and one tick is
- * 2^(25 + WDT_CLK_SC) cycles of the LX peripheral bus clock.  At the 200 MHz LX
- * clock this SoC runs, the coarsest scale gives a 1.342 s tick and a 42 s
- * ceiling; the finest gives 168 ms.
- *
- * ---------------------------------------------------------------------------
- * WHERE THESE FACTS COME FROM, tier by tier, with the 2026-08-26 citation
- * correction that the scale encoding lives in a Kconfig HELP TEXT and not in
- * the BSP headers: dev/MEASURED-luna-wdt-provenance-2026-08-26.md.
- * In short: [1] LIVE on this SoC (luna_machine_restart() has driven exactly
- * these registers since bring-up, which is how this port reboots); [2] this
- * board's own stock firmware, which arms it on every boot; [3] the family BSP
- * headers for the register triple and the field shifts, the encoding
- * corroborated three ways including a numeric sieve (32 ticks = 43 s ONLY at
- * base 2^25); [4] a live read on the RTL9607C reference board, 0xe7c00000,
- * every field where this file says it is.
- * The middle register (+0x04, vendor WDTINTRR) is NOT established; nothing
- * here reads or writes it.
- *
- * ---------------------------------------------------------------------------
- * ARMED IS NOT FIRED, AND THIS DRIVER REFUSES TO PRETEND OTHERWISE.
- *
- * There is no established latch on this SoC that says "the last reset was mine".
- * WDT_E reads 1 whenever the watchdog is ENABLED, which on a healthy unit is all
- * the time -- so a witness built on it would report a bite after every power cut
- * and every clean reboot.  That is the exact phantom this project already
- * installed once on its other board, where a vendor breadcrumb reading 3 meant
- * "the watchdog was started" and was nearly published as "the watchdog fired".
- *
- * The X111W stock firmware has no reset-reason node at all (searched: no
- * reboot_reason / reset_reason / reset_cause anywhere in its kernel or rootfs),
- * so there is nothing to adopt either.
- *
- * => this driver advertises NO WDIOF_CARDRESET and never populates
- *    wdd.bootstatus.  The witness that the watchdog BIT is the one the test
- *    suite already mandates for every case: /proc/uptime went BACKWARDS while
- *    nothing asked for a reboot.  If a real latch is ever established here, it
- *    belongs in bootstatus and this paragraph should be deleted, not softened.
- */
+/* Realtek "Luna" SoC watchdog timer (RTL960x family). The ...
+ * dev/MEASURED-luna_wdt.c.md sec 1. */
 
 #include <linux/bits.h>
 #include <linux/clk.h>
@@ -87,15 +36,8 @@
 #define LUNA_WDT_PH_TO_MSK		0x1fu
 #define LUNA_WDT_RESET_MODE_MSK	0x3u
 
-/*
- * RESET_MODE 0 is the H/W FULL CHIP reset: it takes the CPU down together with
- * the PLL, analog and SerDes domains, i.e. as close to a power-on as this SoC
- * can do to itself, and it re-enters the boot ROM.  That is the only mode worth
- * having in an unattended device -- mode 1 leaves the peripherals in whatever
- * state wedged them, and mode 2 is a software reset, which is precisely what is
- * not running when a watchdog is needed.  Proven by this target's own restart
- * path, which has used mode 0 since bring-up.
- */
+/* RESET_MODE 0 is the H/W FULL CHIP reset: it takes the CPU ...
+ * dev/MEASURED-luna_wdt.c.md sec 2. */
 #define LUNA_WDT_RESET_MODE_FULL_CHIP 0u
 
 /* One tick is 2^(SCALE_SHIFT + WDT_CLK_SC) cycles of the LX bus clock. */
@@ -104,12 +46,8 @@
 /* Each phase field is 5 bits and counts from ONE, so 0 means a single tick. */
 #define LUNA_WDT_TICKS		32u
 
-/*
- * Phase 2 is kept at its shortest.  It exists so a vendor kernel can dump state
- * from the phase-1 interrupt before the reset lands; we take no interrupt (see
- * the probe), so every phase-2 tick is dead time between "the deadline passed"
- * and "the device comes back".
- */
+/* Phase 2 is kept at its shortest. It exists so a vendor ...
+ * dev/MEASURED-luna_wdt.c.md sec 3. */
 #define LUNA_WDT_PH2_TICKS		1u
 
 #define LUNA_WDT_MIN_TIMEOUT		1u
@@ -127,24 +65,16 @@ MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default: "
 		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
-/**
- * struct luna_wdt_timing - the WDT_CTRL timing fields for one timeout
- * @clk_sc:	WDT_CLK_SC, the tick scale, 0..LUNA_WDT_CLK_SC_MAX
- * @ph1:	WDT_PH1_TO field value; the phase lasts @ph1 + 1 ticks
- * @ph2:	WDT_PH2_TO field value; the phase lasts @ph2 + 1 ticks
- */
+/* struct luna_wdt_timing - the WDT_CTRL timing fields for one ...
+ * dev/MEASURED-luna_wdt.c.md sec 4. */
 struct luna_wdt_timing {
 	u32 clk_sc;
 	u32 ph1;
 	u32 ph2;
 };
 
-/*
- * Pure: the longest timeout this block can express on a @rate Hz input clock.
- *
- * Rounded DOWN, deliberately: the number this returns is published to userspace
- * as max_timeout, so it has to be a window the hardware can actually hold.
- */
+/* Pure: the longest timeout this block can express on a @rate ...
+ * dev/MEASURED-luna_wdt.c.md sec 5. */
 static unsigned int luna_wdt_max_timeout(unsigned long rate)
 {
 	u64 cycles = (u64)LUNA_WDT_TICKS <<
@@ -153,22 +83,8 @@ static unsigned int luna_wdt_max_timeout(unsigned long rate)
 	return rate ? (unsigned int)div_u64(cycles, rate) : 0;
 }
 
-/*
- * Pure: turn a timeout in whole seconds into the WDT_CTRL timing fields.
- *
- * The scale is chosen as the FINEST one that still reaches @secs, which matters
- * because the field is only 5 bits: at the coarsest scale a 2 s request would be
- * rounded up to a 2.7 s window, while at the finest it lands within 168 ms.
- * Rounding is always UP, so the device never resets EARLIER than the timeout
- * userspace was promised -- the direction that matters, since the watchdog core
- * feeds at timeout/2 and an early bite would reboot a healthy unit.
- *
- * The arithmetic is deliberately shifts-only.  A 64-bit divide by a runtime
- * value is not something a 32-bit kernel should be doing in a helper that also
- * has to run in a restart path, and the divisor here is always a power of two.
- *
- * Returns 0, or -ERANGE when @secs cannot be expressed at any scale.
- */
+/* Pure: turn a timeout in whole seconds into the WDT_CTRL ...
+ * dev/MEASURED-luna_wdt.c.md sec 6. */
 static int luna_wdt_calc_timing(unsigned long rate, unsigned int secs,
 				   struct luna_wdt_timing *t)
 {
@@ -206,14 +122,8 @@ static u32 luna_wdt_ctrl_timing(const struct luna_wdt_timing *t,
 	       (reset_mode & LUNA_WDT_RESET_MODE_MSK);
 }
 
-/**
- * struct luna_wdt - one Luna watchdog instance
- * @wdd:	the watchdog the core sees
- * @base:	the three-register block
- * @clk:	LX peripheral bus clock, which the counter is scaled from
- * @rate:	@clk's frequency, cached because every timeout change needs it
- * @lock:	serialises the read-modify-write of WDT_CTRL against the kick
- */
+/* struct luna_wdt - one Luna watchdog instance @wdd: the ...
+ * dev/MEASURED-luna_wdt.c.md sec 7. */
 struct luna_wdt {
 	struct watchdog_device	wdd;
 	void __iomem		*base;
@@ -227,19 +137,8 @@ static inline struct luna_wdt *to_luna_wdt(struct watchdog_device *wdd)
 	return container_of(wdd, struct luna_wdt, wdd);
 }
 
-/*
- * Reload both phases.
- *
- * ★ READ-MODIFY-WRITE, and it is not a style preference.  Bit 31 of WDT_CNT is
- * the kick; what the other 31 bits of that register are is NOT established
- * anywhere -- the vendor prints the word and never decodes it, and it reads back
- * as zero on a running sibling, which tells you nothing about a chip that has
- * something latched there.  A blind store would be a write of 31 unknown bits on
- * the hot path of the one mechanism that has to keep working when everything
- * else has stopped.  This project has already paid for exactly that shape on its
- * other board, where the reset-enable word turned out to also hold the power-down
- * bits for the GPON and the forwarding engine.
- */
+/* Reload both phases. ★ READ-MODIFY-WRITE, and it is not a ...
+ * dev/MEASURED-luna_wdt.c.md sec 8. */
 static void luna_wdt_kick(struct luna_wdt *wdt)
 {
 	u32 cnt = readl(wdt->base + LUNA_WDT_CNT);
@@ -254,70 +153,19 @@ static int luna_wdt_stop(struct watchdog_device *wdd);
 
 static int luna_wdt_ping(struct watchdog_device *wdd)
 {
-	/*
-	 * ★★★ THE KICK ALONE DOES NOT RELOAD THIS COUNTER -- MEASURED ON THE
-	 * BOARD, 2026-08-27.  A bisect first proved the watchdog is what resets
-	 * the X111W at ~30 s (`initcall_blacklist=luna_wdt_driver_init` ->
-	 * zero resets past 34 s), and an instrumented kick then showed why:
-	 *
-	 *   rtl960x-wdt: kick cnt=0x00000000 -> 0x00000000 ctrl=0xe5800000
-	 *   ... 54 of them, one every 5 s (procd's cadence) ... and it still bit.
-	 *
-	 * So procd WAS feeding it, faithfully, and the feed did nothing.  Writing
-	 * BIT(31) to WDT_CNT does not restart the count on this block; the
-	 * documented "bit 31 = kick" is not sufficient on its own.
-	 *
-	 * ⇒ reload the way the block demonstrably accepts: rewrite WDT_CTRL with
-	 *   the enable bit, which is exactly what start() does and what arms the
-	 *   counter in the first place.  start() is a read-modify-write that
-	 *   touches only the decoded fields, so this changes no unknown bit --
-	 *   the reasoning above luna_wdt_kick() about the undecoded 31 bits of
-	 *   WDT_CNT stands untouched, and the kick stays where it is inside
-	 *   start().
-	 *
-	 * ⚠ IT IS IDEMPOTENT BY CONSTRUCTION: start() recomputes the SAME window
-	 *   from wdd->timeout every time, so a ping cannot drift the window.
-	 */
-	/*
-	 * ⚠ REWRITING WDT_CTRL IS NOT ENOUGH EITHER -- measured right after the
-	 * kick was: 51 pings through start(), ctrl unchanged at 0xe5800000, and
-	 * the board still reset at 30.184 s.  What reloads this counter is
-	 * TOGGLING THE ENABLE, so the reload is stop-then-start.
-	 *
-	 * ★ THE ARITHMETIC CONFIRMS THE MECHANISM, to the second.  Decoding the
-	 * live ctrl word: EN=1, clk_scale=3 -> 2^28 LX clocks = 1.342 s per unit,
-	 * phase-1 = 22 units = 29.5 s, phase-2 = 0.  Armed at ~0.7 s, that is a
-	 * full-chip reset at 30.2 s -- and every death measured on this board sat
-	 * in a 30.1-32.1 s band, whatever the software timeout said.  The counter
-	 * was simply never reloaded since it was armed.
-	 *
-	 * ⚠ THE DISABLED WINDOW IS REAL AND IT IS THE POINT: between stop() and
-	 * start() the watchdog is off for a few register writes.  That is what a
-	 * reload IS on a block with no reload strobe, and it is bounded by two
-	 * MMIO writes under the driver's own spinlock -- against a 29.5 s window
-	 * fed every 5 s.
-	 */
+	/* ★★★ THE KICK ALONE DOES NOT RELOAD THIS COUNTER -- MEASURED ...
+	 * dev/MEASURED-luna_wdt.c.md sec 9. */
 	struct luna_wdt *wdt = to_luna_wdt(wdd);
 
-	/* ⚠ THE RELOAD EXPERIMENTS ARE NOT KEPT. Both were tried on
-	 * 2026-08-27 and neither moved the deadline by a millisecond:
-	 * rewriting WDT_CTRL through start(), and toggling the enable
-	 * (stop then start). The measured findings above stay because
-	 * they are facts; the code that failed to act on them does not,
-	 * and a ping that disables the watchdog on every feed would be a
-	 * worse default than the one plain kick. */
+	/* ⚠ THE RELOAD EXPERIMENTS ARE NOT KEPT. Both were tried on ...
+	 * dev/MEASURED-luna_wdt.c.md sec 10. */
 	luna_wdt_kick(wdt);
 
 	return 0;
 }
 
-/*
- * Program the window and arm.
- *
- * The kick comes LAST and is not optional: WDT_CTRL is written while the counter
- * may already be part-way through an older, possibly shorter window, and without
- * the reload the new timeout would only take effect at the next feed.
- */
+/* Program the window and arm. The kick comes LAST and is not ...
+ * dev/MEASURED-luna_wdt.c.md sec 11. */
 static int luna_wdt_start(struct watchdog_device *wdd)
 {
 	struct luna_wdt *wdt = to_luna_wdt(wdd);
@@ -378,42 +226,20 @@ static int luna_wdt_set_timeout(struct watchdog_device *wdd,
 
 	wdd->timeout = new_timeout;
 
-	/*
-	 * Reprogram only a watchdog that is already counting.  Programming a
-	 * stopped one here would arm it behind the caller's back: the core
-	 * allows WDIOC_SETTIMEOUT before the start.
-	 */
+	/* Reprogram only a watchdog that is already counting. ...
+	 * dev/MEASURED-luna_wdt.c.md sec 18. */
 	if (watchdog_hw_running(wdd))
 		return luna_wdt_start(wdd);
 
 	return 0;
 }
 
-/*
- * No .get_timeleft.
- *
- * WDT_CNT is the kick register; whether its lower bits are a live down-counter
- * is not established, and the one live reading available reads 0 on a running,
- * healthy sibling -- which is either "not a counter" or "a counter we are
- * decoding wrong", and there is no way to tell them apart from here.  A
- * get_timeleft that returned that number would publish it through
- * /sys/class/watchdog/watchdogN/timeleft as a measurement.
- *
- * No .restart either, and that one is not caution but duplication: this target
- * already restarts through this same block, from luna_machine_restart() in
- * arch/mips/realtek-luna/setup.c, which MIPS reaches via _machine_restart.  It
- * is the proven path -- it is how the port has rebooted since bring-up -- and a
- * second handler at watchdog-core priority would silently take it over.  The
- * field definitions there and here describe one piece of hardware twice, so the
- * offline case luna_wdt_test asserts that the two agree.
- */
+/* No .get_timeleft. WDT_CNT is the kick register; whether its ...
+ * dev/MEASURED-luna_wdt.c.md sec 12. */
 static const struct watchdog_info luna_wdt_info = {
 	.identity	= "Realtek Luna WDT",
-	/*
-	 * No WDIOF_CARDRESET: see the file header.  Nothing on this SoC has been
-	 * shown to distinguish "the watchdog reset the chip" from "the chip was
-	 * reset", and bootstatus is a claim, not a placeholder.
-	 */
+	/* No WDIOF_CARDRESET: see the file header. Nothing on this ...
+	 * dev/MEASURED-luna_wdt.c.md sec 19. */
 	.options	= WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING |
 			  WDIOF_MAGICCLOSE,
 };
@@ -453,13 +279,8 @@ static int luna_wdt_probe(struct platform_device *pdev)
 				     &res->start, LUNA_WDT_BLOCK_SIZE);
 	phys = res->start;
 
-	/*
-	 * devm_ioremap(), not devm_ioremap_resource(): this block is the tail of
-	 * the SoC TC block that the system timer also lives in, and the arch
-	 * restart path reaches the same registers through a fixed KSEG1 address.
-	 * Claiming the window exclusively would make whichever driver probes
-	 * second fail, for no benefit.
-	 */
+	/* devm_ioremap(), not devm_ioremap_resource(): this block is ...
+	 * dev/MEASURED-luna_wdt.c.md sec 13. */
 	wdt->base = devm_ioremap(dev, res->start, resource_size(res));
 
 	if (!wdt->base)
@@ -479,14 +300,8 @@ static int luna_wdt_probe(struct platform_device *pdev)
 				     "a %lu Hz input clock cannot reach a 1 s window\n",
 				     wdt->rate);
 
-	/*
-	 * The phase-1 timeout has its own interrupt line on this SoC and it is
-	 * deliberately NOT requested here.  It exists so a vendor kernel can
-	 * collect debug state in the gap before the reset; taking it would buy
-	 * this driver nothing, and the input number is the one fact in this file
-	 * with a single source behind it.  The reset does not depend on it: the
-	 * block asserts it from phase 2 in hardware.
-	 */
+	/* The phase-1 timeout has its own interrupt line on this SoC ...
+	 * dev/MEASURED-luna_wdt.c.md sec 14. */
 
 	wdt->wdd.info = &luna_wdt_info;
 	wdt->wdd.ops = &luna_wdt_ops;
@@ -496,14 +311,8 @@ static int luna_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.timeout = min(LUNA_WDT_DEFAULT_TIMEOUT, max_timeout);
 
 
-	/*
-	 * ★ Was it already counting when Linux took over?
-	 *
-	 * A boot stage that arms the watchdog and hands over to a kernel that
-	 * ignores it gives a unit that reboots part-way through every boot,
-	 * forever, with nothing in any log to see.  So the state is READ and
-	 * reported, never assumed.
-	 */
+	/* ★ Was it already counting when Linux took over? A boot ...
+	 * dev/MEASURED-luna_wdt.c.md sec 15. */
 	ctrl = readl(wdt->base + LUNA_WDT_CTRL);
 	adopted = !!(ctrl & LUNA_WDT_CTRL_EN);
 
@@ -514,29 +323,13 @@ static int luna_wdt_probe(struct platform_device *pdev)
 
 	watchdog_set_nowayout(&wdt->wdd, nowayout);
 
-	/*
-	 * Stop it across an orderly reboot.
-	 *
-	 * The alternative -- staying armed so that a shutdown which itself hangs
-	 * is also recovered -- is the better behaviour, and the other board in
-	 * this project takes it.  It is NOT taken here, because there it rests on
-	 * a measurement: warm reset and cold control read at the boot prompt,
-	 * showing the block does not carry its countdown into the next boot.  No
-	 * such reading exists for this SoC, and getting it wrong is not a missed
-	 * improvement, it is a unit that reboot-loops with an armed counter and
-	 * no way in.  Take the measurement, then delete this call and say so.
-	 */
+	/* Stop it across an orderly reboot. The alternative -- ...
+	 * dev/MEASURED-luna_wdt.c.md sec 16. */
 	watchdog_stop_on_reboot(&wdt->wdd);
 
 	if (adopted) {
-		/*
-		 * Take the window OVER rather than inherit it.  The counter
-		 * handed to us is part-way through a countdown nobody recorded,
-		 * and the watchdog core derives its feed interval from
-		 * wdd->timeout and not from what the hardware is carrying -- so
-		 * an inherited window shorter than ours would be fed too slowly
-		 * and bite during our own boot.
-		 */
+		/* Take the window OVER rather than inherit it. The counter ...
+		 * dev/MEASURED-luna_wdt.c.md sec 17. */
 		ret = luna_wdt_start(&wdt->wdd);
 		if (ret)
 			return dev_err_probe(dev, ret,

@@ -1,38 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * luna_ponmac.h - board-agnostic bring-up of the Realtek RTL960x family
- * GPON PON-MAC / SerDes, matching the stock device's register behavior.
- *
- * Purpose: have a stock-faithful ponmac/SerDes bring-up for the WHOLE
- * RTL960x family in-tree, so any future 960x board can be brought online by
- * wiring its register accessor + chip id, without re-deriving the sequence
- * from scratch.
- *
- * Reconstructed per-chip from the stock register behavior, with every register
- * resolved to its ABSOLUTE physical address from that chip's register map and
- * field bit-ranges from its field map. The 9602C path is HW-tested (the
- * realtek-luna board); the other family members are behavior-faithful
- * transcriptions, untested for lack of hardware, ready for when a board is
- * connected.
- *
- * The bring-up uses ABSOLUTE physical register addresses; the board driver
- * supplies rd/wr that map phys->virt (KSEG1 0xa0000000|phys, or ioremap).
- * On the 9602C "Luna" SoC: swcore phys 0x1b000000, PON-IP 0x1bf00000,
- * GTC 0x1b700000 (all in the KSEG1-reachable 0x1bxxxxxx window).
- */
+/* luna_ponmac.h - board-agnostic bring-up of the Realtek ...
+ * dev/MEASURED-luna_ponmac.h.md sec 1. */
 #ifndef _LUNA_PONMAC_H
 #define _LUNA_PONMAC_H
 
 #include <linux/types.h>
 
-/*
- * The chips this library actually serves.  It is the LUNA MIPS silicon and
- * nothing else: the RTL9607F carries a Realtek part number from the same
- * series but is a Cortina Access NE core with a different register map, and
- * it is driven by target/linux/realtek-elnath.  It used to sit in this enum
- * as a placeholder returning -ENOTSUPP, which made the file look like it
- * covered the whole RTL960x number space while serving one half of it.
- */
+/* The chips this library actually serves. It is the LUNA MIPS ...
+ * dev/MEASURED-luna_ponmac.h.md sec 2. */
 enum luna_chip {
 	LUNA_CHIP_9602C = 0,	/* + 9601C / 9601C_VB subtypes */
 	LUNA_CHIP_9603CVD,
@@ -71,11 +46,7 @@ static inline void luna_rfwr(const struct luna_ops *o, u32 phys,
 	o->wr(phys, (o->rd(phys) & ~mask) | ((val << lsb) & mask));
 }
 
-/*
- * Bring-up entry points. rev = LUNA_REV_A or the HW chip-revision id; subtype
- * as above. Return 0 on success, -ETIMEDOUT if the SerDes analog-ready gate never
- * asserts (non-fatal; the board driver may proceed + diagnose).
- */
+/* Bring-up entry points. rev = LUNA_REV_A or the HW ... -- dev/MEASURED-luna_ponmac.h.md sec 3. */
 int luna_ponmac_init(enum luna_chip chip, int rev, int subtype,
 			const struct luna_ops *o);
 int luna_ponmac_mode_set(enum luna_chip chip, int rev, int subtype,

@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Cortina-Access NI (network engine) Ethernet driver for the Realtek
- * RTL9607F "Elnath" GPON SoC.
- *
- * Bring-up stage M2a: platform probe, register-window mapping,
- * reserved-memory resolution, internal MDIO bus and GbE PHY discovery.
- * Stage M2b adds the TX datapath (cortina-ni-tx.c).
- */
+/* Cortina-Access NI (network engine) Ethernet driver for the ...
+ * dev/MEASURED-cortina-ni.c.md sec 1. */
 
 #include <linux/bitfield.h>
 #include <linux/build_bug.h>
@@ -48,11 +42,8 @@ static const struct cortina_ni_window_desc cortina_ni_windows[] = {
 	{ CA_NI_WIN_SRAM,	"bd-sram",	false },
 	{ CA_NI_WIN_GLB,	"glb",		true  },
 	{ CA_NI_WIN_AXI_REO,	"axi-reo",	true  },	/* RMU AXI rd/wr reorder - RX dequeue DMA */
-	/* ★ FBM (Free Buffer Manager) + LDMA-aux windows: the RMU allocates a buffer to
-	 * DMA each admitted RX frame into, and that alloc routes through the FBM.  Left
-	 * unmapped/uninitialised, the RMU can't allocate -> never admits (0x6900=0,
-	 * wptr=0) - the same whole-window-missing class as axi-reo.  DTS reg idx 16 +
-	 * 18-21 are already present; map non-required so a DTS gap can't kill probe. */
+	/* ★ FBM (Free Buffer Manager) + LDMA-aux windows: the RMU ...
+	 * dev/MEASURED-cortina-ni.c.md sec 20. */
 	{ CA_NI_WIN_LDMA_AUX,	"ldma-aux",	false },
 	{ CA_NI_WIN_FBM_GLB,	"fbm-glb",	false },
 	{ CA_NI_WIN_FBM_AXI,	"fbm-axi",	false },
@@ -68,11 +59,7 @@ static bool cortina_ni_phy_is_internal(int addr)
 	       addr < CA_NI_GPHY_FIRST + CA_NI_GPHY_COUNT;
 }
 
-/*
- * External MDIO master, clause 22 (stock aal_mdio_read/write_direct):
- * write the command word, pulse CTRL.start, poll CTRL.done, then - for a
- * read - fetch RDDATA *before* acking done (W1C), matching stock order.
- */
+/* External MDIO master, clause 22 (stock ... -- dev/MEASURED-cortina-ni.c.md sec 21. */
 static int cortina_ni_mdio_c22_cmd(struct cortina_ni *ni, u32 cmd, u32 *data)
 {
 	void __iomem *base = ni->win[CA_NI_WIN_MDIO];
@@ -80,11 +67,8 @@ static int cortina_ni_mdio_c22_cmd(struct cortina_ni *ni, u32 cmd, u32 *data)
 	int ret;
 
 	writel(cmd, base + CA_NI_MDIO_ADDR);
-	/*
-	 * Kick the frame.  Writing DONE too clears any stale done latch
-	 * (stock ORs START into the current CTRL value, which has the same
-	 * effect when done was left set).
-	 */
+	/* Kick the frame. Writing DONE too clears any stale done latch
+	 * dev/MEASURED-cortina-ni.c.md sec 22. */
 	writel(CA_NI_MDIO_CTRL_START | CA_NI_MDIO_CTRL_DONE,
 	       base + CA_NI_MDIO_CTRL);
 
@@ -134,11 +118,8 @@ static int cortina_ni_mdio_master_write(struct cortina_ni *ni, int addr,
 	return cortina_ni_mdio_c22_cmd(ni, cmd, NULL);
 }
 
-/*
- * Internal quad GbE PHYs: registers are memory-mapped in the GPHY window,
- * one 256K bank per PHY.  Regs 0x10..0x17 are banked by the (software)
- * page-select shadow; all other MII regs live at a fixed offset.
- */
+/* Internal quad GbE PHYs: registers are memory-mapped in the ...
+ * dev/MEASURED-cortina-ni.c.md sec 23. */
 static u32 cortina_ni_gphy_reg(struct cortina_ni *ni, int addr, int regnum)
 {
 	u32 off = (addr - CA_NI_GPHY_FIRST) * CA_NI_GPHY_BANK_STRIDE;
@@ -178,61 +159,14 @@ static int cortina_ni_gphy_write(struct cortina_ni *ni, int addr, int regnum,
 	return 0;
 }
 
-/*
- * Internal-GPHY firmware (SRAM) patch (see cortina-ni-regs.h).  The on-PHY
- * microcontroller's DSP-SRAM must be seeded with the apro_gen2 firmware body
- * before the PHY forwards a frame across its system-side GMII to the NI MAC.
- * We keep U-Boot's live link (never reset the PHY), so the uC is running - the
- * gate/lock handshake holds it, the firmware image is written word-by-word,
- * then the uC is resumed.  Applied per bank.  The raw OCP accessors are plain
- * memory-mapped readl/writel (no page shadow, no 1 ms MDIO delay - the image
- * is streamed back-to-back).
- */
+/* Internal-GPHY firmware (SRAM) patch (see ... -- dev/MEASURED-cortina-ni.c.md sec 2. */
 struct cortina_ni_gphy_patch_word {
 	u16	addr;	/* SRAM word address (via OCP 0xa436) */
 	u16	data;	/* 16-bit word        (via OCP 0xa438) */
 };
 
-/*
- * apro_gen2 internal-GPHY uC firmware body -- NO LONGER A C ARRAY.
- *
- * ★ THE CRITERION IS WHICH PROCESSOR EXECUTES IT.  A register-write list the
- * SoC CPU performs stays in C, because that IS driver logic.  These 560 words
- * are seeded into the internal PHY's DSP-SRAM and executed by that PHY'S OWN
- * MICROCONTROLLER -- a body for another engine, which is what request_firmware()
- * is for.  It was the only array embedded_blob_audit.py still marked
- * EXTERNALISE.
- *
- * ⚠ IT IS NOT ACCELERATOR MICROCODE.  The commit that added the file
- * (d7a19f1762) calls it "2250 bytes of accelerator microcode"; that is wrong
- * and, being published, cannot be rewritten -- so a reader grepping for
- * "accelerator" must land here.  The bytes are a sliding 16-bit window over ONE
- * byte stream (of the 517 consecutive-address word pairs, 512 satisfy
- * data[k] & 0xff == data[k+1] >> 8, which 560 independent register values could
- * not), written through the PHY's own SRAM address/data pair 0xa436/0xa438 --
- * the only registers this loop touches -- while the PHY's uC is HELD, then
- * released for that uC to run (CA_NI_GPHY_LOCK_HOLD, below).  "apro" is the
- * vendor's ApolloPro platform codename and apro_gen2 its name for this GPHY
- * generation's patch path, so the file name says what the image is for.
- *
- * It ships as "cortina-apro-gen2.fw": magic "APROGEN2", a big-endian u16 count,
- * then count x (big-endian u16 addr, big-endian u16 data), read with EXPLICIT
- * BYTE MATH below.  Generated FROM this driver's former table and proven
- * identical word for word: ONU-test-case/gphy_fw_extract.py --verify.
- *
- * ⚠ IF IT CANNOT BE LOADED THE PATCH IS SKIPPED, LOUDLY, and the driver
- * continues: refusing to probe would take the whole LAN down, while skipping is
- * the state `gphy_patch=0` already selects -- MEASURED indistinguishable from
- * the default on this board (X400AXF, 2026-08-31, TFTP->RAM; record in
- * x400axf/FINDING-gphy-blob-exists-only-as-a-live-read.md and the console log
- * ONU-test-case/results/host/console/onu/2026-08-31.log).  3 of 4 BOOTS reached
- * DATA path UP on each arm (gphy_patch_rate.py, n=4) and board->host over
- * `dd | nc` gave 527.7 Mbps patch-off vs 500.6 patch-on.  ⚠ Scope: ONE cabled
- * RJ45, ONE direction, ~1 s, no soak -- an earlier wording said "3/4 ports",
- * misreading the boot tally as a port count.  "Not REQUIRED to come up and
- * forward" is all that is measured; the image stays until the other sockets,
- * the reverse direction and a soak say the same.
- */
+/* apro_gen2 internal-GPHY uC firmware body -- NO LONGER A C ...
+ * dev/MEASURED-cortina-ni.c.md sec 3. */
 
 static u16 cortina_ni_gphy_ocp_read(void __iomem *bank, u16 ocp)
 {
@@ -251,22 +185,8 @@ static void cortina_ni_gphy_sram_write(void __iomem *bank, u16 addr, u16 data)
 	cortina_ni_gphy_ocp_write(bank, CA_NI_GPHY_SRAM_DATA, data);
 }
 
-/*
- * Load the internal-GPHY SRAM firmware image + resume the uC, per bank.
- *
- * TIMING: the uC SRAM is only writable while the uC is HELD.  The uC only
- * becomes lockable AFTER the MDIO/GPHY init - i.e. around LINK-UP, NOT at probe
- * (where SRAM writes are ignored).  So this runs from the link-up hook
- * (cortina_ni_rx_link_up), not probe.  For each bank we take the gate/lock/
- * ready-poll handshake (cortina-ni-regs.h), stream the firmware image, then
- * clear the hold bit so the uC runs the freshly-written image (its default ROM
- * firmware does NOT forward - the SRAM image is what enables line<->system
- * forwarding).
- *
- * One-shot per bank per boot (ni->gphy_patched[]); a bank whose gate reads
- * EXT_INI (not lockable yet) is left for the next link-up.  If the ready-poll
- * times out we log it and write the words anyway (the hold bit still took).
- */
+/* Load the internal-GPHY SRAM firmware image + resume the uC, ...
+ * dev/MEASURED-cortina-ni.c.md sec 4. */
 static bool gphy_patch = true;
 module_param(gphy_patch, bool, 0444);
 MODULE_PARM_DESC(gphy_patch,
@@ -393,16 +313,8 @@ static int cortina_ni_mdio_write(struct mii_bus *bus, int addr, int regnum,
 	return cortina_ni_mdio_master_write(ni, addr, regnum, val);
 }
 
-/*
- * GPHY-wrapper enable (stock aal_mdio_global_init + the patch_phy_done bit
- * from aal_internal_phy_init).  We FORCE the stock golden EN0/EN1 rather than
- * OR-onto-U-Boot: EN1 bit12 (patch_phy_done) is the GPHY->port-MAC datapath
- * release, and U-Boot leaves it non-deterministically set -> the whole
- * "RX works some boots, dead others" bug.  Writing the exact golden values
- * (EN0 = 0xFF000000, EN1 = 0x1001) makes ingress deterministic every boot.
- * The internal PHYs are memory-mapped (win GPHY), so forcing these MDIO-OCP
- * bits does not disturb our register reads.
- */
+/* GPHY-wrapper enable (stock aal_mdio_global_init + the ...
+ * dev/MEASURED-cortina-ni.c.md sec 5. */
 static void cortina_ni_mdio_hw_enable(struct cortina_ni *ni)
 {
 	void __iomem *wrap = ni->win[CA_NI_WIN_GPHY_WRAP];
@@ -530,11 +442,8 @@ static void cortina_ni_scan_phys(struct cortina_ni *ni)
 			 "match" : "MISMATCH",
 			 CA_NI_GPHY_PHY_ID);
 
-		/*
-		 * Diagnostic A/B: if the memory-mapped GPHY path returned
-		 * nothing sane, also try the external MDIO master once so
-		 * the boot log settles which path reaches these PHYs.
-		 */
+		/* Diagnostic A/B: if the memory-mapped GPHY path returned ...
+		 * dev/MEASURED-cortina-ni.c.md sec 24. */
 		if ((id == 0 || id == 0xffffffff) && ni->win[CA_NI_WIN_GPHY]) {
 			id1 = cortina_ni_mdio_master_read(ni, addr,
 							  MII_PHYSID1);
@@ -584,15 +493,8 @@ static int cortina_ni_mdio_init(struct cortina_ni *ni)
 	return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* the arbitrary-window register peek, read-only (debugfs .../cortina-ni/peek) */
-/* Decisive good-vs-bad-boot diff tool - every RX-subset register reads */
-/* identical on a working and a broken boot, so the deciding bit lives  */
-/* in a register the fixed spy does not print.  Bounded, plain readl,   */
-/* no side effects.  (project rule: dump/spy stays first-class.)        */
-/* ------------------------------------------------------------------ */
-
-/* window name -> selector.  "peri" is the non-DT 4K @0xf4329000 block. */
+/* the arbitrary-window register peek, read-only (debugfs ...
+ * dev/MEASURED-cortina-ni.c.md sec 6. */
 static const struct {
 	const char	*name;
 	u8		win;
@@ -623,32 +525,8 @@ static void __iomem *cortina_ni_peek_base(struct cortina_ni *ni, u8 win,
 	return ni->win[win];
 }
 
-/*
- * ★★ THE BOUND THAT WAS MISSING: A MAPPED WINDOW IS NOT A READABLE WINDOW.
- *
- * The peek already refused an offset past the mapped SIZE, and that is the
- * bound people think of - but it is not the one that takes the board down.
- * Inside these windows are UNMAPPED HOLES, and touching one is not an error
- * return: it is a synchronous external abort or an async SError, i.e. the box
- * is gone and the operator has learned nothing.  Three are recorded in this
- * tree, each paid for with a crash:
- *   - the L3 special-packet block (SPKTP / SPB) - a write hangs the CPU;
- *   - the L3FE HS_LIGHT tail, RE'd from the wrong chip's tree - a write
- *     async-SErrored on the first flow install (the t=58.5 s panic);
- *   - the per-port MAC block tail - a plain readl faults, which is why the
- *     register dump in cortina-ni-rx.c stops at +0x6c and says "never widen".
- * Only ONE of the three was guarded, only against writes, only for two of the
- * four offsets, and only on the /proc path.
- *
- * So the refusals are DECLARED DATA, applied to every caller, and each one
- * says which access it refuses and WHY - a bare -EPERM from a debug tool is
- * indistinguishable from the tool being broken.
- *
- * @read_faults separates the two classes honestly: for the special-packet and
- * HS_LIGHT holes what is MEASURED is that a WRITE kills the board, so reads
- * stay allowed rather than being refused on a guess; for the per-port tail the
- * measured fault is the READ itself.
- */
+/* ★★ THE BOUND THAT WAS MISSING: A MAPPED WINDOW IS NOT A ...
+ * dev/MEASURED-cortina-ni.c.md sec 7. */
 static const struct cortina_ni_peek_hole cortina_ni_peek_holes[] = {
 	{ CA_NI_WIN_NI, 0x333c, 0x3340, false,
 	  "L3 special-packet detect (SPKTP): unmapped on this silicon, a write hangs the CPU" },
@@ -656,15 +534,8 @@ static const struct cortina_ni_peek_hole cortina_ni_peek_holes[] = {
 	  "L3 special-packet buffer (SPB): unmapped on this silicon, a write hangs the CPU" },
 	{ CA_NI_WIN_NI, 0x3dc4, 0x3dcc, false,
 	  "L3FE HS_LIGHT tail: absent on this die (the window ends at ~0x3c8c), a write async-SErrors" },
-	/*
-	 * The per-port MAC block tail, +0x74..+0x8c of each port's 0x90 stride.
-	 * MEASURED on port 0 (0xa634..0xa64c); the other ports are refused by
-	 * the stride, which is a deliberate fail-closed extension - the blocks
-	 * are identical by construction, and refusing seven words of a debug
-	 * peek costs nothing next to aborting the CPU.  Nothing in this driver
-	 * reads that range on any port.  Narrow it if it ever hides a real
-	 * register, and say which port proved it.
-	 */
+	/* The per-port MAC block tail, +0x74..+0x8c of each port's ...
+	 * dev/MEASURED-cortina-ni.c.md sec 8. */
 	{ CA_NI_WIN_NI, CA_NI_PORT_STATIC_CFG(0) + 0x74,
 	  CA_NI_PORT_STATIC_CFG(0) + 0x8c, true,
 	  "per-port MAC block tail: unmapped, readl faults (synchronous external abort)" },
@@ -762,11 +633,8 @@ void cortina_ni_peek_render(struct seq_file *m, struct cortina_ni *ni)
 	}
 }
 
-/*
- * Parse and apply one peek/poke command.  @buf is modified in place and must
- * be NUL-terminated.  Shared by the /proc node and by debugfs, so the bounds
- * cannot be present on one path and missing on the other.
- */
+/* Parse and apply one peek/poke command. @buf is modified in ...
+ * dev/MEASURED-cortina-ni.c.md sec 25. */
 int cortina_ni_peek_command(struct cortina_ni *ni, char *buf)
 {
 	u8 win = CA_NI_WIN_NI;
@@ -780,11 +648,8 @@ int cortina_ni_peek_command(struct cortina_ni *ni, char *buf)
 	if (!tok || !*tok)
 		return -EINVAL;
 
-	/* 'poke' verb: WRITE a register for fast live RE iteration (a boot is
-	 * ~200s; a poke is instant).  usage:
-	 *   echo 'poke [win] <hex_off> <hex_val>'
-	 * The read-back is armed to the poked reg, so a follow-up cat shows it.
-	 * (project rule: dump/spy/poke stays a first-class, always-on feature.) */
+	/* 'poke' verb: WRITE a register for fast live RE iteration (a ...
+	 * dev/MEASURED-cortina-ni.c.md sec 26. */
 	if (!strcmp(tok, "poke")) {
 		void __iomem *base;
 		size_t size;
@@ -849,14 +714,8 @@ int cortina_ni_peek_command(struct cortina_ni *ni, char *buf)
 	return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* the internal-GPHY uC SRAM reader (ours-vs-stock firmware diff),      */
-/* read-only.  Same access the operator used on stock: OCP 0xa436=addr, */
-/* read OCP 0xa438=data.  The uC is best-effort held around the dump    */
-/* (stock reads fine while held).  debugfs .../cortina-ni/gsram; it was */
-/* /proc/cortina_ni_gsram and it has no test consumer, by design - it   */
-/* is a bring-up tool for a human, not a measurement source.            */
-/* ------------------------------------------------------------------ */
+/* the internal-GPHY uC SRAM reader (ours-vs-stock firmware ...
+ * dev/MEASURED-cortina-ni.c.md sec 9. */
 static int cortina_ni_gsram_show(struct seq_file *m, void *v)
 {
 	struct cortina_ni *ni = m->private;
@@ -948,28 +807,8 @@ static const struct file_operations cortina_ni_dbgfs_gsram_fops = {
 	.release	= single_release,
 };
 
-/* ------------------------------------------------------------------ */
-/* debugfs: the peek's supported home, and the ethtool -d decode map    */
-/* ------------------------------------------------------------------ */
-
-/*
- * WHY debugfs and not /proc.
- *
- * The counters moved to `ethtool -S` because a test must be able to ask the
- * SAME question of the vendor firmware and of ours, and a /proc node named
- * after this driver can only ever BLOCK on stock.  The peek is the opposite
- * case and it is worth being explicit about: it is an arbitrary-MMIO RE tool
- * with no vendor counterpart by construction, so it is NOT a comparison
- * instrument and no case may derive a stock-vs-ours verdict from it.  What it
- * needs is a home that is unambiguously a debug surface, mountable or not at
- * the integrator's choice, and that is debugfs.
- *
- * ★ RETIRED 2026-08-08.  There are no driver-named /proc nodes left: the peek,
- * the GPHY-SRAM reader and the rx/tx/l3fe narratives are all published here,
- * and every countable VALUE moved to `ethtool -S` / `ethtool -d`, which the
- * VENDOR firmware's kernel serves too - that is what makes a stock-vs-ours
- * comparison possible at all, and it never was through a node of ours.
- */
+/* debugfs: the peek's supported home, and the ethtool -d ...
+ * dev/MEASURED-cortina-ni.c.md sec 10. */
 static int cortina_ni_dbgfs_peek_show(struct seq_file *m, void *v)
 {
 	cortina_ni_peek_render(m, m->private);
@@ -1008,13 +847,8 @@ static const struct file_operations cortina_ni_dbgfs_peek_fops = {
 	.release	= single_release,
 };
 
-/*
- * The decode key for `ethtool -d`.  That blob is a flat u32 array and no
- * userspace tool knows how to name its words, so the map is published beside
- * it: one line per word, index -> name -> NI-window offset, generated from the
- * same table the dump is taken from.  Without this the register snapshot is
- * only diffable against itself; with it, a word that differs can be named.
- */
+/* The decode key for `ethtool -d`. That blob is a flat u32 ...
+ * dev/MEASURED-cortina-ni.c.md sec 11. */
 static int cortina_ni_dbgfs_regmap_show(struct seq_file *m, void *v)
 {
 	unsigned int i, n = cortina_ni_regdump_len();
@@ -1037,11 +871,8 @@ static void cortina_ni_debugfs_release(void *data)
 	debugfs_remove_recursive(data);
 }
 
-/*
- * The narrative dumps live in rx.c / tx.c / flowoffload.c beside the state they
- * print; only their PUBLICATION is here, so there is one place that answers
- * "what hand-debugging surface does this driver expose".
- */
+/* The narrative dumps live in rx.c / tx.c / flowoffload.c ...
+ * dev/MEASURED-cortina-ni.c.md sec 27. */
 static int cortina_ni_dbgfs_rx_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, cortina_ni_rx_debug_show, inode->i_private);
@@ -1158,22 +989,8 @@ static u32 cortina_ni_block_reset_pulse(void __iomem *rst, u32 bit)
 	return held;
 }
 
-/*
- * Bring up the L3QM block.  Stock ca_ni_global_reset pulses the NE block
- * resets (assert -> 1ms -> deassert, per block) so each re-runs its internal
- * init and asserts its *_init_done.  U-Boot brings up only the TX/NI path for
- * TFTP and leaves the QM un-inited, so QM_PHY_PORT_STS.qm_init_done reads 0,
- * the empty-buffer pools never activate and the CPU-push FIFO never drains.
- * A TQM-only pulse was NOT enough; nor was L2FE+L2TM+L3FE+TQM (the reset fired
- * - held bits read back correctly - but qm_init_done stayed 0).  QM_PHY_PORT_STS
- * is dominated by NI<->QM handshake bits (nirx_qm_rdy, qm_nitx_rdy, nitx_qm_vld,
- * te_qm_es_ni_ok), so the QM only completes init once the NI is reset alongside
- * it.  Match stock ca_ni_global_reset EXACTLY: pulse NI+L2FE+L2TM+L3FE+TQM in
- * that order (SDRAM is skipped - it is DRAM).  Resetting NI drops U-Boot's
- * FE-bypass direct-TX, but cortina_ni_tx_hw_init() (run right after, in
- * tx_probe) fully rebuilds the NI/TX path - same reset->full-init order stock's
- * ca_init uses.  Direct MMIO via the GLB window (same as the dphy_rst release).
- */
+/* Bring up the L3QM block. Stock ca_ni_global_reset pulses ...
+ * dev/MEASURED-cortina-ni.c.md sec 12. */
 static void __maybe_unused cortina_ni_qm_reset(struct cortina_ni *ni)
 {
 	void __iomem *rst;
@@ -1183,15 +1000,8 @@ static void __maybe_unused cortina_ni_qm_reset(struct cortina_ni *ni)
 		return;
 	rst = ni->win[CA_NI_WIN_GLB] + CA_NI_GLB_BIST_CONTROL4;
 
-	/* ★ Reset ONLY NI + TQM, NOT L2FE/L2TM/L3FE.  Resetting the forwarding
-	 * blocks and NOT re-initialising them (aal_l2fe_init/aal_arb_init/
-	 * aal_l2_tm_init - a huge, table-heavy init we do not port) leaves them
-	 * reset-but-dead: their indirect-access engines hang (REDIR_LDPID/FIB
-	 * writes never complete, GO stuck) and they make no forwarding decision,
-	 * so LAN ingress never reaches the CPU.  The boot ROM / U-Boot already
-	 * brings L2FE/L2TM/L3FE up (U-Boot RX works), so leave them running and
-	 * only reset the two blocks we DO fully reconfigure: NI (rebuilt by
-	 * cortina_ni_tx_hw_init) and the TQM/QM (our EQ/EPP/ring config). */
+	/* ★ Reset ONLY NI + TQM, NOT L2FE/L2TM/L3FE. Resetting the ...
+	 * dev/MEASURED-cortina-ni.c.md sec 13. */
 	h_ni  = cortina_ni_block_reset_pulse(rst, CA_NI_GLB_RST_NI);
 	h_tqm = cortina_ni_block_reset_pulse(rst, CA_NI_GLB_RST_TQM);
 	usleep_range(100000, 110000);		/* stock trailing mdelay(100) */
@@ -1230,41 +1040,20 @@ static int cortina_ni_probe(struct platform_device *pdev)
 	spin_lock_init(&ni->nihv_lock);
 	platform_set_drvdata(pdev, ni);
 
-	/*
-	 * Front-panel per-RJ45 link lamps: publish the per-port LED triggers
-	 * before any of the bring-up below.  Early on purpose - an LED that is
-	 * already registered binds immediately, and no early `return ret` on the
-	 * way down can skip it.  Software only: it touches no hardware, returns
-	 * void, and cannot fail the probe (cortina-ni-leds.c).
-	 */
+	/* Front-panel per-RJ45 link lamps: publish the per-port LED ...
+	 * dev/MEASURED-cortina-ni.c.md sec 14. */
 	cortina_ni_leds_probe(ni);
 
 	ret = cortina_ni_map_windows(ni);
 	if (ret)
 		return ret;
 
-	/*
-	 * ★ Release the internal-GPHY <-> NI datapath sub-blocks from reset
-	 * FIRST, before any GPHY/MAC bring-up (release-then-init order).
-	 * U-Boot leaves GLOBAL_DPHY_RESET (GLB+0xa0) with datapath sub-blocks
-	 * held in reset (0x50302340); stock releases them to 0x10000000.  With
-	 * them held, NO frame crosses the internal GMII on any port even though
-	 * the GPHY line side links - the bidirectional-dead gate.  A late
-	 * release (at link-up) sticks but does not re-init the sub-block, so we
-	 * must do it here at probe entry, ahead of MDIO/PHY/MAC init.
-	 */
+	/* ★ Release the internal-GPHY <-> NI datapath sub-blocks from ...
+	 * dev/MEASURED-cortina-ni.c.md sec 15. */
 	if (ni->win[CA_NI_WIN_GLB]) {
 		void __iomem *glb = ni->win[CA_NI_WIN_GLB];
-		/* ★★ build64: the EXACT stock ca_ni_global_reset sequence (vendor source): the NE
-		 * core resets done SEQUENTIAL, ONE-AT-A-TIME, IN ORDER - ni, l2fe, l2tm, l3fe, tqm -
-		 * each a 1ms assert->deassert; tqm(bit5) LAST, after its deps ni/l2fe/l2tm/l3fe are
-		 * back up.  SKIP sdram(bit4, resetting it kills DRAM) and ptp.  cortina,rst-mgr @
-		 * glb+0xa0 is a plain bit set/clear (no clock/delay in the reg), so a direct poke is
-		 * faithful; the ORDER + one-at-a-time + delays are what matter (build60's combined
-		 * ni+tqm booted but the engine stayed dead - wrong SHAPE).  This runs right after the
-		 * glb window is mapped, before any NI-core access.  First release the U-Boot-held DPHY
-		 * datapath sub-blocks (0x10000000 resting = the original bidirectional-dead fix), then
-		 * run the sequence (read fresh each iter to preserve the other bits). */
+		/* ★★ build64: the EXACT stock ca_ni_global_reset sequence ...
+		 * dev/MEASURED-cortina-ni.c.md sec 16. */
 		static const int order[] = { 0, 1, 2, 3, 5 };	/* ni,l2fe,l2tm,l3fe,tqm (SKIP 4=sdram) */
 		u32 was = readl(glb + CA_NI_GLB_BLOCK_RESET);
 		int j;
@@ -1282,22 +1071,8 @@ static int cortina_ni_probe(struct platform_device *pdev)
 			 was, readl(glb + CA_NI_GLB_BLOCK_RESET));
 	}
 
-	/* ★ NE block reset DISABLED (storm bisect test): our L2FE showed a
-	 * ~100k/s internal packet storm (sop/eop diverging = looping frames) with
-	 * wptr=0.  qm_init_done proved a phantom, so the block reset never had a
-	 * real justification - and re-resetting NI/TQM after the boot ROM already
-	 * initialised the whole NE datapath can leave the L2FE->TM->QM handoff in
-	 * a self-feeding loop.  Run on the pure boot-ROM datapath + only our
-	 * QM/EQ/CPU-EPP + forwarding config on top, and see if the storm clears.
-	 * (Re-enable cortina_ni_qm_reset(ni) here to A/B the reset.) */
-
-	/*
-	 * NOTE: the internal-GPHY firmware patch + uC resume is NOT done here -
-	 * at probe the uC is still running (HOLD == 0) and its SRAM is not
-	 * writable.  It is deferred to link-up (cortina_ni_rx_link_up ->
-	 * cortina_ni_gphy_patch_and_resume), where the uC has entered the held
-	 * state after MDIO/GPHY init.
-	 */
+	/* ★ NE block reset DISABLED (storm bisect test): our L2FE ...
+	 * dev/MEASURED-cortina-ni.c.md sec 17. */
 
 	cortina_ni_log_reserved_mem(ni);
 
@@ -1322,34 +1097,12 @@ static int cortina_ni_probe(struct platform_device *pdev)
 	if (ret)
 		dev_warn(dev, "L3FE flow offload disabled (%d)\n", ret);
 
-	/* ★ EVERY hand-debugging dump this driver has, in ONE generic place.
-	 * There are no driver-named /proc nodes any more: what a TEST reads is
-	 * `ethtool -S` / `-d` (which stock's kernel serves too, so a comparison
-	 * exists at all), and what a HUMAN reads is here.  Runs last in probe so
-	 * rx/tx/l3fe are already up and every dump has something to show. */
+	/* ★ EVERY hand-debugging dump this driver has, in ONE generic ...
+	 * dev/MEASURED-cortina-ni.c.md sec 28. */
 	cortina_ni_debugfs_init(ni);
 
-	/*
-	 * ★★ THE ORDER OF TEARDOWN, AND IT IS REGISTERED LAST ON PURPOSE.
-	 *
-	 * devres releases in REVERSE registration order, so an action added here
-	 * runs FIRST -- before rx (devm_kzalloc in cortina_ni_rx_probe) and the
-	 * l3e context (in cortina_ni_flowoffload_probe) are freed. That is the
-	 * whole point: this driver has no .remove, and with the netdev managed
-	 * by devres its unregister ran LAST, after both were gone. Unregistering
-	 * an UP interface calls ndo_stop, and cortina_ni_rx_stop() reads ni->rx
-	 * -- a pointer nobody clears, to memory that no longer exists.
-	 *
-	 * CORTINA_NI is tristate and the unbind attribute is not suppressed, so
-	 * this path is reachable without unloading anything.
-	 */
-	/*
-	 * ★ PUBLICATION IS THE LAST THING, AND THE CLEANUP IS REGISTERED WITH IT.
-	 *   Registering the netdev inside tx_probe made it reachable before rx
-	 *   existed, and left it REGISTERED over devm-freed memory whenever a
-	 *   later probe failed -- a partial-probe unwind, which needs no unbind
-	 *   and no module unload to reach.
-	 */
+	/* ★★ THE ORDER OF TEARDOWN, AND IT IS REGISTERED LAST ON ...
+	 * dev/MEASURED-cortina-ni.c.md sec 18. */
 	ret = devm_add_action_or_reset(dev, cortina_ni_teardown, ni);
 	if (ret)
 		return ret;
@@ -1376,28 +1129,8 @@ static struct platform_driver cortina_ni_driver = {
 	},
 };
 
-/* ------------------------------------------------------------------ */
-/* internal quad-GPHY phy_driver: inherit U-Boot's link, NEVER re-aneg  */
-/* ------------------------------------------------------------------ */
-
-/*
- * ★ THE determinism gate.  U-Boot brings the internal GPHY up to a stable
- * 1G/full link (it TFTPs our kernel over it) and hands it to Linux working
- * bidirectionally.  Generic phylib, at phy_start, RESTARTS auto-negotiation
- * (genphy_config_aneg -> BMCR restart), which bounces the GPHY LINE link
- * Up->Down->Down->Up over ~5s.  The internal GPHY<->NI-MAC datapath dies
- * across that bounce and never re-establishes - RX+TX both dead, and
- * non-deterministic ("works the boots the bounce timing spares it").  Stock
- * never restarts aneg: it inherits U-Boot's link and only MONITORS it.
- *
- * A no-op config_aneg makes phylib do exactly that: phy_start still runs the
- * state machine and calls read_status (so adjust_link fires once and we adopt
- * the live link + set up the RX datapath), but it writes NO BMCR - so the
- * line link is never bounced and the U-Boot datapath survives into Linux.
- * No .soft_reset / .config_init either (phy_init_hw then never resets the
- * PHY, preserving its U-Boot patch/calibration).  Features fall through to
- * genphy_read_abilities automatically.
- */
+/* internal quad-GPHY phy_driver: inherit U-Boot's link, NEVER ...
+ * dev/MEASURED-cortina-ni.c.md sec 19. */
 static int cortina_ni_gphy_config_aneg(struct phy_device *phydev)
 {
 	return 0;	/* never touch aneg - keep U-Boot's stable link */

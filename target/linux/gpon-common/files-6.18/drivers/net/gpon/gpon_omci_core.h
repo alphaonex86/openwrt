@@ -73,11 +73,8 @@
 /* Attribute-mask bit: attr #n is bit (16-n), so bit15 = attr 1. */
 #define OMCI_ATTR_BIT(n)	(1u << (16 - (n)))
 
-/* The two ME class IDs the MESSAGE layer itself reasons about: ME 2 because an
- * OLT Set of its attribute 1 is an explicit MIB-Data-Sync resync write, ME 329
- * because the VEIP operational-state AVC is a message this layer emits.  The
- * ME-model layer defines both identically; a repeated object-like #define with
- * the same replacement list is a benign redefinition. */
+/* The two ME class IDs the MESSAGE layer itself reasons ...
+ * dev/MEASURED-gpon_omci_core.h.md sec 4. */
 #define OMCI_ME_ONU_DATA	2
 #define OMCI_ME_VEIP		329
 
@@ -107,12 +104,8 @@ struct omci_accepted {
 int omci_onu_input_ex(struct omci_onu *o, const u8 *req, unsigned int len,
 		      u8 *resp, struct omci_accepted *accepted);
 
-/* Process one DS baseline PDU -> fill @resp (48 bytes, trailer + MIC done).
- * Returns OMCI_LEN, or 0 when no response must be sent.
- * ⚠ THE THREE ZERO-RETURNS ARE NOT INTERCHANGEABLE: on AR clear the MIB change
- *   has ALREADY BEEN APPLIED and only the acknowledgement is suppressed, so
- *   collapsing "no response" into "did nothing" desynchronises MIB-Data-Sync.
- *   o->no_ack / o->rx_extended keep each case countable from /proc. */
+/* Process one DS baseline PDU -> fill @resp (48 bytes, ...
+ * dev/MEASURED-gpon_omci_core.h.md sec 1. */
 int omci_onu_input(struct omci_onu *o, const u8 *req, unsigned int len, u8 *resp);
 
 /* The AAL5-BE MIC over bytes 0..43 as a VALUE, and the stamper into bytes
@@ -133,29 +126,13 @@ void omci_finalize(u8 *msg);
  * report.  Fills @out (48 bytes, trailer + MIC done); returns OMCI_LEN. */
 int omci_onu_emit_veip_up_avc(struct omci_onu *o, u8 *out);
 
-/* ★★★ THE ALARM SURFACE (G.988 clause 11.2.2), in the core, once.  THE DEFECT
- * IT CLOSES: our ONU read LOS/LOF out of the GPON MAC, printed it to /proc and
- * never told the OLT — nothing built an ONU-autonomous alarm and Get-all-alarms
- * answered a hardcoded zero.  An ISP learns a subscriber's fibre is degrading
- * because the ONU says so.
- * ★ THE SPLIT: the core owns the MESSAGE, the EDGE and the ACCOUNTING; the
- *   family owns only "read THIS silicon's alarm register", handed in as
- *   (class, instance, bitmap).
- * ⚠ THE BIT MEANINGS ARE DELIBERATELY NOT NAMED HERE.  Each ME class assigns
- *   its own alarm numbers in G.988, and inventing a mapping we have not read
- *   from the standard would be a fabricated register fact. */
-
-/* Tell the core which conditions THIS silicon currently asserts on one ME.
- * Pure state: it emits nothing, so a caller may poll it from any context. */
+/* ★★★ THE ALARM SURFACE (G.988 clause 11.2.2), in the core, ...
+ * dev/MEASURED-gpon_omci_core.h.md sec 2. */
 void omci_onu_set_alarms(struct omci_onu *o, u16 class_id, u16 inst,
 			 u16 bitmap);
 
-/* Build the ONU-autonomous alarm (MT 0x10) for a CHANGE, if there is one.
- * -> OMCI_LEN when a PDU was written into @out, 0 when nothing changed.
- * ★ AN EDGE, NOT A LEVEL, which is the whole reason it lives here: an alarm
- *   re-sent every poll is a flood the OLT must filter, and one never re-sent
- *   after it clears is a permanent false fault.  Calling this on a timer is
- *   therefore correct and cheap. */
+/* Build the ONU-autonomous alarm (MT 0x10) for a CHANGE, if ...
+ * dev/MEASURED-gpon_omci_core.h.md sec 3. */
 int omci_onu_emit_alarm(struct omci_onu *o, u8 *out);
 
 /* How many alarm-bearing ME instances are asserting right now — what

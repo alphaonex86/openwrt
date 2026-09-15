@@ -1,38 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Cortina-Access CA77xx peripheral GPIO controller.
- *
- * Found in the Realtek RTL9607F "Elnath" GPON ONU SoC (Cortina CA8277C class),
- * where it drives the front-panel LEDs and the reset / WPS buttons.
- *
- * The block is a bank of five 32-pin groups living in the peripheral register
- * window, plus one pin-mux word per group in the global (GLB) window.  Per
- * group, three consecutive 32-bit words:
- *
- *	+0x00	CFG	direction, 1 = input, 0 = output
- *	+0x04	OUT	output level (only meaningful for output pins)
- *	+0x08	IN	live pin level
- *
- * and in the GLB window one word per group where setting bit N routes pin N to
- * the GPIO block instead of its peripheral function.  Group G therefore sits at
- * PERI + 0x300 + 0x24 * G and GLB + 0x130 + 4 * G; this driver takes one DT
- * node per group so only the groups a board actually uses cost anything.
- *
- * Register facts (offsets, the 0x24 stride, the CFG polarity and the mux
- * semantics) are cross-confirmed by three independent sources: the stock
- * firmware's own /etc/reg.txt naming (GLOBAL_GPIO_MUX_1 0xf4320134,
- * PER_GPIO1_CFG/OUT 0xf4329324/0xf4329328), the address/size pair in the stock
- * device tree's gpio-controller node (0xf4329300 length 0xb4 = 5 * 0x24, and
- * 0xf4320130 length 0x14 = 5 * 4), and live register reads on the board.
- *
- * ★ Every access here is a read-modify-write of the single pin's bit, never a
- * whole-register store.  That is deliberate and load-bearing: the GPON driver
- * independently drives other pins in these same groups (the BOSA / laser
- * control nets) from its own mapping of the peripheral window, so a shadowed
- * or whole-register write from this side would silently undo it.  For the same
- * reason the mapping is a plain devm_ioremap() rather than an exclusive
- * request_mem_region(), and the mux word is only ever OR-ed into.
- */
+/* Cortina-Access CA77xx peripheral GPIO controller. Found in ...
+ * dev/MEASURED-gpio-cortina-ca77xx.c.md sec 1. */
 
 #include <linux/gpio/driver.h>
 #include <linux/io.h>
@@ -74,13 +42,8 @@ static void ca77xx_clr_bit(struct ca77xx_gpio *cg, unsigned int reg, u32 mask)
 	spin_unlock_irqrestore(&cg->lock, flags);
 }
 
-/*
- * A pin only reaches the GPIO block once its mux bit is set; out of reset most
- * pins carry a peripheral function instead.  The consumer that needs the pad
- * owns the mux write, so do it when the line is requested.  Never cleared on
- * free: dropping a pad back to its peripheral function mid-life would be a
- * surprise, and the stock firmware leaves these routed too.
- */
+/* A pin only reaches the GPIO block once its mux bit is set; ...
+ * dev/MEASURED-gpio-cortina-ca77xx.c.md sec 2. */
 static int ca77xx_gpio_request(struct gpio_chip *gc, unsigned int off)
 {
 	struct ca77xx_gpio *cg = gpiochip_get_data(gc);
@@ -160,11 +123,8 @@ static int ca77xx_gpio_probe(struct platform_device *pdev)
 
 	spin_lock_init(&cg->lock);
 
-	/*
-	 * devm_ioremap(), not devm_ioremap_resource(): the GPON driver maps the
-	 * same peripheral window for the pins it owns, so neither side may claim
-	 * the region exclusively.
-	 */
+	/* devm_ioremap(), not devm_ioremap_resource(): the GPON ...
+	 * dev/MEASURED-gpio-cortina-ca77xx.c.md sec 3. */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -EINVAL;

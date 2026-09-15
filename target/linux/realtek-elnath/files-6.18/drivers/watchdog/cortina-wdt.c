@@ -1,31 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * Cortina-Access peripheral watchdog (PER_WDT).
- *
- * Found on the Cortina-Access "Venus" family and on the Realtek parts derived
- * from it -- this driver is used on the RTL9607F "Elnath" GPON ONU, where the
- * block sits at 0xf432902c and the SoC reset glue it drives lives outside the
- * block, in GLOBAL_GLOBAL_CONFIG at 0xf43200c8.
- *
- * The hardware is a down-counter with a programmable prescaler:
- *
- *	PER_WDT_PS   scales the input clock to a 1 ms tick
- *	PER_WDT_DIV  divides that tick further (1000 -> one count per second)
- *	PER_WDT_LD   is the reload value, i.e. the timeout in counter units
- *	PER_WDT_LOADE reloads the counter from LD -- this is the "kick"
- *	PER_WDT_CTRL enables the counter and, with RSTEN, the SoC reset
- *
- * Reaching zero raises PER_WDT_INT_0 and, when RSTEN is set, asserts the SoC
- * reset DELAY_RESET/16 kHz clock cycles later.  The reset itself is gated by
- * bits in GLOBAL_GLOBAL_CONFIG which are NOT part of this block: without them
- * the counter expires and nothing happens.  That word also carries unrelated
- * power-down bits for the GPON/L3FE/crypto blocks, so it is only ever
- * read-modify-written.
- *
- * Register offsets, field semantics, the prescaler arithmetic and the reset
- * enables are hardware facts, cross-checked between the SoC's own register
- * name table and a live read of a running device.
- */
+/* Cortina-Access peripheral watchdog (PER_WDT). Found on the ...
+ * dev/MEASURED-cortina-wdt.c.md sec 1. */
 
 #include <linux/bits.h>
 #include <linux/clk.h>
@@ -63,41 +38,8 @@
 #define PER_WDT_STAT_0			0x20
 #define PER_WDT_BLOCK_SIZE		0x30	/* CTRL..STAT_1, 12 registers */
 
-/*
- * --- GLOBAL_GLOBAL_CONFIG, the SoC reset glue (a single 32-bit word) -------
- *
- * The five enables below are what turn an expired counter into an actual chip
- * reset.  Everything else in the word belongs to other subsystems -- including
- * power-down bits for the GPON, EPON, L3FE, crypto and core blocks -- which is
- * why this word is only ever READ-MODIFY-WRITTEN.  A blind store here would
- * enable the reset and power down half the device on its way past.
- *
- * ★ bit 8 and bit 9 are TWO DIFFERENT BITS -- settled 2026-08-10 against this
- * silicon's own register table, cross-checked on a sibling part.  An earlier
- * version of this comment said "EXT_RESET (bit 9) ... is deliberately left
- * alone" and read as if it contradicted the mask below, which includes BIT(8):
- *
- *	bit 8  wd_reset_ext_reset -- the WATCHDOG's external-reset ENABLE, one
- *	       of the wd_reset_* group, and correctly part of the mask;
- *	bit 9  ext_reset          -- the standalone external reset, which this
- *	       driver never touches, then or now.
- *
- * So the mask was right and the WORDING was wrong.  Both statements were true
- * of different bits, which is the most durable kind of wrong comment: nothing
- * ever fails to force the fix.
- *
- * MEASURED the same day, at the U-Boot prompt on a COLD boot, before this
- * driver has ever run: the word already reads 0x076455f0, which is the
- * documented reset default 0x07645420 plus exactly bits 4, 6, 7 and 8.  An
- * earlier boot stage therefore already enables the watchdog reset path, and
- * this driver's read-modify-write changes nothing at all on this board -- it
- * exists for a board whose loader does not set them.
- *
- * Note bit 5: it is already set at power-on here (it is part of that default),
- * and the vendor's own driver ORs only 4|6|7|8 on this chip.  Keeping it in the
- * mask is a no-op on this board either way; it is recorded rather than removed
- * because neither spelling can be told from the other by measurement here.
- */
+/* GLOBAL_GLOBAL_CONFIG, the SoC reset glue (a single 32-bit ...
+ * dev/MEASURED-cortina-wdt.c.md sec 2. */
 #define GLOBAL_WD_RESET_SUBSYS_ENABLE	BIT(4)
 #define GLOBAL_WD_RESET_PCIE		BIT(5)
 #define GLOBAL_WD_RESET_ALL_BLOCKS	BIT(6)
@@ -109,11 +51,7 @@
 					 GLOBAL_WD_RESET_REMAP | \
 					 GLOBAL_WD_RESET_EXT_RESET)
 
-/*
- * The prescaler is programmed for a 1 ms tick, and PER_WDT_DIV then turns that
- * into one count per second.  Both are hardware constants of the block, not
- * tunables.
- */
+/* The prescaler is programmed for a 1 ms tick, and ... -- dev/MEASURED-cortina-wdt.c.md sec 13. */
 #define PER_WDT_TICK_HZ			1000		/* the prescaled tick */
 #define PER_WDT_DIV_PER_SECOND		1000		/* ticks per second   */
 
@@ -123,11 +61,8 @@
 #define CORTINA_WDT_DEFAULT_TIMEOUT	60
 #define CORTINA_WDT_MIN_TIMEOUT		1
 
-/*
- * The counter is 32 bits wide and, in seconds mode, counts one per second, so
- * the register is not the limit -- the watchdog core is, because it does its
- * arithmetic in milliseconds.
- */
+/* The counter is 32 bits wide and, in seconds mode, counts ...
+ * dev/MEASURED-cortina-wdt.c.md sec 14. */
 #define CORTINA_WDT_MAX_TIMEOUT		(UINT_MAX / 1000)
 
 static unsigned int timeout;
@@ -142,18 +77,8 @@ MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default: "
 		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
-/**
- * struct cortina_wdt - one PER_WDT instance
- * @wdd:	the watchdog the core sees
- * @base:	PER_WDT register block
- * @rstcfg:	GLOBAL_GLOBAL_CONFIG, the reset glue outside the block
- * @clk:	APB clock feeding the prescaler
- * @prescaler:	PER_WDT_PS value giving a 1 ms tick from @clk
- * @delay:	PER_WDT_CTRL delay field, in 16 kHz cycles
- * @reset:	true when expiry must reset the SoC (reset-on-timeout)
- * @irq_armed:	true when we own the expiry interrupt
- * @lock:	serialises the read-modify-write of PER_WDT_CTRL
- */
+/* struct cortina_wdt - one PER_WDT instance @wdd: the ...
+ * dev/MEASURED-cortina-wdt.c.md sec 3. */
 struct cortina_wdt {
 	struct watchdog_device	wdd;
 	void __iomem		*base;
@@ -171,18 +96,8 @@ static inline struct cortina_wdt *to_cortina_wdt(struct watchdog_device *wdd)
 	return container_of(wdd, struct cortina_wdt, wdd);
 }
 
-/*
- * Load the counter and (re)start it.
- *
- * @count is in whole seconds unless @millisecond is set, in which case the
- * DIV stage is bypassed and the counter runs on the raw 1 ms tick -- that mode
- * exists for the restart handler, which wants the shortest reachable timeout.
- *
- * The closing PER_WDT_LOADE strobe is what makes a *running* watchdog adopt a
- * new PER_WDT_LD immediately; without it a shortened timeout would only take
- * effect at the next kick, which is precisely the window an unattended device
- * must not have.
- */
+/* Load the counter and (re)start it. @count is in whole ...
+ * dev/MEASURED-cortina-wdt.c.md sec 4. */
 static void cortina_wdt_program(struct cortina_wdt *wdt, u32 count,
 				bool millisecond, bool with_delay)
 {
@@ -199,15 +114,8 @@ static void cortina_wdt_program(struct cortina_wdt *wdt, u32 count,
 	writel(wdt->prescaler, wdt->base + PER_WDT_PS);
 	writel(millisecond ? 0 : PER_WDT_DIV_PER_SECOND, wdt->base + PER_WDT_DIV);
 	writel(count, wdt->base + PER_WDT_LD);
-	/*
-	 * The expiry event is enabled even on a board that takes no interrupt.
-	 * Whether PER_WDT_IE_0 also gates the path from "counter reached zero"
-	 * to "RSTEN asserts the reset" is not documented anywhere we can check,
-	 * and a watchdog that quietly fails to bite is the one outcome this
-	 * driver may not have.  A firmware known to reset this SoC leaves the
-	 * bit set, so we do too; with no handler registered the line is simply
-	 * never unmasked at the interrupt controller.
-	 */
+	/* The expiry event is enabled even on a board that takes no ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 5. */
 	writel(PER_WDT_IE_0_WDTE, wdt->base + PER_WDT_IE_0);
 	writel(ctrl, wdt->base + PER_WDT_CTRL);
 	writel(PER_WDT_LOADE_WDT | PER_WDT_LOADE_PRE, wdt->base + PER_WDT_LOADE);
@@ -257,11 +165,8 @@ static int cortina_wdt_set_timeout(struct watchdog_device *wdd,
 {
 	wdd->timeout = new_timeout;
 
-	/*
-	 * Reprogram only when the counter is already running.  Programming a
-	 * stopped watchdog here would arm it behind the caller's back: the
-	 * core allows WDIOC_SETTIMEOUT before WDIOC_SETOPTIONS/start.
-	 */
+	/* Reprogram only when the counter is already running. ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 15. */
 	if (watchdog_hw_running(wdd))
 		return cortina_wdt_start(wdd);
 
@@ -275,15 +180,8 @@ static unsigned int cortina_wdt_get_timeleft(struct watchdog_device *wdd)
 	return readl(wdt->base + PER_WDT_CNT);
 }
 
-/*
- * Last-resort machine restart.
- *
- * Registered at the default (lowest) priority, so a firmware reset -- PSCI on
- * this SoC -- is always preferred.  This path only runs when everything above
- * it declined, which is exactly the situation an unattended device needs a way
- * out of.  It uses the millisecond tick and no reset delay to fire as fast as
- * the block can.
- */
+/* Last-resort machine restart. Registered at the default ...
+ * dev/MEASURED-cortina-wdt.c.md sec 6. */
 static int cortina_wdt_restart(struct watchdog_device *wdd,
 			       unsigned long action, void *data)
 {
@@ -299,12 +197,8 @@ static int cortina_wdt_restart(struct watchdog_device *wdd,
 	return 0;
 }
 
-/*
- * Only reached on a board that wires the expiry interrupt AND does not ask for
- * reset-on-timeout: with RSTEN set the SoC is already on its way down.  Ack the
- * event and mask it, so a board without a reset path reports the timeout once
- * instead of live-locking on a level-triggered line.
- */
+/* Only reached on a board that wires the expiry interrupt AND ...
+ * dev/MEASURED-cortina-wdt.c.md sec 7. */
 static irqreturn_t cortina_wdt_isr(int irq, void *dev_id)
 {
 	struct cortina_wdt *wdt = dev_id;
@@ -334,39 +228,8 @@ static const struct watchdog_ops cortina_wdt_ops = {
 	.restart	= cortina_wdt_restart,
 };
 
-/*
- * Turn an expired counter into a chip reset.
- *
- * These bits are outside the watchdog's own register window, which is the whole
- * reason this is a separate step: a fully and correctly programmed PER_WDT on a
- * SoC whose glue is untouched counts down and does nothing.
- *
- * ⚠ OPEN, MEASURED 2026-08-10 -- OUR RESET DOES NOT LEAVE A RESET *REASON*, and
- *   the full investigation is
- *   dev/MEASURED-x400axf-reset-reason-breadcrumb-2026-08-10.md.  In short:
- *   /proc/realtek/reboot_reason DOES discriminate on stock (its own watchdog
- *   fired -> 3, clean reboot -> 0) and reads 0 after OURS fires, twice.  It is
- *   NOT a reset-path difference -- the reset enables are identical live
- *   (GLOBAL_GLOBAL_CONFIG 0x076445f0 on stock, 0x076455f0 at the U-Boot prompt,
- *   bits 4..8 set in both, and the only write below is an OR) and so is the
- *   PER_WDT programming.  The value is a SOFTWARE BREADCRUMB in GLOBAL_SOFTWARE
- *   (0xf43201c4) bits [3:0] that the vendor kernel writes (1 orderly reboot,
- *   2 panic, 3 watchdog STARTED); ours writes none, which accounts for every
- *   reading.
- *
- * ⚠⚠ AND THE OBVIOUS "FIX" WOULD INSTALL A PHANTOM.  `3` means THE WATCHDOG WAS
- *   ARMED, not "it fired" -- stock arms it on every boot, so 3 is its steady
- *   state and survives a power cut.  Writing 3 from .start and calling it
- *   WDIOF_CARDRESET would publish a witness true whenever the previous boot
- *   merely ENABLED a watchdog: the phantom-witness family this port has already
- *   paid for twice.  A PARTIAL adoption is worse than none (the vendor's
- *   userspace counts an "abnormal reboot" whenever the value exceeds 1), so a
- *   correct adoption needs all three writers and two of them are SoC-level.
- *
- * ⇒ DECLARED difference, not a regression: stock cannot report bootstatus
- *   either.  And it could not be observed on the dev rig anyway -- our image is
- *   TFTP->RAM, so a watchdog reset lands the board on the NAND vendor image.
- */
+/* Turn an expired counter into a chip reset. These bits are ...
+ * dev/MEASURED-cortina-wdt.c.md sec 8. */
 static void cortina_wdt_enable_soc_reset(struct cortina_wdt *wdt)
 {
 	u32 val = readl(wdt->rstcfg);
@@ -391,11 +254,8 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 
 	spin_lock_init(&wdt->lock);
 
-	/*
-	 * devm_ioremap(), not devm_ioremap_resource(): both windows live inside
-	 * peripheral blocks that other drivers on this SoC also map, and
-	 * claiming them exclusively would make whichever probes second fail.
-	 */
+	/* devm_ioremap(), not devm_ioremap_resource(): both windows ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 16. */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return dev_err_probe(dev, -EINVAL,
@@ -430,11 +290,8 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL, "input clock reports 0 Hz\n");
 	wdt->prescaler = rate / PER_WDT_TICK_HZ - 1;
 
-	/*
-	 * Optional: how long the block waits between raising the expiry event
-	 * and asserting the reset.  Expressed in the device tree in 16 kHz
-	 * cycles, which is also how the vendor firmware programs it.
-	 */
+	/* Optional: how long the block waits between raising the ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 17. */
 	if (!of_property_read_u32(dev->of_node, "delay-reset", &wdt->delay)) {
 		u64 cycles = (u64)wdt->delay * (rate / PER_WDT_DELAY_HZ);
 
@@ -442,11 +299,8 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 				   PER_WDT_CTRL_DELAY >> PER_WDT_CTRL_DELAY_SHIFT);
 	}
 
-	/*
-	 * The interrupt is optional and only matters without reset-on-timeout.
-	 * A board whose interrupt controller is not described simply does not
-	 * get one; the reset is asserted by the hardware either way.
-	 */
+	/* The interrupt is optional and only matters without ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 18. */
 	irq = platform_get_irq_optional(pdev, 0);
 	if (irq > 0) {
 		ret = devm_request_irq(dev, irq, cortina_wdt_isr, 0,
@@ -464,14 +318,8 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.max_timeout = CORTINA_WDT_MAX_TIMEOUT;
 	wdt->wdd.timeout = CORTINA_WDT_DEFAULT_TIMEOUT;
 
-	/*
-	 * ★ Was it already counting when Linux took over?
-	 *
-	 * A bootloader that arms the watchdog and hands over to a kernel that
-	 * ignores it produces a board which reboots mid-boot, forever, with
-	 * nothing to see.  So the state is READ rather than assumed and
-	 * reported on every boot.
-	 */
+	/* ★ Was it already counting when Linux took over? A ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 9. */
 	ctrl = readl(wdt->base + PER_WDT_CTRL);
 	adopted = ctrl & PER_WDT_CTRL_WDTEN;
 	if (adopted) {
@@ -481,97 +329,23 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 							 : load;
 	}
 
-	/*
-	 * watchdog_init_timeout() reports failure ONLY when a value it was
-	 * handed is out of range; with no module parameter and no timeout-sec
-	 * property it succeeds and leaves our default standing.  It therefore
-	 * says nothing about an inherited window, and must not be used to
-	 * decide anything about one -- an earlier version of this driver keyed
-	 * the adopt path on this return value, so that path could only ever
-	 * have run on a board that was already misconfigured.
-	 */
+	/* watchdog_init_timeout() reports failure ONLY when a value ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 10. */
 	ret = watchdog_init_timeout(&wdt->wdd, timeout, dev);
 	if (ret)
 		dev_warn(dev, "timeout out of range, keeping %u s\n",
 			 wdt->wdd.timeout);
 
-	/*
-	 * Deliberately NO watchdog_stop_on_reboot().
-	 *
-	 * The watchdog stays armed for the whole of an orderly reboot, which
-	 * covers the one case nobody is in the building for: a device that
-	 * wedges while shutting down.  Once userspace stops being scheduled
-	 * nothing kicks the counter, so a shutdown that never completes is
-	 * reset within one window instead of hanging until a human cuts power.
-	 *
-	 * ★ MEASURED on this board (2026-08-10), because the alternative
-	 * -- a counter that keeps running into the next boot -- would be far
-	 * worse than no watchdog at all: it would reboot-loop the unit.
-	 *
-	 * Taken with the watchdog ARMED and being fed (a 30 s window), then a
-	 * plain `reboot` == PSCI SYSTEM_RESET, with NO power event anywhere in
-	 * the sequence.  Read at the U-Boot prompt ~8 s later, over three warm
-	 * reboots plus a cold control:
-	 *
-	 *   warm (PSCI reset) CTRL=0x00000000  DIV=1000  LD=23  CNT static
-	 *   cold (power cut)  CTRL=0x00000000  DIV=1000  LD=23  CNT static
-	 *
-	 * CTRL=0 is WDTEN clear, and the count does not move between two reads
-	 * 4.3 s apart, so nothing is counting when the bootloader hands over.
-	 * This driver's probe then reported "stopped at kernel entry" on all
-	 * four boots.
-	 *
-	 * ★ AND THE MECHANISM IS NOT "the SoC reset cleared our block", which
-	 * is what the raw reading first looks like and what an earlier draft of
-	 * this comment claimed.  LD reads 23 and OUR window was 30, so between
-	 * the reset and the prompt an earlier boot stage REPROGRAMMED the block
-	 * with a 23 s window of its own -- on the warm path exactly as on the
-	 * cold one.  The vendor's own loader then stops it, gated on
-	 * recognising precisely that signature (DIV == 1000 and LD == 23) late
-	 * in its init, before the kernel image is loaded.  Our countdown does
-	 * not reach the next boot because it is OVERWRITTEN, which is a
-	 * different and weaker claim than the reset clearing the block -- and
-	 * the one the measurement actually supports.
-	 *
-	 * ⚠ So the loader's stop is CONDITIONAL on its own signature and is NOT
-	 * a general safety net for an arbitrary window left running by us; it
-	 * is the earlier stage's unconditional re-arming that makes ours
-	 * harmless here.  Re-measure this if the boot chain is ever replaced.
-	 *
-	 * Coverage is therefore: probe -> the reset instant, on every boot,
-	 * including the reboot path itself, which is the point.
-	 *
-	 * The alternative designs, and why not: watchdog_stop_on_reboot() would
-	 * give up the shutdown-hang coverage that is the entire reason to stay
-	 * armed, to remove a hazard measured not to exist; re-arming long in a
-	 * reboot notifier would keep both but adds a moving part for the same
-	 * non-existent hazard, and slows real recovery to that longer window.
-	 * The vendor's driver makes the same call as this one -- its reboot
-	 * notifier and .shutdown are both compiled out.
-	 */
+	/* Deliberately NO watchdog_stop_on_reboot(). The watchdog ...
+	 * dev/MEASURED-cortina-wdt.c.md sec 11. */
 	watchdog_set_nowayout(&wdt->wdd, nowayout);
 
 	if (wdt->reset)
 		cortina_wdt_enable_soc_reset(wdt);
 
 	if (adopted) {
-		/*
-		 * Take the window OVER rather than inherit it.  Two reasons,
-		 * and neither is cosmetic:
-		 *
-		 *  - the counter handed to us is part-way through a countdown
-		 *    nobody recorded.  It may have a fraction of its window
-		 *    left, and running with that would bite during our own
-		 *    boot for no reason;
-		 *  - the watchdog core derives its keepalive interval from
-		 *    wdd->timeout, NOT from what the hardware is carrying, so
-		 *    an inherited window shorter than wdd->timeout would be
-		 *    fed too slowly to survive.
-		 *
-		 * Programming our own timeout and reloading settles both, and
-		 * makes WDOG_HW_RUNNING an honest description of the hardware.
-		 * The inherited window is still reported below as evidence.
-		 */
+		/* Take the window OVER rather than inherit it. Two reasons, ...
+		 * dev/MEASURED-cortina-wdt.c.md sec 12. */
 		cortina_wdt_start(&wdt->wdd);
 	}
 

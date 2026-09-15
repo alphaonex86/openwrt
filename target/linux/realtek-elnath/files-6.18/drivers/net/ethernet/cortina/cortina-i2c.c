@@ -1,29 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Minimal poll-mode MMIO I2C master for the Cortina-Access ca77xx "BIW"
- * (bus-interface-wrapper) I2C controller of the Realtek RTL9607F "Elnath"
- * GPON SoC — per_i2c bus 0 @ phys 0xf4329170 (stock DT: i2c@f4329170,
- * compatible "cortina,ca77xx-i2c"; a second instance sits at 0xf4329198).
- *
- * The controller is an OpenCores-style single-byte engine: one data byte per
- * TXR/RXR command, a CTRL register carrying the start/stop/read/write/ack-in
- * strobes plus a transfer-done flag, and an ACK register with arbitration-
- * lost / bus-busy / RxACK status.  SCL prescaler: prer = pclk/(5*SCL) - 1
- * with pclk = 125 MHz APB ("g3_apb_pclk") -> 249 for the 100 kHz standard
- * mode the stock BOSA init runs at.  No FIFO, no quirks; clock stretching
- * disabled (matches the stock configuration).
- *
- * Poll-mode only, NOT wired to the Linux I2C subsystem, on purpose:
- *   - the only in-kernel user is the GN25L95 BOSA laser-driver programming,
- *     which must run deterministically BEFORE the GPON ranging FSM starts,
- *     inside the cortina-gpon probe.  drivers/net links ahead of drivers/i2c,
- *     so an i2c-subsystem client could not guarantee that ordering without
- *     probe-deferral gymnastics;
- *   - the lean per-model kernel carries no other I2C user, so the subsystem
- *     would cost image size for a single slave;
- *   - a byte at 100 kHz completes in ~90 us, so polling is cheap and it only
- *     runs at bring-up + on /proc/gpon reads.
- */
+/* Minimal poll-mode MMIO I2C master for the Cortina-Access ...
+ * dev/MEASURED-cortina-i2c.c.md sec 1. */
 
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -38,15 +15,8 @@
 #define CGI2C_PHYS		0xf4329170ULL
 #define CGI2C_SIZE		0x28
 
-/*
- * GLB pinmux: the i2c0 SCL/SDA pads must be routed to the BIW engine or every
- * transfer silently no-ops (unrouted pins float, the ACK line reads low = fake
- * ACK, reads return 0x00 — the exact cold-boot "BOSA all-zero / DS LOF / FSM
- * stuck O1" failure).  Live-verified: cold power-on reset value 0x00100000,
- * stock-running value 0x00110000 — bit16 = the i2c0 pin group.  Stock routes
- * it from userspace before rtkbosa runs; we must do it in-kernel before the
- * first BIW transfer.
- */
+/* GLB pinmux: the i2c0 SCL/SDA pads must be routed to the BIW ...
+ * dev/MEASURED-cortina-i2c.c.md sec 2. */
 #define CGI2C_PINMUX_PHYS	0xf4320430ULL	/* GLB 0xf4320000 + 0x430 */
 #define CGI2C_PINMUX_I2C0_EN	BIT(16)		/* route the i2c0 pin group */
 
@@ -194,11 +164,8 @@ out:
 	return ret;
 }
 
-/*
- * Map + initialize the controller: soft-reset if it was left enabled (warm
- * boot / bootloader use), program the SCL prescaler, enable the core.
- * Idempotent; interrupts stay off (poll mode).
- */
+/* Map + initialize the controller: soft-reset if it was left ...
+ * dev/MEASURED-cortina-i2c.c.md sec 3. */
 int cg_i2c_init(struct device *dev)
 {
 	u32 prer = CGI2C_PCLK_HZ / (5 * CGI2C_BUS_HZ) - 1;

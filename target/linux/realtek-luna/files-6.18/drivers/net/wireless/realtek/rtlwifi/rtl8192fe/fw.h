@@ -15,11 +15,7 @@
 #define FW_8192F_POLLING_DELAY			5
 #define FW_8192F_POLLING_TIMEOUT_COUNT		3000
 
-/* The RTL8192F firmware blob carries an optional 32-byte header.  The header
- * signature shares the 8192-series "0x92x0" form; for this part it is 0x92F0.
- * The signature/version/ramcodesize/svnindex fields are little-endian on the
- * wire, so the test must run on the host-converted value (BE-MIPS safe).
- */
+/* The RTL8192F firmware blob carries an optional 32-byte ... -- dev/MEASURED-fw.h.md sec 1. */
 #define IS_FW_HEADER_EXIST(_pfwhdr)	\
 	((le16_to_cpu(_pfwhdr->signature) & 0xFFF0) == 0x92F0)
 

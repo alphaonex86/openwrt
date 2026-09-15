@@ -4,20 +4,7 @@
 #ifndef __RTL92FE_TRX_H__
 #define __RTL92FE_TRX_H__
 
-/* PCIe TX/RX descriptor geometry for the RTL8192F.
- *
- * The RTL8192F shares the 8192-series PCIe ring layout: a 64-byte TX
- * descriptor whose first 40 bytes are the hardware header, a 24-byte RX
- * status descriptor, and a separate buffer-descriptor (BD) ring whose
- * entries reference up to four DMA segments (SEG_NUM=1 -> 4 segments:
- * seg0 = txdesc, seg1 = payload).
- *
- * BE-MIPS: every multi-byte descriptor field below is little-endian on
- * the wire.  All accessors operate on __le32 words and convert with the
- * le32_get_bits()/le32p_replace_bits()/cpu_to_le32()/le32_to_cpu()
- * helpers so a big-endian host never reads or writes a raw, host-order
- * descriptor word.  Never cast a CPU-order value over a u8* descriptor.
- */
+/* PCIe TX/RX descriptor geometry for the RTL8192F. The ... -- dev/MEASURED-trx.h.md sec 1. */
 
 #define TX_DESC_SIZE					64
 
@@ -264,11 +251,7 @@ static inline void set_earlymode_len4(__le32 *__paddr, u32 __val)
 	le32p_replace_bits((__paddr + 1), __val, GENMASK(31, 20));
 }
 
-/* ---- TX buffer descriptor (BD ring entry) ---------------------------- */
-
-/* Segment slots 1..N: each slot is 4 dwords (len/amsdu, addr-low,
- * addr-high, reserved).  Offset 0 is the header slot.
- */
+/* TX buffer descriptor (BD ring entry) -- dev/MEASURED-trx.h.md sec 2. */
 static inline void set_txbuffer_desc_len_with_offset(__le32 *__pdesc,
 						     u8 __offset, u32 __val)
 {
@@ -526,11 +509,7 @@ struct phy_rx_agc_info_t {
 	#endif
 };
 
-/* RTL8192F PHY status report (RX driver-info block).  The multi-byte
- * members (CFO tails, EVM, CSI) are little-endian on the wire; the
- * single-byte gain/lna/vga fields are endian-safe.  See BE-MIPS note
- * at the top of this header.
- */
+/* RTL8192F PHY status report (RX driver-info block). The ... -- dev/MEASURED-trx.h.md sec 3. */
 struct phy_status_rpt {
 	struct phy_rx_agc_info_t path_agc[2];
 	u8 ch_corr[2];

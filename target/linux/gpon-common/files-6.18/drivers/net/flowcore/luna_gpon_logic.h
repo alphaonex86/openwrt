@@ -1,21 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * luna_gpon_logic.h -- the Luna GPON shell's hoisted pure logic.
- *
- * RENAMED 2026-09-10: gpon_rtl9602c_logic.{c,h} -> luna_gpon_logic.{c,h}.
- * The old name claimed the CORE and a single CHIP at once (file_prefix_guard)
- * and did neither: this object is built for BOTH Luna dies under
- * CONFIG_LUNA_GPON, so its scope is the FAMILY -- the exact counterpart of
- * cortina_gpon_logic.{c,h} beside it.  It was hoisted out of gpon-rtl9602c.c,
- * which is today luna_gpon.c; provenance notes naming either older spelling are
- * dated records of where code CAME FROM and are kept as written.
- *
- * Every function here was moved MECHANICALLY under one rule: it touches no
- * MMIO, calls no kernel service, and reads no file-scope state of the shell
- * it left. Operator, 2026-08-28: a port should be "una lista de registros
- * y tal vez algunos workaround", and that is only true once the LOGIC
- * exists in one place instead of once per board.
- */
+/* luna_gpon_logic.h -- the Luna GPON shell's hoisted pure ...
+ * dev/MEASURED-luna_gpon_logic.h.md sec 1. */
 #ifndef _LUNA_GPON_LOGIC_H
 #define _LUNA_GPON_LOGIC_H
 
@@ -25,13 +10,8 @@ u8 bosa_slave_for(u16 reg);
 s32 ddm_word_to_level(int raw);
 s32 bosa_code_to_cdbm(u32 code);
 
-/*
- * "Could not measure" sentinel for the RX optical chain. bosa_rx_code_calc()
- * floors a genuine reading at 11, so 0 can never be a measurement and is free
- * to mean "no reading". The caller must render it as "n/a", never a number
- * (the shell's BOSA_RX_CDBM_NA is deliberately NOT the -4000 dBm floor a real
- * dark reading produces -- the two must not look alike).
- */
+/* "Could not measure" sentinel for the RX optical chain. ...
+ * dev/MEASURED-luna_gpon_logic.h.md sec 2. */
 #define BOSA_RX_CODE_NA		0u
 
 /* Per-board optical calibration. Stock loads this from rtl8290b.data into its
@@ -39,15 +19,8 @@ s32 bosa_code_to_cdbm(u32 code);
  * board's confirmed values) and passes it down BY ARGUMENT -- the logic never
  * reaches back for file-scope state. */
 struct bosa_optical_cal {
-	/* Faithful RTL8290B RX-power chain (re-expressed from europa_drv.ko
-	 * rtl8290b_rxPower_get + _rtl8290b_rx_power_cal; reproduces the reference to
-	 * the centi-dBm across 5 samples). The dark term (rx_vthr) makes it AFFINE,
-	 * not proportional -- a through-origin fraction fit is wrong off-anchor:
-	 *   V     = (rssi - tap_lo)*3.3Vuv/(tap_hi - tap_lo)     (ratiometric, uV)
-	 *   irssi = 1000*(V - rx_vthr)*(r1+r2)/(r1*r2)           (rx_vthr = dark level)
-	 *   code  = ((b*(irssi/s1)/8192)*s1 + 1000*c/4096)/100,  s1 = irssi<65536?10:100
-	 *   dBm   = 1000*log10(code) - 4000  (centi-dBm; bosa_code_to_cdbm)
-	 * Per-board constants from rtl8290b.data (europa_param). */
+	/* Faithful RTL8290B RX-power chain (re-expressed from ...
+	 * dev/MEASURED-luna_gpon_logic.h.md sec 3. */
 	u32 rx_vthr;		/* RSSI detection threshold / dark level, uV (data @0x552) */
 	u32 rx_r1, rx_r2;	/* RSSI load resistors, ohm (data @0x5df, @0x5e1, x10) */
 	s32 rx_poly_b, rx_poly_c;	/* code poly, a=0 on this board (data @0x54a, @0x54e) */
@@ -62,23 +35,12 @@ u32 bosa_bias_ua_calc(int h, int l);
 u32 bosa_tx_sample_contrib(s32 vmpd, s32 dark, int iavg, int range);
 u32 bosa_tx_word_calc(u64 sum, int n, s32 tx_slope, s32 tx_offset);
 
-/* pi_packed_locate/insert/extract + struct pi_packed_slot MOVED to
- * flowcore.h / flowcore_hash.o on 2026-09-02 (round 3): generic packed-slot
- * math another engine needed, and this object's CONFIG_LUNA_GPON gate
- * made a call from that engine a link error on its board.  The include below
- * keeps every existing caller of this header compiling unchanged. */
+/* pi_packed_locate/insert/extract + struct pi_packed_slot ...
+ * dev/MEASURED-luna_gpon_logic.h.md sec 5. */
 #include "flowcore.h"
 
-/* ===== round 2 (2026-09-02): module identity + sample selection ========= */
-
-/*
- * Three-outcome optical-module identity, decided from the SFF-8472 A0 bytes
- * the shell sampled. The module's own NAME outranks the mere presence of an
- * SFF-8472 identity page -- deciding on the ident byte while holding the
- * vendor string is what mis-classified the G24W's RTL8290 as foreign and
- * refused every register write (measured 2026-08-30, tier 1). The middle
- * outcome is ours: unreadable is "could not tell", never "it is not one".
- */
+/* ===== round 2 (2026-09-02): module identity + sample ...
+ * dev/MEASURED-luna_gpon_logic.h.md sec 4. */
 enum bosa_module_verdict {
 	BOSA_MODULE_NAMED_OURS,		/* strings name REALTEK/RTL8290: path stays enabled */
 	BOSA_MODULE_FOREIGN,		/* plausible SFF-8024 ident AND a foreign name:
@@ -94,11 +56,8 @@ enum bosa_module_verdict bosa_module_classify(int ident, int extid,
  * failed read) -> printable ASCII, '.' elsewhere, NUL-terminated (dst[n+1]). */
 void bosa_sff_text(char *dst, const int *raw, unsigned int n);
 
-/* Median of the first n samples (insertion sort in place, upper median
- * v[n/2]; n >= 1). This is THE reading-selection rule for the glitch-tolerant
- * BOSA reads: for the RX code chain BOSA_RX_CODE_NA == 0 deliberately sorts
- * to the bottom, so one glitched sample is discarded and only a majority of
- * NA samples makes the verdict NA. */
+/* Median of the first n samples (insertion sort in place, ...
+ * dev/MEASURED-luna_gpon_logic.h.md sec 6. */
 u32 bosa_median_u32(u32 *v, unsigned int n);
 
 /* The MPD sample validity test + ratiometric mV conversion (the one

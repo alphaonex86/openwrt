@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * cortina_vlan_install.c -- the Cortina family's gpon_vlan_ops.
- *
- * Every hardware write below goes through `struct hwio`, so the SEQUENCE this
- * emits -- which register, which value, in which order -- is asserted on x86
- * with no board (dev/rtl9607c-test/gpon_vlan_install_diff_test).  A write the
- * hardware consumes is invisible on read-back and still visible there, which
- * is why the offline proof is a stream and not a state.
- */
+/* cortina_vlan_install.c -- the Cortina family's gpon_vlan_ops
+ * dev/MEASURED-cortina_vlan_install.c.md sec 1. */
 #include <linux/errno.h>
 #include <linux/types.h>
 
@@ -153,11 +146,8 @@ static int cortina_vlan_rule_install(void *ctx, const struct gpon_vlan_rule *r)
 	return aft_write(c, c->regs->map_access, c->map_idx, data, off, 1);
 }
 
-/*
- * Remove: clear the MAP entry FIRST, so a freed fib stops being reachable
- * before its contents change.  The reverse order leaves a window in which
- * frames take a half-cleared edit.
- */
+/* Remove: clear the MAP entry FIRST, so a freed fib stops ...
+ * dev/MEASURED-cortina_vlan_install.c.md sec 3. */
 static int cortina_vlan_rule_remove(void *ctx, const struct gpon_vlan_rule *r)
 {
 	struct cortina_vlan_ctx *c = ctx;
@@ -181,16 +171,8 @@ static int cortina_vlan_rule_remove(void *ctx, const struct gpon_vlan_rule *r)
 	return aft_write(c, c->regs->l2fib_access, c->fib_idx, data, off, 3);
 }
 
-/*
- * ⚠ THE FIVE SLOTS LEFT NULL ARE A STATEMENT, NOT AN OVERSIGHT.  admit_set
- * (ME 84), preassign_set (ME 79), pbit_map_set (ME 130), gem_td_set (ME 280)
- * and mcast_iw_set (ME 281) have NO programmable surface established on this
- * die: there is no port2vid or VID-membership descriptor in the NE at all, the
- * 802.1p map register is identified and deliberately unwritten (stock's own
- * init residue was misread once already), and the ILPB tag-drop fields are
- * recorded only as "all 0" and never decoded.  A NULL slot makes the core
- * COUNT the decision as owed; a guessed install would make it disappear.
- */
+/* ⚠ THE FIVE SLOTS LEFT NULL ARE A STATEMENT, NOT AN ...
+ * dev/MEASURED-cortina_vlan_install.c.md sec 2. */
 const struct gpon_vlan_ops cortina_vlan_ops = {
 	.rule_install	= cortina_vlan_rule_install,
 	.rule_remove	= cortina_vlan_rule_remove,

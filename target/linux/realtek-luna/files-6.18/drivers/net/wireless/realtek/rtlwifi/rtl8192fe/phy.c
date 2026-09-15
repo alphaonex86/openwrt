@@ -11,12 +11,7 @@
 #include "dm.h"
 #include "table.h"
 
-/* RTL8192F-specific BB anchors used by the IQK/LCK flows.  These addresses
- * are part of the 8192F BB register space (IQK report/result block 0x0e98..
- * 0x0ec8, IQK-precondition analog block, antenna/tap-update); they are kept
- * local so phy.c is self-contained where the shared reg.h enumerates the
- * generic 8192-series names rather than the 8192F-specific offsets.
- */
+/* RTL8192F-specific BB anchors used by the IQK/LCK flows. ... -- dev/MEASURED-phy.c.md sec 1. */
 #define R8192F_FPGA0_ANALOG4		0x088c
 #define R8192F_ANAPWR1			0x0d94
 #define R8192F_RX_WAIT_CCA		0x0e70
@@ -630,23 +625,7 @@ static bool _rtl92fe_phy_bb_config_parafile(struct ieee80211_hw *hw)
 	return true;
 }
 
-/*
- * ★★★ TEMPORARY DIAGNOSTIC, 2026-09-01 -- REMOVE once the X111W wedge is named.
- *
- * MEASURED with rtl8192fe.hwinit_stop_at, three cold boots per rung: the board
- * is alive 3/3 with the firmware download done (rung 2) and starts dying the
- * moment THIS function runs (rung 3, 2/3 dead), getting faster and more certain
- * as more PHY/BB/RF programming follows.  That dose-response is what MORE
- * WRITES TO ONE BLOCK look like, not one fatal value -- so the question is
- * WHICH ACCESS.
- *
- *     bootarg:  rtl8192fe.mac_array_pairs=N
- *
- * N == 0 writes the whole array (the shipping behaviour); N > 0 writes only the
- * first N pairs.  The count is PRINTED so a bisect never has to guess the
- * length, and so an N larger than the array is visibly a no-op rather than a
- * silently different arm.
- */
+/* ★★★ TEMPORARY DIAGNOSTIC, 2026-09-01 -- REMOVE once the ... -- dev/MEASURED-phy.c.md sec 2. */
 static int mac_array_pairs;
 module_param(mac_array_pairs, int, 0644);
 MODULE_PARM_DESC(mac_array_pairs,
@@ -1896,12 +1875,8 @@ static bool _rtl92fe_phy_sw_chnl_step_by_step(struct ieee80211_hw *hw,
 				       (u8)currentcmd->para2);
 			break;
 		case CMDID_RF_WRITEREG: {
-			/* Match vendor config_phydm_switch_channel_8192f: key the
-			 * full RF_CHNLBW (0x18) word on BOTH paths from path A's
-			 * known-good value (band + bandwidth bits preserved), not
-			 * just the low channel byte from each path's own (possibly
-			 * unseeded) tracker.  The per-path 0xff-mask write left
-			 * RF_B[0x18]=0 (path B mistuned -> 2T2R beacon dark). */
+			/* Match vendor config_phydm_switch_channel_8192f: key the ...
+			 * dev/MEASURED-phy.c.md sec 3. */
 			u32 chnlval = (rtlphy->rfreg_chnlval[0] & 0xfffff00) |
 				      currentcmd->para2;
 
@@ -1953,13 +1928,7 @@ static bool _rtl92fe_phy_set_sw_chnl_cmdarray(struct swchnlcmd *cmdtable,
 	return true;
 }
 
-/* ------------------------------------------------------------------ */
-/* IQ / LO / LC calibration.  The RTL8192F runs a TX-LOK+IQK pass then  */
-/* an RX-IQK pass, per path A then B; the LOK result is folded back     */
-/* into the TX-PA LUT through RF reg 0x33.  A failure is signalled by    */
-/* bits[25:16] of the result word reading 0x142 (before) / 0x42 (after) */
-/* in which case the identity matrix is applied so traffic still flows.  */
-/* ------------------------------------------------------------------ */
+/* IQ / LO / LC calibration. The RTL8192F runs a TX-LOK+IQK ... -- dev/MEASURED-phy.c.md sec 4. */
 
 static void _rtl92fe_phy_save_regs(struct ieee80211_hw *hw, const u32 *reg,
 				     u32 *backup, u32 num)
@@ -2674,17 +2643,7 @@ static void _rtl92fe_phy_iq_calibrate(struct ieee80211_hw *hw,
 
 	if (is2t) {
 		/* Path B was parked into RF standby (RF reg 0x00 = 0x10000) at
-		 * line ~2554 so path A could calibrate undisturbed.  Nothing in
-		 * the BB/ADDA/MAC reload below touches RF reg 0x00, so without
-		 * this write path B stays in standby (observed live as
-		 * RF_B[0x18]=0x00000) and the 2T2R TX path radiates a corrupt /
-		 * cancelled waveform that no scanner can decode.  Wake path B
-		 * back to operating mode, matching the radiob table tail
-		 * (RF 0x00 = 0x00031DD5) and the vendor's post-IQK channel
-		 * re-key.  Re-key the channel/BW reg (0x18) too: the IQK park
-		 * left RF_B[0x18]=0, and only re-applying the full chnlval (as
-		 * the vendor channel-switch does for both paths) re-tunes path
-		 * B's synthesizer. */
+		 * dev/MEASURED-phy.c.md sec 5. */
 		rtl_set_rfreg(hw, RF90_PATH_B, RF8192F_AC, RFREG_OFFSET_MASK,
 			      0x31DD5);
 		rtl_set_rfreg(hw, RF90_PATH_B, RF_CHNLBW, RFREG_OFFSET_MASK,

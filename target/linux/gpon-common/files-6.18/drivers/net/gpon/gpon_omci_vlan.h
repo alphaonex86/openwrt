@@ -49,13 +49,8 @@
 
 #include <linux/types.h>
 
-/* ---------------------------------------------------------------------------
- * ME 171 — the received-frame VLAN tagging operation table row
- * ------------------------------------------------------------------------- */
-
-/* One row is 16 octets = four 32-bit words, in this order.  Stock's own
- * debug_ExtVlan() names them: [OuterFilter] [InnerFilter] [OuterTreate]
- * [InnerTreate], four octets printed per line. */
+/* ME 171 — the received-frame VLAN tagging operation table row
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 1. */
 #define GPON_EXT_VLAN_ROW_LEN	16
 
 /* The RAW row, field by field, exactly as the wire carries it — no meaning
@@ -81,17 +76,8 @@ struct gpon_ext_vlan_row {
 	u8	t_in_tpid;	/* 3 bits */
 };
 
-/*
- * THE SENTINELS.  Every one of these is a value one past the legal range of
- * its field, which is how G.988 says "no value here" without a second field,
- * and it is what stock's own translators test.
- *
- * ⚠ A SENTINEL IS NOT A VALUE, and collapsing the two is the whole class of
- *   bug this model exists to avoid: priority 15 is not "priority fifteen", it
- *   is "this tag is not present / do not add one", and an install that wrote
- *   15 into a priority field would tag every frame with a priority no
- *   subscriber asked for.
- */
+/* THE SENTINELS. Every one of these is a value one past the ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 2. */
 #define GPON_VLAN_PRI_ANY	8	/* filter: do not filter on priority.
 					 * Stock's own OMCI_PRI_FILTER_IGNORE */
 #define GPON_VLAN_PRI_DEFAULT	14	/* filter: part of the default-rule
@@ -102,11 +88,8 @@ struct gpon_ext_vlan_row {
 					 * Stock's own OMCI_VID_FILTER_IGNORE */
 #define GPON_VLAN_ETYPE_ANY	0	/* filter: do not filter on EtherType */
 
-/* The TPID/DE code, 3 bits.  Stock splits it with one `sltiu code,5`: 0..4 are
- * an ordinary 0x8100 tag, 5..7 mean "use this ME's INPUT TPID attribute", and
- * when that attribute is not 0x8100 the tag is taken as a service tag rather
- * than a customer one.  That is why gpon_ext_vlan_filter() needs the ME's own
- * input TPID as an argument: the row alone does not say which tag it is. */
+/* The TPID/DE code, 3 bits. Stock splits it with one `sltiu ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 19. */
 #define GPON_VLAN_TPID_INPUT_MIN	5
 #define GPON_VLAN_TPID_C		0x8100
 
@@ -115,11 +98,8 @@ struct gpon_ext_vlan_row {
  * emits any filter at all. */
 #define GPON_VLAN_REMOVE_DISCARD	3
 
-/* The EtherType filter codes, and the wire values they name.  Read out of the
- * jump table stock's omci_SetExtValnClassifyRule() indexes (.rodata+44), so
- * these are the DEVICE's codes; codes 1, 3 and 4 also match G.988 Table
- * 9.3.13, and the vendor splits PPPoE into a discovery code and a session one
- * rather than one "PPPoE" code. */
+/* The EtherType filter codes, and the wire values they name. ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 20. */
 #define GPON_VLAN_ETYPE_MAX	5	/* ⚠ AND CODES 6..15 ARE A STOCK DEFECT WE
 					 * DO NOT COPY: its table lookup falls
 					 * past the end, the EtherType field is
@@ -152,11 +132,8 @@ static inline u16 gpon_vlan_etype_of(u8 code)
 	}
 }
 
-/*
- * Decode one 16-octet row.  Explicit byte math, never a struct cast: this
- * core builds big-endian on MIPS, little-endian on ARM64 and on x86, and the
- * wire is big-endian on all three.
- */
+/* Decode one 16-octet row. Explicit byte math, never a struct ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 21. */
 static inline void gpon_ext_vlan_row_decode(const u8 *b,
 					    struct gpon_ext_vlan_row *r)
 {
@@ -214,31 +191,8 @@ static inline void gpon_ext_vlan_row_encode(const struct gpon_ext_vlan_row *r,
 	b[14] = (u8)(w3 >> 8); b[15] = (u8)w3;
 }
 
-/* ---------------------------------------------------------------------------
- * ME 49 — the MAC bridge port filter table row
- * ------------------------------------------------------------------------- */
-
-/*
- * ★★ THE LAYOUT IS STOCK'S OWN DECODER, READ TWICE ON TWO DIES.  The X111W's
- *    /lib/omci/mib_MacBridgePortFilterTable.so carries MacFilterTableOper(),
- *    which memcpy()s EIGHT octets off the wire and then names every field with
- *    its own debug strings -- `bit.isFilter:%d` is (w>>16)&1, `bit.isSa:%d` is
- *    (w>>17)&1 and `bit.oper:%d` is (w>>22)&3, over the first four octets read
- *    big-endian.  The G24W's copy of the same plugin uses the IDENTICAL shifts
- *    0x10/0x11/0x16, so the row is a FAMILY fact and not one build's.
- *
- *      octet 0      not read by stock's decoder (G.988 leaves it unused)
- *      octet 1      bit 0 filter/forward · bit 1 SA/DA · bits 6..7 operation
- *      octets 2..7  the 6-octet MAC address
- *
- * ★ AND THE KEY IS THE MAC ALONE, which is a MEASUREMENT and not a choice:
- *   stock's REMOVE arm walks its list comparing exactly the MAC halfword at
- *   +2 and the MAC word at +4, and nothing else.  So two rows naming the same
- *   MAC are ONE table entry, and an ADD over an existing MAC replaces it.
- *   ⚠ Stock APPENDS a duplicate node instead of replacing, and its own REMOVE
- *     then deletes only the first match -- a defect worth not copying, and the
- *     reason this is stated rather than inherited.
- */
+/* ME 49 — the MAC bridge port filter table row ★★ THE LAYOUT ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 3. */
 #define GPON_MAC_FILTER_ROW_LEN		8
 #define GPON_MAC_FILTER_MAC_OFF		2	/* where the address starts */
 
@@ -282,21 +236,8 @@ static inline bool gpon_mac_filter_same_key(const u8 *a, const u8 *b)
 	return true;
 }
 
-/* ---------------------------------------------------------------------------
- * The DECIDED rule — what the family is asked to install
- * ------------------------------------------------------------------------- */
-
-/*
- * What a tag is filtered ON.  A BITMASK PER TAG, and the vocabulary is the
- * vendor's own OMCI_VLAN_FILTER_MODE_e -- recovered by name and value from the
- * G24W build's DWARF, and produced by the decoder in libomci_mib.so which is
- * the function that turns a raw ME 171 row into what the driver consumes.
- *
- * ★ IT IS A MASK AND NOT AN ENUM OF STATES, which is the thing a fresh design
- *   gets wrong: "this tag must be present and I filter on nothing about it"
- *   (CARE_TAG alone) and "I filter on its VID" (VID) are different
- *   instructions, and TCI is the pair of VID and PRI rather than a third kind.
- */
+/* The DECIDED rule — what the family is asked to install What ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 4. */
 #define GPON_VLANF_NO_CARE_TAG	0x01	/* the tag may be there or not */
 #define GPON_VLANF_CARE_TAG	0x02	/* it must be there; nothing else matched */
 #define GPON_VLANF_NO_TAG	0x04	/* it must NOT be there */
@@ -326,34 +267,8 @@ struct gpon_vlan_filter {
 					 * 0x8100, so the tag is a SERVICE tag */
 };
 
-/* ---------------------------------------------------------------------------
- * The TREATMENT half — what to do with the frame the filter matched
- *
- * ★★ EVERY VALUE BELOW IS STOCK'S OWN, from the digest in libomci_mib.so that
- *    turns a raw ME 171 row into what the driver consumes.  It was the last
- *    unread hop and it is read now: the two decision helpers (priority at
- *    0x253dc, VID at 0x2545c), the TPID resolver at 0x25270, and stock's own
- *    NAME TABLE for the TPID codes at 0xeb74.
- *
- * ★ AND THE ENUM THE EARLIER PASS CALLED DISPUTED IS NOT DISPUTED: the two
- *   candidate orders belonged to two DIFFERENT enums in two different modules.
- *   The 3.18 RTL9602C build contains no `omci_pon_wan_vlan_*` string at all;
- *   what it emits is OMCI_VLAN_ACT_MODE_e, and its own name table at 0xe3d8
- *   spells it NO_ACT 0, ADD 1, REMOVE 2, MODIFY 3, TRANSPARENT 4 -- which is
- *   byte-identical to the G24W DWARF for that same enum, and is exactly what
- *   the earlier pass measured behaviourally ("2 maps to Delete, 3 to Tagging").
- *
- * ⚠ WHAT IS DELIBERATELY NOT DERIVED HERE: the per-tag VERB (add / modify /
- *   remove / leave alone).  Stock computes it to index its own rtk action map,
- *   and a family that has the six facts below -- strip count, discard, and per
- *   output tag whether it is written, where its VID comes from, where its
- *   priority comes from and what TPID/DEI it carries -- has the whole
- *   instruction without it.  The RE that settled the fields read about 55% of
- *   that digest and anchored the verb only for the cases it walked, so deriving
- *   it here would be modelling past the evidence for no gain.
- * ------------------------------------------------------------------------- */
-
-/* TAGS_TO_REMOVE, and 3 is not a count. */
+/* The TREATMENT half — what to do with the frame the filter ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 5. */
 #define GPON_VLAN_REMOVE_NONE	0	/* strip nothing */
 #define GPON_VLAN_REMOVE_OUTER	1	/* strip the outer (S) tag only */
 #define GPON_VLAN_REMOVE_BOTH	2
@@ -442,21 +357,8 @@ struct gpon_vlan_rule {
 	struct gpon_vlan_treat	t;
 };
 
-/* ---------------------------------------------------------------------------
- * The pure translation — the half stock proves can be pure
- * ------------------------------------------------------------------------- */
-
-/*
- * Is this the DEFAULT (catch-all) row?  SIX conditions, not one -- this is the
- * signature stock's own decoder tests, and the canonical row it recognises is
- *
- *     F8 00 00 00 | E8 00 00 00 | 00 0F 00 00 | 00 0F 00 00
- *
- * ⚠ A LOOSER TEST IS A REAL FAULT, not a stylistic one: "filter priority is 14"
- *   alone also matches an ordinary row that happens to filter on priority 14,
- *   and calling that the catch-all would apply the subscriber's default
- *   treatment to one priority class and nothing else.
- */
+/* The pure translation — the half stock proves can be pure Is ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 6. */
 static inline bool gpon_ext_vlan_row_is_default(const struct gpon_ext_vlan_row *r)
 {
 	return r->t_remove == 0 &&
@@ -469,31 +371,15 @@ static inline bool gpon_ext_vlan_row_is_default(const struct gpon_ext_vlan_row *
 	       r->f_in_pri == GPON_VLAN_PRI_DEFAULT;
 }
 
-/*
- * Is this row a DISCARD rule -- the OLT telling us to drop what it matches?
- * It is the tags-to-remove field at its one non-count value, and stock diverts
- * on it before emitting any filter.
- */
+/* Is this row a DISCARD rule -- the OLT telling us to drop ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 22. */
 static inline bool gpon_ext_vlan_row_is_discard(const struct gpon_ext_vlan_row *r)
 {
 	return r->t_remove == GPON_VLAN_REMOVE_DISCARD;
 }
 
-/*
- * A row is DELETED by writing it back with BOTH TREATMENT WORDS all-ones: the
- * OLT names the row by its filter half -- the first eight octets, which stock
- * compares word for word -- and says "this one goes".
- *
- * ⚠ IT IS TESTED ON THE RAW OCTETS, not on the decoded fields, and that is not
- *   pedantry: the two treatment words carry reserved bits the decode drops, so
- *   a decoded test would call a row with those bits CLEAR a delete where stock
- *   calls it an update.  A delete that is really an update leaves a rule
- *   installed that the OLT believes it removed.
- * ⚠ AND IT IS CHECKED BEFORE THE DISCARD RULE ABOVE, in that order, because an
- *   all-ones treatment also carries tags-to-remove 3.  Stock's own plugin tests
- *   delete first; reversing the two turns every delete into "drop the frames
- *   this row matches", which is the opposite instruction.
- */
+/* A row is DELETED by writing it back with BOTH TREATMENT ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 7. */
 static inline bool gpon_ext_vlan_raw_is_delete(const u8 *b)
 {
 	unsigned int i;
@@ -504,19 +390,8 @@ static inline bool gpon_ext_vlan_raw_is_delete(const u8 *b)
 	return true;
 }
 
-/*
- * ONE TAG's filter mode, from its raw (priority, VID) pair.  This ladder is
- * read off the producer in libomci_mib.so and it is the whole filter semantic:
- *
- *   pri 15               -> NO_TAG     the tag must be ABSENT
- *   pri 8, vid 4096      -> CARE_TAG   present, nothing about it matched
- *   pri 8, vid != 4096   -> VID
- *   pri != 8, vid 4096   -> PRI
- *   pri != 8, vid != 4096-> TCI        both
- *
- * Priority 14 is the default-rule marker and is handled by the caller before
- * this is reached; every other value 0..13 is a literal priority.
- */
+/* ONE TAG's filter mode, from its raw (priority, VID) pair. ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 8. */
 static inline u8 gpon_ext_vlan_tag_mode(u8 pri, u16 vid)
 {
 	if (pri == GPON_VLAN_PRI_NONE)
@@ -527,19 +402,8 @@ static inline u8 gpon_ext_vlan_tag_mode(u8 pri, u16 vid)
 	return vid == GPON_VLAN_VID_ANY ? GPON_VLANF_PRI : GPON_VLANF_TCI;
 }
 
-/*
- * Turn the FILTER half of a raw row into the decided filter.
- * @in_tpid is this ME 171 instance's attribute #3, which the row needs and does
- * not carry: a TPID/DE code of 5..7 means "the input TPID", and whether that
- * makes the tag a service tag depends on its value.
- *
- * -> false when the row cannot be represented, which today is exactly one case
- *    and it is a STOCK DEFECT WE REFUSE TO COPY: an EtherType code above 5.
- *    Stock sets the entry's valid bit and mask for such a code and never writes
- *    the EtherType, so the rule filters on a stale value.  Refusing is the only
- *    honest answer -- accepting and dropping the EtherType condition would
- *    forward traffic the OLT asked us to classify.
- */
+/* Turn the FILTER half of a raw row into the decided filter. ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 9. */
 static inline bool gpon_ext_vlan_filter(const struct gpon_ext_vlan_row *r,
 					u16 in_tpid,
 					struct gpon_vlan_filter *f)
@@ -574,11 +438,8 @@ static inline bool gpon_ext_vlan_filter(const struct gpon_ext_vlan_row *r,
 	return true;
 }
 
-/* ONE output tag, from its raw treatment priority, VID and TPID code.
- * @tags_matched is how many received tags the FILTER half requires, 0..2 — the
- * copy-from-received codes need it and the row does not carry it.
- * -> false when the row asks to copy from a tag the filter does not require,
- *    which is stock's own refusal (its helper returns rc=2 for exactly this). */
+/* ONE output tag, from its raw treatment priority, VID and ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 23. */
 static inline bool gpon_ext_vlan_tag_treat(u8 pri, u16 vid, u8 tpid_code,
 					   u8 tags_matched,
 					   struct gpon_vlan_tag_treat *o)
@@ -621,15 +482,8 @@ static inline bool gpon_ext_vlan_tag_treat(u8 pri, u16 vid, u8 tpid_code,
 	return true;
 }
 
-/*
- * The TREATMENT half of a raw row, decided.
- *
- * ⚠ DISCARD IS CHECKED FIRST AND SHORT-CIRCUITS, because stock's digest does
- *   the same -- and because stock then writes the value 3 into the field its
- *   OWN printer labels `isDefaultRule`, so a consumer reading that member has
- *   to know 3 means "drop" and not "default".  We keep discard in a field of
- *   its own rather than inherit an overload nobody has proven a reader for.
- */
+/* The TREATMENT half of a raw row, decided. ⚠ DISCARD IS ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 10. */
 static inline bool gpon_ext_vlan_treat(const struct gpon_ext_vlan_row *r,
 				       u8 tags_matched,
 				       struct gpon_vlan_treat *t)
@@ -673,13 +527,8 @@ static inline bool gpon_ext_vlan_decide(const struct gpon_ext_vlan_row *r,
 	return gpon_ext_vlan_treat(r, gpon_vlan_tags_matched(&out->f), &out->t);
 }
 
-/* ---------------------------------------------------------------------------
- * The stored model — what the OLT has told us, per ME
- * ------------------------------------------------------------------------- */
-
-/* How many ME 171 instances and rows this build holds.  Overridable for the
- * same reason OMCI_STORE_MAX is: one lean kernel per model, and a board with a
- * bigger panel is owed a bigger table rather than silent truncation. */
+/* The stored model — what the OLT has told us, per ME How ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 11. */
 #ifndef GPON_EXT_VLAN_MAX
 #define GPON_EXT_VLAN_MAX	4
 #endif
@@ -926,16 +775,8 @@ static inline void gpon_mac_filter_copy_row(u8 *dst, const u8 *src)
 		dst[i] = src[i];
 }
 
-/*
- * Apply one ME 49 table-attribute write.  @body is the 8 octets the OLT sent.
- * -> true when the model changed.
- *
- * ★ THE OPERATION IS IN THE ROW, which is what makes this ME different from
- *   every other table in this model: ME 171 signals a delete with a magic row,
- *   ME 49 carries ADD / REMOVE / CLEAR-ALL in two bits.  All three are honoured
- *   here; the reserved fourth value is COUNTED, because an OLT that sends it is
- *   saying something and a silent drop is how that stops being visible.
- */
+/* Apply one ME 49 table-attribute write. @body is the 8 ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 12. */
 static inline bool gpon_mac_filter_row_set(struct gpon_vlan_model *m, u16 inst,
 					   const u8 *body)
 {
@@ -1041,14 +882,8 @@ static inline const u8 *gpon_mac_filter_raw(const struct gpon_vlan_model *m,
 	return NULL;
 }
 
-/* ---------------------------------------------------------------------------
- * The other six: pure decoders over the dense instance body
- * ------------------------------------------------------------------------- */
-
-/* ME 78 — VLAN tagging operation configuration data, the pre-171 single-tag
- * operation ME.  An OLT that uses it instead of 171 is expressing the SAME
- * service, so it decodes into the same rule shape and the family gets one
- * install path rather than two. */
+/* The other six: pure decoders over the dense instance body ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 13. */
 struct gpon_vlan_op {
 	u8	us_mode;	/* #1 upstream tagging operation mode */
 	u16	us_tci;		/* #2 upstream TCI (pri<<13 | cfi<<12 | vid) */
@@ -1070,16 +905,7 @@ static inline bool gpon_vlan_op_decode(const u8 *body, unsigned int blen,
 	return true;
 }
 
-/* ⚠ AND THERE IS NO gpon_vlan_op_to_rule() HERE, DELIBERATELY.  ME 78's
- * operation-mode enum would have to be translated into the rule shape above,
- * and NOTHING on either Luna die can check that translation: measured, the
- * mib_VlanTagOpCfgData plugin imports no omci_wrapper_* on either generation,
- * so stock stores this ME and programs nothing from it.  Writing the mapping
- * anyway would be a guess with no oracle, which is the failure this project
- * pays for most.  OWED, and what settles it is an OLT that actually provisions
- * with ME 78 plus a capture of what the service then has to look like. */
-
-/* ME 84 — VLAN tagging filter data: the per-bridge-port VLAN admit list. */
+/* ⚠ AND THERE IS NO gpon_vlan_op_to_rule() HERE, ... -- dev/MEASURED-gpon_omci_vlan.h.md sec 14. */
 #define GPON_VLAN_FILTER_MAX	12	/* #1 is 24 octets = 12 TCI entries */
 
 struct gpon_vlan_admit {
@@ -1102,23 +928,8 @@ static inline bool gpon_vlan_admit_decode(const u8 *body, unsigned int blen,
 	return a->n <= GPON_VLAN_FILTER_MAX;
 }
 
-/*
- * -> is @vid one of the VIDs this list NAMES?  A fact about the list, and only
- *    that.  Each entry is a TCI: priority in the top 3 bits, CFI in bit 12,
- *    VID in the low 12 -- read off stock's own printer, which renders the
- *    entries as "FilterTbl[%d]: PRI %d,CFI %d, VID %d" with exactly that split.
- *
- * ⚠⚠ AND THERE IS DELIBERATELY NO gpon_vlan_admits() HERE.  Whether the list is
- *    a pass list, a drop list or something else is the FORWARD OPERATION
- *    (attribute #2), and NOTHING IN STOCK TESTS THAT BYTE: measured on both
- *    dies, VlanTagFilterDataDrvCfg is a log-only `return 0` and the plugin
- *    imports no omci_wrapper_* at all, so this ME is stored and never acted on.
- *    We therefore have NO oracle for the operation vocabulary, and writing one
- *    from memory of the spec is the failure mode this project pays for most --
- *    an admission verdict that reads permissive would forward traffic the OLT
- *    told us to drop.  OWED, and what settles it is an OLT that provisions with
- *    a non-trivial forward operation, captured.
- */
+/* > is @vid one of the VIDs this list NAMES? A fact about the ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 15. */
 static inline bool gpon_vlan_admit_lists_vid(const struct gpon_vlan_admit *a,
 					     u16 vid)
 {
@@ -1266,50 +1077,8 @@ static inline bool gpon_mcast_iw_decode(const u8 *body, unsigned int blen,
 	return true;
 }
 
-/* ---------------------------------------------------------------------------
- * The family seam
- * ------------------------------------------------------------------------- */
-
-/*
- * What a family shell must supply to make a decision real.  Every member may
- * be NULL: a shell that cannot install a kind of rule says so by leaving the
- * slot empty, and the core COUNTS the decision as owed instead of pretending
- * it landed.  That is the whole difference between this model and the silence
- * it replaces — an unimplemented install is now a number somebody can read.
- *
- * ★ FILLED SINCE 2026-09-14, by BOTH families, and each fills exactly what
- *   its silicon can be shown to do:
- *     flowcore/cortina_vlan_install.c  the DMA-AFT egress VLAN edit (RTL9607F)
- *     flowcore/luna_vlan_install.c     the per-port default VID (three dies)
- *   Both leave five slots NULL on purpose -- ME 84, 79, 130, 280 and 281 have
- *   no established programmable surface on either family -- so the owed count
- *   still measures something real rather than reading zero by omission.  The
- *   emitted write SEQUENCE is asserted per family and per die on x86, with no
- *   board, by dev/rtl9607c-test/gpon_vlan_install_diff_test.
- *
- * ⚠ AND WHAT IS STILL OWED IS THE CLASSIFIER, which is where stock puts an
- *   ME 171 row: neither family reaches one.  On Luna the access engine that
- *   would carry a CF_ or ACL_ entry is not established and one declared die
- *   (the RTL9603CVD) has no CF block at all; on Cortina no port2vid or
- *   VID-membership descriptor exists in the NE.  A rule that needs one is
- *   REFUSED with a named rc and no bus traffic, never approximated -- the
- *   board CONFIRMS, it does not DISCOVER.
- *
- * ★★ AND ME 49 IS DELIBERATELY NOT HERE -- IT OWES NO INSTALL AT ALL, WHICH IS
- *    A MEASUREMENT.  Stock reaches its install through omci_wrapper_setMacFilter
- *    and that lands on a function that is TWO INSTRUCTIONS, `jr ra; move v0,
- *    zero`: pf_rtl96xx_SetMacFilter at .text+0x128 of the X111W's pf_rg.ko
- *    (8 bytes, mapper slot 60) and pf_rt_SetMacFilter at .text+0x5a8 of the
- *    G24W's pf_rt_fc.ko (8 bytes, mapper slot 67).  Stock records the row in a
- *    software list and programs NOTHING, on both dies and both kernel
- *    generations.  ⇒ holding the table IS byte-for-byte what stock does here,
- *    and giving ME 49 an op slot would invite a shell to "finish" an install
- *    that does not exist.  The claim is re-derivable with no board and no AI:
- *        python3 ONU-test-case/mac_filter_install_stub.py --board=<S>/<B>/<M>
- *    ⚠ IT IS A PARITY CLAIM, NOT A CAPABILITY ONE: neither firmware filters on
- *      a MAC here, and the day a die fills that mapper slot the guard above
- *      goes red and the install becomes owed.
- */
+/* The family seam What a family shell must supply to make a ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 16. */
 struct gpon_vlan_ops {
 	int (*rule_install)(void *ctx, const struct gpon_vlan_rule *r);
 	int (*rule_remove)(void *ctx, const struct gpon_vlan_rule *r);
@@ -1331,11 +1100,8 @@ enum gpon_vlan_emit {
 	GPON_VLAN_INSTALL_FAILED,
 };
 
-/*
- * Hand one decided rule to the family.  @ops and @ctx may both be NULL, which
- * is the shipped state today -- no family in this tree fills the table yet, and
- * the count is what says so out loud.
- */
+/* Hand one decided rule to the family. @ops and @ctx may both ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 24. */
 static inline enum gpon_vlan_emit
 gpon_vlan_rule_emit(struct gpon_vlan_model *m, const struct gpon_vlan_ops *ops,
 		    void *ctx, const struct gpon_vlan_rule *r)
@@ -1355,23 +1121,8 @@ static inline u16 gpon_vlan_owed(const struct gpon_vlan_model *m)
 	return m->owed;
 }
 
-/* ---------------------------------------------------------------------------
- * The GEOMETRY of a decided rule — the half BOTH families would otherwise
- * derive separately
- * ------------------------------------------------------------------------- */
-
-/*
- * ★ WHY THIS IS CORE AND NOT FAMILY.  "How many received tags come off and how
- *   many go on" is arithmetic over the OMCI row, identical on every silicon,
- *   and it has two traps that cost a session each if re-derived per family:
- *   TAGS_TO_REMOVE 3 is NOT a count (it is DISCARD, and stock diverts on it
- *   before emitting any filter), and a tag with pri_act == NONE is not written
- *   at all however complete the rest of its word looks.
- *
- * ⚠ IT CLASSIFIES, IT DOES NOT JUDGE CAPABILITY.  Whether a shape is
- *   installable is the FAMILY's answer, per die, and the core has no business
- *   having an opinion about a classifier it cannot see.
- */
+/* The GEOMETRY of a decided rule — the half BOTH families ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 17. */
 enum gpon_vlan_shape {
 	GPON_VLAN_SHAPE_DISCARD = 0,	/* drop what matched; nothing else applies */
 	GPON_VLAN_SHAPE_TRANSPARENT,	/* strip nothing, write nothing */
@@ -1431,13 +1182,8 @@ static inline void gpon_vlan_rule_want(const struct gpon_vlan_rule *r,
 		w->all_assigned = false;	/* nothing was assigned at all */
 }
 
-/* ---------------------------------------------------------------------------
- * Walking one ME 171 instance into the family
- * ------------------------------------------------------------------------- */
-
-/* ME 171's per-INSTANCE attributes: everything a ROW needs that is not in the
- * row.  Passed in rather than read from the ME store, so this header keeps its
- * one include and the walker stays fuzzable with no ME model at all. */
+/* Walking one ME 171 instance into the family ME 171's ...
+ * dev/MEASURED-gpon_omci_vlan.h.md sec 18. */
 struct gpon_vlan_inst_attrs {
 	u8	assoc_type;	/* #1 */
 	u16	in_tpid;	/* #3 */

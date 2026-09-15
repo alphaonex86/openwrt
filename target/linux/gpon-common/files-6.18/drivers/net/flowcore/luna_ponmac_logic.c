@@ -5,11 +5,8 @@
 
 #include "luna_ponmac_logic.h"
 
-/* True for the SerDes offsets our golden table writes but the stock rev-A bring-up never does.
- * The first three ranges were labelled "duplicate GPON per-rate bank 1/2/3" until 2026-09-02;
- * the chip's own register map names them as the OTHER line-rate pages (SDS_ANA_SPD /
- * SDS_ANA_1P25G / SDS_ANA_EPON) - not GPON banks.  Comment-only correction; the ranges are
- * untouched. */
+/* True for the SerDes offsets our golden table writes but the ...
+ * dev/MEASURED-luna_ponmac_logic.c.md sec 1. */
 bool c2_off_overconfig(u32 off)
 {
 	u32 a = off & 0xffffu;

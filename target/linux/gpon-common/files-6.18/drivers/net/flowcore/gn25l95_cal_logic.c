@@ -1,40 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * GN25L95 per-unit calibration, expressed as an ordered operation list.
- *
- * SOURCE OF THE FACTS: each unit's OWN stock rtkbosa
- * (G24W fn 0x4045a4 size 0x660, X400AXF fn 0x1cafc size 0x88c), compared
- * against each other. Ranges, indices, order, the RMWs, the 0x6E pulse,
- * A0 = 0x6a and the password writes agree; the two disagreements are the
- * struct gn_variant fields.
- *
- * ⚠ WHAT IS DELIBERATELY NOT COPIED: stock ignores I2C and fread errors and
- *   falls back to a COMPILED calibration. Inheriting that would mean a laser
- *   programmed from another unit's numbers while every log line reads healthy.
- *   Here a bad input yields no operations at all.
- */
+/* GN25L95 per-unit calibration, expressed as an ordered ...
+ * dev/MEASURED-gn25l95_cal_logic.c.md sec 1. */
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include "gn25l95_cal_logic.h"
 
-/* CONFIRMED at G24W rtkbosa 0x40471c/20/28: the MCU loader calls
- * byte_write(0x51, 0x7f, 4) and the wrapper at 0x4031e8 passes slave and
- * register unchanged into rtk_i2c_write. The DETECTOR (is_semtech_gn2xl9x,
- * 0x403fac) addresses the part the SAME way -- 0x51:0x7f at 0x404048, then
- * reads 0x80/0x85/0x86, then page 2 and a read of 0xD1. There is ONE transport,
- * and 0xff is a PAGE VALUE written to the selector, never a second register. */
+/* CONFIRMED at G24W rtkbosa 0x40471c/20/28: the MCU loader ...
+ * dev/MEASURED-gn25l95_cal_logic.c.md sec 2. */
 #define SLAVE_CAL	0x51		/* the loader's slave                */
 #define SLAVE_SFF	0x50		/* SFF-8472, used only by the G24 tail */
 #define REG_PAGE	0x7f		/* page/table selector               */
 
-/*
- * The calibration file is eight 0x80-byte slots, and which slot serves which
- * (page, half) is a LOOKUP, not a formula -- page 2 alone occupies two of them.
- * Page 2's high half has a name because THREE separate operations index it and
- * a comment claiming otherwise was wrong: the D2..E7 rewrite and the BB
- * readback address the very bytes the page-2 bulk copy already wrote.
- */
+/* The calibration file is eight 0x80-byte slots, and which ...
+ * dev/MEASURED-gn25l95_cal_logic.c.md sec 3. */
 #define CAL_PAGE2_HIGH	0x200u			/* page 2, registers 0x80..0xff */
 #define CAL_P2(reg)	(CAL_PAGE2_HIGH + (reg) - 0x80u)
 #define REG_BB		0xbbu			/* the one register read back   */
@@ -44,26 +23,8 @@
 const struct gn_variant gn_variant_g24w    = { .bb_set = true,  .tail_c4_7f = true  };
 const struct gn_variant gn_variant_x400axf = { .bb_set = false, .tail_c4_7f = false };
 
-/* ★★★ THE SEQUENCE, AGAINST AN ACTUAL REPLAY OF BOTH STOCK LOADERS.
- *
- * Oracle: each unit's own rtkbosa executed under Unicorn with a synthetic
- * 1024-byte calibration and stateful mocked byte-I/O -- no hardware.
- *   G24W    fn 0x4045a4  -> 649 byte-I/O calls = 642 writes + 7 reads
- *   X400AXF fn 0x1cafc   -> 646 calls          = 639 writes + 7 reads
- *   ELF sha256: G24W b4eca8bf..66d0 · X400AXF b0259256..572e
- * The first 646 calls have the SAME shape; only the BB write at index 641
- * differs (set bit 0 / clear it), and the G24W appends three calls.
- *
- * ⚠ A PREVIOUS CUT OF THIS FILE WAS INVENTED and is why the trace is quoted
- *   here rather than summarised: it ordered the tables 2,4,5,6 instead of
- *   4,5,6,2; omitted D2..E7, low 6f/72/78/79, F8/FC and the password writes;
- *   turned the 0x6E pulse into two literal writes when stock does ONE read and
- *   two writes derived from that byte; and read the diagnostics after the G24
- *   tail instead of before it. None of those would have raised an error -- they
- *   would have programmed a laser plausibly and wrongly, in silence.
- *
- * The selector positions below are the trace's, and the test asserts them.
- */
+/* ★★★ THE SEQUENCE, AGAINST AN ACTUAL REPLAY OF BOTH STOCK ...
+ * dev/MEASURED-gn25l95_cal_logic.c.md sec 4. */
 static int emit(struct gn_op *o, u32 *n, u32 max, u8 kind, u8 slave,
 		u16 reg, u8 val, u8 mask)
 {
@@ -128,15 +89,8 @@ int gn25l95_cal_ops(const u8 *cal, u32 cal_len, const struct gn_variant *v,
 	for (i = 0x7b; i <= 0x7e; i++)
 		EMIT(GN_WRITE, SLAVE_CAL, i, 0xff, 0);
 
-	/*
-	 * BB is judged on the WHOLE byte, and the expected value is DERIVED
-	 * from the payload: bits 7..1 are what the page-2 bulk wrote, bit 0 is
-	 * what the RMW just set. Judging bit 0 alone would accept an all-zero
-	 * reply -- a dead bus or a fake ACK -- as a pass on any unit that
-	 * clears it, which is every X400AXF. Two independent routes give the
-	 * same byte on the X400AXF: cal[0x23b] is 0x1c, and the stock
-	 * sequence's own final pair is {0xbb, 0x1c}.
-	 */
+	/* BB is judged on the WHOLE byte, and the expected value is ...
+	 * dev/MEASURED-gn25l95_cal_logic.c.md sec 5. */
 	EMIT(GN_SELECT,      SLAVE_CAL, REG_PAGE, 2, 0);	/* index 639 */
 	EMIT(GN_RMW,         SLAVE_CAL, REG_BB, v->bb_set ? 0x01 : 0x00, 0x01);
 	EMIT(GN_READ_EXPECT, SLAVE_CAL, REG_BB,

@@ -12,16 +12,8 @@ u64 ca_ni_mac_key(const u8 *mac)
 	       ((u64)mac[3] << 16) | ((u64)mac[4] << 8) | mac[5];
 }
 
-/* ------------------------------------------------------------------ */
-/* TX round (2026-09-02).  Chip facts below are the RTL9607F's, from   */
-/* the same tier-1/tier-2 evidence the shell's register header cites;  */
-/* the cortina-ni-regs.h spellings whose only code uses moved here are */
-/* retired (dead defines, listed for deletion in the coordinator       */
-/* report).  cortina-ni-flowoffload.c still uses the PPORT / CPU0      */
-/* spellings, so those regs.h lines stay live and are re-spelled here  */
-/* token-identically (the redefinition-warning trick can only bite in  */
-/* a TU that includes both headers -- the tx shell does).              */
-/* ------------------------------------------------------------------ */
+/* TX round (2026-09-02). Chip facts below are the RTL9607F's, ...
+ * dev/MEASURED-cortina_ni_tx_logic.c.md sec 1. */
 
 unsigned int ca_ni_mac_bucket(const u8 *mac, unsigned int mask)
 {
@@ -51,12 +43,8 @@ int ca_ni_lan_fdb_ent_port(u64 ent, u64 mac_key)
 	return (int)((ent >> CA_NI_LAN_FDB_PORT_SHF) & CA_NI_LAN_FDB_PORT_MASK);
 }
 
-/*
- * The egress port set for one frame, as a port bitmap (never empty).
- * Branch structure moved verbatim from the shell's ca_ni_lan_tx_ports();
- * what the shell did in-branch with kernel services became the three
- * outcome flags (counters and the WARN stay in the shell).
- */
+/* The egress port set for one frame, as a port bitmap (never ...
+ * dev/MEASURED-cortina_ni_tx_logic.c.md sec 2. */
 void cortina_ni_lan_tx_pick(int force_ldpid, int mode, u32 link,
 			    unsigned int fixed_port, bool da_mc,
 			    u64 fdb_ent, u64 da_key,
@@ -68,12 +56,8 @@ void cortina_ni_lan_tx_pick(int force_ldpid, int mode, u32 link,
 	p->flood = false;
 	p->force_oor = false;
 
-	/* Diagnostic knob still wins, but RANGE-CHECKED: the port set is a
-	 * bitmap, and a bit of an out-of-range value is 0 = "no port", which
-	 * would map an skb and attach it to no descriptor at all (a DMA +
-	 * skb leak, and the frame silently vanishes).  The DEST field is 4
-	 * bits wide, so anything outside 0..15 could never have been stamped
-	 * anyway -- out of range falls through exactly as in the shell. */
+	/* Diagnostic knob still wins, but RANGE-CHECKED: the port set ...
+	 * dev/MEASURED-cortina_ni_tx_logic.c.md sec 3. */
 	if (force_ldpid >= 0) {
 		if (force_ldpid < CA_NI_TX_DEST_LDPID_COUNT) {
 			p->ports = 1u << force_ldpid;
@@ -121,12 +105,8 @@ u32 cortina_ni_tx_vp_lspid(unsigned int vp)
 				     : CA_DMA_LSO_LSPID_CPU0;
 }
 
-/* ------------------------------------------------------------------ */
-/* The L2FE ARB ldpid->pdpid map semantics (vendor aal_port.c global   */
-/* port init).  The pdpid names are re-spelled token-identically to    */
-/* cortina-ni-regs.h (still live there for cortina-ni-flowoffload.c);  */
-/* the ldpid range names' only code uses live here now.                */
-/* ------------------------------------------------------------------ */
+/* The L2FE ARB ldpid->pdpid map semantics (vendor aal_port.c ...
+ * dev/MEASURED-cortina_ni_tx_logic.c.md sec 4. */
 #define CA_NI_PPORT_OAM			0x0c	/* AAL_PPORT_OAM */
 #define CA_NI_PPORT_QM			0x08	/* AAL_PPORT_QM (US PON data path) */
 #define CA_NI_PPORT_BLACKHOLE		0x0f	/* AAL_PPORT_BLACKHOLE (drop) */
@@ -165,11 +145,8 @@ int cortina_ni_arb_pdpid(u32 idx)
 	return -1;	/* not programmed by this driver's init */
 }
 
-/* ------------------------------------------------------------------ */
-/* Descriptor word1 + PON HEADER_A encoders.  Bit positions are the    */
-/* ex-cortina-ni-regs.h CA_NI_TX_DESC1_* / CA_NI_PON_HDRA_* facts      */
-/* (stock ca-ne.ko disasm); their only code uses live here now.        */
-/* ------------------------------------------------------------------ */
+/* Descriptor word1 + PON HEADER_A encoders. Bit positions are ...
+ * dev/MEASURED-cortina_ni_tx_logic.c.md sec 5. */
 #define CA_NI_TX_DESC1_DEST_SHF		1	/* GENMASK(4, 1): LAN port */
 #define CA_NI_TX_DESC1_DEST_MASK	0xfu
 #define CA_NI_TX_DESC1_COS_SHF		5	/* GENMASK(7, 5) */

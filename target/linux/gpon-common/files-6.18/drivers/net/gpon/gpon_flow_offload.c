@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * gpon_flow_offload -- the TC hardware-offload lifecycle, shared.
- *
- * See gpon_flow_offload.h for WHERE the seam is and why it is not where it
- * first looked.  This file holds the half that is a fact about nf_flow_table
- * and about keeping a cookie map; every line that would have to read or write
- * a register is on the other side of `ops`.
- */
+/* gpon_flow_offload -- the TC hardware-offload lifecycle, ...
+ * dev/MEASURED-gpon_flow_offload.c.md sec 1. */
 #include <linux/errno.h>
 #include <linux/ip.h>
 #include <linux/jiffies.h>
@@ -86,13 +80,7 @@ void gpon_flow_offload_free(struct gpon_flow_offload *fo)
 	kfree(fo);
 }
 
-/*
- * ── the ACTION decode ────────────────────────────────────────────────────
- *
- * Everything here is nf_flow_table's own encoding, documented against what
- * emits it, because the encodings are not obvious and getting one backwards
- * installs a WORKING-LOOKING entry that rewrites the wrong end of the flow.
- */
+/* ── the ACTION decode ... -- dev/MEASURED-gpon_flow_offload.c.md sec 2. */
 int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 			  bool ds_leg, struct gpon_flow_act *act,
 			  struct net_device **odev_out)
@@ -111,23 +99,8 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 		case FLOW_ACTION_MANGLE:
 			switch (fa->mangle.htype) {
 			case FLOW_ACT_MANGLE_HDR_TYPE_IP4:
-				/*
-				 * nf_flow_table's two legs of a masqueraded
-				 * flow are exact mirrors: the ORIGINAL rule
-				 * mangles saddr (offset 12) to our WAN address,
-				 * the REPLY rule mangles daddr (offset 16) back
-				 * to the client's.  The discriminator is the
-				 * INGRESS SIDE and NOT the SNAT/DNAT flag, so
-				 * an inbound port-forward works too -- its
-				 * WAN-ingress leg is a daddr rewrite and its
-				 * LAN-ingress leg a saddr rewrite, the same two
-				 * shapes reached via ipv4_dnat().
-				 *
-				 * A doubly-NAT'd flow emits BOTH mangles on one
-				 * leg; the second trips this and the flow is
-				 * refused to software -- correct, because an
-				 * entry carries exactly one rewrite.
-				 */
+				/* nf_flow_table's two legs of a masqueraded flow are exact ...
+				 * dev/MEASURED-gpon_flow_offload.c.md sec 3. */
 				if (fa->mangle.offset !=
 				    (ds_leg ? offsetof(struct iphdr, daddr)
 					    : offsetof(struct iphdr, saddr)))
@@ -138,16 +111,8 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				break;
 			case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
 			case FLOW_ACT_MANGLE_HDR_TYPE_UDP:
-				/*
-				 * The port rewrite is ONE big-endian 32-bit
-				 * word at offset 0: source in the upper half,
-				 * dest in the lower.  The MASK is the leg
-				 * discriminator (flow_offload_port_snat):
-				 * ORIGINAL -> mask ~htonl(0xffff0000), value
-				 * p<<16 = the new SOURCE port; REPLY -> mask
-				 * ~htonl(0xffff), value p = restore the DEST
-				 * port to the client's original one.
-				 */
+				/* The port rewrite is ONE big-endian 32-bit word at offset 0: ...
+				 * dev/MEASURED-gpon_flow_offload.c.md sec 4. */
 				if (fa->mangle.offset != 0 ||
 				    (fa->mangle.mask == ~htonl(0xffff)) != ds_leg)
 					return -EOPNOTSUPP;
@@ -157,69 +122,8 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 				act->port_valid = 1;
 				break;
 			case FLOW_ACT_MANGLE_HDR_TYPE_ETH:
-				/*
-				 * This leg's next-hop DMAC, emitted as TWO ETH
-				 * mangles: offset 0 = dmac[0..3]; offset 4 with
-				 * the low 16 bits changed (the mask KEEPS the
-				 * high 16) = dmac[4..5].  The offset-4-high and
-				 * offset-8 words are the SMAC, which the engine
-				 * substitutes itself -- ignored here.
-				 *
-				 * Direction-agnostic on purpose: the same parse
-				 * yields the WAN gateway MAC on the US leg and
-				 * the LAN client's MAC on the DS leg, because
-				 * flow_offload_eth_dst() resolves the neighbour
-				 * of the OTHER tuple's source address.
-				 */
-				/*
-				 * ★★★ READ THE VALUE'S *MEMORY*, NOT ITS
-				 * NUMBER -- and this was wrong here until
-				 * 2026-09-11, on big-endian only.
-				 *
-				 * flow_offload_eth_dst() builds these two words
-				 * with `memcpy(&val, ha, 4)` and
-				 * `memcpy(&val16, ha + 4, 2)`. There is NO
-				 * htonl anywhere in that path (unlike the IP
-				 * and port mangles, which DO carry network
-				 * order and are correctly read with ntohl
-				 * below), so what the word carries is the MAC's
-				 * own byte order in memory and nothing else.
-				 * Decoding it with numeric shifts therefore
-				 * yields the right MAC on a little-endian host
-				 * and a per-word REVERSED one on a big-endian
-				 * host: ha[3],ha[2],ha[1],ha[0],ha[5],ha[4].
-				 *
-				 * ⚠ WHICH IS WHY IT SURVIVED: this file was
-				 * written and proven on the Cortina, ARM64 and
-				 * LITTLE-endian, where the two spellings agree
-				 * byte for byte. The Luna family is MIPS
-				 * BIG-endian, and the first consumer there to
-				 * compare this MAC against one read from the
-				 * neighbour table refused every flow it was
-				 * offered -- correctly, because the two really
-				 * did differ (measured: 168 refusals, "the
-				 * rule's next hop is not the WAN gateway").
-				 *
-				 * The project's own rule names this exact
-				 * shape: wire parsing uses explicit byte math,
-				 * never a cast. The fix is a NO-OP on
-				 * little-endian by construction.
-				 */
-				/*
-				 * ⚠⚠ AND THE TWO WORDS ARE NOT BUILT THE SAME
-				 * WAY -- the host differential caught this in
-				 * the FIRST version of this very fix, before
-				 * the board did. Word 0 is `memcpy(&val, ha, 4)`
-				 * with no promotion, so its memory IS the MAC's.
-				 * Word 4 is `memcpy(&val16, ha + 4, 2);
-				 * val = val16` -- a NUMERIC promotion, so on a
-				 * big-endian host those two octets live in the
-				 * LOW half and the word's first two memory
-				 * bytes are ZERO. Narrowing back to u16 and
-				 * reading THAT object's memory is right on both
-				 * orders; reading the u32's memory is not.
-				 * Pinned by rtl9607c-test/eth_mangle_endian_test.
-				 */
+				/* This leg's next-hop DMAC, emitted as TWO ETH mangles: ...
+				 * dev/MEASURED-gpon_flow_offload.c.md sec 5. */
 				if (fa->mangle.offset == 0) {
 					u32 w = fa->mangle.val;
 
@@ -240,23 +144,14 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 		case FLOW_ACTION_CSUM:
 			break;		/* implicit in the HW rewrite */
 		case FLOW_ACTION_PPPOE_PUSH:
-			/*
-			 * The LIVE negotiated session id (host-order u16, from
-			 * the reply tuple's encap -- nf_flow_rule_route_common;
-			 * mtk_ppe precedent).  NEVER a configured constant.
-			 */
+			/* The LIVE negotiated session id (host-order u16, from the ...
+			 * dev/MEASURED-gpon_flow_offload.c.md sec 10. */
 			act->pppoe_sid = fa->pppoe.sid;
 			break;
 		case FLOW_ACTION_VLAN_PUSH:
 		case FLOW_ACTION_VLAN_POP:
-			/*
-			 * Reached only when the WAN sub-interface's LOWER device
-			 * is itself a flowtable device, so the encap survived
-			 * nft_dev_forward_path() and a push/pop was emitted for
-			 * it.  No hit-action here can express a tag, so it is
-			 * refused -- but ATTRIBUTED, because the absence of that
-			 * attribution made this defect unreadable twice.
-			 */
+			/* Reached only when the WAN sub-interface's LOWER device is ...
+			 * dev/MEASURED-gpon_flow_offload.c.md sec 6. */
 			if (fo && fo->ops->note_vlan_action)
 				fo->ops->note_vlan_action(fo->sh, ds_leg,
 					fa->id == FLOW_ACTION_VLAN_PUSH ?
@@ -295,12 +190,8 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	if (!fo || !fo->table_ready)
 		return -EOPNOTSUPP;
 
-	/*
-	 * The other direction may already hold this cookie.  Refusing here is
-	 * not an error path: nf_flow_table offers both legs and each carries
-	 * its own cookie, so a COLLISION means we are being re-offered one we
-	 * already installed.
-	 */
+	/* The other direction may already hold this cookie. Refusing ...
+	 * dev/MEASURED-gpon_flow_offload.c.md sec 7. */
 	if (rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params))
 		return -EEXIST;
 
@@ -308,20 +199,8 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	if (err)
 		return err;
 
-	/*
-	 * ★ The block-cb device is NOT the flow's ingress -- every registered
-	 * cb sees every rule.  The rule carries the real ingress ifindex in its
-	 * META key.  LAN ingress = the US (LAN->WAN) transit direction;
-	 * anything else is the DS (WAN->LAN) reply leg, which nf_flow_table
-	 * offers as a second REPLACE with its own cookie once
-	 * NF_FLOW_HW_BIDIRECTIONAL is set (nft_flow_offload and xt_FLOWOFFLOAD
-	 * both set it unconditionally).
-	 *
-	 * ⚠ A rule with NO META key leaves ds_leg false, i.e. it is treated as
-	 * the US leg.  That is the historical behaviour and it is kept
-	 * deliberately: changing it here would change which mangle offsets are
-	 * accepted, on every board at once, for a shape nobody has measured.
-	 */
+	/* ★ The block-cb device is NOT the flow's ingress -- every ...
+	 * dev/MEASURED-gpon_flow_offload.c.md sec 8. */
 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {
 		struct flow_match_meta m;
 
@@ -344,11 +223,8 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	entry->cookie = f->cookie;
 	entry->ds = ctx.ds_leg;
 
-	/*
-	 * Every decision that needs silicon, and the install, in ONE call --
-	 * see the contract for why it is not two.  A refusal here costs no
-	 * unwind: nothing is in the table yet.
-	 */
+	/* Every decision that needs silicon, and the install, in ONE ...
+	 * dev/MEASURED-gpon_flow_offload.c.md sec 11. */
 	err = fo->ops->install(fo->sh, &key, &act, &ctx, entry_priv(entry),
 			       &entry->idx);
 	if (err)
@@ -383,14 +259,8 @@ void gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 	if (!fo || !fo->table_ready)
 		return;
 
-	/*
-	 * ⚠ REMOVING WHILE WALKING.  rhashtable's iterator is explicitly safe
-	 * against removal of the entry it is sitting on, which the previous
-	 * implementation achieved instead by iterating the family's own reverse
-	 * map -- a mechanism no other family has.  The walk is stopped and
-	 * restarted around each removal because rhashtable_remove_fast may
-	 * rehash, and a rehash under a held walk is the use-after-free.
-	 */
+	/* ⚠ REMOVING WHILE WALKING. rhashtable's iterator is ...
+	 * dev/MEASURED-gpon_flow_offload.c.md sec 9. */
 	rhashtable_walk_enter(&fo->table, &it);
 	do {
 		rhashtable_walk_start(&it);

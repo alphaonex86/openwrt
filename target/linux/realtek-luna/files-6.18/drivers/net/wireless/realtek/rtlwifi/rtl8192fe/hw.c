@@ -21,12 +21,7 @@
 
 #define LLT_CONFIG	5
 
-/* Crystal load-cap trim. This board's WiFi EFUSE is blank (crystalcap reads
- * 0x00), so the per-chip XCAP comes from the board factory cal instead: the
- * flash apmib HW_WLAN0_11N_XCAP value (0x47) is injected into
- * efuse.crystalcap by _rtl92fe_apply_board_cal() and applied by the AFE trim
- * in rtl92fe_hw_init(). Default xtal_cap = -1 means "use the (now cal-filled)
- * EFUSE value"; set xtal_cap >= 0 to override for per-board tuning. */
+/* Crystal load-cap trim. This board's WiFi EFUSE is blank ... -- dev/MEASURED-hw.c.md sec 1. */
 static int xtal_cap = -1;
 module_param(xtal_cap, int, 0644);
 MODULE_PARM_DESC(xtal_cap, "RTL8192F crystal load-cap trim 0..0x3f (<0 = use EFUSE/board-cal value)");
@@ -56,78 +51,21 @@ static void _rtl92fe_stop_tx_beacon(struct ieee80211_hw *hw)
 	rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 2, tmp);
 }
 
-/* ★★ DIAGNOSTIC KNOB, 2026-09-01 -- arming beacon TX is the last thing this
- * board does before it wedges, and this makes the question answerable on ONE
- * image instead of two builds.
- *
- * MEASURED: `iw phy phy0 interface add ap0 type __ap` succeeds (rc 0) and the
- * following `ip link set ap0 up` wedges the whole SoC -- no hostapd, no beacon
- * template, no beacon ENABLED, and the rtl_pci interrupt count still 0.  So it
- * is not the beacon CONTENT and not a storm: it is the act of arming beacon
- * transmission on a queue nothing has ever filled.
- *
- * ⚠ AND THE TIMING IS WHAT DIFFERS FROM MAINLINE, not the register set.
- * rtl8xxxu's set_linktype() writes the MSR and NOTHING else; it arms beacons
- * only later, from bss_info_changed() on BSS_CHANGED_BEACON_ENABLED -- i.e.
- * when beaconing is actually turned on.  We arm it here, at interface-up.
- * regs_touched_vs_mainline.py reported exactly those two registers as
- * "only ours" and I ERASED THAT by widening the mainline side of the pair to
- * include start_tx_beacon(): the union then matched, and the SEQUENCE
- * difference -- the real one -- disappeared with it.  Comparing sets loses
- * order; that is a limit of the tool and it is now written down.
- */
+/* ★★ DIAGNOSTIC KNOB, 2026-09-01 -- arming beacon TX is the ... -- dev/MEASURED-hw.c.md sec 2. */
 static bool arm_beacon_on_ap = true;
 module_param(arm_beacon_on_ap, bool, 0644);
 MODULE_PARM_DESC(arm_beacon_on_ap,
 		 "arm beacon TX when entering AP mode (default 1). Set 0 to "
 		 "test whether that is what wedges the host bus.");
 
-/* ★★ A BISECT KNOB, NOT A CONFIG KNOB.  Three register writes arm beacon TX,
- * and one of them wedges the host bus.  Guessing which cost three refuted
- * hypotheses (the per-dword readback, the 8051 reset, deferring the arm until
- * after a beacon exists -- the last two MEASURED FALSE).  A bitmask makes it
- * one build and three boots instead:
- *
- *   bit 0  FWHW_TXQ_CTRL+2 |= BIT(6)   -- let the HW own the beacon queue
- *   bit 1  TBTT_PROHIBIT+1  = 0xff     -- the prohibit window's middle byte
- *   bit 2  TBTT_PROHIBIT+2 |= BIT(0)   -- the prohibit window's top bit
- *
- * ⚠ AND THE VENDOR DRIVER PROGRAMS TBTT_PROHIBIT AS ONE 32-BIT FIELD, with
- * measured values (0x4004, 0x104, and a field write under mask 0x000FFF00),
- * where this code follows upstream rtlwifi and pokes byte +1 with 0xff.  That
- * is a lead, not a conclusion: this knob is what decides whether bits 1-2 are
- * even involved. */
+/* ★★ A BISECT KNOB, NOT A CONFIG KNOB. Three register writes ... -- dev/MEASURED-hw.c.md sec 3. */
 static int beacon_arm_steps = 7;
 module_param(beacon_arm_steps, int, 0644);
 MODULE_PARM_DESC(beacon_arm_steps,
 		 "bitmask of the beacon-arming register writes to perform "
 		 "(default 7 = all three); for bisecting which one wedges");
 
-/* ★★★ THE PAIR THE BISECT NAMED, AND THE VALUE THE VENDOR USES.
- *
- * MEASURED 2026-09-01, one build and seven boots, with steps=7 as the positive
- * control:
- *     steps 1 (FWHW_TXQ_CTRL)      SURVIVED
- *     steps 2 (TBTT_PROHIBIT+1)    SURVIVED
- *     steps 4 (TBTT_PROHIBIT+2)    SURVIVED
- *     steps 3 (both of the above)  WEDGED     <- 0 + 1
- *     steps 5 (0 + 2)              SURVIVED
- *     steps 7 (all three)          WEDGED     <- the control
- * So no single write wedges the host bus; FWHW_TXQ_CTRL's BIT(6) -- which hands
- * the beacon queue to the HARDWARE -- plus the TBTT_PROHIBIT+1 poke does.  The
- * prohibit window only matters once the hardware owns the queue, which is
- * exactly why neither is fatal alone.
- *
- * ★ AND THE VALUE IS WRONG BY THE VENDOR'S OWN NUMBER.  This code follows
- * upstream rtlwifi's 8192ee and pokes 0xff into byte +1 (plus BIT(0) at +2),
- * leaving field [19:8] = 0x1FF.  The vendor driver that runs THIS part on THIS
- * board writes the whole 32-bit register instead -- rtl8192cd programs
- * TBTT_PROHIBIT with 0x4004 / 0x104 / 0x1df04 and does a field write under mask
- * 0x000FFF00 with 0x138, its own comment calling that 10 ms.  0x1FF is 63%
- * larger than 0x138.
- *
- * -1 keeps the old byte-poke behaviour so the A/B is one image, not two builds.
- */
+/* ★★★ THE PAIR THE BISECT NAMED, AND THE VALUE THE VENDOR USES -- dev/MEASURED-hw.c.md sec 4. */
 static int tbtt_prohibit_field = -1;
 module_param(tbtt_prohibit_field, int, 0644);
 MODULE_PARM_DESC(tbtt_prohibit_field,
@@ -791,12 +729,7 @@ static bool _rtl92fe_llt_table_init(struct ieee80211_hw *hw)
 	u8 txpktbuf_bndy;
 	u8 u8tmp, testcnt = 0;
 
-	/* The RTL8192F packet buffer holds 0xF7 TX pages; the boundary at
-	 * 0xF8 reserves the top of the buffer for the beacon/MGNT queue.
-	 * The 4-EP RQPN split allocates HIQ/LOQ/NORMQ = 8 pages each and
-	 * the remainder (0xDE) to the public queue, with the auto-LLT bit
-	 * driving the on-chip linked-list initialisation.
-	 */
+	/* The RTL8192F packet buffer holds 0xF7 TX pages; the ... -- dev/MEASURED-hw.c.md sec 5. */
 	txpktbuf_bndy = TX_PAGE_BOUNDARY;
 
 	rtl_write_dword(rtlpriv, REG_RQPN, RQPN_INIT_VALUE);
@@ -891,12 +824,8 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 	if (!rtl_hal_pwrseqcmdparsing(rtlpriv, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK,
 				      PWR_INTF_PCI_MSK,
 				      RTL8192F_NIC_ENABLE_FLOW)) {
-		/* pr_err, not rtl_dbg: this is a HARD FAILURE PATH and the caller
-		 * only prints the generic "Init MAC failed". A failure that cannot
-		 * say WHICH step failed forces a rebuild-with-debug to learn what
-		 * the driver already knew.  It costs nothing at runtime: it prints
-		 * only when the radio is already dead.
-		 */
+		/* pr_err, not rtl_dbg: this is a HARD FAILURE PATH and the ...
+		 * dev/MEASURED-hw.c.md sec 6. */
 		pr_err("rtl8192fe: Init MAC failed at the power-on sequence "
 		       "(rtl_hal_pwrseqcmdparsing, RTL8192F_NIC_ENABLE_FLOW)\n");
 		return false;
@@ -931,12 +860,7 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 	rtl_write_dword(rtlpriv, REG_HISR, 0xffffffff);
 	rtl_write_dword(rtlpriv, REG_HISRE, 0xffffffff);
 
-	/* TRXDMA_CTRL (REG_TXDMA_PQ_MAP) is a 16-bit, 2-bit-field-per-queue
-	 * priority map on the RTL8192F (vendor HAL == 8192ee): VOQ=4, VIQ=6,
-	 * BEQ=8, BKQ=10, MGQ=12, HIQ=14, with LOW=1/NORMAL=2/HIGH=3. Program all
-	 * queues while preserving the RX-DMA nibble in bits[3:0]. MUST be a WORD
-	 * access -- a 32-bit write spills the high half into 0x010E.
-	 */
+	/* TRXDMA_CTRL (REG_TXDMA_PQ_MAP) is a 16-bit, ... -- dev/MEASURED-hw.c.md sec 7. */
 	dwordtmp = rtl_read_word(rtlpriv, REG_TRXDMA_CTRL);
 	dwordtmp &= 0xf;
 	dwordtmp |= TRXDMA_CTRL_QMAP_VALUE;
@@ -946,15 +870,8 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 
 	/* Set RCR register */
 	rtl_write_dword(rtlpriv, REG_RCR, rtlpci->receive_config);
-	/* Per-frame-type RX subtype filter maps. Only RXFLTMAP2 (management) was
-	 * programmed before; RXFLTMAP0 (data) + RXFLTMAP1 (control) were left at the
-	 * chip reset default, which drops the client's DATA frames. ★2026-07-05: this
-	 * is the WiFi ASSOCIATION bug: the WPA 4-way-handshake EAPOL messages (M2/M4)
-	 * are DATA frames — with RXFLTMAP0 unset the AP admits the auth/assoc (mgmt via
-	 * RXFLTMAP2) but never receives the client's EAPOL replies, so the 4-way handshake
-	 * times out and hostapd deauthenticates the STA ("local deauth request"). Program
-	 * the full triple to the values this driver's DESIGN.md specifies: data=accept-all,
-	 * control=PS-Poll only (so AP power-save clients work), management=accept-all. */
+	/* Per-frame-type RX subtype filter maps. Only RXFLTMAP2 ...
+	 * dev/MEASURED-hw.c.md sec 8. */
 	rtl_write_word(rtlpriv, REG_RXFLTMAP0, 0xffff);	/* data: accept all subtypes (incl. EAPOL) */
 	rtl_write_word(rtlpriv, REG_RXFLTMAP1, 0x0400);	/* control: admit PS-Poll (subtype 10) */
 	rtl_write_word(rtlpriv, REG_RXFLTMAP2, 0xffff);	/* management: accept all subtypes */
@@ -987,11 +904,8 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 
 dma64_end:
 
-	/* Set TX/RX descriptor physical address (lo part). The ring-base
-	 * DMA value split is host-endianness-independent (BE-MIPS safe):
-	 * rtl_write_dword normalises the register write, and the DMA
-	 * address is masked to 32 bits before being handed to the chip.
-	 */
+	/* Set TX/RX descriptor physical address (lo part). The ...
+	 * dev/MEASURED-hw.c.md sec 33. */
 	rtl_write_dword(rtlpriv, REG_BCNQ_DESA,
 			((u64)rtlpci->tx_ring[BEACON_QUEUE].buffer_desc_dma) &
 			DMA_BIT_MASK(32));
@@ -1031,39 +945,12 @@ dma64_end:
 
 	rtl_write_dword(rtlpriv, REG_MCUTST_1, 0x0);
 
-	/* Ring SW/HW-depth invariants (build-time, chip-agnostic).
-	 *
-	 * The depth we program into the HW BD-ring registers below MUST equal
-	 * the SW ring depth the shared rtlwifi PCI core actually allocates for
-	 * this chip; if they diverge, the HW read pointer wraps at a different
-	 * modulus than the SW write pointer (cur_tx_wp), TX-reclaim's
-	 * is_tx_desc_closed() latches false, and every AC stop-queues forever
-	 * (the 512-vs-128 association/DHCP/hang regression).
-	 *
-	 * TX: PCI id 0x818c is unknown to _rtl_pci_find_adapter(), so hw_type
-	 * falls back to the non-8192EE default and _rtl_pci_init_trx_var()
-	 * sizes every TX ring to RT_TXDESC_NUM -- NOT TX_DESC_NUM_92E. So the
-	 * per-queue HW TXBD depth (TX_DESC_NUM_92F) must equal RT_TXDESC_NUM.
-	 * (A sibling chip that _is_ mapped to HARDWARE_TYPE_RTL8192EE would
-	 * instead assert its own TX_DESC_NUM_xx == TX_DESC_NUM_92E: same rule,
-	 * the SW sizer for that chip's resolved hw_type.)
-	 * RX: rxringcount is always RTL_PCI_MAX_RX_COUNT, independent of
-	 * hw_type, so the HW RXBD depth (RX_DESC_NUM_92F) must equal it.
-	 *
-	 * Derived from the driver's own constants (never a hand-copied literal)
-	 * so each family member is checked against ITS own ring size at build.
-	 * Inert while correct (128==128 / 512==512); fires only on a real drift
-	 * -- a copy-paste to a new model that keeps a stale depth, or a core
-	 * change to the SW sizer.
-	 */
+	/* Ring SW/HW-depth invariants (build-time, chip-agnostic). ...
+	 * dev/MEASURED-hw.c.md sec 9. */
 	BUILD_BUG_ON(TX_DESC_NUM_92F != RT_TXDESC_NUM);
 	BUILD_BUG_ON(RX_DESC_NUM_92F != RTL_PCI_MAX_RX_COUNT);
-	/* ...and each depth must fit its register's depth field without
-	 * corrupting the adjacent segment-count/enable bits: TXBD_NUM packs
-	 * depth in [11:0] | seg in [13:12]; RXBD_NUM packs depth in [12:0] |
-	 * seg in [14:13] | enable BIT(15).  (Both true today; guards a future
-	 * model that bumps a ring past the field width.)
-	 */
+	/* and each depth must fit its register's depth field without
+	 * dev/MEASURED-hw.c.md sec 10. */
 	BUILD_BUG_ON(TX_DESC_NUM_92F & ~0xFFFU);
 	BUILD_BUG_ON(RX_DESC_NUM_92F & ~0x1FFFU);
 
@@ -1342,12 +1229,8 @@ static void _rtl92fe_reset_pcie_interface_dma(struct rtl_priv *rtlpriv,
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 		"ResetPcieInterfaceDMA8192FE()\n");
 
-	/* PCIe RX-DMA-hang reset flow. */
-
-	/* 1. disable register write lock
-	 *	write 0x1C bit[1:0] = 2'h0
-	 *	write 0xCC bit[2] = 1'b1
-	 */
+	/* PCIe RX-DMA-hang reset flow. 1. disable register write lock ...
+	 * dev/MEASURED-hw.c.md sec 11. */
 	tmp = rtl_read_byte(rtlpriv, REG_RSV_CTRL);
 	tmp &= ~(BIT(1) | BIT(0));
 	rtl_write_byte(rtlpriv, REG_RSV_CTRL, tmp);
@@ -1420,29 +1303,7 @@ static void _rtl92fe_reset_pcie_interface_dma(struct rtl_priv *rtlpriv,
 	rtl_write_byte(rtlpriv, REG_PMC_DBG_CTRL2, tmp);
 }
 
-/* Fixed-argument TX/RX-path ("TRX mode") init for the configuration this
- * board runs:
- *   tx_path_en      = BB_PATH_AB  (both TX paths)
- *   rx_path         = BB_PATH_AB  (both RX paths)
- *   tx_path_sel_1ss = BB_PATH_A   (nominal; with path-diversity off the 1ss
- *                                  selection collapses to tx_path_en = AB)
- *   tx_path_sel_cck = BB_PATH_A   (likewise collapses to AB)
- *   rfe_type        = 3           (no handled case -> rfe sub-step is a no-op)
- *
- * Without this TRX-mode init after BB config the path registers
- * (0x804/0x808-equiv c04/0x90c/...) are left mis-configured. Path-diversity,
- * spur calibration, dynamic energy-TH and MP-mode branches are intentionally
- * omitted (not used for a fixed-mode AP).
- */
-/* RFE (RF front-end) pinmux for the external-PA/FEM board variant.
- *
- * The WiFi efuse on this board is blank, so rfe_type can't be auto-read. GPON
- * ONUs use an external PA/FEM (SKY85201-class = the vendor's DSL-PON rfe_type 7).
- * Without this the T/R-switch + PA-enable + RX-LNA control pins stay at their BB
- * table defaults, so TX radiates ~40dB down AND the RX is deaf (a close peer is
- * heard at ~-100dBm). These are the vendor phydm 8192F rfe_type-7 RFE-pinmux
- * writes (0x940 control word, 0x930/0x938 T/R-switch invert/sel, 0x944, 0x934/
- * 0x93c, 0x92c/0x920 PAPE, 0x968, plus the 0x103c/0x04c/0x064/0x1038 seeds). */
+/* Fixed-argument TX/RX-path ("TRX mode") init for the ... -- dev/MEASURED-hw.c.md sec 12. */
 static void _rtl92fe_config_rfe(struct ieee80211_hw *hw)
 {
 	rtl_set_bbreg(hw, 0x103c, 0x70000, 0x7);
@@ -1496,30 +1357,7 @@ static void _rtl92fe_config_trx_mode_ab(struct ieee80211_hw *hw)
 	_rtl92fe_config_rfe(hw);
 }
 
-/*
- * ★★★ TEMPORARY DIAGNOSTIC LADDER, 2026-09-01 -- REMOVE once the X111W wedge
- * is named.  Declared here so nobody mistakes it for a feature.
- *
- * The X111W stops dead -- console AND network at the same instant, no oops, no
- * reset -- and it was MEASURED today that the trigger is `ip link set wlan0
- * up`: with `rdinit=/bin/sh` the board is alive 5/5 past 84 s, a control
- * (`ip link set lo up`) returns, and the wlan0 command NEVER RETURNS.  That
- * path is mac80211 -> rtl_op_start -> rtl_pci_start -> HERE.
- *
- * The earlier ten-rung PROBE bisect could never enter this function, so it
- * could only ever prove a negative.  This ladder splits hw_init itself:
- *
- *     insmod-time / bootarg:  rtl8192fe.hwinit_stop_at=N
- *
- * N == 0 runs the whole thing (the shipping behaviour).  N > 0 returns 0 as
- * soon as rung N has run, so `ip link set wlan0 up` COMPLETES if the killer is
- * above N and HANGS if it is at or below N.  One build, and each arm is a boot
- * plus one command instead of five boots at 4-in-5 odds.
- *
- * ⚠ IT RETURNS 0, NOT AN ERROR, ON PURPOSE: an error would fail the ip command
- * for a reason that is not the fault under test, and "the command returned"
- * is exactly the witness being measured.
- */
+/* ★★★ TEMPORARY DIAGNOSTIC LADDER, 2026-09-01 -- REMOVE once ... -- dev/MEASURED-hw.c.md sec 13. */
 static int hwinit_stop_at;
 module_param(hwinit_stop_at, int, 0644);
 MODULE_PARM_DESC(hwinit_stop_at,
@@ -1588,10 +1426,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 						   PCI_EXP_LNKCTL_ASPMC);
 
 		/* Power-on tail the pwrseq-only init_mac does not cover (stock
-		 * brings it up in this order): AFE power-on, SYS_PW_CTRL(0x04)
-		 * power-ready handshake, WLAN auto-enable, hold the 8051, then
-		 * LDO/SPS regulator(0x7c). Without the regulator + power-ready
-		 * the high-offset RAM region stays marginally powered. */
+		 * dev/MEASURED-hw.c.md sec 34. */
 		rtl_write_byte(rtlpriv, 0x24, rtl_read_byte(rtlpriv, 0x24) | BIT(0));
 		pw = (rtl_read_word(rtlpriv, 0x04) & 0xe7ff) | 0x0800;
 		rtl_write_word(rtlpriv, 0x04, pw);
@@ -1699,12 +1534,8 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 
 	rtlpriv->rtlhal.being_init_adapter = false;
 
-	/* Trim the crystal load cap into the AFE registers (8192F: XTAL1 =
-	 * REG_AFE_PLL_CTRL[6:1], XTAL0 = REG_AFE_XTAL_CTRL[30:25]) before
-	 * calibration. Without this the 25 MHz crystal is untrimmed and RX
-	 * cannot demodulate. (The old 8192EE put this in REG_MAC_PHY_CTRL.)
-	 * This board's WiFi EFUSE crystalcap reads 0x00 (invalid), so a sane
-	 * default is used via the xtal_cap module parameter. */
+	/* Trim the crystal load cap into the AFE registers (8192F: ...
+	 * dev/MEASURED-hw.c.md sec 14. */
 	{
 		u8 cc = (xtal_cap >= 0) ? (xtal_cap & 0x3f)
 				       : (rtlpriv->efuse.crystalcap & 0x3f);
@@ -1761,11 +1592,8 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	HWINIT_RUNG(10, "config_trx_mode_ab");
 	rtl92fe_dm_init(hw);
 
-	/* One-line RF bring-up summary (info level so it shows in dmesg without
-	 * raising the debug mask). Confirms which chip version/RFE the driver
-	 * latched and that the RF-serial path is alive: a sane non-zero RF
-	 * read of A:0x18 (RF_CHNLBW) / A:0x00 (RF mode) means the radio keyed
-	 * up; rfe_type picks the front-end/IQK path. */
+	/* One-line RF bring-up summary (info level so it shows in ...
+	 * dev/MEASURED-hw.c.md sec 35. */
 	pr_info("rtl8192fe: RF up: chipver=0x%x rf_type=%s rfe_type=0x%x xtal_cap=0x%x RF_A[0x00]=0x%05x RF_A[0x18]=0x%05x RF_B[0x18]=0x%05x\n",
 		rtlhal->version,
 		(rtlphy->rf_type == RF_2T2R) ? "2T2R" : "1T1R",
@@ -1776,13 +1604,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 		rtl_get_rfreg(hw, RF90_PATH_A, RF_CHNLBW, RFREG_OFFSET_MASK),
 		rtl_get_rfreg(hw, RF90_PATH_B, RF_CHNLBW, RFREG_OFFSET_MASK));
 
-	/* Post-IQK operating dump: TX-IQ correction result (0xc80/0xc94 path A,
-	 * 0xc88/0xc9c path B), TX path-enable (0x90c), TX-AGC rate18-06 (0xe00)
-	 * and RF mode 0x00 for both paths. Diff path-A 0xc80/0xc94/0xe00/RF0x00
-	 * against the working stock twin: a 0xc80 stuck at the table default
-	 * 0x40000100 with reg_e94==0x100/reg_e9c==0 means IQK produced no TX-IQ
-	 * correction (ran but failed -> identity), while a non-default 0xc80 with
-	 * a sane gain (~0x100 in [31:22]) and small phase means IQK took. */
+	/* Post-IQK operating dump: TX-IQ correction result ... -- dev/MEASURED-hw.c.md sec 15. */
 	pr_info("rtl8192fe: PHY op: 0xc80=0x%08x 0xc94=0x%08x 0xc88=0x%08x 0xc9c=0x%08x 0x90c=0x%08x 0xe00=0x%08x RF_A[0x00]=0x%05x RF_B[0x00]=0x%05x iqk{e94=0x%x e9c=0x%x eb4=0x%x ebc=0x%x}\n",
 		rtl_get_bbreg(hw, ROFDM0_XATXIQIMBALANCE, MASKDWORD),
 		rtl_get_bbreg(hw, ROFDM0_XCTXAFE, MASKDWORD),
@@ -1807,14 +1629,8 @@ static enum version_8192f _rtl92fe_read_chip_version(struct ieee80211_hw *hw)
 	enum version_8192f version;
 	u32 value32;
 
-	/* The RTL8192F silicon is a 2-chain (2T2R) RECEIVER, and rf_type gates the RX
-	 * chain enable, path-B PA-bias and dual-path IQK/AGC (hw.c:1552/1562, dm.c) --
-	 * so it MUST track the silicon or the AP goes deaf and never hears the client's
-	 * 4-way M2 (setting RF_1T1R here disabled path-B RX and stalled association).
-	 * The MCS15 seen in the TX spy is only the PRE-override negotiated rate; AP
-	 * unicast DATA is already force-pinned to legacy DESC_RATE54M in tx_fill_desc,
-	 * so the on-air data rate is single-stream regardless. The single-stream cap
-	 * belongs in the rate path, NOT in a lie about the receiver's chain count. */
+	/* The RTL8192F silicon is a 2-chain (2T2R) RECEIVER, and ...
+	 * dev/MEASURED-hw.c.md sec 16. */
 	rtlphy->rf_type = RF_2T2R;
 
 	value32 = rtl_read_dword(rtlpriv, REG_SYS_CFG1);
@@ -1876,15 +1692,8 @@ static int _rtl92fe_set_media_status(struct ieee80211_hw *hw,
 		_rtl92fe_stop_tx_beacon(hw);
 		_rtl92fe_enable_bcn_sub_func(hw);
 	} else if (mode == MSR_ADHOC || mode == MSR_AP) {
-		/* ⚠ THE ARM STAYS HERE FOR NOW, AND THE REASON IS A REFUTATION.
-		 * Deferring it to the BSS_CHANGED_BEACON_ENABLED path -- so that a
-		 * beacon exists before the engine is armed -- was tried on
-		 * 2026-09-01 and the board STILL DIED on a normal boot.  So the
-		 * failure is not about WHEN the arming happens, and moving it
-		 * bought nothing; leaving the move in would be a change with no
-		 * evidence behind it, dressed as a fix.
-		 * Which of the three writes inside actually wedges the bus is
-		 * measured by the beacon_arm_steps bitmask, not guessed. */
+		/* ⚠ THE ARM STAYS HERE FOR NOW, AND THE REASON IS A REFUTATION
+		 * dev/MEASURED-hw.c.md sec 17. */
 		_rtl92fe_resume_tx_beacon(hw);
 		_rtl92fe_disable_bcn_sub_func(hw);
 	} else {
@@ -1931,14 +1740,8 @@ int rtl92fe_set_network_type(struct ieee80211_hw *hw, enum nl80211_iftype type)
 	if (_rtl92fe_set_media_status(hw, type))
 		return -EOPNOTSUPP;
 
-	/* check-BSSID (drop RX not matching our BSSID) is wanted ONLY for an
-	 * infrastructure STA that is LINKED. AP/mesh must NEVER check-BSSID: it has
-	 * to receive frames from unassociated peers -- crucially a phone's wildcard
-	 * PROBE REQUEST during a scan. The old code left AP-while-LINKED falling
-	 * through BOTH branches, so stale CBSSID bits from a prior state survived
-	 * and the HW silently dropped probe requests -> hostapd never answered ->
-	 * the phone never listed the AP (worked only from a fresh, non-LINKED
-	 * bring-up). Force it explicitly for every case. */
+	/* check-BSSID (drop RX not matching our BSSID) is wanted ONLY ...
+	 * dev/MEASURED-hw.c.md sec 18. */
 	if (rtlpriv->mac80211.link_state == MAC80211_LINKED &&
 	    type != NL80211_IFTYPE_AP &&
 	    type != NL80211_IFTYPE_MESH_POINT)
@@ -1979,31 +1782,8 @@ void rtl92fe_enable_interrupt(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
-	/* ★★ THE FLAG FIRST, THEN THE HARDWARE -- THIS ORDER IS THE BUG.
-	 *
-	 * Arming HIMR/HIMRE before setting @irq_enabled leaves a window in which
-	 * the device can assert INTx while the handler still reads the flag as
-	 * false.  _rtl_pci_interrupt() then returns WITHOUT touching one endpoint
-	 * register, so the ISR is never write-1-to-cleared and DEASSERT_INTx is
-	 * never sent.  On a level line whose irq_chip has no .irq_ack and whose
-	 * root complex does no bridge-side acknowledge, that assertion never goes
-	 * away: the handler is re-entered forever in hard-IRQ context and the CPU
-	 * stalls with nothing printed.
-	 *
-	 * ★ NOT OUR DEDUCTION ALONE -- this exact race is described upstream for
-	 * this driver family, in "rtlwifi: rtl8192x: Enabling and disabling
-	 * hardware interrupts after enabling local irq flags": the line "goes
-	 * high at ASSERT_INTx and goes low only at DEASSERT_INTx", and
-	 * "DEASSERT_INTx cannot be sent when the flag is still false, making CPU
-	 * stall".  Three independent sources agree: that patch, the sibling G24W
-	 * which MEASURED the same storm (there it was re-entered in softirq
-	 * context and printed "soft lockup ... CPU#0 stuck for 26s! [hostapd]"),
-	 * and this board's own signature -- serial and Ethernet ceasing together,
-	 * no oops, at a varying moment.
-	 *
-	 * Setting the flag first cannot produce a spurious claim: with the
-	 * hardware still masked the ISR reads an empty ISR and now returns
-	 * IRQ_NONE. */
+	/* ★★ THE FLAG FIRST, THEN THE HARDWARE -- THIS ORDER IS THE ...
+	 * dev/MEASURED-hw.c.md sec 19. */
 	rtlpci->irq_enabled = true;
 	rtl_write_dword(rtlpriv, REG_HIMR, rtlpci->irq_mask[0] & 0xFFFFFFFF);
 	rtl_write_dword(rtlpriv, REG_HIMRE, rtlpci->irq_mask[1] & 0xFFFFFFFF);
@@ -2014,16 +1794,7 @@ void rtl92fe_disable_interrupt(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
-	/* ★ AND THE MIRROR ON THE WAY DOWN.  The io accessors installed by
-	 * _rtl_pci_io_handler_init() are the POSTED (async) variants, so these
-	 * two writes may still be in flight when the function returns.  Clearing
-	 * @irq_enabled while the hardware is still armed re-opens exactly the
-	 * window above -- an assertion arrives, the handler sees false, and
-	 * nothing acknowledges it.
-	 *
-	 * The read-back is the flush: a non-posted read of the same block cannot
-	 * complete until the writes ahead of it have, so once it returns the mask
-	 * really is off and the flag may safely follow. */
+	/* ★ AND THE MIRROR ON THE WAY DOWN. The io accessors ... -- dev/MEASURED-hw.c.md sec 20. */
 	rtl_write_dword(rtlpriv, REG_HIMR, IMR_DISABLED);
 	rtl_write_dword(rtlpriv, REG_HIMRE, IMR_DISABLED);
 	rtl_read_dword(rtlpriv, REG_HIMR);	/* flush the posted writes */
@@ -2093,12 +1864,8 @@ void rtl92fe_card_disable(struct ieee80211_hw *hw)
 
 	_rtl92fe_poweroff_adapter(hw);
 
-	/* P3: after power off we must redo IQK. Clear iqk_initialized
-	 * UNCONDITIONALLY -- get_btc_status() returns true for this chip, so the
-	 * old btc gate skipped the clear, and every post-reload hw_init then took
-	 * the "restore from backup" IQK path, re-imposing the FIRST boot's result
-	 * (which can settle to identity) on a freshly reset baseband. Only a reboot
-	 * re-ran a real IQK. Clearing here makes a reload recalibrate for real. */
+	/* P3: after power off we must redo IQK. Clear iqk_initialized ...
+	 * dev/MEASURED-hw.c.md sec 21. */
 	rtlpriv->phy.iqk_initialized = false;
 }
 
@@ -2134,19 +1901,8 @@ void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)
 	rtlpci->reg_bcn_ctrl_val |= BIT(3);
 	rtl_write_byte(rtlpriv, REG_BCN_CTRL, (u8)rtlpci->reg_bcn_ctrl_val);
 
-	/* NB: do NOT set ENSWBCN (REG_CR bit8) here to force a live-TIM SW beacon --
-	 * the rtl8192fe SW-beacon path (BEACON_QUEUE) has no DWBCN commit/beacon-valid
-	 * handshake, so the tasklet-filled beacon misses TBTT on the slow MIPS core
-	 * and the AP goes intermittently/fully SILENT (clients can't even scan it).
-	 * Keep the reliable FW-auto reserved-page beacon. Delivering buffered
-	 * downstream to a legacy-PS STA needs the reserved-page beacon rebuilt with a
-	 * live TIM -- a separate, carefully-soaked project. */
-	/* P4: this function disabled interrupts above (to program beacon regs
-	 * atomically) but the stock code never re-enabled them, so on the FIRST
-	 * AP bring-up beacon/TX/RX IRQs stay masked until some later path happens
-	 * to call update_interrupt_mask -- until then beacon DMA is never serviced
-	 * and the AP is enabled but silent (the "not on-air until wifi reload"
-	 * quirk). Re-enable here so the beacon starts on the first bring-up. */
+	/* NB: do NOT set ENSWBCN (REG_CR bit8) here to force a ...
+	 * dev/MEASURED-hw.c.md sec 22. */
 	rtl92fe_enable_interrupt(hw);
 }
 
@@ -2383,13 +2139,8 @@ _rtl92fe_read_txpower_info_from_hwpg(struct ieee80211_hw *hw,
 	RTPRINT(rtlpriv, FINIT, INIT_TXPOWER,
 		"eeprom_regulatory = 0x%x\n", efu->eeprom_regulatory);
 
-	/* The RFE type (efuse RFE option @0xCA, bits[4:0]) selects the RF
-	 * front-end variant: it drives the IQK PAD_TXG branch and the
-	 * external-PA/LNA RFE antenna-switch overrides (rfe 7/8/9/12). It was
-	 * previously left at the zero-init default, so an external-PA board
-	 * was silently calibrated as internal-PA -> the front-end never keyed
-	 * up. Mirror the mainline behaviour and latch it from efuse here.
-	 * 0xFF (unprogrammed) falls back to type 0 (internal PA/LNA). */
+	/* The RFE type (efuse RFE option @0xCA, bits[4:0]) selects ...
+	 * dev/MEASURED-hw.c.md sec 23. */
 	if (!autoload_fail && hwinfo[EEPROM_RFE_OPTION_92F] != 0xFF)
 		rtl_hal(rtlpriv)->rfe_type = hwinfo[EEPROM_RFE_OPTION_92F] & 0x1f;
 	else
@@ -2403,12 +2154,8 @@ static void _rtl92fe_read_adapter_info(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_efuse *rtlefuse = rtl_efuse(rtl_priv(hw));
 	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
-	/* The RTL8192F efuse signature (0x8129) lives at offset 0x00 and
-	 * the per-board MAC at 0x107. The MAC pulled here is ONLY an
-	 * identity hint / fallback: the operational MAC is provisioned
-	 * from the board (DT/nvmem via of_get_mac_address(), else
-	 * SoC-derived) and must NOT be baked from efuse.
-	 */
+	/* The RTL8192F efuse signature (0x8129) lives at offset 0x00 ...
+	 * dev/MEASURED-hw.c.md sec 24. */
 	int params[] = {RTL8192F_EEPROM_ID, EEPROM_VID_92F, EEPROM_DID_92F,
 			EEPROM_SVID_92F, EEPROM_SMID_92F, EEPROM_MAC_ADDR_92F,
 			EEPROM_CHANNELPLAN_92F, EEPROM_VERSION_92F,
@@ -2488,29 +2235,8 @@ static void _rtl92fe_hal_customized_behavior(struct ieee80211_hw *hw)
 		"RT Customized ID: 0x%02X\n", rtlhal->oem_id);
 }
 
-/* ------------------------------------------------------------------------- *
- * Board factory WiFi calibration (flash apmib HW_WLAN0_*)
- *
- * The RTL8192FE on this HSGQ X111W ships with a BLANK PCIe efuse (signature
- * byte != 0x8129).  The rtlwifi core therefore sets autoload_failflag and the
- * normal _rtl92fe_read_adapter_info() path reads nothing: tx-power, MAC,
- * crystalcap and thermal meter are all left zero, so the radio comes up with a
- * random 00:e0:4c MAC, generic default tx-power and an untrimmed crystal -> the
- * AP beacons off-frequency / at the wrong power and is invisible to clients.
- *
- * The real per-chip cal lives in the board's NOR flash apmib (HW_WLAN0_*); the
- * stock WiFi driver reads it from there, not from efuse.  Until we wire
- * a flash/apmib reader (or a DT/nvmem cell) into the clean-room driver, the
- * values for THIS board are baked here so the radio calibrates like stock.
- *
- * Single 2.4 GHz 1T1R RTL8192FE, 14 channels (ch1..ch14).  All tx-power tables
- * below are PER-CHANNEL (one byte per channel), matching the apmib layout, so
- * they are copied straight into the driver's per-channel txpwrlevel_* arrays
- * (no efuse group-byte -> channel expansion is needed).
- *
- * TODO: source these from flash apmib HW_WLAN0_* (or a DT/nvmem cell) so the
- * driver works across units instead of carrying one board's cal.
- * ------------------------------------------------------------------------- */
+/* Board factory WiFi calibration (flash apmib HW_WLAN0_*) The ...
+ * dev/MEASURED-hw.c.md sec 25. */
 struct rtl92fe_board_cal {
 	/* ★★★ WHICH BOARD THIS CAL BELONGS TO -- the DT ROOT compatible.
 	 * Added 2026-08-27 after this table was MEASURED being applied to the
@@ -2548,41 +2274,7 @@ static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
 	.reg_domain = 1,
 };
 
-/*
- * LANLY G24W (RTL9603CVD). READ FROM THIS UNIT'S OWN FLASH MIB, key for key --
- * `mib_read.py --file <mtd3-config.bin>` on the board's own config partition:
- *
- *   ELAN_MAC_ADDR               5c1923b3ce90
- *   HW_WLAN0_TX_POWER_CCK_A     2c x14
- *   HW_WLAN0_TX_POWER_CCK_B     2f x14
- *   HW_WLAN0_TX_POWER_HT40_1S_A 2c x9, 2d x5
- *   HW_WLAN0_TX_POWER_HT40_1S_B 2e x9, 2f x5
- *   HW_WLAN0_11N_THER           34
- *   HW_WLAN0_11N_XCAP           21
- *   HW_WLAN0_11N_PA_TYPE        0
- *   HW_WLAN0_REG_DOMAIN         14
- *
- * ★★★ THE MIB HOLDS ONE FILE IN TWO BASES, AND THE VENDOR'S OWN PARSER DECIDES
- * WHICH (corrected 2026-09-10; this comment previously claimed the scalars were
- * hex and both boards' tables were baked that way). In rtl8192cd's mib_table[]
- * the tx-power arrays are BYTE_ARRAY_T -- hex digit pairs, so 27 27 28 IS 0x27
- * 0x27 0x28 -- while THER / XCAP / PA_TYPE / REG_DOMAIN are INT_T, which
- * `_atoi(arg_val, 10)` reads in BASE TEN unless the text starts with 0x. The
- * board's own stock console confirms it: `iwpriv wlan0 set_mib xcap=47 ther=36`.
- * So the scalars below are DECIMAL, matching the MIB text digit for digit.
- * ⚠ Reading XCAP as hex gave 0x47, which does not even fit the six-bit AFE
- * field: it was masked to 0x07 and the radio ran at a seventh of the vendor's
- * crystal trim, silently. `ONU-test-case/wifi_cal_vs_mib.py` is the guard.
- *
- * ★ AND THE MAC IS THE *ELAN* MAC, which the same cross-check established: the
- * X111W's baked .mac IS its ELAN_MAC_ADDR. `WLAN_MAC_ADDR` in the MIB reads
- * 00:e0:4c:07:68:02 on BOTH boards -- a vendor placeholder, not a per-unit
- * address, and using it would put every unit of this family on one MAC.
- *
- * ⚠ reg_domain is masked to 3 bits here and only selects a tx-power limit table
- * -- the LEGAL domain comes from OpenWrt's own country setting and
- * wireless-regdb, never from this byte.
- */
+/* LANLY G24W (RTL9603CVD). READ FROM THIS UNIT'S OWN FLASH ... -- dev/MEASURED-hw.c.md sec 26. */
 static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 	.compat = "realtek,rtl9603cvd", .board = "G24W",
 	.mac = { 0x5c, 0x19, 0x23, 0xb3, 0xce, 0x90 },
@@ -2600,25 +2292,8 @@ static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 	.reg_domain = 14,		/* MIB text "14", INT_T => base 10 */
 };
 
-/*
- * ★★★ A BOARD'S CAL IS APPLIED TO THAT BOARD, AND TO NO OTHER (2026-08-27).
- *
- * MEASURED, on the first boot that ever brought this radio up on the G24W:
- *
- *   rtl8192fe: applied board WiFi cal (X111W): MAC=98:c7:a4:32:82:ae ...
- *
- * -- the X111W's factory calibration, INCLUDING ITS MAC, on a different product
- * with a different crystal and different tx-power tables. Two boards on this rig
- * would have claimed one MAC the moment both had WiFi up, which is the identical
- * failure the Ethernet driver already had with the silicon default
- * 00:e0:4c:86:70:01 and repaired with a loud random LAA. The table's own TODO
- * said so ("carrying one board's cal"); nothing enforced it.
- *
- * ⇒ the cal is SELECTED by the device tree's ROOT compatible, and a board with
- * no entry gets NOTHING -- not a neighbour's. Applying a foreign MAC and a
- * foreign crystal trim is worse than an uncalibrated radio, because an
- * uncalibrated radio announces itself.
- */
+/* ★★★ A BOARD'S CAL IS APPLIED TO THAT BOARD, AND TO NO OTHER ...
+ * dev/MEASURED-hw.c.md sec 27. */
 static const struct rtl92fe_board_cal *const rtl92fe_board_cals[] = {
 	&rtl92fe_x111w_cal,
 	&rtl92fe_g24w_cal,
@@ -2646,11 +2321,8 @@ static void _rtl92fe_apply_board_cal(struct ieee80211_hw *hw,
 	struct rtl_efuse *efu = rtl_efuse(rtl_priv(hw));
 	u8 rf, ch;
 
-	/* MAC: identity hint / fallback only.  The operational MAC is still
-	 * provisioned from the board (DT/nvmem/uci); but filling dev_addr with
-	 * a valid per-chip address stops base.c from assigning a random
-	 * 00:e0:4c MAC when no board MAC is present.
-	 */
+	/* MAC: identity hint / fallback only. The operational MAC is ...
+	 * dev/MEASURED-hw.c.md sec 36. */
 	memcpy(efu->dev_addr, cal->mac, ETH_ALEN);
 
 	/* Per-channel tx-power.  Paths A/B are the only populated RF paths on
@@ -2688,34 +2360,16 @@ static void _rtl92fe_apply_board_cal(struct ieee80211_hw *hw,
 	efu->thermalmeter[1] = cal->thermalmeter;
 	efu->apk_thermalmeterignore = false;
 
-	/* Crystal load cap (XCAP).  Critical for an on-frequency beacon; the
-	 * AFE trim in rtl92fe_hw_init() picks this up via efuse.crystalcap
-	 * when xtal_cap < 0 (the default).  The AFE field is SIX BITS, and a
-	 * wider value used to be masked in silence -- which is how a cal read in
-	 * the wrong base ran the radio at 0x07 instead of 0x2f for months.
-	 */
+	/* Crystal load cap (XCAP). Critical for an on-frequency ...
+	 * dev/MEASURED-hw.c.md sec 28. */
 	if (cal->crystalcap > 0x3f)
 		pr_warn("rtl8192fe: board cal crystalcap 0x%02x exceeds the 6-bit AFE field and is being masked to 0x%02x -- the cal is wrong, not the radio\n",
 			cal->crystalcap, cal->crystalcap & 0x3f);
 	efu->crystalcap = cal->crystalcap & 0x3f;
 	efu->eeprom_crystalcap = cal->crystalcap & 0x3f;
 
-	/* Front-end / regulatory.  The WiFi efuse is blank, so rfe_type cannot be
-	 * auto-read.  The board WiFi chip is an RTL8192FR (integrated PA/LNA -- no
-	 * external FEM on the PCB), so the PA is physically internal.  Two settings
-	 * are decoupled here, both tuned empirically on this board:
-	 *  - RFE control pins (T/R switch + RX-LNA routing) MUST be programmed: the
-	 *    no-op rfe_type 3 left them at BB-table defaults -> deaf RX (peer heard
-	 *    at -100dBm).  _rtl92fe_config_rfe() (from _rtl92fe_config_trx_mode_ab)
-	 *    writes the rfe_type-7 RFE-pinmux pattern -- the only PCIe 8192F RFE init
-	 *    that enables the T/R switch here; its ext-PA-enable half is inert with
-	 *    no external PA fitted.  RX recovers ~68dB.
-	 *  - external_pa: despite the integrated (internal) PA, external_pa=1 is
-	 *    EMPIRICALLY better -- it selects the ext-PA IQK TX-gain (PAD_TXG 0x30),
-	 *    which drives this PA cleanly (~96% link).  external_pa=0 (internal
-	 *    PAD_TXG 0xe9) REGRESSED to ~40% with assoc timeouts (the DM under-drives
-	 *    the TX), so keep external_pa=1.
-	 */
+	/* Front-end / regulatory. The WiFi efuse is blank, so ...
+	 * dev/MEASURED-hw.c.md sec 29. */
 	rtl_hal(rtlpriv)->rfe_type = 7;
 	efu->board_type = 0;
 	rtl_hal(rtlpriv)->board_type = 0;
@@ -2772,12 +2426,7 @@ void rtl92fe_read_eeprom_info(struct ieee80211_hw *hw)
 		rtlefuse->autoload_failflag = true;
 	}
 
-	/* Blank efuse (no autoload, or bad signature so rtl_get_hwinfo() left
-	 * autoload_failflag set): the per-chip cal is not in efuse on this
-	 * board, it is in flash apmib.  Inject the board factory cal and clear
-	 * autoload_failflag so the radio calibrates instead of falling back to
-	 * a random MAC + generic tx-power + untrimmed crystal.
-	 */
+	/* Blank efuse (no autoload, or bad signature so ... -- dev/MEASURED-hw.c.md sec 30. */
 	if (rtlefuse->autoload_failflag) {
 		const struct rtl92fe_board_cal *cal =
 			_rtl92fe_board_cal_for_this_board();
@@ -2860,17 +2509,8 @@ static void rtl92fe_update_hal_rate_mask(struct ieee80211_hw *hw,
 	else if (mac->opmode == NL80211_IFTYPE_AP ||
 		 mac->opmode == NL80211_IFTYPE_ADHOC) {
 		macid = sta->aid + 1;
-		/* This board's 8192FR has a single usable TX chain, so 2-spatial-
-		 * stream rates (MCS8-15) are un-transmittable: an AP unicast DATA
-		 * frame emitted at MCS15 reaches the air as a broken 2SS PPDU no
-		 * client can decode -- the real "Obtaining IP" root cause (the frame
-		 * IS transmitted, the ring drains, but the client rx-decodes nothing).
-		 * Cap the peer to single-stream AT THE SOURCE: with rx_mask[1]=0,
-		 * _rtl_get_highest_n_rate() returns MCS7 and the ratr_bitmap below
-		 * excludes MCS8-15, so every data rate the driver/FW can pick is
-		 * deliverable -- WITHOUT touching rf_type (the silicon is a 2-chain
-		 * RECEIVER; leaving RF_2T2R keeps RX diversity, which is what lets the
-		 * WPA2 4-way complete). Idempotent across rate refreshes. */
+		/* This board's 8192FR has a single usable TX chain, so ...
+		 * dev/MEASURED-hw.c.md sec 31. */
 		sta->deflink.ht_cap.mcs.rx_mask[1] = 0;
 	}
 
@@ -2975,14 +2615,8 @@ static void rtl92fe_update_hal_rate_mask(struct ieee80211_hw *hw,
 		ratr_index, ratr_bitmap, rate_mask[0], rate_mask[1],
 		rate_mask[2], rate_mask[3], rate_mask[4],
 		rate_mask[5], rate_mask[6]);
-	/* AP/ADHOC peer: the FW rate/security context for this macid (aid+1) is only
-	 * usable after the macid is reported CONNECTED. The infra-STA path
-	 * (JOINBSSRPT, hw.c:631) only ever registers macid 0, so without this a
-	 * use_rate=0 unicast DATA frame addressed to an aid+1 macid is HELD by the FW
-	 * (no DOK -> the BE ring fills -> stop-queue latch) -- which is why the DHCP
-	 * OFFER and all post-association unicast data never reach the client. Register
-	 * the peer macid here, right before its RA-mask, so CONNECT and the rate table
-	 * land together (order matters: allocate the FW slot, then populate it). */
+	/* AP/ADHOC peer: the FW rate/security context for this macid ...
+	 * dev/MEASURED-hw.c.md sec 32. */
 	if (macid)		/* != 0 => an AP/ADHOC peer, not the STA-self (macid 0) */
 		rtl92fe_set_fw_media_status_rpt_cmd(hw, RT_MEDIA_CONNECT, macid);
 
@@ -3017,11 +2651,8 @@ void rtl92fe_update_channel_access_setting(struct ieee80211_hw *hw)
 
 bool rtl92fe_gpio_radio_on_off_checking(struct ieee80211_hw *hw, u8 *valid)
 {
-	/* The RTL8192F has no hardware RF-kill GPIO wired on this board;
-	 * report the radio as always present and let software RFKILL drive
-	 * the on/off state.
-	 * TODO(8192f): validate on hardware if a GPIO RF-kill input exists.
-	 */
+	/* The RTL8192F has no hardware RF-kill GPIO wired on this ...
+	 * dev/MEASURED-hw.c.md sec 37. */
 	*valid = 1;
 	return true;
 }
@@ -3122,11 +2753,8 @@ void rtl92fe_set_key(struct ieee80211_hw *hw, u32 key_index,
 		} else {
 			rtl_dbg(rtlpriv, COMP_SEC, DBG_DMESG,
 				"add one entry\n");
-			/* KEY spy: prove the PTK/GTK actually reach the HW CAM.
-			 * A missing/mis-slotted GROUP key = downstream broadcast
-			 * (e.g. a DHCP OFFER) can't be encrypted -> a client that
-			 * finished the 4-way still never gets an IP. alg: 1=WEP40
-			 * 2=TKIP 4=AES 5=WEP104. */
+			/* KEY spy: prove the PTK/GTK actually reach the HW CAM. A ...
+			 * dev/MEASURED-hw.c.md sec 38. */
 			pr_info("92f-spy KEY add entry=%u kidx=%u %s %pM alg=%u\n",
 				entry_id, key_index,
 				is_pairwise ? "PAIRWISE" : (is_group ? "GROUP" : "def"),

@@ -35,13 +35,7 @@ void prom_putchar(char c)
 	__raw_writeb(c, LUNA_UART0 + UART_THR);
 }
 
-/*
- * The bootloader enters Linux with a legacy MIPS argument vector:
- *   a0 (fw_arg0) = argc, a1 (fw_arg1) = argv (KSEG-mapped char **).
- * Stitch argv back into arcs_cmdline; the arch then merges this with the
- * device-tree /chosen bootargs. ethaddr=... arrives this way too and is
- * consumed by the NIC driver (per the per-board MAC policy).
- */
+/* The bootloader enters Linux with a legacy MIPS argument ... -- dev/MEASURED-prom.c.md sec 1. */
 static void __init prom_init_cmdline(void)
 {
 	int argc = (int)fw_arg0;
@@ -72,12 +66,8 @@ void __init prom_init(void)
 	prom_putchar('P');
 	prom_putchar(']');
 
-	/* Clear the CPU's unmapped-memory-segment (UMSAR0..3 @ 0xb8001300) and SRAM
-	 * segment (SRAMSAR0..3 @ 0xb8004000) address registers. Left in their
-	 * preloader state, some CPU<->peripheral transactions (PCIe config
-	 * completions, peripheral SRAM DMA) can mis-route on the SoC OCP fabric and
-	 * return the master-abort pattern. The earliest init is the safe place to do
-	 * this, before DRAM/SRAM is in active use. */
+	/* Clear the CPU's unmapped-memory-segment (UMSAR0..3 @ ...
+	 * dev/MEASURED-prom.c.md sec 2. */
 	for (i = 0; i < 4; i++) {
 		*(volatile u32 *)(0xb8001300ul + i * 0x10) = 0;
 		*(volatile u32 *)(0xb8004000ul + i * 0x10) = 0;

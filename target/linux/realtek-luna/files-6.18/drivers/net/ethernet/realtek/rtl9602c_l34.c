@@ -38,13 +38,8 @@ static inline void l34_wr(struct rtl9602c_l34 *l, u32 off, u32 val)
 	writel(val, l->sw + off);
 }
 
-/* l34_field_get() moved to rtl9602c_l34_logic.c (flowcore, 2026-09-02),
- * beside its inverse l34_field_set -- the set/get pair shares one home so a
- * wrong get can no longer mirror a wrong set invisibly (the SID2QID lesson). */
-
-/* Issue one indirect table op. The data bank is significance-ordered: WRDATA[i]
- * (and RDDATA[i]) carry entry bits [32*i+31 : 32*i], so w[i] maps 1:1 onto data
- * slot i (w[0] = least-significant word). */
+/* l34_field_get() moved to rtl9602c_l34_logic.c (flowcore, ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 1. */
 static int l34_tbl_op(struct rtl9602c_l34 *l, enum l34_tbl type, u16 idx,
 		      u32 *w, unsigned int n, bool write)
 {
@@ -85,12 +80,8 @@ static int l34_tbl_read(struct rtl9602c_l34 *l, enum l34_tbl type, u16 idx,
 	return l34_tbl_op(l, type, idx, w, n, false);
 }
 
-/*
- * The writer flowcore's l34_prog_run() drives.  flowcore holds no MMIO, so the
- * shell supplies the table op -- and REPORTS a failed one, because flowcore
- * has no logger and a silent table timeout is exactly how a half-programmed
- * interface hides.  The copy is because the op writes through its buffer.
- */
+/* The writer flowcore's l34_prog_run() drives. flowcore holds ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 2. */
 static int l34_prog_wr(void *ctx, u8 tbl, u16 idx, const u32 *w, unsigned int n)
 {
 	struct rtl9602c_l34 *l = ctx;
@@ -105,13 +96,8 @@ static int l34_prog_wr(void *ctx, u8 tbl, u16 idx, const u32 *w, unsigned int n)
 	return ret;
 }
 
-/*
- * Enable the L34 NAT engine. DEFERRED from init: writing the engine's NAT-mode /
- * lookup-mode / master-enable bits BEFORE the OLT has provisioned the GPON GEM
- * datapath corrupts the upstream-GEM setup on a cold range (the US data GEM
- * stops egressing -> no DHCP -> no WAN). So it is enabled lazily the first time
- * the offload is programmed, once the datapath is up. Caller holds l->lock.
- */
+/* Enable the L34 NAT engine. DEFERRED from init: writing the ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 3. */
 static void l34_engine_on(struct rtl9602c_l34 *l)
 {
 	u32 v;
@@ -161,15 +147,8 @@ static int l34_free_way(struct rtl9602c_l34 *l, enum l34_tbl type, u16 bucket,
 	return -ENOSPC;
 }
 
-/*
- * NAPT flow programming. A 4-way hashed pair: the outbound slot
- * (L34_TBL_NAPT_OUT, keyed by l34_hash_out() of the original tuple) points at an
- * inbound rewrite entry (L34_TBL_NAPTR_IN, keyed by l34_hash_in() of the
- * translated WAN tuple) holding the internal host addr/port + post-NAT port.
- * The rewrite's WAN source IP and egress next-hop come from the EXTIP slot named
- * by f->egress_netif, programmed once at WAN bring-up. Written full-cone
- * (remHash unused) so the return path matches on the WAN addr/port alone.
- */
+/* NAPT flow programming. A 4-way hashed pair: the outbound ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 4. */
 int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 {
 	u32 naptr[L34_WORDS_NAPTR_IN] = { 0 };
@@ -263,11 +242,8 @@ int rtl9602c_l34_flow_hit(struct rtl9602c_l34 *l, u16 hw_index, bool *active)
 	return 0;
 }
 
-/*
- * WAN forwarding bring-up: the per-interface state a NAPT flow egresses through.
- * The L2 unicast table sits behind its own indirect block (poll BUSY, write the
- * data words, issue a command, poll BUSY, read the assigned index back).
- */
+/* WAN forwarding bring-up: the per-interface state a NAPT ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 13. */
 static int l2_busy_wait(struct rtl9602c_l34 *l)
 {
 	unsigned int t;
@@ -369,61 +345,8 @@ out:
 	return ret;
 }
 
-/*
- * Program a LAN-side interface: a NETIF (the ONU's LAN MAC/IP, in the L34
- * domain) plus a local route (process=ARP, internal=1) classifying the LAN
- * subnet — so a US (LAN->WAN) frame's MAC-base lookup resolves to a netif and
- * the DS return is routed back to the LAN.
- *
- * ⚠⚠ CLAIMING THE ONU'S OWN LAN MAC HERE KILLS IPv4 MANAGEMENT, AND THE TWO
- * OBVIOUS REPAIRS ARE REFUTED ON THE BOARD (X111W, 2026-09-12, tier 1, each arm
- * with positive proof that it was programmed):
- *
- *   - an own-MAC STATIC L2 entry on the CPU port -- which is what stock does at
- *     exactly this point (_rtk_rg_createGatewayMacEntry, port_idx = CPU, under
- *     its own comment "patch for DA==GatewayMac will hit layer2 unknown DA") --
- *     changed NOTHING: 100% loss with it, 100% without;
- *   - L34_GLB_CFG bit 1 (L34_L2_LOOKUP_MISS_ACT, 0 = DROP / 1 = TRAP per the
- *     vendor DAL) set to TRAP changed NOTHING either: glb_cfg read back
- *     0x00000007 with the claim live and the loss stayed 100%.
- *
- * ⇒ the drop is NOT the engine's MAC-table miss, and NOT the local route table
- * (the /32 CPU self-route reads back perfect and is inert).
- *
- * ✔ THE OWED MEASUREMENT WAS TAKEN, 2026-09-12: a stock-vs-ours MMIO diff over
- * the L34 page AND the switch LUT block, ours captured with the engine ARMED.
- * It took WIDENING the declared blocks first -- the L34 page needed a WINDOW
- * declaration (the driver's swdump has ioremapped 0x1b800000 since 2026-09-09
- * and the host had never asked for it) and the LUT block 0x1C000..0x1C0FC had
- * been inside sw[] all along with no host-side block naming it.  Every register
- * below was OUTSIDE every declared block until that day, so no measurement
- * could have disagreed with us.
- *
- * IT FOUND REAL DIFFERENCES AND NONE OF THEM DECIDES -- seven MORE arms, each
- * with the board's own read-back proving the write landed, each 100% loss with
- * the claim live and 0% on every restore:
- *
- *   SWTCR0  stock 84801e10 / ours 64000e20   D: V4FLRT_EN cleared -> 100%
- *                                            E: stock's WHOLE word -> 100%
- *   BD_CFG  stock a2400000 / ours 00000000   F: stock (UNMATCHED_L2L3 =
- *           V6_BD_CTL.PB_EN 1 / 0               FORCE_L2Bridge) -> 100%
- *                                            G: + PB_EN = stock -> 100%
- *   the LUT control set (ten words, every    H: LUT_UNKN_UC_DA_CTRL -> 100%
- *   one differing, incl. the three FLOOD     I: ALL TEN = stock -> 100%
- *   masks 0x08 stock / 0x0b ours)
- *
- * ⇒ NINE hypotheses refuted and the deciding register is STILL NOT NAMED.  What
- * is now known is narrower and worth more than a guess: the engine takes the
- * frame on the NETIF MAC match alone, and NOTHING in the L34 control word, the
- * binding pair or the switch LUT changes that.  Re-runnable, and adding a
- * candidate is ONE entry in arms():
- * `python3 ONU-test-case/l34_own_mac_ab.py --board=RTL9602C/HSGQ/X111W`
- * (needs a boot with rtl9602c_eth.hw_nat=1; hw_nat ships 0, so the SHIPPED
- * image never arms this engine and is not affected).
- * The next unmeasured surface is the NETIF entry's own fields -- what the
- * engine does with a claimed frame is encoded there, and `netif[1] blackholes
- * 0` is the driver's own decoder saying the entry does not ask for a drop.
- */
+/* Program a LAN-side interface: a NETIF (the ONU's LAN ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 5. */
 int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 			   const u8 *lan_mac, u32 lan_net, u8 prefix, u16 vlan)
 {
@@ -435,12 +358,8 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	if (idx >= L34_EXTIP_SLOTS || prefix < 1 || prefix > 32)
 		return -EINVAL;
 
-	/* ★ STEP 0 IS THE CLAIM, AND ON THIS SIDE IT IS THE ONU'S OWN LAN MAC.
-	 * A failure after it used to leave the engine claiming that MAC with no
-	 * CPU route behind it -- IPv4 unicast to management is then taken by the
-	 * engine and never delivered, while ARP and broadcast still cross.
-	 * MEASURED A->B->A on the X111W; the contract is at struct
-	 * l34_prog_step (flowcore) and l34_prog_run() is what revokes it. */
+	/* ★ STEP 0 IS THE CLAIM, AND ON THIS SIDE IT IS THE ONU'S OWN ...
+	 * dev/MEASURED-rtl9602c_l34.c.md sec 6. */
 	step[0].tbl = L34_TBL_NETIF;
 	step[0].idx = idx;
 	step[0].words = L34_WORDS_NETIF;
@@ -453,11 +372,8 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	step[1].words = L34_WORDS_L3ROUTE;
 	l34_rt_lan_encode(step[1].w, lan_net, prefix, idx);
 
-	/* The /32 CPU self-route.  ⚠ On its own it does NOT keep management
-	 * alive on this die -- MEASURED, read back from the silicon and still
-	 * 100% dead, even as the ONLY valid route: the engine's MAC lookup
-	 * missed first and a miss is DROPPED, so no route was ever consulted.
-	 * The evidence is at l34_rt_cpu_encode() in flowcore. */
+	/* The /32 CPU self-route. ⚠ On its own it does NOT keep ...
+	 * dev/MEASURED-rtl9602c_l34.c.md sec 14. */
 	step[2].tbl = L34_TBL_L3ROUTE;
 	step[2].idx = idx + L34_RT_CPU_SLOT_OFF;
 	step[2].words = L34_WORDS_L3ROUTE;
@@ -471,19 +387,8 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	return ret;
 }
 
-/*
- * Program BOTH interface slots from one reading of the live kernel edge.
- *
- * ★★ THIS IS THE STEP THAT WAS MISSING, AND ITS ORDER IS THE WHOLE POINT.
- * rtl9602c_l34_flow_add() writes a NAPTR whose EXTIP_IDX names a slot; if that
- * slot is empty the entry reads back perfectly and the traffic disappears.  So
- * the interface tables are filled FIRST, from values Linux already resolved,
- * and only a caller holding a 0 from here may install a flow.
- *
- * It is idempotent by construction: every write is an absolute table entry at
- * a fixed index, so re-running it after the WAN address moves REPLACES the old
- * values rather than accumulating a second set.
- */
+/* Program BOTH interface slots from one reading of the live ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 7. */
 int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
 {
 	int ret;
@@ -507,13 +412,8 @@ int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
 	return 0;
 }
 
-/* /proc/flowdump: read the outbound NAPT hit bitmap; write the live WAN
- * parameters the engine cannot learn by itself.  Created only when hw_nat is on.
- *   w <wanMAC> <wanIPhex> <gwIPhex> <gwMAC> <port> <vlan>             -> wan_setup
- *   l <lanMAC> <lanIPhex> <netIPhex> <prefix> <vlan>                  -> lan_setup
- *   f <proto> <sIPhex> <sPort> <dIPhex> <dPort> <natIPhex> <natPort>  -> flow_add
- *   x <tbl> <idx> <w0hex> [w1 [w2 [w3]]]                              -> raw table write
- */
+/* /proc/flowdump: read the outbound NAPT hit bitmap; write ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 8. */
 static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 			      size_t n, loff_t *off)
 {
@@ -567,12 +467,8 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 		ret = rtl9602c_l34_flow_add(l, &f);
 		pr_info("rtl9602c_l34: flow_add -> %d hw_index=%u\n", ret, f.hw_index);
 	} else if (buf[0] == 'x') {
-		/* Raw indirect table write: the companion of the read-back
-		 * above, and the only way to ask the engine a question its
-		 * fixed call sites cannot pose -- e.g. "does a LOWER index win
-		 * a route lookup?", which is what decides whether the /32 CPU
-		 * self-route can ever beat the /24 subnet route.  Word count
-		 * comes from how many words were actually given. */
+		/* Raw indirect table write: the companion of the read-back ...
+		 * dev/MEASURED-rtl9602c_l34.c.md sec 9. */
 		unsigned int tbl, tidx;
 		u32 w[L34_WORDS_MAX] = { 0 };
 		int got = sscanf(buf, "x %u %u %x %x %x %x",
@@ -591,36 +487,8 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 	return ret ? ret : n;
 }
 
-/*
- * ⚠ `hits_seen` IS RATE-DEPENDENT AND THE NODE SAYS SO.  The engine's hit
- * bitmap is CLEARED BY READING, so no reader can report a total: what this
- * accumulates is "set bits seen by the reads that happened", and two readers
- * of this file divide the evidence between them.  It is a DEBUG instrument.
- * What it can honestly answer is the binary question -- did any slot match
- * between two reads -- which is exactly what a hardware-forwarding witness
- * needs, and it is named so nobody mistakes it for a packet count.
- */
-/*
- * ★ THE INTERFACE TABLES, READ BACK FROM THE SILICON -- not from what we
- * believe we wrote.
- *
- * The class this closes is named by swdump_readback_guard.py: a register the
- * driver WRITES and cannot re-read is one no measurement can contradict.  The
- * L34 tables are INDIRECT, so they sit outside that guard's population (it
- * judges direct MMIO offsets) and outside field_name_vs_sdk.py's for the same
- * reason -- they were readable by l34_tbl_read() all along and nothing asked.
- *
- * What it prints is the DECODE, not a hexdump: MASK and PROCESS are the two
- * fields that decide whether the /32 CPU self-route beats the /24 subnet
- * route, and that question is open (the write returns 0 and management still
- * black-holes).  `blackholes` is flowcore's predicate applied to what came
- * BACK, so the node answers the safety question directly.
- *
- * ⚠ RAW WORDS ARE PRINTED BESIDE THE DECODE ON PURPOSE.  Our decode is the
- * thing under test; if it disagrees with the chipdef the raw words are what
- * settles it, and a reader must not have to trust our field map to read the
- * node.
- */
+/* ⚠ `hits_seen` IS RATE-DEPENDENT AND THE NODE SAYS SO. The ...
+ * dev/MEASURED-rtl9602c_l34.c.md sec 10. */
 static const char *const l34_rt_process_name[4] = { "CPU", "DROP", "ARP", "NH" };
 
 static void l34_proc_show_rt(struct seq_file *sf, struct rtl9602c_l34 *l,
@@ -662,13 +530,8 @@ static void l34_proc_show_iface(struct seq_file *sf, struct rtl9602c_l34 *l)
 		seq_puts(sf, "engine off -- interface tables not read back\n");
 		return;
 	}
-	/* ★ THE ENGINE CONTROL WORDS, READ BACK. l34_engine_on() writes SWTCR0
-	 * and GLB_CFG and nothing could re-read them -- the same blind-write
-	 * class as the tables. The flow-route enables are printed SEPARATELY
-	 * because this driver writes neither, so whether IPv4 flow routing is on
-	 * at all was an assumption rather than a reading.
-	 * ⚠ THE v6 COLUMN USED TO READ BIT 31, WHICH IS NOT A ROUTING BIT: it
-	 * printed `v6rt 0` on a board whose V6FLRT_EN (bit 29) was 1. */
+	/* ★ THE ENGINE CONTROL WORDS, READ BACK. l34_engine_on() ...
+	 * dev/MEASURED-rtl9602c_l34.c.md sec 11. */
 	v = l34_rd(l, L34_SWTCR0);
 	seq_printf(sf,
 		   "swtcr0 %08x natmode %u limdbc %u v4flrt %u v6flrt %u\nglb_cfg %08x\n",
@@ -739,24 +602,13 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 			   &l->edge.wan_ip, &l->edge.gw_ip, l->edge.gw_mac,
 			   L34_NETIF_WAN, &l->edge.lan_net, l->edge.lan_prefix,
 			   l->edge.lan_mac, L34_NETIF_LAN);
-	/*
-	 * ★ THE THREE COUNTS THAT SEPARATE FOUR DIFFERENT SILENCES, and the
-	 * bench needed every one of them. `binds` 0 means the flowtable never
-	 * accepted this driver's block -- nothing will ever be offered.
-	 * `offered` 0 with binds>0 means the block is bound and nf_flow_table
-	 * is not handing it flows. `core_refused` is the COMMON lifecycle
-	 * declining before the engine is asked (a rule shape it cannot express).
-	 * `refusals` is this engine's own decision, with `last_refusal` saying
-	 * which. Without them, "installs 0" is one number for four faults.
-	 */
+	/* ★ THE THREE COUNTS THAT SEPARATE FOUR DIFFERENT SILENCES, ...
+	 * dev/MEASURED-rtl9602c_l34.c.md sec 12. */
 	seq_printf(sf, "binds %u\noffered %u\ncore_refused %u\ninstalls %u\nremovals %u\nrefusals %u\nds_legs %u\n",
 		   l->binds, l->offered, l->core_refused, l->installs,
 		   l->removals, l->refusals, l->ds_legs);
-	/* ★ THE FEW LINES THAT DECIDE, ON DEMAND -- not a log flood.  A refused
-	 * flow is a NORMAL outcome (it stays on the software path), so it may
-	 * not print per packet; but "why is nothing offloaded" is the first
-	 * question anyone asks, and it must be answerable without a debug
-	 * build. */
+	/* ★ THE FEW LINES THAT DECIDE, ON DEMAND -- not a log flood. ...
+	 * dev/MEASURED-rtl9602c_l34.c.md sec 15. */
 	if (l->vlan_refused)
 		seq_printf(sf, "vlan_refused %u last_vid %u\n",
 			   l->vlan_refused, l->vlan_refused_vid);

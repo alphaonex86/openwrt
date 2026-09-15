@@ -1,31 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* GPON PON-SerDes analog/CMU/PLL profile for RTL9607F Elnath.
- * Register FACTS extracted from the board's stock /etc/serdes/pon_serdes_gpon.txt
- * (header "RL6900_P7_GPON_20230921"): the CMU/PLL/CDR/TX-driver config the SerDes needs to
- * generate the PON APB clock.  Each row: writel(val, pon_window + off).
- * Applied via the PSDS DATAIN(0xa08c)/ACCESS(0xa088) register pair. */
+/* GPON PON-SerDes analog/CMU/PLL profile for RTL9607F Elnath. ...
+ * dev/MEASURED-cortina-gpon-serdes.h.md sec 2. */
 struct cg_serdes_row { u16 off; u32 val; u16 delay_us; };
 
-/* ★★ THE TABLE IS PAIRS, AND UNTIL 2026-09-02 THE FILE MADE YOU COUNT THEM.
- *    266 rows alternating between two addresses are really 133 LOGICAL WRITES
- *    to indexed SerDes registers: the value goes to DATAIN, then a command
- *    naming the register goes to ACCESS.  The header above always said so in
- *    prose; the table did not, so a reader could not tell which SerDes
- *    register any row programmed, nor that 0x420..0x7bf is the index space.
- *
- * ⚠ THE NAMES ARE NOT INVENTED: this file's own header already calls the pair
- *   "DATAIN(0xa08c)/ACCESS(0xa088)".  Naming them records a fact that was
- *   already written down; no SerDes register beyond the pair is named, because
- *   nothing in this tree establishes one.
- *
- * ★ THE MACRO EXPANDS TO THE SAME TWO ROWS, so the write ORDER is unchanged and
- *   so is the walker's per-row delay -- cortina-gpon.c applies
- *   `udelay(delay_us ? delay_us : 10)` to EVERY row, so one logical write has
- *   always cost two 10 us waits and still does.
- *
- * ★ THE INDEX ORDER IS DELIBERATE AND NOT SORTED (measured: 133 distinct
- *   indices in 0x420..0x7bf, not monotonic).  Sorting this table would change
- *   the bring-up sequence with nothing to see. */
+/* ★★ THE TABLE IS PAIRS, AND UNTIL 2026-09-02 THE FILE MADE ...
+ * dev/MEASURED-cortina-gpon-serdes.h.md sec 1. */
 #define CG_PSDS_DATAIN	0xa08c		/* the value the next command will write */
 #define CG_PSDS_ACCESS	0xa088		/* command: CG_PSDS_WRITE | serdes reg index */
 #define CG_PSDS_WRITE	0xc0000000u

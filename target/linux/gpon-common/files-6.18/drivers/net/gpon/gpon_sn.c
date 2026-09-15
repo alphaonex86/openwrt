@@ -21,11 +21,8 @@ static int sn_hex_nibble(char c)
 	return -1;
 }
 
-/* A vendor ID character: printable ASCII, and not a space. The upper bound is
- * 0x7e, so a byte with the top bit set is refused rather than sign-extended
- * into something plausible -- `char` signedness differs between the two
- * architectures this file is compiled for, and that is exactly the kind of
- * difference this tree refuses to leave to chance. */
+/* A vendor ID character: printable ASCII, and not a space. ...
+ * dev/MEASURED-gpon_sn.c.md sec 2. */
 static int sn_id_char_ok(char c)
 {
 	unsigned char u = (unsigned char)c;
@@ -104,14 +101,7 @@ bool gpon_sn_is_set(const u8 sn[GPON_SN_BYTES])
 {
 	if (!sn)
 		return false;
-	/* ★★ EITHER HALF BLANK IS "NOT PROVISIONED", not just both of them.
-	 * The vendor-id half and the vendor-specific half are programmed from
-	 * DIFFERENT places on these boards -- one is a fleet-wide constant a
-	 * driver can hold, the other is the per-unit value that has to be read
-	 * off the board -- so the failure that actually happens is HALF an
-	 * identity: a real-looking vendor id beside a blank VSSN. That is what
-	 * the Elnath placeholder was ("XPON" + ff ff ff ff), and it ranged.
-	 * Testing "any byte non-zero" cannot see it, because four of the eight
-	 * bytes are perfectly good ASCII. */
+	/* ★★ EITHER HALF BLANK IS "NOT PROVISIONED", not just both of ...
+	 * dev/MEASURED-gpon_sn.c.md sec 1. */
 	return !sn_half_blank(sn) && !sn_half_blank(sn + 4);
 }

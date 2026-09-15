@@ -1,23 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
- * TIER: CORE (drivers/net/gpon) -- HW-DECOUPLED.  Builds on MIPS-BE, ARM64-LE
- * and x86.  No MMIO, no clock, no allocator: see "THE THREE TIERS" in
- * gpon_common.h.
- *
- * gpon_regseq -- a bring-up expressed as DATA, and the tiny interpreter that
- * runs it.  The ADDRESSES and VALUES are silicon facts and stay with the
- * silicon; "write this word, set these bits, wait, poll that bit until it
- * clears or give up" is the same algorithm on every PON MAC, and was written
- * once per family only because interpreter and tables shared a file.
- *
- * ★★ TIME IS AN EXPLICIT INPUT, and that is what made this movable.  The family
- * version called mdelay()/udelay() directly; with the two delays as ops the
- * same interpreter can be driven by a FIXTURE clock at thousands of sequences
- * per second instead of one ~200 s board boot.
- *
- * ⚠ THE POLL BUDGET IS IN ITERATIONS, NOT MILLISECONDS, and it is the caller's.
- * A core deciding the timeout would be deciding a hardware fact it cannot know.
- */
+/* TIER: CORE (drivers/net/gpon) -- HW-DECOUPLED. Builds on ...
+ * dev/MEASURED-gpon_regseq.h.md sec 1. */
 #ifndef GPON_REGSEQ_H
 #define GPON_REGSEQ_H
 
@@ -40,38 +23,8 @@ struct gpon_regseq_op {
 	u32 val;
 };
 
-/*
- * The shell's whole contract: four function pointers, no device, no lock, no
- * allocator.  `rd`/`wr` take an ABSOLUTE address because the sequences are
- * written that way in the silicon's own documentation -- translating them would
- * invent a second numbering nobody could check against the vendor's tables.
- */
-/**
- * gpon_field_mask() - the mask for bits [@msb:@lsb]. -> u32
- *
- * ★★★ ONE OWNER since 2026-09-04. This arithmetic was written THREE times:
- * here (gpon_regseq_fld), in flowcore/hwio.h (hwio_rmw) and in
- * realtek-luna/luna_ponmac.h (luna_rfwr) -- and hwio.h's own comment already
- * said why that is dangerous: "both families have their own today and a field
- * written one bit wide too far is the class of bug that reads back correct and
- * behaves wrong".
- *
- * ★ IT LIVES IN gpon/ AND NOT IN flowcore/ FOR A MEASURED REASON. The include
- * direction is one-way: flowcore/Makefile carries
- * `-I$(srctree)/drivers/net/gpon` and gpon/Makefile carries nothing toward
- * flowcore -- verified with the compiler, not read off the Makefiles: a TU
- * including "gpon_regseq.h" with flowcore+gpon on -I compiles, and one
- * including "hwio.h" with only gpon on -I is a fatal error. So gpon is the
- * lower layer, and a helper both need can only live here.
- *
- * ⚠ THE FULL-WORD CASE IS SEPARATE ON PURPOSE, and all three copies had it:
- * `1u << 32` is undefined behaviour, so msb=31,lsb=0 cannot go through the
- * general formula. msb=31,lsb=0 is the ONLY pair that reaches width 32.
- *
- * ★ PROVEN EQUIVALENT before unifying: the three spellings were compiled side
- * by side and compared over every (msb,lsb) with msb>=lsb -- 528 pairs, 0
- * disagreements. This replaces them without changing a single computed mask.
- */
+/* The shell's whole contract: four function pointers, no ...
+ * dev/MEASURED-gpon_regseq.h.md sec 2. */
 static inline u32 gpon_field_mask(u8 msb, u8 lsb)
 {
 	return (msb == 31 && lsb == 0)

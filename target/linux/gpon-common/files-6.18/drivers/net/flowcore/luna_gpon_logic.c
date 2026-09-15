@@ -47,12 +47,8 @@ s32 bosa_code_to_cdbm(u32 code)
 
 #define BOSA_ADC_VREF_UV	3300000		/* stock 3.3V ADC full-scale (0x325aa0) */
 
-/* RX power code (0.1 uW) from the raw ratiometric ADC samples (europa_drv
- * rtl8290b_rxPower_get): rssi = SD-ADC at gain 0xC2, tap_lo/tap_hi = the on-die
- * reference taps 0x314 and 0x305.
- * tap_hi <= tap_lo is the dead-bus witness: a NACKing bus reads 0 and a floating
- * one 0xffffff, so both taps agree. Sentinel exits return BOSA_RX_CODE_NA, never
- * the tail clamp's 11 -- that value renders as a real -29.85 dBm. */
+/* RX power code (0.1 uW) from the raw ratiometric ADC samples ...
+ * dev/MEASURED-luna_gpon_logic.c.md sec 1. */
 u32 bosa_rx_code_calc(u32 rssi, u32 tap_lo, u32 tap_hi,
 		      const struct bosa_optical_cal *cal)
 {
@@ -148,11 +144,8 @@ u32 bosa_tx_word_calc(u64 sum, int n, s32 tx_slope, s32 tx_offset)
  * on CONFIG_LUNA_GPON, which that board never sets. */
 #include <linux/string.h>
 
-/* The test ORDER is load-bearing. An RTL8290B may ship an SFF-8472 identity
- * page -- measured 2026-08-30 on the G24W, slave 0x50 reads "REALTEK"/"RTL8290"
- * -- so "an identity exists" alone once classified ours as foreign and refused
- * every register write, the RX enable included. The NAME decides; the ident byte
- * only separates a positively-foreign module from "could not tell". */
+/* The test ORDER is load-bearing. An RTL8290B may ship an ...
+ * dev/MEASURED-luna_gpon_logic.c.md sec 2. */
 enum bosa_module_verdict bosa_module_classify(int ident, int extid,
 					      const char *vend, const char *part)
 {

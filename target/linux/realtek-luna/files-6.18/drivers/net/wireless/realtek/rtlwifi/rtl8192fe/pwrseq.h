@@ -6,36 +6,7 @@
 
 #include "../pwrseqcmd.h"
 
-/*
- * The RTL8192F power architecture exposes the same six hardware power
- * states the rest of the rtlwifi family uses:
- *
- *	0: POFF    - power off
- *	1: PDN     - power down
- *	2: CARDEMU - card emulation
- *	3: ACT     - active mode
- *	4: LPS     - low power state
- *	5: SUS     - suspend
- *
- * Each macro below encodes one directed transition between two of those
- * states as a list of wlan_pwr_cfg entries.  rtl_hal_pwrseqcmdparsing()
- * walks the concatenated lists and performs the read/write/poll/delay
- * actions.  The offsets and bit positions are the RTL8192F register facts
- * (REG_APS_FSMCO @0x0004 power domain, REG_SYS_FUNC @0x0002, REG_RF_CTRL
- * @0x001F, the small-LDO/SOP block, and the SDIO local power register);
- * the APS_FSMCO dword bits are addressed here through their byte offsets:
- *
- *	0x04[8]  MAC enable     -> 0x0005 BIT(0)
- *	0x04[9]  MAC off        -> 0x0005 BIT(1)
- *	0x04[10] SW LPS         -> 0x0005 BIT(2)
- *	0x04[11] HW suspend     -> 0x0005 BIT(3)
- *	0x04[12] PCIe           -> 0x0005 BIT(4)
- *	0x04[15] HW power down   -> 0x0005 BIT(7)
- *	0x04[16] WLON reset     -> 0x0006 BIT(0)
- *	0x04[17] power ready    -> 0x0006 BIT(1)
- */
-
-/* Number of wlan_pwr_cfg entries each transition macro expands to. */
+/* The RTL8192F power architecture exposes the same six ... -- dev/MEASURED-pwrseq.h.md sec 1. */
 #define	RTL8192F_TRANS_CARDEMU_TO_ACT_STEPS	22
 #define	RTL8192F_TRANS_ACT_TO_CARDEMU_STEPS	18
 #define	RTL8192F_TRANS_CARDEMU_TO_SUS_STEPS	18
@@ -46,13 +17,7 @@
 #define	RTL8192F_TRANS_LPS_TO_ACT_STEPS		23
 #define	RTL8192F_TRANS_END_STEPS		1
 
-/*
- * CARDEMU -> ACT : the RTL8192F disabled_to_emu + emu_to_active bring-up.
- * Clears the HW-power-down / HW-suspend / PCIe / SW-LPS controls, enables
- * the macro LDO, releases the analog isolation, waits for the 0x04[17]
- * power-ready bit, pulses WLON reset, enables the MAC by HW state machine
- * and finally brings the RF control register out of reset.
- */
+/* CARDEMU -> ACT : the RTL8192F disabled_to_emu + ... -- dev/MEASURED-pwrseq.h.md sec 2. */
 #define RTL8192F_TRANS_CARDEMU_TO_ACT					\
 	/* { offset, cut_msk, fab_msk|interface_msk, base|cmd, msk, value },*/\
 	/* clear HW power down 0x04[15]=0 and HW suspend 0x04[11]=0 */	\
@@ -122,11 +87,8 @@
 	{0x001C, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK, PWR_INTF_ALL_MSK,	\
 	 PWR_BASEADDR_MAC, PWR_CMD_WRITE, BIT(7), 0},
 
-/*
- * ACT -> CARDEMU : the RTL8192F active_to_emu teardown.  Turns the RF off,
- * resets the BB, releases WLON, turns the MAC off through the HW state
- * machine, re-asserts the analog isolation and drops the macro LDO.
- */
+/* ACT -> CARDEMU : the RTL8192F active_to_emu teardown. Turns ...
+ * dev/MEASURED-pwrseq.h.md sec 3. */
 #define RTL8192F_TRANS_ACT_TO_CARDEMU					\
 	/* { offset, cut_msk, fab_msk|interface_msk, base|cmd, msk, value },*/\
 	/* 0x1F[7:0] = 0 turn off RF */					\
@@ -151,11 +113,7 @@
 	{0x0020, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK, PWR_INTF_ALL_MSK,	\
 	 PWR_BASEADDR_MAC, PWR_CMD_WRITE, BIT(0), 0},
 
-/*
- * CARDEMU -> SUS : enter WL suspend.  PCIe keeps 0x04[12:11]=2b'11; the
- * USB/SDIO interfaces use 2b'01; the SDIO local register handshake is kept
- * for interface completeness even though this board is PCIe.
- */
+/* CARDEMU -> SUS : enter WL suspend. PCIe keeps ... -- dev/MEASURED-pwrseq.h.md sec 4. */
 #define RTL8192F_TRANS_CARDEMU_TO_SUS					\
 	/* { offset, cut_msk, fab_msk|interface_msk, base|cmd, msk, value },*/\
 	/* 0x04[12:11] = 2b'11 enable WL suspend for PCIe */		\
@@ -197,11 +155,8 @@
 	{0x0005, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK, PWR_INTF_ALL_MSK,	\
 	 PWR_BASEADDR_MAC, PWR_CMD_WRITE, BIT(4) | BIT(3), 0},
 
-/*
- * CARDEMU -> CARDDIS : card disable.  SOP disables BG/MB, the small LDO is
- * unlocked/disabled (SDIO), WL suspend / SW-LPS are enabled and the SDIO
- * local register is parked.
- */
+/* CARDEMU -> CARDDIS : card disable. SOP disables BG/MB, the ...
+ * dev/MEASURED-pwrseq.h.md sec 5. */
 #define RTL8192F_TRANS_CARDEMU_TO_CARDDIS				\
 	/* { offset, cut_msk, fab_msk|interface_msk, base|cmd, msk, value },*/\
 	/* SOP option to disable BG/MB 0x07=0x20 */			\
@@ -277,11 +232,7 @@
 	{0x0005, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK, PWR_INTF_ALL_MSK,	\
 	 PWR_BASEADDR_MAC, PWR_CMD_WRITE, BIT(7), 0},
 
-/*
- * ACT -> LPS : firmware-driven low power.  Stop PCIe DMA, pause TX, wait
- * for the per-queue FIFOs to drain, gate the BB clock, reset the BB and
- * MAC TRX engine and respond TxOK to the scheduler.
- */
+/* ACT -> LPS : firmware-driven low power. Stop PCIe DMA, ... -- dev/MEASURED-pwrseq.h.md sec 6. */
 #define RTL8192F_TRANS_ACT_TO_LPS					\
 	/* { offset, cut_msk, fab_msk|interface_msk, base|cmd, msk, value },*/\
 	/* PCIe DMA stop 0x301=0xFF */					\
@@ -324,11 +275,8 @@
 	{0x0553, PWR_CUT_ALL_MSK, PWR_FAB_ALL_MSK, PWR_INTF_ALL_MSK,	\
 	 PWR_BASEADDR_MAC, PWR_CMD_WRITE, BIT(5), BIT(5)},
 
-/*
- * LPS -> ACT : firmware-driven wake.  RPWM toggle, switch TSF back to 40M,
- * re-enable the WMAC TRX engine and the BB macro, release the TX pause and
- * clear the ISR.
- */
+/* LPS -> ACT : firmware-driven wake. RPWM toggle, switch TSF ...
+ * dev/MEASURED-pwrseq.h.md sec 7. */
 #define RTL8192F_TRANS_LPS_TO_ACT					\
 	/* { offset, cut_msk, fab_msk|interface_msk, base|cmd, msk, value },*/\
 	/* SDIO RPWM */							\

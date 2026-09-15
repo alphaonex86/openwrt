@@ -4,17 +4,7 @@
 #ifndef __RTL92F_REG_H__
 #define __RTL92F_REG_H__
 
-/*
- * RTL8192F (PCI 0x10ec:0x818c, 2T2R 802.11n) MAC/PHY/RF register map.
- *
- * The bulk of the MAC register block is common to the 8192-series PCIe parts;
- * the 8192F-specific deltas are called out inline (TRXDMA_CTRL 3-bit queue
- * fields, page-count budget, RCR/RXFLTMAP defaults, the efuse->eeprom field
- * offsets, and the type-3 protocol-config quad). Names follow the rtlwifi
- * 8192ee convention so the chip .c files resolve them unchanged. Facts are
- * taken from the published RTL8192F register documentation and cross-checked
- * against the mainline rtl8192ee and rtl8xxxu/8192f drivers.
- */
+/* RTL8192F (PCI 0x10ec:0x818c, 2T2R 802.11n) MAC/PHY/RF ... -- dev/MEASURED-reg.h.md sec 1. */
 
 #define TXPKT_BUF_SELECT			0x69
 #define RXPKT_BUF_SELECT			0xA5
@@ -545,12 +535,7 @@
 #define	SCR_TXSEC_ENABLE			0x02
 #define	SCR_RXSEC_ENABLE			0x04
 
-/*********************************************
- *	RTL8192F IMR/ISR bit map
- *
- * Set-0 lives at REG_HIMR/REG_HISR (0x00B0/0x00B4), set-1 (the "E" extension)
- * at REG_HIMRE/REG_HISRE (0x00B8/0x00BC).
- *********************************************/
+/* RTL8192F IMR/ISR bit map Set-0 lives at REG_HIMR/REG_HISR ... -- dev/MEASURED-reg.h.md sec 2. */
 #define	IMR_DISABLED				0x0
 /* IMR/ISR set-0 (REG_HIMR / REG_HISR) bit 0-31 */
 #define	IMR_TIMER2				BIT(31)
@@ -663,18 +648,7 @@
 #define EEPROM_CLK				0x06
 #define EEPROM_TESTR				0x08
 
-/*
- * 8192F efuse -> eeprom field offsets.
- *
- * Per-path TX power tables (path A @0x10, path B @0x3A), then the single-byte
- * config block at the 0xB8.. region, RFE option @0xCA, country code @0xCB,
- * and the operational MAC hint @0x107. Per-channel kfree gain bytes sit at
- * 0x1EA/0x1EC/0x1EE (nibble-split per path: 0x0F = path A, 0xF0 = path B).
- *
- * NOTE: the efuse MAC @0x107 is an identity/fallback hint only - the
- * operational address is sourced from the board (DT/nvmem, else SoC-derived),
- * never baked from efuse.
- */
+/* 8192F efuse -> eeprom field offsets. Per-path TX power ... -- dev/MEASURED-reg.h.md sec 3. */
 #define	EEPROM_TX_PWR_INX			0x10
 #define	EEPROM_TXPWR_PATH_A			0x10
 #define	EEPROM_TXPWR_PATH_B			0x3A
@@ -1040,14 +1014,7 @@
 #define HQSEL_MGTQ				BIT(4)
 #define HQSEL_HIQ				BIT(5)
 
-/*
- * REG_TRXDMA_CTRL / REG_TXDMA_PQ_MAP (0x010C) queue->DMA-engine map.
- *
- * TWO-bit field per queue in a 16-bit register (vendor HAL: BIT_MASK_TXDMA_*=0x3;
- * identical to 8192ee), shifted VOQ=4, VIQ=6, BEQ=8, BKQ=10, MGQ=12, HIQ=14.
- * bits[3:0] are RX-DMA control (RXDMA_ARBBW_EN/RXSHFT_EN/RXDMA_AGG_EN), preserved.
- * Engine codes are QUEUE_LOW/NORMAL/HIGH below.
- */
+/* REG_TRXDMA_CTRL / REG_TXDMA_PQ_MAP (0x010C) ... -- dev/MEASURED-reg.h.md sec 4. */
 #define _TXDMA_HIQ_MAP(x)			(((x) & 0x3) << 14)
 #define _TXDMA_MGQ_MAP(x)			(((x) & 0x3) << 12)
 #define _TXDMA_BKQ_MAP(x)			(((x) & 0x3) << 10)
@@ -1059,12 +1026,7 @@
 #define QUEUE_NORMAL				2
 #define QUEUE_HIGH				3
 
-/* Composite queue->engine priority map written (as a 16-bit word) to
- * REG_TRXDMA_CTRL during MAC init: BE/BK -> LOW, VI -> NORMAL, VO/MGNT/HI ->
- * HIGH.  hw.c preserves the RX-DMA nibble (bits[3:0]) and ORs this value in;
- * none of these fields touch bits[3:0].  Equals the mainline 8192ee 0xF5B0.
- *	(3<<4)|(2<<6)|(1<<8)|(1<<10)|(3<<12)|(3<<14) = 0xF5B0
- */
+/* Composite queue->engine priority map written (as a 16-bit ... -- dev/MEASURED-reg.h.md sec 5. */
 #define TRXDMA_CTRL_QMAP_VALUE			\
 	(_TXDMA_VOQ_MAP(QUEUE_HIGH)   | _TXDMA_VIQ_MAP(QUEUE_NORMAL) |	\
 	 _TXDMA_BEQ_MAP(QUEUE_LOW)    | _TXDMA_BKQ_MAP(QUEUE_LOW)    |	\
@@ -1093,13 +1055,7 @@
 #define LPQ_PUBLIC_DIS				BIT(25)
 #define LD_RQPN					BIT(31)
 
-/* TX packet-buffer page allocation (8192F, all-three-queue / 4-EP split):
- * total 0xF7 TX pages -> HPQ=LPQ=NPQ=8 pages each, PUBQ=0xDE; the boundary
- * is programmed one page past the last (0xF8) so the top of the buffer is
- * reserved for the beacon/MGNT queue.  LD_RQPN triggers the load.
- *	LD_RQPN | _PUBQ(0xDE) | _LPQ(0x08) | _HPQ(0x08) = 0x80DE0808
- * (The normal-priority quota 0x08 is loaded separately via REG_RQPN_NPQ.)
- */
+/* TX packet-buffer page allocation (8192F, all-three-queue / ... -- dev/MEASURED-reg.h.md sec 6. */
 #define TX_TOTAL_PAGE_NUM_92F			0xF7
 #define TX_PAGE_NUM_PUBQ_92F			0xDE
 #define TX_PAGE_NUM_HPQ_92F			0x08
@@ -1301,11 +1257,7 @@
 #define USB_AGG_EN				BIT(3)
 
 #define MAC_ADDR_LEN				6
-/*
- * 8192F TX packet-buffer budget: TX_TOTAL=0xF7 pages, last usable page index
- * 0xF7 - 1. Boundaries (BCNQ/MGQ/WMAC-LBK/TDECTRL) land at 0xF8 per the page
- * map; see hw.c LLT/queue-page allocation.
- */
+/* 8192F TX packet-buffer budget: TX_TOTAL=0xF7 pages, last ... -- dev/MEASURED-reg.h.md sec 7. */
 #define LAST_ENTRY_OF_TX_PKT_BUFFER		247
 
 #define POLLING_LLT_THRESHOLD			20

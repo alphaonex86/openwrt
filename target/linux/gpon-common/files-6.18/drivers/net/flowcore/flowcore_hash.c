@@ -37,11 +37,8 @@ void flowcore_key_bitrev(u32 *w, int n_words)
 		w[i] = flowcore_bitrev32(w[n_words - 1 - i]);
 		w[n_words - 1 - i] = flowcore_bitrev32(t);
 	}
-	/* ★ THE ODD MIDDLE WORD IS NOT A CORNER CASE, IT IS HALF THE KEYS: an
-	 * odd word count leaves one word untouched by the swap loop, and it
-	 * still has to be reversed. Dropping this line changes the hash for
-	 * every odd-length key and for no even one -- the kind of difference
-	 * that shows up as a few flows mysteriously not matching. */
+	/* ★ THE ODD MIDDLE WORD IS NOT A CORNER CASE, IT IS HALF THE ...
+	 * dev/MEASURED-flowcore_hash.c.md sec 2. */
 	if (n_words & 1)
 		w[i] = flowcore_bitrev32(w[i]);
 }
@@ -82,25 +79,7 @@ u16 flowcore_crc16_ccitt_reflected(const u8 *p, u32 len)
 		     flowcore_bitrev8((u8)(crc >> 8)));
 }
 
-/* ===== packed-array slot addressing (moved from gpon_rtl9602c_logic.c
- * 2026-09-02, round 3 -- see flowcore.h for why it lives in THIS object) ===
- * PACKING CORRECTED 2026-06-13 (from the stock array-field-write routine):
- * the reg-array helper packs entries `entries_per_word = 32/bits` PER 32-bit
- * WORD, word-aligned, leaving the top (32 - entries_per_word*bits) bits of each
- * word UNUSED. A field NEVER straddles a word boundary. So:
- *   epw   = 32 / bits
- *   word  = idx / epw          (byte addr = base + word*4)
- *   shift = (idx % epw) * bits
- * The OLD code used CONTIGUOUS bit-packing (bit = idx*bits) which is only
- * correct when bits divides 32 evenly (1b, 2b, 4b). For the 7-bit SID2QID
- * array it addressed the wrong word: SID 64 -> 0x2130 (== HW SID 56's slot)
- * instead of the true 0x2138. That single off-by-one-word bug pointed the OMCI
- * SID-64 classify entry at a data flow's queue, so the US-NIC never classified
- * upstream OMCI to its T-CONT16/q0 -> the OLT never received the MIB-upload.
- * (Matches stock: SID 64 -> base 0x20f8 + 16*4 = 0x2138.) This is the same
- * class as l34_field_set: a self-consistent wrong offset survives every
- * readback, so the addressing lives HERE, x86-testable, and set/get share it.
- * bits must be 1..32 (epw = 32/bits; bits = 0 is a caller bug). */
+/* ===== packed-array slot addressing (moved from ... -- dev/MEASURED-flowcore_hash.c.md sec 1. */
 struct pi_packed_slot pi_packed_locate(u32 base, unsigned int idx,
 				       unsigned int bits)
 {

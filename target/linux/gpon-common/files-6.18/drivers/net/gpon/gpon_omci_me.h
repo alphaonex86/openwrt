@@ -48,14 +48,8 @@
  * body can), and the other six decode straight out of their dense bodies. */
 #include "gpon_omci_vlan.h"
 
-/* ★★ A CAPACITY IS A PER-BOARD VALUE, THE LOGIC IS COMMON (2026-08-27).  Both
- * store ceilings are overridable so a board can rebase onto this store WITHOUT
- * losing room: the Luna shell kept its own 128-entry and 200-row tables, and
- * swapping them for a fixed 64/72 would have silently dropped provisioned MEs —
- * a regression wearing the clothes of a cleanup.  One lean kernel per model, so
- * each target compiles the core with its own number. */
-/* The same header chooses the layout for the NIC owner and every common
- * responder translation unit. Per-directory compiler flags split this ABI. */
+/* ★★ A CAPACITY IS A PER-BOARD VALUE, THE LOGIC IS COMMON ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 1. */
 #ifndef OMCI_STORE_MAX
 #if defined(CONFIG_LUNA_GPON) || defined(CONFIG_LUNA_GPON_MODULE)
 #define OMCI_STORE_MAX 128
@@ -64,13 +58,8 @@
 #endif
 #endif
 
-/* A dynamic ME instance the OLT provisioned (Create).  Stored so GET and the
- * MIB-Upload reflect the ACTUAL configured MIB — without it the OLT's
- * post-config audit gets UNKNOWN_ME, re-runs the whole
- * MIB-Reset/Upload/Create sequence every ~50 s, and finally Deactivates. */
-/* The attribute body one provisioned instance holds -- also the ceiling every
- * dense class must fit, which is why it is a name and not a literal in three
- * places. */
+/* A dynamic ME instance the OLT provisioned (Create). Stored ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 2. */
 #define OMCI_STORE_BODY 26
 
 struct omci_me_inst {
@@ -107,28 +96,8 @@ struct omci_mib_row {
  * rows on the G24W and 4 on the X400AXF, ME 264 has 6 and 5. */
 #define OMCI_UNI_MAX 8
 
-/*
- * The instances of ONE UNI class the ONU presents, and the administrative
- * state each of them last ACCEPTED.
- *
- * ★ ME 11 (PPTP Ethernet UNI) AND ME 264 (UNI-G) GET ONE EACH, AND THE TWO
- *   INVENTORIES ARE INDEPENDENT -- not two views of one list: the X400AXF
- *   reports a UNI-G at 0x0604 with no PPTP Ethernet UNI beside it (0x0604 is
- *   not the VEIP, which is 0x0601).  Folding them would invent an instance on
- *   one class or drop one from the other.
- *
- * ★ THE KEY IS THE FULL u16.  The G24W numbers its fourth PPTP Ethernet UNI
- *   0x0401 while the first three are 0x0101..0x0103, so 0x0101 and 0x0401
- *   share a low byte: an 8-bit port index identifies nothing here.
- *
- * ★ NOTHING HERE COMBINES THE TWO STATES.  Whether a locked UNI-G also stops
- *   the PPTP -- and which physical port either is -- is a FAMILY question with
- *   a per-board answer: stock keys its Ethernet-UNI apply on the MANAGEMENT
- *   CAPABILITY value (0, 1, 2), not a port index, and the G24W runs the apply
- *   for all three while the X400AXF skips whenever the capability is 1.
- *   ⚠ THAT IS NOT "the X400AXF skips one port": all four of its Ethernet UNI-G
- *   rows report capability 1.  The core reports what was accepted, per class.
- */
+/* The instances of ONE UNI class the ONU presents, and the ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 3. */
 struct omci_uni_inv {
 	u16	inst[OMCI_UNI_MAX];	/* instance ids, [0, n) valid */
 	u8	admin[OMCI_UNI_MAX];	/* G.988: 0 unlocked, 1 locked */
@@ -143,42 +112,15 @@ struct omci_uni_inv {
 struct omci_onu {
 	u8	sn[8];			/* PLOAM serial number (vendor+VSSN) */
 	u8	mds;			/* ME 2 attr 1: MIB-Data-Sync */
-	/* The two UNI inventories.  ⚠ EACH WAS A SINGLE u8 FOR ONE HARDCODED
-	 * INSTANCE, 0x0101: a Get on any other instance answered 0 whatever had
-	 * been Set, and a Set on any other instance wrote the FIRST one's state.
-	 * Both boards' stock MIBs carry four ME 11 instances, and six (G24W) /
-	 * five (X400AXF) ME 264.
-	 * ⚠ AND ME 264 WAS A CONSTANT ZERO BEFORE THAT: the Set was ACKed, the
-	 * MIB-Data-Sync advanced, and the Get answered 0 -- so the OLT was told
-	 * the write took and then shown that it had not.
-	 *
-	 * ★★ AND THE G24W's OWN STOCK STILL DOES EXACTLY THAT, DELIBERATELY --
-	 * so our storing it is a DECLARED DELTA, not an oversight.  Executing
-	 * that board's own binaries: ME 264's AdminState carries OltAcc 1
-	 * against a requested Set permission of 2, the effective write mask is
-	 * ZERO, and four Set requests across 0x0101, 0x0601 and 0x0801 keep the
-	 * old value, advance the MIB-Data-Sync and answer 0.  Its config
-	 * handler is eight bytes of `jr ra`.  Copying that back would make our
-	 * own MIB-Data-Sync a lie by construction, which is the defect this
-	 * model already paid for once.  Re-runnable proof, with the one-byte
-	 * metadata control that makes the arms mean something:
-	 * ONU-test-case/instrument/RTL9603CVD/LANLY/G24W/stock_uni_contract.py */
+	/* The two UNI inventories. ⚠ EACH WAS A SINGLE u8 FOR ONE ...
+	 * dev/MEASURED-gpon_omci_me.h.md sec 4. */
 	struct omci_uni_inv	pptp_eth_uni;	/* ME 11, attribute 5 */
 	struct omci_uni_inv	uni_g;		/* ME 264, attribute 2 */
-	/* ME 264 #3 management capability, per uni_g slot.  ⚠ IT WAS THE
-	 * CONSTANT 1, which was true of the ONE modelled instance and is false
-	 * of the extra one each board carries: the X400AXF's 0x0604 and the
-	 * G24W's 0x0601 both report 0 in their own stock MIB.  Modelling more
-	 * instances while keeping the constant would have made the extended
-	 * inventory contradict the capture it came from. */
+	/* ME 264 #3 management capability, per uni_g slot. ⚠ IT WAS ...
+	 * dev/MEASURED-gpon_omci_me.h.md sec 5. */
 	u8	uni_g_mgmt_cap[OMCI_UNI_MAX];
-	/* ★ ME 11 #1/#2, PER INSTANCE.  Expected and Sensed type are the G.988
-	 *   plug-in type coding, which states what the UNI IS -- not what it
-	 *   negotiated -- so a fixed integrated port answers the same byte with
-	 *   its link down.  It was one constant 47 for every instance, and that
-	 *   is right for the GE port on both Luna boards and wrong for every FE
-	 *   one, which their own stock reports as 24.  Like the switch port, it
-	 *   is a fact of the panel and is not computable from the instance id. */
+	/* ★ ME 11 #1/#2, PER INSTANCE. Expected and Sensed type are ...
+	 * dev/MEASURED-gpon_omci_me.h.md sec 6. */
 	u8	uni_type[OMCI_UNI_MAX];
 	/* MIB-Upload rows the row table had no room for.  ⚠ THE BUILDER DROPS
 	 * THEM SILENTLY, and a dropped row is an instance the OLT never learns
@@ -236,14 +178,8 @@ struct omci_onu {
 	u16	alarm_told;	/* what the OLT has been told -- the EDGE */
 	u8	alarm_seq;	/* G.988 alarm sequence number, wraps at 255 */
 	u32	alarm_emitted;	/* spy counter: autonomous alarms sent */
-	/* ME 263 ANI-G #10 RX / #14 TX optical level in the G.988 wire form
-	 * (2's complement, 0.002 dB steps referred to 1 mW).  Seeded by
-	 * omci_onu_init() to the static fallback below and overwritten by the
-	 * shell from the live SFF-8472 A2h DDM read.  The fallback survives a
-	 * FAILED read because the OLT must never get silence, and @anig_live
-	 * says which of the two a reader is looking at, so a stub is never
-	 * mistaken for a measurement.  The host oracle never calls the setter,
-	 * so its GET responses stay byte-identical to the reference snapshot. */
+	/* ME 263 ANI-G #10 RX / #14 TX optical level in the G.988 ...
+	 * dev/MEASURED-gpon_omci_me.h.md sec 7. */
 	u16	anig_rx_level;
 	u16	anig_tx_level;
 	bool	anig_live;
@@ -267,16 +203,8 @@ static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
 	o->anig_live = true;
 }
 
-/* Re-provision the G.984.3 ONU serial after init.
- * ★ A SETTER AND NOT A SECOND COPY IN THE SHELL: a shell may only learn the
- *   real serial from PLOAM after probe, and re-running omci_onu_init() to
- *   deliver it would ZERO the whole MIB mid-session — created instances, MDS
- *   and all.  The one reader serves these bytes at GET time, so writing them is
- *   complete and no row needs rebuilding.
- * ⚠ THE ALTERNATIVE ALREADY WENT WRONG ONCE: the Luna shell's
- *   set_omci_identity() copies the serial into a PRIVATE omci_sn[8] that only a
- *   /proc line has read since the responder was rebased onto this core, so
- *   ONU-G there still answers whatever probe happened to seed. */
+/* Re-provision the G.984.3 ONU serial after init. ★ A SETTER ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 8. */
 static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
 {
 	unsigned int i;	/* a loop, not memcpy(): this header includes only
@@ -286,11 +214,8 @@ static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
 		o->sn[i] = sn[i];
 }
 
-/* ME class IDs presented in the MIB upload (G.988 + the HSGQ OLT's set).
- * ONU_DATA and VEIP are also defined identically by gpon_omci_core.h, which
- * reasons about those two itself; a repeated object-like #define with the same
- * replacement list is a benign redefinition, so each header stays readable on
- * its own. */
+/* ME class IDs presented in the MIB upload (G.988 + the HSGQ ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 24. */
 #define OMCI_ME_ONU_DATA	2
 #define OMCI_ME_CARDHOLDER	5
 #define OMCI_ME_CIRCUIT_PACK	6
@@ -361,30 +286,12 @@ static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
 #define OMCI_ME_VEIP		329
 #define OMCI_ME_CTC_LOID_AUTH	65530	/* 0xFFFA — CTC extension the OLT audits */
 
-/* ★★ THE MIB-DATA-SYNC POISON SEED IS PROTOCOL POLICY, AND IT LIVES ONCE.
- * We hold no persistent MIB, so a warm re-admit MUST make the OLT re-provision
- * from MIB-Reset.  Two mechanisms exist and they are NOT equally strong:
- *   1..30      satisfies this OLT's own gate UNCONDITIONALLY — MEASURED on the
- *              Luna side: it treats rsync < 31 as not-in-sync and re-provisions
- *              whatever lsync it stored;
- *   any other  works only by MISMATCH against the stored lsync, and fails
- *              exactly when the OLT stored OUR OWN previous seed (the X111W
- *              warm-readmit lesson).  The Cortina shell carried a literal 200
- *              for weeks, CITING that lesson while using the value it argues
- *              against.
- * The default is the measured-safe band; a shell may expose a tunable, but its
- * DEFAULT is this. */
+/* ★★ THE MIB-DATA-SYNC POISON SEED IS PROTOCOL POLICY, AND IT ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 9. */
 #define OMCI_MDS_POISON_SEED	7
 
-/* ★★ THE WALK: WHAT TO DO WHEN THE SEED IS NOT ENOUGH.  The seed makes the
- * FIRST admit re-provision and cannot help once the OLT has STORED that value:
- * from then on rsync == lsync, every escape clause in its audit is false, and
- * it reads us forever provisioning nothing — a poisoned value that is STABLE is
- * indistinguishable from being in sync.  So after N reads with no MIB-Reset and
- * no applied config, STEP the reported value.
- * ⚠ 0 IS EXCLUDED FROM THE SEARCH SPACE: G.988 gives it the meaning "just
- *   MIB-Reset", and folding 0 onto 1 splices the orbit into an 83-value CYCLE
- *   instead of an exhaustive 1..255 walk. */
+/* ★★ THE WALK: WHAT TO DO WHEN THE SEED IS NOT ENOUGH. The ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 10. */
 #define OMCI_MDS_WALK_STEP	37	/* coprime with 255: enumerates 1..255 */
 #define OMCI_MDS_ADAPT_READS	12	/* reads with no provisioning before a step */
 
@@ -401,39 +308,12 @@ bool omci_mic_ok(const u8 *msg, unsigned int len);
  * it before the memset.  A shell declares its UNI inventory straight after. */
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed);
 
-/*
- * Re-init a LIVE model for a new identity, carrying its declared UNI inventory
- * across.  This is the one to call on an identity change.
- *
- * ⚠ omci_onu_init() MEMSETS, and a board does not gain or lose UNIs when its
- *   serial number changes: a bare re-init drops three of four ME 11 instances
- *   out of the MIB mid-session, which the OLT discovers only at its next
- *   upload.  The two are separate functions because the cold caller's object
- *   is indeterminate -- several callers pass an uninitialised stack struct --
- *   so the cold path may not read the inventory it would need to preserve.
- */
+/* Re-init a LIVE model for a new identity, carrying its ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 11. */
 void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed);
 
-/*
- * Declare which instances of ME 11 and ME 264 this board presents, and rebuild
- * the MIB-Upload rows around them.  Called by the FAMILY shell after
- * omci_onu_init(); until it is, the model carries the single 0x0101 of each
- * that every board on the bench has.
- *
- * The two lists are independent and either may be EMPTY -- a board with no
- * Ethernet UNI at all is a legal declaration, not a request for the default.
- * @unig_mgmt_cap is ME 264 #3 per instance; NULL means 1 for all of them.
- *
- * Refuses a list longer than OMCI_UNI_MAX, a zero instance id, a duplicate, or
- * a panel whose rows do not fit the MIB table -- each of those would put the
- * MIB and the OLT's copy of it permanently out of step.
- *
- * ★ A REFUSAL CHANGES NOTHING, AND THAT INCLUDES THE STATE A PORT DEPENDS ON:
- *   the accepted administrative states and the undrained apply obligations are
- *   exactly as they were.  The capacity case is checked by building and putting
- *   the previous panel back, so there is no second capacity model to keep in
- *   step with the row builder.
- */
+/* Declare which instances of ME 11 and ME 264 this board ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 12. */
 bool omci_onu_declare_unis(struct omci_onu *o,
 			   const u16 *pptp_inst, const u8 *pptp_type, u8 pptp_n,
 			   const u16 *unig_inst, const u8 *unig_mgmt_cap,
@@ -453,30 +333,8 @@ enum omci_uni_decl {
 				 * states and pending obligations included */
 };
 
-/*
- * Decode a board's panel out of the RAW BYTES of its declaration and install
- * it.  The instance lists are 16-bit BIG-ENDIAN, which is how a device tree
- * stores them; @cap is one byte per UNI-G.  A negative length means the
- * property is ABSENT, which is a different answer from present-and-empty.
- *
- * ★ IT IS HERE, AND IT TAKES BYTES, FOR TWO REASONS.  The core may hold no
- *   device-tree handle (it builds on x86 against no kernel at all), and both
- *   families were about to carry their own copy of this parsing -- which is
- *   how they came to share four malformed-input defects on the day they were
- *   written.  Bytes in, panel out, fuzzable on a host.
- *
- * ★ EVERY LENGTH IS CHECKED RATHER THAN ROUNDED.  An odd byte count is not a
- *   list with the tail dropped, a capability array that is short or long is
- *   not one padded with the old constant, and a list written in the device
- *   tree's DEFAULT 32-bit cell width is none of those things either -- it is
- *   a board saying something it did not mean, and the only safe answer is to
- *   refuse it and say which property.
- *
- * ★ AND cap DEFAULTS TO 1 ONLY WHEN IT IS ABSENT.  Present-but-wrong silently
- *   becoming all-ones is exactly the failure that would make an extended
- *   inventory contradict the capture it came from.  @type is one byte per
- *   ETHERNET UNI and follows the same rule against OMCI_UNI_TYPE_DEFAULT.
- */
+/* Decode a board's panel out of the RAW BYTES of its ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 13. */
 enum omci_uni_decl omci_onu_declare_unis_be(struct omci_onu *o,
 					    const void *pptp_be, int pptp_len,
 					    const void *type, int type_len,
@@ -488,51 +346,16 @@ enum omci_uni_decl omci_onu_declare_unis_be(struct omci_onu *o,
  * instance.  Answers on the FULL u16. */
 int omci_uni_slot(const struct omci_uni_inv *inv, u16 inst);
 
-/*
- * Take the set of slots whose administrative state moved since the last call,
- * and clear it.  This is the seam the family applies to a port and its PHY.
- *
- * ★ THE CORE NEVER NAMES A PORT, A PHY OR A REGISTER.  Which physical socket
- *   an instance is remains unproven on both boards -- the mapping seen so far
- *   is what each board's own stock MIB REPORTS, which is not a connector
- *   proof -- so the family owns it and the core hands over an instance id.
- *
- * ★ AND A PHYSICAL FAILURE IS NOT REPAIRABLE FROM HERE.  The Set response is
- *   already committed (and a duplicate-TID replay answers from the cache
- *   without reaching this path at all), so a family that cannot bring a port
- *   down must report that as its own fault -- never by rewriting a response
- *   byte after the fact, which would claim the model failed when it did not.
- */
+/* Take the set of slots whose administrative state moved ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 14. */
 u8 omci_uni_take_changed(struct omci_uni_inv *inv);
 
-/*
- * Put a drained obligation BACK, because the family could not apply it.
- *
- * ★ AN APPLY THAT FAILED IS STILL OWED.  take_changed() clears the word, so a
- *   family that drains a slot and then cannot drive its port would leave the
- *   model reporting a lock the socket never took, with nothing left to retry
- *   from: no later Set of the same value re-arms it (that is deliberate) and a
- *   MIB-Reset only covers the unlock direction.
- */
+/* Put a drained obligation BACK, because the family could not ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 15. */
 void omci_uni_mark_changed(struct omci_uni_inv *inv, u8 slot);
 
-/*
- * ★★★ DRAINING THE OBLIGATION IS G.988 WORK, AND IT WAS WRITTEN TWICE
- * (measured 2026-09-14).  `luna_uni_apply_work_fn` and `cg_uni_apply_work` are
- * two spellings of one rule: walk the taken changed-mask, drive each flagged
- * slot, and — the half that is easy to get wrong — put the obligation BACK
- * whenever the port did not take it, arming a retry timer only when the
- * failure can still go away.  Nothing in that decision is per-silicon: which
- * slots are flagged is the model's, what a permanent failure means is G.988's,
- * and only the CALL and the LOCK around it belong to a shell.
- *
- * ⚠ THE TWO COPIES HAD ALREADY DRIFTED IN THEIR PROSE.  Cortina's carried a
- * note that dropping the obligation on a permanent error "made the text above
- * a lie"; Luna's arrived at the same behaviour through a different expression
- * (`retry` gated on the backend existing) and said nothing about it.  Two
- * bodies agreeing today with no shared statement of WHY is the state a repair
- * to one of them ends.
- */
+/* ★★★ DRAINING THE OBLIGATION IS G.988 WORK, AND IT WAS ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 16. */
 enum omci_uni_apply_rc {
 	/* the port took the administrative state: the obligation is discharged */
 	OMCI_UNI_APPLIED = 0,
@@ -544,46 +367,20 @@ enum omci_uni_apply_rc {
 	OMCI_UNI_TRANSIENT,
 };
 
-/**
- * struct omci_uni_apply_ops - the two doors the drain needs into a shell
- * @apply: drive UNI slot @slot to @locked (G.988: 1 = locked).  The shell maps
- *         its own backend's failure onto the enum; the core never sees an
- *         errno, a port number or a register.
- * @rearm: put slot @slot's obligation back — omci_uni_mark_changed() under
- *         whatever lock that shell keeps the model under, which is why the
- *         core cannot do it itself.
- *
- * Both are MANDATORY: a drain with no way to re-arm silently loses a lock the
- * OLT has already been told took effect.
- */
+/* struct omci_uni_apply_ops - the two doors the drain needs ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 17. */
 struct omci_uni_apply_ops {
 	enum omci_uni_apply_rc (*apply)(void *sh, u8 slot, bool locked);
 	void (*rearm)(void *sh, u8 slot);
 };
 
-/**
- * omci_uni_apply_run() - drive one drained changed-mask onto the ports
- * @ops:     the shell's two doors; a NULL member makes this a no-op that
- *           re-arms nothing, because losing the obligation silently is worse
- *           than not draining it.
- * @sh:      opaque shell handle, handed back to every op
- * @changed: the mask omci_uni_take_changed() returned
- * @n:       how many slots the inventory declares
- * @admin:   the snapshot of the administrative states, @n entries
- *
- * Return: true when a RETRY TIMER is owed — at least one slot failed in a way
- * that can still succeed.  A board with no port for a slot never sets it.
- */
+/* omci_uni_apply_run() - drive one drained changed-mask onto ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 18. */
 bool omci_uni_apply_run(const struct omci_uni_apply_ops *ops, void *sh,
 			u8 changed, u8 n, const u8 *admin);
 
-/* The ME-model API the MESSAGE layer calls.  These nine were `static` while the
- * model and the message rules shared one translation unit; the split is the only
- * reason they are declared here, and the contract of each stays written at its
- * DEFINITION in gpon_omci_me.c — a duplicated contract in a header drifts from
- * the code it describes. */
-
-/* dynamic (OLT-provisioned) ME store */
+/* The ME-model API the MESSAGE layer calls. These nine were ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 19. */
 struct omci_me_inst *omci_store_find(struct omci_onu *o, u16 class_id, u16 inst);
 bool omci_store_has_class(struct omci_onu *o, u16 class_id);
 struct omci_me_inst *omci_store_nth(struct omci_onu *o, u16 idx);
@@ -613,39 +410,8 @@ bool omci_class_modelled(u16 class_id);
 /* is (class, inst) a MIB instance this ONU holds? */
 bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst);
 
-/* ★★★ THE WAN SERVICE SPINE — where the OLT said a GEM port GOES.
- *
- * G.988 clause 9.3 expresses a service as a chain of POINTERS, and the ONU can
- * only answer "which bridge is my WAN on" by following it:
- *
- *     ME 268 (GEM port CTP)  <- #1 of  ME 266 (GEM interworking TP)
- *     ME 266                 <- #4 of  ME 47  (MAC bridge port config data)
- *     ME 45  (bridge)        <- #1 of  ME 47
- *     ME 272 (GAL Eth prof)  <- #7 of  ME 266
- *
- * Each bit of @have says one LINK resolved, and they are cumulative in that
- * order: a chain that stops names exactly how far the OLT's provisioning got,
- * which is the difference between "the OLT has not finished" and "the OLT means
- * something we do not implement".
- *
- * ⚠ REPORTING, NOT INSTALLING.  Nothing in either family calls it yet: the WAN
- *   above the GEM is ours from uci and the GEM install stays gated on ME 268 +
- *   ME 262 + PLOAM.  It exists so the OLT's intent and our installed path can
- *   be COMPARED at all — before this, they could not be.
- *
- * ★ BOTH ROUTES ARE WALKED (the second one landed 2026-09-14).  G.988 lets a
- *   bridge port reach a GEM interworking TP EITHER directly (ME 47 #4 -> ME 266)
- *   OR through an 802.1p mapper service profile (ME 47 #4 -> ME 130, whose eight
- *   P-bit pointers each name an ME 266).  An OLT using the mapper is not exotic,
- *   and before the second route this reported the chain stopping at the
- *   interworking TP — true about what resolved, and read by a human as "the OLT
- *   provisioned nothing".  @have names WHICH route was taken, because the two
- *   are different service models and not two spellings of one.
- *
- *     ME 268 (GEM port CTP)  <- #1 of  ME 266 (GEM interworking TP)
- *     ME 266                 <- #4 of  ME 47   ... the DIRECT route
- *                            <- #2..#9 of ME 130 <- #4 of ME 47 ... the MAPPER
- */
+/* ★★★ THE WAN SERVICE SPINE — where the OLT said a GEM port ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 20. */
 #define OMCI_SVC_GEM_CTP	0x01	/* an ME 268 carries this Port-ID */
 #define OMCI_SVC_IW_TP		0x02	/* an ME 266 interworks that CTP */
 #define OMCI_SVC_BRIDGE_PORT	0x04	/* an ME 47 points at that ME 266 */
@@ -679,27 +445,8 @@ u8 omci_service_resolve(struct omci_onu *o, u16 gem_port,
  * reach one.  The flat form, for callers that cannot take the struct. */
 u16 omci_service_bridge_of_gem(struct omci_onu *o, u16 gem_port);
 
-/* ★★★ WHICH ME 268 IS THE WAN DATA GEM — a decision, in the core, once.  Both
- * targets answered it privately and they had DIVERGED:
- *
- *   rule                                    elnath   luna (pre-2026-08-27)
- *   direction must be BIDIRECTIONAL          yes      ABSENT
- *   refuse the OMCC's own GEM                yes      ABSENT
- *   refuse Port-ID 0                         yes      ABSENT
- *   refuse the multicast GEM                 via dir  yes, by port-id
- *
- * ⚠ AND LUNA'S COPY IS NOT MERELY WEAKER, IT IS GONE: its ME 268 snoop lived
- *   inside the shell's own responder and was deleted with it by 836b76be01, the
- *   core gained no replacement, so `data_gem_solicited` lost its only setter and
- *   the WAN data GEM is never installed from the OLT's Create at all.
- * ★ A QUERY AND NOT A NOTIFICATION, so it needs no callback and no lifecycle:
- *   the responder ALREADY stores every Set-by-Create body, so the answer is a
- *   pure read of state the core holds anyway, and it is exercisable on x86.
- * ★ THE GEOMETRY STAYS THE SHELL'S: @omcc_gem and @mcast_gem are INPUTS. */
-
-/* Why a candidate ME 268 is, or is not, the WAN data GEM.  Six outcomes,
- * because "not the data GEM" is five different facts and a shell that cannot
- * say WHICH one is a shell that cannot explain a dead WAN. */
+/* ★★★ WHICH ME 268 IS THE WAN DATA GEM — a decision, in the ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 21. */
 enum omci_dgem {
 	OMCI_DGEM_YES = 0,	/* adopt: bidirectional, and nobody else's */
 	OMCI_DGEM_RUNT,		/* Create body too short to carry attr 1..3 */
@@ -711,14 +458,8 @@ enum omci_dgem {
 	OMCI_DGEM_NOT_BIDIR,	/* a uni-directional CTP: G.988 direction != 3 */
 };
 
-/* Classify ONE stored ME 268 Set-by-Create body.  @body/@blen are the bytes the
- * store holds (attribute 1 first, i.e. the wire from octet 8).  On
- * OMCI_DGEM_YES, *@port_id is the 12-bit G.984.3 wire Port-ID.
- * Pure: no state, no side effect, safe from any context.
- * ⚠ @blen IS A u8, SO THE CALLER MUST CLAMP -- NEVER CAST.  A shell that wrote
- *   `(u8)(len - 8)` WRAPPED: len 264 became 0 and read as a RUNT, and len 512
- *   became 248 -- a plausible-looking body length, which is the worse of the
- *   two.  Bound the frame to OMCI_LEN first, then subtract the 8-octet header. */
+/* Classify ONE stored ME 268 Set-by-Create body. @body/@blen ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 22. */
 enum omci_dgem omci_dgem_classify(const u8 *body, u8 blen,
 				  u16 omcc_gem, u16 mcast_gem, u16 *port_id);
 
@@ -749,14 +490,8 @@ void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 bool omci_data_gem_port(struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
 			u16 *port_id);
 
-/* ★ THE DATA-PATH SNOOP'S OTHER TWO DECISIONS — core, once (2026-09-02).  Same
- * shape and reason as omci_dgem_classify(): the Elnath shell answered "does
- * this ME 262 move or detach the data alloc-id?" and "does this ME 268 Delete
- * name the latched data GEM?" privately, and Luna has NO copy at all since
- * 836b76be01, so the next board would have re-derived both from G.988.  The
- * SHADOW is an INPUT: the core decides, the shell keeps the CAM writes. */
-
-/* What one MIC-verified ME 262 (T-CONT) PDU means for the DATA alloc-id. */
+/* ★ THE DATA-PATH SNOOP'S OTHER TWO DECISIONS — core, once ...
+ * dev/MEASURED-gpon_omci_me.h.md sec 23. */
 enum omci_tcont_verdict {
 	OMCI_TCONT_NONE = 0,	/* nothing actionable: not a Create/Set, runt
 				 * body, attr 1 absent from the Set mask,

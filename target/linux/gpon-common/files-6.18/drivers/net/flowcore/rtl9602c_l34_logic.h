@@ -1,14 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * rtl9602c_l34_logic.h -- logic hoisted out of the rtl9602c_eth.c TU
- * (rtl9602c_l34.c is #included into it, so one pair serves the whole shell).
- *
- * Every function here was moved MECHANICALLY under one rule: it touches no
- * MMIO, calls no kernel service, and reads no file-scope state of the shell
- * it left. Operator, 2026-08-28: a port should be "una lista de registros
- * y tal vez algunos workaround", and that is only true once the LOGIC
- * exists in one place instead of once per board.
- */
+/* rtl9602c_l34_logic.h -- logic hoisted out of the ...
+ * dev/MEASURED-rtl9602c_l34_logic.h.md sec 1. */
 #ifndef _RTL9602C_L34_LOGIC_H
 #define _RTL9602C_L34_LOGIC_H
 
@@ -21,24 +13,7 @@ u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width);
 u16 l34_hash_out(bool is_tcp, u32 sip, u16 sport, u32 dip, u16 dport);
 u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 
-/* ---- L34/L2 entry LAYOUTS + their encoders --------------------------------
- * Moved from rtl9602c_l34.h / split out of rtl9602c_l34.c (2026-09-02): the
- * layout defines travel WITH their encoders (the TXD3_9602C_* precedent) so
- * every layout fact exists ONCE; the shell reaches them through this header.
- * {LSP, W} = LSB bit position within the packed entry and field width in
- * bits.  The data bank is significance-ordered (w[i] holds entry bits
- * [32*i+31 : 32*i]); a field's word index is LSP/32.  Hardware facts; the
- * naming/expression is original.
- *
- * Every encoder below writes into a CALLER-ZEROED word array (the shell's
- * on-stack `= { 0 }`): l34_field_set is read-modify-write, deliberately, so
- * the shell's rollback path (re-writing a zeroed entry) stays possible.
- * Registers, table types, word counts and the engine/L2 command plumbing
- * stay in the shell's rtl9602c_l34.h -- they are transport, not layout.
- */
-
-/* NAPT_OUT (type 10, 1 word): outbound hash slot. The slot's table index is
- * itself the outbound hash; the word only points at the rewrite entry. */
+/* L34/L2 entry LAYOUTS + their encoders -- dev/MEASURED-rtl9602c_l34_logic.h.md sec 2. */
 #define L34_NAPT_HASHIN_IDX_LSP	0	/* -> NAPTR_IN entry index */
 #define L34_NAPT_HASHIN_IDX_W	12
 #define L34_NAPT_VALID_LSP	12
@@ -188,30 +163,8 @@ void l34_arp_encode(u32 *w, u32 gw_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);
 int l34_l2uc_sts_index(u32 sts);
 
-/* ---- blackhole-safety: an interface program is ALL-OR-NOTHING ------------
- *
- * ★ WHY THE CONTRACT LIVES HERE AND NOT IN A SHELL.  The Cortina side already
- * states it for its own install path -- cortina-ni-flowoffload.c: "the caller
- * must fully undo (blackhole-safety)"; cortina-l3fe.c: "ours MUST punt to
- * CPU_0 or gate-on would black-hole LAN management on the first miss".  Luna
- * had neither.  rtl9602c_l34_lan_setup() wrote NETIF, then the subnet route,
- * then the CPU self-route, each with its own `goto out`, so a failure AFTER
- * the NETIF write left the engine CLAIMING the ONU's own LAN MAC with no CPU
- * route behind it.
- *
- * MEASURED on the X111W (2026-09-11, A->B->A with no reboot): with the own MAC
- * claimed, IPv4 unicast to the ONU is taken by the engine and never delivered
- * -- 100% loss 4/4, `Icmp InEchos` 34->34 across 40 echoes; rewriting the SAME
- * NETIF with a foreign MAC restored it, 0% loss 3/3.  ARP and broadcast cross
- * throughout, so the loss is SELECTIVE and every layer a reader would blame
- * reads healthy.
- *
- * ⚠ THE CLAIM IS STEP 0 BY CONSTRUCTION.  A NETIF entry starts claiming the
- * instant it is written; every other entry is inert until something points at
- * it.  So the steps are ORDERED with the claim first and l34_prog_run()
- * revokes step 0 -- and only step 0 -- on any later failure.  A partial
- * program that merely stops is the shape that black-holes.
- */
+/* blackhole-safety: an interface program is ALL-OR-NOTHING
+ * dev/MEASURED-rtl9602c_l34_logic.h.md sec 3. */
 #define L34_WORDS_MAX		4	/* NETIF, the widest entry programmed here */
 
 struct l34_prog_step {
@@ -237,56 +190,7 @@ bool l34_rt_is_cpu_self(const u32 *rt, u32 ip, u8 netif_idx);
 bool l34_iface_blackholes(const u32 *netif, const u32 *cpu_rt, u32 own_ip,
 			  u8 netif_idx);
 
-/* ---- hoisted from rtl9602c_eth.c (same shell TU) ---------------------- */
-
-/* ★ THE DS-OMCI RX REASON IS NO LONGER A CONSTANT HERE, AND IT NEVER SHOULD
- * HAVE BEEN.  This file carried `#define RTL9602C_OMCI_REASON 246` and the
- * classifier below read it directly.  246 is the RTL9602C's value ALONE: the
- * vendor's own NIC RX hook switches on the chip id and picks 229 for the
- * RTL9607C and the RTL9603CVD (rtl86900/sdk/src/module/gpon/gponapi.c,
- * rtk_gponapp_omci_rx_wrapper -- tier 3).  A constant named for one chip, in a
- * file both shells include, is exactly how a sibling's literal comes to look
- * portable; the value now travels from the per-chip table
- * (luna_sw_map.omci_cpu_reason, luna_eth_regs.h) as an ARGUMENT, the same shape
- * this file already uses for @err_mask.
- */
-
-/*
- * 9602C GMAC TX steering-descriptor facts, moved here from rtl9602c_eth.c so
- * the cross-chip trap that file documents exists ONCE, where a sibling chip's
- * table can visibly disagree with it:
- *
- *   9602C opts3/word3 layout (authoritative: the 9602C TX-descriptor field
- *   map): extspa[31:29] | tx_portmask[28:23] | tx_dst_stream_id[22:16] |
- *   rsvd | l34_keep[1] | ptp[0]
- *
- * The 9607C puts dst_stream_id at [6:0]; writing SID 64 there on 9602C landed
- * it in RESERVED bits (ignored), so the US-NIC never saw SID 64 (rxsid stayed
- * 0 -- the whole US-OMCI blocker).  extspa is left 0 for OMCI.
- *
- * GROUND TRUTH from a live working stock ref ONU (devmem of its OMCI TX ring
- * 0, 2026-06-11): every OMCI descriptor is word2=0x80080000, word3=0x02400000.
- * Decoding word3 in the 9602C layout: tx_portmask[28:23] = (1<<2) and
- * tx_dst_stream_id[22:16] = 64.  So the PON port for the GMAC tx_portmask is
- * 2, not 4 (the earlier guess).
- *
- * SDK CROSS-CHECK (2026-09-03), so the devmem no longer stands alone: the
- * vendor 9602C-generation tx_info (rtl86900/romeDriver/re8686_sim.h; the
- * struct is identical in every SDK copy on this bench) agrees field for
- * field -- opts2 cputag:31 + efid:19 (stock word2 0x80080000 = cputag|efid);
- * opts3 extspa[31:29] | tx_portmask[28:23] | tx_dst_stream_id[22:16] |
- * l34_keep[1] | ptp[0].  keep(25), dislrn(21) and cputag_psel(18) live in
- * OPTS1 on this generation: stock's OMCI word0 OR of 0x02240000 is exactly
- * keep|dislrn|cputag_psel (the value the shell long carried as an invented
- * "segment/org control" -- now TXD0_OMCI_KEEP_DISLRN_PSEL in rtl9602c_eth.c).
- * The RTL9607C generation (rtl86900/nicDriver/re8686_rtl9607c.h) moved those
- * fields into opts3 (keep:23, dislrn:21, cputag_psel:20, l34_keep:17,
- * tx_dst_stream_id[6:0]) and the portmask into opts2[26:16]; rtl9602c_eth.c
- * carried those SIBLING placements as three separate dead #define blocks
- * (TXD2_*, TXD3_*, TXD_*) until 2026-09-03 -- deleted, this note is their
- * record, and the 9607C's own driver is where those values belong if one is
- * ever written.
- */
+/* hoisted from rtl9602c_eth.c (same shell TU) -- dev/MEASURED-rtl9602c_l34_logic.h.md sec 4. */
 #define GMAC_PON_PORT		2	/* GMAC tx_portmask PON bit (stock = 1<<2 -> word3 0x02400000) */
 #define TXD2_OMCI_CPUTAG	0x80000000u	/* opts2 bit31 cputag */
 #define TXD2_OMCI_EFID		0x00080000u	/* opts2 bit19 efid (stock word2 = 0x80080000) */

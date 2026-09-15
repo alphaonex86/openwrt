@@ -25,11 +25,8 @@
 
 struct net_device;
 
-/*
- * Addresses are HOST order.  Every engine packs its own table words with
- * explicit shift/mask, so a network-order value here would only be a second
- * place to get the byte order wrong.
- */
+/* Addresses are HOST order. Every engine packs its own table ...
+ * dev/MEASURED-gpon_edge.h.md sec 2. */
 struct gpon_edge {
 	u32	wan_ip;			/* the address a US frame is NAT'd to	*/
 	u32	gw_ip;			/* the next hop that address egresses to */
@@ -43,18 +40,8 @@ struct gpon_edge {
 	u8	lan_prefix;		/* LAN prefix length, 1..32		*/
 };
 
-/*
- * Fill *e from the live kernel state.  @lan and @wan are the driver's OWN
- * netdevs; the L3 interface above each (a bridge, a VLAN) is found from them,
- * never named.  @peer is a remote address the caller already holds -- a flow's
- * destination -- so the default route is found by ASKING FOR IT rather than by
- * naming a probe address nobody chose.
- *
- * Returns 0, or a negative errno with *why naming what is not established.
- * ⚠ A failure is a NORMAL outcome (gateway not resolved yet, WAN over a device
- * this engine cannot express); *why exists so the caller can say WHICH, instead
- * of reporting one anonymous refusal.
- */
+/* Fill *e from the live kernel state. @lan and @wan are the ...
+ * dev/MEASURED-gpon_edge.h.md sec 1. */
 int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 		   u32 peer, struct gpon_edge *e, const char **why);
 

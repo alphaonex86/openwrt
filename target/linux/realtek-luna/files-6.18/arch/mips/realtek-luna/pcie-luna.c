@@ -1,55 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * Realtek "Luna" RTL960x PCIe host controller driver.
- *
- * ONE driver, TWO chips, selected at runtime from the device-tree root
- * compatible. It has to be one file: `pcibios_map_irq()` and
- * `pcibios_plat_dev_init()` are GLOBAL arch hooks with exactly one definition
- * per kernel, so two per-chip host drivers cannot coexist in one image even
- * when only one of them would ever register.
- *
- * ★★ THE ACCEPTANCE TEST FOR THE RTL9602C IS A BYTE-IDENTICAL REGISTER
- * SEQUENCE. Its table entry below is the previous file's constants value for
- * value, and every field the RTL9602C does not have is 0 with the caller
- * SKIPPING it -- so any behaviour change on the X111W is a defect of this
- * refactor and not of the new chip.
- *
- * Independent implementation from each SoC's register interface. The RTL9602C
- * facts were established by direct hardware probing of an X111W-A10 (reading
- * back live controller state, bisecting the bring-up, confirming each field
- * against observed link behaviour). The RTL9603CVD facts were established from
- * the LANLY G24W's own stock kernel image -- its `bsp_pcie_reset`,
- * `pci1_controller`, `pcie1_phy_params`, `PCIE_reset_pin` and built-in DTB --
- * and cross-checked against that chip's own 4.4 SDK C source and against the
- * board's own boot console.
- *
- * ┌─ per chip ────────────────┬─ RTL9602C (X111W) ─┬─ RTL9603CVD (G24W) ─────┐
- * │ live PCIe port            │ 0                  │ 1 (port 0 not wired)    │
- * │ hostcfg / devcfg / hostext│ b8b00000 / b8b10000 / b8b01000  (SAME)       │
- * │ MEM / IO window           │ 19000000+16M / 18c00000+64K     (SAME)       │
- * │ SOC_PINMUX 0xb800004c     │ |= 0x10000000      │ REGISTER DOES NOT EXIST │
- * │ SOC_PCI_MISC 0xb8000504   │ strobe BIT(24)|BIT(21) │ strobe BIT(21) only │
- * │ SOC_IP_SEL   0xb8000600   │ MAC BIT(7), plus    │ MAC BIT(6), NO extras  │
- * │                           │ BIT(26)+0,2,11,12   │                        │
- * │ SerDes ePHY table         │ 23 pairs, 25 MHz    │ 10 pairs, no refclk    │
- * │                           │ refclk block        │ variant on this part   │
- * │ endpoint PERST#           │ not software-driven │ GPIO 40, ACTIVE LOW    │
- * │ INTC input for INTx       │ 15                  │ 16                     │
- * └───────────────────────────┴────────────────────┴─────────────────────────┘
- *
- * ⚠ THE THREE 9602C CONSTANTS THAT WOULD HAVE BEEN CARRIED OVER SILENTLY. On
- * the RTL9603CVD, `SOC_PINMUX` is not a register at all (nothing in that chip's
- * stock kernel touches offset 0x4c, and its chipdef names 0x48/0x4c
- * CFG_PCSXF / CFG_PHY_CTRL); `IP_SEL` bit 7 is the OTHER port's MAC gate; and
- * bits 26/0/2/11/12 are never set by stock and enable unidentified IP blocks.
- * This is the same defect class that put BASE_PHYAD=25 on the G24W's PHY bus
- * and a 9602C SerDes window into 9603CVD silicon -- a sibling literal on the
- * wrong die, consumed by the hardware with nothing to read back.
- *
- * Bring-up, per chip, in the order that chip's own boot does it: (optionally)
- * assert PERST#, MDIO reset, MAC-enable pulse, PHY reset + SerDes tuning,
- * (optionally) release PERST#, then poll the LTSSM for L0 (0x728[4:0] == 0x11).
- */
+/* Realtek "Luna" RTL960x PCIe host controller driver. ONE ...
+ * dev/MEASURED-pcie-luna.c.md sec 1. */
 
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -97,69 +48,8 @@
 
 struct luna_pcie_phy { u8 reg; u16 val; };
 
-/*
- * RTL9602C PCIe SerDes PHY tuning, written over the host MDIO before link
- * training. These are the revB analog values that match this RTL9602C (rev A)
- * SerDes. The match is load-bearing beyond just training: regs 0x20/0x21 set the
- * SerDes PLL and clock divider that also clock the downstream endpoint's config
- * core. A sibling part's revC table (0x20=0xd4a4/0x21=0x485a) still bit-locks
- * the lane to L0, but leaves the endpoint's config-core clock mistuned so every
- * config TLP aborts (reads back the 0xeeeeeeee pattern). {reg, val} pairs,
- * terminated by reg 0xff.
- */
-/*
- * ★★★ THE STOCK TABLE, and it is FIVE PAIRS.
- *
- * Two independent disassemblies of the board's own stock kernel (tier 2) put
- * its ePHY table at 0x80ccc780 with exactly these five entries. Everything in
- * luna_pcie_phy_9602c[] below that is NOT here, we add on top of stock --
- * fourteen registers stock leaves at their default, traced to a 9607C
- * `pcie0_phy_params_revC`.
- *
- * ⚠⚠ THIS COMMENT USED TO SAY "the MDIO register field is masked to 5 bits, so
- * some of those fourteen alias onto registers nobody intended to touch" -- and
- * it was describing STOCK'S WRITER, not ours. VERIFIED 2026-09-05 on the
- * board's own stock kernel (tier 2), helper at 0x3d71c0 in
- * cross-compiler/stock_nor/k0_kernel:
- *
- *     3d71e4:  lui   t8,0xb8b0      port 0 base
- *     3d71e8:  andi  a1,a1,0x1f     <- the register index, MASKED TO 5 BITS
- *     3d71ec:  addiu t8,t8,4096     -> 0xb8b01000, our .hostext exactly
- *     3d71f0:  sll   a1,a1,0x8
- *     3d71f4:  sll   a2,a2,0x10
- *     3d71fc:  ori   a2,a2,0x1
- *     3d7200:  sw    a2,0(t8)
- *
- * The writer below masks NOTHING (`reg` is u8, shifted straight to [15:8]), so
- * under OUR code those entries do NOT alias -- they are emitted as 8-bit
- * indices. Six entries of luna_pcie_phy_9602c[] are >= 0x20 and therefore land
- * somewhere different than stock would put them: 0x20, 0x21, 0x23, 0x24, 0x29,
- * 0x2b, which stock's mask would turn into 0x00, 0x01, 0x03, 0x04, 0x09, 0x0b.
- *
- * ★ THE DEFAULT PATH IS NOT AFFECTED: chip->phy is luna_pcie_phy_9602c_stock,
- * whose five registers are all < 0x20, so masked and unmasked are the same
- * word. The divergence only exists on the `pcie_phy_full` arm -- which is
- * exactly the arm that claims to be the A/B control, so the comparison it
- * offers is not the one it says it is.
- *
- * ★ WHICH BEHAVIOUR THE SILICON WANTS IS UNPROVEN, and the tree disagrees with
- * itself: the RTL9603CVD's vendor bring-up masks to EIGHT bits and programs a
- * whole second bank at 0x40..0x6f, which a 5-bit decode would make
- * self-destroying. So the mask is per-chip SOFTWARE and stock's 5 bits are not
- * automatically this ePHY's decode width. Settling it needs a live read-back of
- * an index >= 0x20 against its aliased low counterpart on a cold-booted board.
- * See FINDING-our-ephy-writer-does-not-mask-where-stock-does.md.
- *
- * ⚠ AND THE COMMENT BELOW ALREADY ACCUSES THEM: it names 0x20=0xd4a4 /
- * 0x21=0x485a as "a sibling part's revC table [that] leaves the endpoint's
- * config-core clock mistuned so every config TLP aborts" -- and the table
- * ships those two values verbatim. A comment that is right above code that is
- * not.
- *
- * Default is STOCK'S FIVE. `pcie_phy_full` on the kernel command line restores
- * the full table, so the shipping behaviour stays reachable as the control arm
- * of the A/B without a second build.
- */
+/* RTL9602C PCIe SerDes PHY tuning, written over the host MDIO ...
+ * dev/MEASURED-pcie-luna.c.md sec 2. */
 static const struct luna_pcie_phy luna_pcie_phy_9602c_stock[] = {
 	{ 0x03, 0x3031 }, { 0x06, 0xe0b8 }, { 0x0e, 0x98c5 },
 	{ 0x0f, 0x400f }, { 0x19, 0xfc70 },
@@ -180,37 +70,18 @@ static int __init pcie_phy_full_setup(char *str)
 early_param("pcie_phy_full", pcie_phy_full_setup);
 
 static const struct luna_pcie_phy luna_pcie_phy_9602c[] = {
-	/* ★ THE FOUR ENTRIES THIS TREE CAN NAME ARE NAMED AT THE ENTRY, 2026-09-05.
-	 * The rest are register INDICES in the PCIe ePHY's own MDIO-style space,
-	 * and NOTHING here establishes a name for them: the chipdefs describe
-	 * memory addresses, not this space; the vendor kernel tree contains no
-	 * ePHY register names at all (searched); and the stock reg.txt oracle is
-	 * Cortina silicon, which this tree may not cross. So they stay numbers and
-	 * this comment says why -- an un-nameable entry and a not-yet-named entry
-	 * must not read alike. */
+	/* ★ THE FOUR ENTRIES THIS TREE CAN NAME ARE NAMED AT THE ...
+	 * dev/MEASURED-pcie-luna.c.md sec 3. */
 	{ 0x01, 0xa852 }, { 0x06, 0x0017 }, { 0x08, 0x3591 }, { 0x09, 0x520c },
 	{ 0x0a, 0xf670 }, { 0x0b, 0xa90d }, { 0x0d, 0xe720 }, { 0x0e, 0x1000 },
 	{ 0x1c, 0x2001 }, { 0x1e, 0x66eb },
-	/* 0x20 = SerDes PLL, 0x21 = its clock divider -- the pair that also clocks
-	 * the downstream endpoint's CONFIG CORE (see the block comment above).
-	 * ⚠ THESE TWO VALUES ARE THE ONES THAT COMMENT ACCUSES: it names
-	 * 0x20=0xd4a4 / 0x21=0x485a as a sibling part's revC table that bit-locks
-	 * the lane to L0 but leaves the config core mistuned, so every config TLP
-	 * aborts and reads back 0xeeeeeeee -- and the table ships them verbatim.
-	 * Left as they are: the default path never reaches here (chip->phy is
-	 * luna_pcie_phy_9602c_stock, five registers, all < 0x20), this arm exists
-	 * only under `pcie_phy_full`, and settling it needs a live read-back on a
-	 * COLD-BOOTED board, which the dead bench relay makes impossible today.
-	 * Named here so the next reader meets the contradiction at the values
-	 * rather than forty lines above them. */
+	/* 0x20 = SerDes PLL, 0x21 = its clock divider -- the pair ...
+	 * dev/MEASURED-pcie-luna.c.md sec 4. */
 	{ 0x20, 0xd4a4 }, { 0x21, 0x485a },
 	{ 0x23, 0x0b66 }, { 0x24, 0x4f0c }, { 0x29, 0xf0f3 }, { 0x2b, 0xa0a1 },
 	{ 0x09, 0x500c }, { 0x09, 0x520c },
-	/* 25 MHz reference-clock SerDes values (the board has a 25 MHz crystal at
-	 * the WiFi PCIe PHY). This is the vendor "9602C 25M clk" ePHY table; reg
-	 * 0x03 is the refclk PLL multiplier (0x3031 for 25 MHz, vs 0x7b31 for
-	 * 40 MHz) and reg 0x06 = 0xe0b8 (vs 0xe2b8). A 40 MHz PLL on a 25 MHz
-	 * refclk mistunes the config-core clock -> marginal high-offset access. */
+	/* 25 MHz reference-clock SerDes values (the board has a 25 ...
+	 * dev/MEASURED-pcie-luna.c.md sec 16. */
 	{ 0x03, 0x3031 },	/* refclk PLL multiplier: 0x3031 = 25 MHz
 				 * (0x7b31 is the 40 MHz value) */
 	{ 0x06, 0xe0b8 },	/* refclk-dependent companion of 0x03
@@ -220,24 +91,8 @@ static const struct luna_pcie_phy luna_pcie_phy_9602c[] = {
 	{ 0xff, 0xffff },	/* the terminator, not a register */
 };
 
-/*
- * RTL9603CVD PCIe SerDes ePHY tuning -- port 1. TEN pairs, and NOT a subset of
- * the 9602C's: reg 0x20/0x21, the pair the comment above calls load-bearing for
- * the endpoint's config-core clock, are 0x0105/0x1000 here against 0xd4a4/0x485a
- * there. Carrying the sibling table over is exactly the failure that comment
- * describes.
- *
- * ★ AND THERE IS NO REFERENCE-CLOCK VARIANT ON THIS PART. The 9602C table above
- * carries a second 25 MHz block because that chip's vendor code selects between
- * a 25 MHz and a 40 MHz ePHY table. The RTL9603CVD's bring-up has ONE table, no
- * strap, no DT property and no branch -- so this board's crystal frequency is
- * NOT NEEDED to train the link, and it is also NOT ESTABLISHED. It is named here
- * rather than inferred from the sibling.
- *
- * Established two independent ways that agree pair for pair: read as bytes from
- * `pcie1_phy_params` in the G24W's own stock kernel image (tier 2), and from
- * that chip's own 4.4 SDK C source (tier 3).
- */
+/* RTL9603CVD PCIe SerDes ePHY tuning -- port 1. TEN pairs, ...
+ * dev/MEASURED-pcie-luna.c.md sec 5. */
 static const struct luna_pcie_phy luna_pcie_phy_9603cvd[] = {
 	{ 0x00, 0x8a50 }, { 0x02, 0x26f9 }, { 0x03, 0x6bcd }, { 0x06, 0x1088 },
 	{ 0x08, 0x4a45 }, { 0x09, 0x6303 }, { 0x0b, 0x0009 }, { 0x0c, 0x0800 },
@@ -245,13 +100,8 @@ static const struct luna_pcie_phy luna_pcie_phy_9603cvd[] = {
 	{ 0xff, 0xffff },
 };
 
-/*
- * The per-chip table. A field that is 0 is NOT PRESENT on that chip and the
- * caller SKIPS the step -- never writes zero to the register. That idiom is the
- * whole reason this refactor is safe for the RTL9602C: every field the 9602C
- * has keeps its previous value, and every field only the RTL9603CVD has is 0
- * there, so the X111W's emitted register sequence does not move.
- */
+/* The per-chip table. A field that is 0 is NOT PRESENT on ...
+ * dev/MEASURED-pcie-luna.c.md sec 6. */
 struct luna_pcie_chip {
 	const char *name;
 	const char *root_compat;	/* DT root compatible selecting this entry */
@@ -282,57 +132,8 @@ struct luna_pcie_chip {
 
 static const struct luna_pcie_chip luna_pcie_9602c = {
 	.name = "RTL9602C", .root_compat = "realtek,rtl9602c",
-	/* ★★★ AGGREGATOR INPUT 15, AND IT IS THE PORT THAT DECIDES -- NOT THE DIE.
-	 * There are TWO PCIe inputs on this aggregator, one per root-complex port,
-	 * and every other field in this entry already says this chip is on PORT 0
-	 * (.ip_mac_bit = IP_SEL_EN_PCIE0).  Only .hwirq said port 1.
-	 *
-	 *	PCIe port 0 -> GISR input 15	PCIe port 1 -> GISR input 16
-	 *
-	 * TIER 1, MEASURED CAUSALLY ON THIS BOARD, 2026-09-10
-	 * (`ONU-test-case/pcie_intx_bind.py --board=RTL9602C/HSGQ/X111W`).  The
-	 * endpoint's OWN mask was the stimulus and the whole GISR word 0 was the
-	 * observation, twice: with the radio free to assert, GISR0 = 0x00008000;
-	 * with HIMR and HIMRE written to 0, GISR0 = 0x00000000; restored, bit 15
-	 * again.  Exactly one input follows the endpoint, bit 16 never sets in any
-	 * sample, and the whole word going to zero rules out a coincidental
-	 * neighbour.  Corroborated by the vendor's own map of THIS register
-	 * (bspchip_9607c.h at BSP_GIMR0_0 = 0xB8003000, the same address this
-	 * chip's DT gives the INTC): BSP_PCIE0_IE = BIT(15), BSP_PCIE1_IE = BIT(16).
-	 *
-	 * ⚠ WHY THE 2026-09-01 "CORRECTION" TO 16 WAS WRONG, because the reasoning
-	 * looked strong and will be met again.  Every source it cited was real; the
-	 * hole was in irq-luna.c's named-input list, which carried ONE entry
-	 * "16 PCIe" for what is a PAIR and did not name 15 at all.  A list that
-	 * omits an input cannot be used to argue that the input does not exist, and
-	 * the DT corroboration (uart0=49, timer=43, nic=26) confirmed three OTHER
-	 * inputs -- it never touched PCIe.  The sibling RTL9603CVD's tier-1 16 is
-	 * also correct AND CONSISTENT: that board is on port 1.  Both boards were
-	 * right about themselves; the axis was misread as the die.  The list is
-	 * fixed at its source, so the next reader meets the pair.
-	 *
-	 * ⚠⚠⚠ AND THE COMPANION REPAIR IS VERIFIED BEFORE THE BOARD IS COMMITTED,
-	 * NOT AFTER.  This field's previous comment said the change "is NOT safe
-	 * alone": point the driver at the line that DOES fire while its ISR still
-	 * returns IRQ_HANDLED without clearing anything, and a deaf radio becomes a
-	 * level storm that takes the whole SoC down -- the INTC implements only
-	 * mask/unmask (no .irq_ack, no .irq_eoi) and the root complex does no
-	 * bridge-side INTx acknowledge, so nothing else can rescue it.  On
-	 * 2026-09-10 the repair WAS present and the boot was fine, but it was
-	 * checked AFTERWARDS, which is luck rather than method.
-	 *
-	 *     python3 ONU-test-case/irq_claim_order_guard.py
-	 *
-	 * ⇒ a change whose own comment says it is unsafe alone gets its companion
-	 * VERIFIED FIRST.  The guard is one command and costs nothing; a level storm
-	 * costs the board, and it does not announce itself as this change's fault.
-	 *
-	 * ⚠⚠ A WRONG INPUT IS SILENT, which is why this cost weeks: request_irq
-	 * succeeds on a linear domain whatever the number, the endpoint's interrupt
-	 * simply never arrives, and nothing in the boot log, the driver or a
-	 * register dump can contradict it.  Only an experiment whose EFFECT is
-	 * observed elsewhere can -- hence the tool above, not another reading.
-	 */
+	/* ★★★ AGGREGATOR INPUT 15, AND IT IS THE PORT THAT DECIDES -- ...
+	 * dev/MEASURED-pcie-luna.c.md sec 7. */
 	.intc_compat = "realtek,rtl9602c-intc", .hwirq = 15,
 	.hostcfg = 0xb8b00000ul, .devcfg = 0xb8b10000ul, .hostext = 0xb8b01000ul,
 	.mem_phys = 0x19000000u, .mem_size = 0x01000000u,
@@ -342,14 +143,8 @@ static const struct luna_pcie_chip luna_pcie_9602c = {
 	.misc_strobe = PCI_MISC_MDIO_P0 | PCI_MISC_MDIO_P1,
 	.ip_mac_bit = IP_SEL_EN_PCIE0,
 	.ip_pre_or = IP_SEL_EN_PCIE_PHY | IP_SEL_EN_EXTRA,
-	/* PERST# is not driven by an SoC GPIO here: probing shows the candidate
-	 * lines left as inputs while the link is up, so the endpoint is tied
-	 * released, so the two PERST steps are skipped.
-	 * ★ WRITTEN DOWN rather than left to the compiler (2026-09-14): the
-	 * comment above had said "all four stay 0" since this table landed, and
-	 * an omitted member and a declared 0 looked identical.  The values are
-	 * UNCHANGED -- C already produced exactly these -- so the image is
-	 * byte-identical; what is new is that they are an ANSWER. */
+	/* PERST# is not driven by an SoC GPIO here: probing shows the ...
+	 * dev/MEASURED-pcie-luna.c.md sec 8. */
 	.perst_pad_en = 0, .perst_dir = 0, .perst_data = 0, .perst_bit = 0,
 	/* resolved at init: stock's five by default, the full table with
 	 * `pcie_phy_full` on the command line. See luna_pcie_phy_9602c_stock. */
@@ -358,11 +153,8 @@ static const struct luna_pcie_chip luna_pcie_9602c = {
 
 static const struct luna_pcie_chip luna_pcie_9603cvd = {
 	.name = "RTL9603CVD", .root_compat = "realtek,rtl9603cvd",
-	/* Aggregator input 16. TIER 1, from the board's own boot console: its
-	 * vendor kernel prints the whole translate table, and `16=>50` is the
-	 * PCIe row (`26=>36` is GMAC0, which our own eth driver already uses).
-	 * 50 + the GISR domain's base 23 = Linux virq 73, and the vendor WiFi
-	 * driver prints `b8b10000/b9000000/73` on this board. Three numbers close. */
+	/* Aggregator input 16. TIER 1, from the board's own boot ...
+	 * dev/MEASURED-pcie-luna.c.md sec 17. */
 	.intc_compat = "realtek,rtl9603cvd-intc", .hwirq = 16,
 	/* PORT 1, not port 0. Port 0's constants exist in the stock code and are
 	 * dead on this product -- its CPU-side interrupt number has no aggregator
@@ -389,22 +181,8 @@ static const struct luna_pcie_chip luna_pcie_9603cvd = {
 	.phy = luna_pcie_phy_9603cvd, .retries = 4, .link_polls = 9,
 };
 
-/* ★★★ THE CHIP TABLE MUST SURVIVE INIT -- IT IS NOT INIT DATA (measured
- * 2026-08-27 on the G24W, one panic, one boot lost to stock fallback).
- * `chip` is dereferenced by luna_pcie_access() on EVERY config-space access
- * for the life of the system, and config space is touched long after boot:
- * the first wlan0 open runs rtl92fe_hw_init -> pcie_capability_*() at ~21 s,
- * AFTER free_initmem(). With the tables (and the phy arrays their .phy
- * members point at) marked __initconst, that access read a recycled page:
- *   BadVA df414f10, epc luna_pcie_access+0xb8 (the hostext function-select
- *   write), Kernel panic, SoC watchdog full-chip reset, U-Boot autoboots
- *   the committed STOCK image -- a crash that presents as "the board came
- *   back on the wrong firmware". Boot-time enumeration worked because it
- *   runs BEFORE the free, which is exactly what kept this latent until
- *   wifi-scripts landed and something finally opened wlan0.
- * The original pcie-rtl9602c.c had no chip table and marked only its
- * init-walked PHY array __initconst; the rewrite introduced the defect.
- * Cost of residency: ~0.5 KB. Do not "optimise" it back. */
+/* ★★★ THE CHIP TABLE MUST SURVIVE INIT -- IT IS NOT INIT DATA ...
+ * dev/MEASURED-pcie-luna.c.md sec 9. */
 static const struct luna_pcie_chip *chip;	/* resolved in luna_pcie_init() */
 
 static DEFINE_SPINLOCK(luna_pcie_lock);
@@ -425,15 +203,8 @@ static inline void __iomem *pcie_hostext(void)
 	return (void __iomem *)chip->hostext;
 }
 
-/* ---------- config-space accessors ----------
- *
- * Only two devices exist on this single-port root complex: the root bridge at
- * PCI slot 0 and the downstream endpoint at slot 1; their config windows sit at
- * fixed MMIO bases (a hardware fact). A small table maps slot -> window so a
- * single helper serves both reads and writes. The controller targets a function
- * by latching PCI_FUNC(devfn) into the host-extension function register just
- * before the access, so reads and writes are serialised against that latch.
- */
+/* config-space accessors ---------- Only two devices exist on ...
+ * dev/MEASURED-pcie-luna.c.md sec 10. */
 
 static int luna_pcie_access(struct pci_bus *bus, unsigned int devfn, int where,
 			    int size, u32 *val, bool is_write)
@@ -500,12 +271,8 @@ int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static int pcie_virq;
 
-	/* The endpoint's INTx is aggregated by the SoC INTC onto a single input
-	 * line; map that hwirq through the INTC's (linear) irq_domain to obtain
-	 * the Linux virq the PCI core hands to the endpoint driver. Returning the
-	 * raw hwirq would yield an unmapped virq (no_irq_chip) so request_irq()
-	 * fails with -ENOSYS. The INTC drives handle_level_irq, so the line is
-	 * already level-triggered. */
+	/* The endpoint's INTx is aggregated by the SoC INTC onto a ...
+	 * dev/MEASURED-pcie-luna.c.md sec 11. */
 	if (!pcie_virq && chip) {
 		struct device_node *np;
 
@@ -543,25 +310,8 @@ static struct pci_controller luna_pcie_controller = {
 	.io_resource  = &luna_pcie_io,
 };
 
-/* ---------- bring-up ---------- */
-
-/* Drive the endpoint PERST# pin. ACTIVE LOW: assert=0 holds the endpoint in
- * reset, release=1 lets it come up. A no-op on a chip that declares no pin.
- *
- * ★ THE DRIVER THAT NEEDS THE PAD OWNS THE MUX WRITE, so the pad-function
- * enable is done here and as a READ-MODIFY-WRITE of one bit. The alternative --
- * a gpio_chip for the whole SoC -- would be the larger and more useful piece of
- * work, and it is not what this driver needs to train a link.
- *
- * ⚠ THE PAD-ENABLE WORD IS SHARED, AND THIS IS THE ONE CROSS-DRIVER HAZARD HERE.
- * `IO_GPIO_EN` word 1 (SWCORE 0x40) is the same word the GPON driver's Board-C
- * optical-pad recipe writes WHOLESALE as SOC_IO_GPIO_EN_W1. That recipe is
- * skipped on the RTL9603CVD today ("GPIO optical-SD pad recipe skipped ... not
- * Board C's pinout"), so nothing clobbers this bit -- but a future change that
- * un-skips it would de-claim the PERST pad, and because PERST is a one-shot at
- * boot the link would already be trained and only a RE-train would fail. Named
- * here so it is not re-derived from a symptom.
- */
+/* bring-up ---------- Drive the endpoint PERST# pin. ACTIVE ...
+ * dev/MEASURED-pcie-luna.c.md sec 12. */
 static void __init luna_pcie_perst(bool assert)
 {
 	u32 bit;
@@ -583,12 +333,8 @@ static void __init luna_pcie_perst(bool assert)
 	mb();
 }
 
-/*
- * Full PCIe host bring-up, in the controller's own reset order and timing.
- * Returns 0 once the LTSSM reaches L0 (state 0x11), -ETIMEDOUT otherwise. No
- * access to the 0xb8b0xxxx window happens before the MAC gate is set in step 2,
- * or the CPU bus stalls on an un-acked target.
- */
+/* Full PCIe host bring-up, in the controller's own reset ...
+ * dev/MEASURED-pcie-luna.c.md sec 13. */
 static int __init luna_pcie_reset(void)
 {
 	u32 v;
@@ -628,12 +374,8 @@ static int __init luna_pcie_reset(void)
 	writel(0x81, pcie_hostext() + HOSTEXT_LTSSM);	/* release PHY reset      */
 	mdelay(50);
 
-	/* 4. SerDes PHY tuning over MDIO -- required before POLLING can complete.
-	 *
-	 * ★ THE TABLE IS RESOLVED HERE, not in the static initialiser, so the
-	 *   control arm of the A/B costs a command line and not a second build.
-	 *   Which table ran is PRINTED: an arm that cannot be told apart in the
-	 *   log is an arm whose result cannot be attributed. */
+	/* 4. SerDes PHY tuning over MDIO -- required before POLLING ...
+	 * dev/MEASURED-pcie-luna.c.md sec 14. */
 	{
 		const struct luna_pcie_phy *tbl = chip->phy;
 		int n;
@@ -690,11 +432,8 @@ static int __init luna_pcie_init(void)
 
 	chip = luna_pcie_which();
 	if (!chip) {
-		/* NOT an error and NOT a silence: a board whose root compatible
-		 * names neither chip has no host bridge THIS DRIVER knows, and
-		 * saying so is what keeps "no PCIe here" apart from "the PCIe
-		 * bring-up failed". Touching a 0xb8b0xxxx window on a die that
-		 * does not decode it stalls the CPU bus. */
+		/* NOT an error and NOT a silence: a board whose root ...
+		 * dev/MEASURED-pcie-luna.c.md sec 18. */
 		pr_info("realtek-pcie: no PCIe host declared for this board -- not registering\n");
 		return 0;
 	}
@@ -718,12 +457,8 @@ static int __init luna_pcie_init(void)
 	/* Configuration-retry settle before any config/BAR access. */
 	mdelay(100);
 
-	/* Program the downstream endpoint's BARs + command register, then enable the
-	 * host bridge (written twice), set 128 B max payload, and enable config
-	 * forwarding. The forwarding-enable is the bit17 write-strobe -- the register
-	 * then reads back the operational value 0x100, but writing 0x100 does not
-	 * enable it. Every value here is IDENTICAL on both chips, established
-	 * separately on each rather than carried across. */
+	/* Program the downstream endpoint's BARs + command register, ...
+	 * dev/MEASURED-pcie-luna.c.md sec 15. */
 	writel(chip->io_phys | 1u, pcie_devcfg() + 0x10);
 	writel(chip->mem_phys | 4u, pcie_devcfg() + 0x18);
 	writel(0x00180007, pcie_devcfg() + 0x04);

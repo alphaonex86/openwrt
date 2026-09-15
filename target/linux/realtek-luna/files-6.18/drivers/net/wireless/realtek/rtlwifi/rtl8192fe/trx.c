@@ -322,14 +322,7 @@ static void _rtl92fe_insert_emcontent(struct rtl_tcb_desc *ptcb_desc,
 	set_earlymode_len4(virtualaddress, dwtmp);
 }
 
-/* ---- handshake spy: a permanent, always-on in-tree instrument (project
- * "spy built-in from day one" rule) so a WPA2 auth/assoc/4-way is VISIBLE in
- * the driver log without a sniffer. Logs mgmt (auth/assoc/deauth/action) and
- * EAPOL (M1..M4/group) frames on BOTH rx and tx, with rate/crc/icv/PM. mgmt +
- * EAPOL are rare, so this is off the per-packet forwarding hot path (two
- * predictable branches on a data frame). Endianness-agnostic explicit byte
- * math over the wire bytes (BE MIPS + LE ARM). Runtime kill switch:
- * /sys/module/rtl8192fe/parameters/spy. */
+/* handshake spy: a permanent, always-on in-tree instrument ... -- dev/MEASURED-trx.c.md sec 1. */
 static bool rtl92f_spy_on = true;
 module_param_named(spy, rtl92f_spy_on, bool, 0644);
 MODULE_PARM_DESC(spy, "1=log mgmt+EAPOL frames rx/tx to dmesg for 4-way debug (default on)");
@@ -498,19 +491,8 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 
 	rx_status->flag |= RX_FLAG_MACTIME_START;
 
-	/* The RTL8192F reports HW-decrypted frames with the 802.11 Protected bit
-	 * CLEARED (prot=0), unlike most rtlwifi parts which preserve it. Keying the
-	 * "decrypted vs open" decision off ieee80211_has_protected() (the mainline
-	 * gate) therefore mis-classifies every HW-decrypted DATA frame as open, so
-	 * mac80211's ieee80211_rx_h_decrypt drops it (unprotected data from a keyed
-	 * STA) and the station's upstream never reaches the bridge -- the bridge
-	 * never learns the STA, and ONU-sourced downstream unicast (e.g. the DHCP
-	 * OFFER) is then flooded rather than STA-resolved, egresses without the PTK,
-	 * and the client discards it. status->decrypted (= !swdec) already means the
-	 * HW handled decryption, so trust it: set RX_FLAG_DECRYPTED, and only CLEAR
-	 * the flag for an UNPROTECTED robust management frame (IEEE 802.11w / MFP),
-	 * which mac80211 must still decrypt/verify in software.
-	 */
+	/* The RTL8192F reports HW-decrypted frames with the 802.11 ...
+	 * dev/MEASURED-trx.c.md sec 2. */
 	if (status->decrypted) {
 		if (_ieee80211_is_robust_mgmt_frame(hdr) &&
 		    !ieee80211_has_protected(hdr->frame_control))
@@ -834,38 +816,11 @@ void rtl92fe_tx_fill_desc(struct ieee80211_hw *hw,
 				ptcb_desc->use_driver_rate = true;
 				set_tx_desc_tx_rate(pdesc, DESC_RATE11M);
 			} else {
-				/* AP mode: the firmware rate-adaptation engine has no live
-				 * context for the per-STA macid (aid+1) -- the only
-				 * media-status/join H2C the driver sends hardcodes macid 0
-				 * (STA-join), and the DM RA refresh is gated to STATION mode.
-				 * So a use_rate=0 (FW-controlled) unicast DATA frame hands rate
-				 * control to an unpopulated FW-RA slot -> the FW never resolves
-				 * a rate -> the HW holds the descriptor -> hw_idx freezes -> the
-				 * BE queue stop-latches after the first few frames (mgmt/EAPOL
-				 * are unaffected -- they already use driver rate above).
-				 * Drive the rate from the driver instead: the descriptor carries
-				 * the STA's negotiated hw_rate (highest negotiated MCS, set in
-				 * rtl_get_tcb_desc) and HW ARFR fallback downshifts on retries --
-				 * the SAME no-FW-RA mechanism the working mgmt/EAPOL frames use.
-				 * Correct + permanent for a 1x1 11n AP (loses only upward FW
-				 * rate-climb; keeps initial-high + HW downshift).
-				 * ALSO pin a fixed LEGACY OFDM rate: HT-MCS TX descriptors do
-				 * not complete on this bring-up (the HW holds them -> no DOK ->
-				 * ring fills -> stop-queue latch). EVERY frame that ever TXes
-				 * here is legacy (beacon 1M CCK, mgmt/EAPOL at legacy hw_rate);
-				 * data's hw_rate is the highest negotiated HT-MCS, which wedges.
-				 * Force data onto the same legacy TX path; HW ARFR fallback
-				 * still degrades on retries. (Real HT-MCS TX is a separate PHY/
-				 * rate-power bring-up, not the datapath.) */
+				/* AP mode: the firmware rate-adaptation engine has no live ...
+				 * dev/MEASURED-trx.c.md sec 3. */
 				ptcb_desc->use_driver_rate = true;
-				/* Pin legacy CCK 11M for data. With the RF front-end enabled
-				 * (rfe_type 7 RFE pinmux in _rtl92fe_config_rfe) legacy OFDM
-				 * (54M) now radiates too -- but on this hardware 54M is marginal:
-				 * it degrades to heavy loss under sustained traffic (4->2->0->0)
-				 * even at a strong -7dBm, while CCK 11M holds a rock-solid link
-				 * (24/24). So keep the reliable CCK rate. OFDM/HT-rate stability
-				 * (OFDM EVM / PA-linearity / ARFR) and the HT-MCS TX-descriptor
-				 * wedge (no DOK) are a separate PHY/rate bring-up. */
+				/* Pin legacy CCK 11M for data. With the RF front-end enabled ...
+				 * dev/MEASURED-trx.c.md sec 4. */
 				set_tx_desc_tx_rate(pdesc, DESC_RATE11M);
 			}
 		}
@@ -965,12 +920,8 @@ void rtl92fe_tx_fill_desc(struct ieee80211_hw *hw,
 	    is_broadcast_ether_addr(ieee80211_get_DA(hdr)))
 		set_tx_desc_bmc(pdesc, 1);
 
-	/* TX-FINAL probe (spy_data): read back the FINAL descriptor after every field
-	 * is set, for a unicast data frame. Resolves whether AP unicast DATA leaves
-	 * ENCRYPTED (sec=3) or plaintext-with-Protected (sec=0 => the client's CCMP RX
-	 * drops it), at LEGACY vs HT (tx_rate 0x0b=54M vs 0x13=MCS7), driver- vs
-	 * FW-rated (use_rate), and aggregated (agg=1 => HW uses the aggregate MCS and
-	 * ignores a legacy tx_rate). One line answers the crypto-vs-HT-reception fork. */
+	/* TX-FINAL probe (spy_data): read back the FINAL descriptor ...
+	 * dev/MEASURED-trx.c.md sec 5. */
 	if (rtl92f_spy_data && ieee80211_is_data(hdr->frame_control) &&
 	    !is_multicast_ether_addr(hdr->addr1))
 		pr_info("92f-spy TX-FINAL %pM sta=%s hw_key=%s tx_rate=0x%02x agg=%u sec=%u\n",
@@ -1197,9 +1148,6 @@ bool rtl92fe_is_tx_desc_closed(struct ieee80211_hw *hw, u8 hw_queue, u16 index)
 
 void rtl92fe_tx_polling(struct ieee80211_hw *hw, u8 hw_queue)
 {
-	/* The RTL8192F PCIe engine advances its own write pointer when the
-	 * TXBD_IDX register is updated in rtl92fe_set_desc(); no explicit
-	 * doorbell poke is required here, matching the 8192-series PCIe BD
-	 * model.
-	 */
+	/* The RTL8192F PCIe engine advances its own write pointer ...
+	 * dev/MEASURED-trx.c.md sec 6. */
 }

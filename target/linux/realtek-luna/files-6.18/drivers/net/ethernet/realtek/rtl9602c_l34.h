@@ -20,11 +20,8 @@
 
 #include "gpon_edge.h"	/* core: the router edge, read from the live kernel */
 
-/*
- * Indirect table-access block (byte offsets within the switch-core MMIO).
- * A table op writes the data bank, issues a command with the table type and
- * entry index, then polls the matching EXE bit until the engine clears it.
- */
+/* Indirect table-access block (byte offsets within the ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 7. */
 #define L34_CMD			0x800100	/* command/trigger register */
 #define  L34_CMD_RD_EXE		BIT(25)		/* start read  (self-clears when done) */
 #define  L34_CMD_WR_EXE		BIT(24)		/* start write (self-clears when done) */
@@ -36,22 +33,8 @@
 #define L34_RDATA		0x800108	/* read-data bank base  (word0..) */
 #define L34_WDATA		0x80011c	/* write-data bank base (word0..) */
 #define L34_SWTCR0		0x800010	/* engine control (NAT mode / flow route) */
-/*
- * ⚠⚠ THESE BIT NAMES WERE WRONG UNTIL 2026-09-12, AND THE WRONG ONE WAS ON THE
- * REGISTER THAT DECIDES.  They read V6RT_EN = BIT(31) and V4RT_EN = BIT(30);
- * this die's own chipdef (SWTCR0_RTL9602C_FIELDS) puts CF_SIP_ARP_TRF_EN at 31,
- * V4FLRT_EN at 30 and V6FLRT_EN at **29**, and the vendor's own DAL confirms the
- * meaning by name -- L34_GLOBAL_V4FLOW_RT_STATE writes V4FLRT_ENf.
- * So l34_proc_show_iface() printed `v6rt 0` while IPv6 flow routing was ENABLED
- * and bit 31 -- an ARP-trap enable, not a routing enable -- was being read as if
- * it were one.  A name that is off by two bits is not cosmetic: it is what a
- * reader checks the silicon against.
- * MEASURED the same day on this board, stock vs ours, over the L34 page:
- *   stock 0x84801e10   ours 0x64000020 (boot) -> 0x64000e20 (engine armed)
- * i.e. stock runs with BOTH flow-route enables CLEAR and we run with BOTH SET,
- * and nothing in this tree writes either -- they are the power-on default the
- * vendor clears and we never did.
- */
+/* ⚠⚠ THESE BIT NAMES WERE WRONG UNTIL 2026-09-12, AND THE ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 1. */
 #define  L34_SWTCR0_V6FLRT_EN	BIT(29)		/* IPv6 flow routing	*/
 #define  L34_SWTCR0_V4FLRT_EN	BIT(30)		/* IPv4 flow routing	*/
 #define  L34_SWTCR0_CF_SIP_ARP_TRF_EN BIT(31)	/* NOT a routing enable */
@@ -63,12 +46,8 @@
 #define L34_GLB_CFG		0x01106c	/* master L34 routing enable */
 #define L34_NAPT_HIT		0x800400	/* outbound NAPT hit/age bitmap (idx/32 words) */
 
-/*
- * Table types (L34_CMD_TYPE). The NAPT path is a hashed pair: an outbound slot
- * table (key hash -> inbound index) and an inbound rewrite table (the actual
- * 5-tuple + post-NAT addresses/ports). EXTIP/NEXTHOP/NETIF/ARP/L3ROUTE support
- * the routing the NAT entries reference.
- */
+/* Table types (L34_CMD_TYPE). The NAPT path is a hashed pair: ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 2. */
 enum l34_tbl {
 	L34_TBL_L3ROUTE		= 0,	/* 16 entries, 2 words: LPM route -> nexthop */
 	L34_TBL_NEXTHOP		= 2,	/* 16 entries, 1 word:  egress intf + L2 (ARP) index */
@@ -91,47 +70,23 @@ enum l34_tbl {
 #define L34_NAPT_ENTRIES	4096
 #define L34_NAPT_WAYS		4		/* 4-way bucket: index = (hash << 2) + way */
 
-/*
- * Entry field LAYOUTS (L34_NAPT_* / L34_NAPTR_* / L34_EXTIP_* / L34_NETIF_*
- * / L34_NH_* / L34_ARP_* / L34_RT_* / L2UC_* and the L2_STS decode bits)
- * moved to rtl9602c_l34_logic.h WITH their encoders (flowcore, 2026-09-02)
- * -- the TXD3_9602C_* precedent: a layout fact exists ONCE, where the
- * function that packs it lives, and the host suite drives the shipping
- * encoders on x86.  This file keeps what is TRANSPORT: registers, table
- * types, word counts, geometry, and the two shell-facing values below.
- */
+/* Entry field LAYOUTS (L34_NAPT_* / L34_NAPTR_* / L34_EXTIP_* ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 3. */
 #define L34_EXTIP_SLOTS		8	/* EXTIP/EXTIP_IDX is 3-bit: netif idx must be < 8 */
 #define L34_NETIF_DEF_VLAN	1
 
-/*
- * The two interface slots this driver provisions.  They are a CHOICE, not a
- * hardware fact, and they are named because three tables index each other by
- * them: a NAPTR's EXTIP_IDX is the WAN slot, NEXTHOP[WAN] and EXTIP[WAN] carry
- * that interface's next hop, and lan_setup writes L3ROUTE[LAN] and
- * L3ROUTE[LAN + 8].  Spelling them as bare 0 and 1 at four call sites is how
- * two of them come to disagree.
- */
+/* The two interface slots this driver provisions. They are a ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 4. */
 #define L34_NETIF_WAN		0
 #define L34_NETIF_LAN		1
 
-/*
- * Two more index CHOICES the same argument covers, and they were bare
- * literals at their call sites: the CPU self-route slot offset (lan_setup
- * writes L3ROUTE[LAN] and L3ROUTE[LAN + this]) and the ARP half the WAN
- * gateway is placed in.  ⚠ THE SELF-ROUTE OFFSET IS NOT A HARDWARE FACT --
- * L3ROUTE holds 16 entries and any free one is legal; whether a HIGHER index
- * can win a lookup against a lower one is a MEASUREMENT, read back through
- * /proc/flowdump ("route" section), not something to assume from the prefix.
- */
+/* Two more index CHOICES the same argument covers, and they ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 5. */
 #define L34_RT_CPU_SLOT_OFF	8	/* L3ROUTE[netif + 8] = that netif's CPU self-route */
 #define L34_ARP_WAN_BASE	64	/* the WAN half of the 128-entry ARP table */
 
-/*
- * L2 unicast table (the gateway/peer destination MAC). Reached through a
- * SEPARATE indirect block from the L34 NAT block: a MAC-method insert lets the
- * engine hash the MAC, place it in a free way, and report the assigned index
- * that NEXTHOP/ARP nhIdx then reference.
- */
+/* L2 unicast table (the gateway/peer destination MAC). ...
+ * dev/MEASURED-rtl9602c_l34.h.md sec 6. */
 #define L2_CMD			0x12000
 #define  L2_CMD_TYPE_SH		0	/* [2:0] table type (0 = L2_UC) */
 #define  L2_CMD_WR		BIT(3)	/* 0 = read, 1 = write */

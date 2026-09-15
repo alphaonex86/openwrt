@@ -1,24 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * luna_vlan_install.c -- the Luna family's gpon_vlan_ops.
- *
- * Every hardware access goes through `struct hwio`, so what this emits -- the
- * read, the modify, the write, in order -- is asserted on x86 with no board.
- * A read-modify-write is precisely the shape a state dump cannot judge and a
- * recorded stream can.
- */
+/* luna_vlan_install.c -- the Luna family's gpon_vlan_ops. ...
+ * dev/MEASURED-luna_vlan_install.c.md sec 1. */
 #include <linux/errno.h>
 #include <linux/types.h>
 
 #include "luna_vlan_install.h"
 #include "regtable.h"		/* struct reg / reg_rc / REG_AT */
 
-/*
- * The three dies.  Addresses: VLAN_PB_VID's base, width and packing come from
- * OUR OWN stock kernel (three independent witnesses) and the three chipdefs
- * agree; the other three VLAN addresses are chipdef-corroborated on all three
- * parts, same address on each.  Port ranges are each chipdef's own.
- */
+/* The three dies. Addresses: VLAN_PB_VID's base, width and ...
+ * dev/MEASURED-luna_vlan_install.c.md sec 2. */
 const struct luna_vlan_regs luna_vlan_rtl9602c = {
 	.name		= "RTL9602C",
 	.pb_vid		= REG_AT(0x1300c),
@@ -120,15 +110,8 @@ int luna_vlan_rule_to_pvid(const struct gpon_vlan_rule *r, u16 *vid)
 	 * port default VID says. */
 	if (w.shape != GPON_VLAN_SHAPE_PUSH || w.write != 1 || !w.all_assigned)
 		return -EOPNOTSUPP;
-	/*
-	 * ⚠ AND THE FILTER MUST BE THE WHOLE PORT.  A default VID has no match
-	 * half at all, so taking a row that filters on a VID, a priority, a TCI
-	 * or an EtherType would give EVERY frame on the port the treatment the
-	 * OLT meant for one class.  Only two filters are representable: the
-	 * catch-all (NO_CARE_TAG on both) and "arrives untagged" (NO_TAG on
-	 * both).  CARE_TAG is in the reject set on purpose -- "a tag must be
-	 * present" is a match condition, not an absence of one.
-	 */
+	/* ⚠ AND THE FILTER MUST BE THE WHOLE PORT. A default VID has ...
+	 * dev/MEASURED-luna_vlan_install.c.md sec 3. */
 	if ((r->f.s_mode & LUNA_VLAN_FILTER_MATCHES) ||
 	    (r->f.c_mode & LUNA_VLAN_FILTER_MATCHES))
 		return -EOPNOTSUPP;
@@ -179,12 +162,8 @@ static int luna_vlan_rule_install(void *ctx, const struct gpon_vlan_rule *r)
 	return luna_vlan_pvid_write(c, vid);
 }
 
-/*
- * Remove: put the port back on the default VID this driver ships (1), which is
- * what the Ethernet shell writes at init.  Restoring 0 would be a VID no port
- * may carry, and leaving the OLT's VID behind would keep a service alive after
- * the OLT withdrew it.
- */
+/* Remove: put the port back on the default VID this driver ...
+ * dev/MEASURED-luna_vlan_install.c.md sec 4. */
 #define LUNA_VLAN_SHIPPED_PVID	1u
 
 static int luna_vlan_rule_remove(void *ctx, const struct gpon_vlan_rule *r)
@@ -203,16 +182,8 @@ static int luna_vlan_rule_remove(void *ctx, const struct gpon_vlan_rule *r)
 	return luna_vlan_pvid_write(c, LUNA_VLAN_SHIPPED_PVID);
 }
 
-/*
- * ⚠ THE FIVE NULL SLOTS SAY SOMETHING, and it is not "not done yet".  ME 84's
- * forward-operation vocabulary and ME 79's per-protocol matrix have NO oracle:
- * measured on both Luna dies, stock's own VlanTagFilterDataDrvCfg is a log-only
- * `return 0` and pf_rtl96xx_SetMacFilter is two instructions -- `jr ra; move
- * v0,zero`.  Stock stores those MEs and programs nothing, so a family that
- * programmed something would be the one making it up.  ME 130, 280 and 281
- * have no established surface here either.  NULL makes the core COUNT the
- * decision as owed; an invented install would make it disappear.
- */
+/* ⚠ THE FIVE NULL SLOTS SAY SOMETHING, and it is not "not ...
+ * dev/MEASURED-luna_vlan_install.c.md sec 5. */
 const struct gpon_vlan_ops luna_vlan_ops = {
 	.rule_install	= luna_vlan_rule_install,
 	.rule_remove	= luna_vlan_rule_remove,

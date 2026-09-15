@@ -43,11 +43,8 @@
 #define UINT_EN			0x1c	/* interrupt enable (uses UCFG TX_EN/RX_EN bits) */
 #define UINT_PEND		0x24	/* interrupt pending; write-back to acknowledge */
 
-/*
- * The interrupt-enable register (UINT_EN) uses the same TX_EN/RX_EN bit
- * positions as UCFG. UINT_PEND is read for pending sources and written back
- * to acknowledge; the RX/TX work is then driven off the UINFO FIFO flags.
- */
+/* The interrupt-enable register (UINT_EN) uses the same ...
+ * dev/MEASURED-cortina-uart.c.md sec 2. */
 #define UINT_RX_NOT_EMPTY	BIT(6)	/* == UCFG RX_EN: enable RX interrupt */
 #define UINT_TX_EMPTY		BIT(5)	/* == UCFG TX_EN: enable TX interrupt */
 
@@ -207,12 +204,8 @@ static void cortina_uart_set_termios(struct uart_port *port,
 {
 	unsigned long flags;
 
-	/*
-	 * The boot loader has already programmed URX_SAMPLE for
-	 * 115200 8N1; reprogramming the divisor here risks losing the
-	 * console. Force the line to 115200 8N1 and only update the
-	 * serial-core bookkeeping.
-	 */
+	/* The boot loader has already programmed URX_SAMPLE for ...
+	 * dev/MEASURED-cortina-uart.c.md sec 1. */
 	termios->c_cflag &= ~(CSIZE | CSTOPB | PARENB | PARODD | CMSPAR);
 	termios->c_cflag |= CS8;
 

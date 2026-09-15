@@ -159,6 +159,49 @@ config GPON_GEM_DIAG
 	  that must shed every byte sets this to n and the facility is ABSENT,
 	  not silenced.
 
+config GPON_OLT_DIAG
+	bool "GPON far-end capture (record the OLT's conversation for offline replay)"
+	depends on GPON_CORE
+	default y
+	help
+	  The fifth member of the GPON_<SUBSYSTEM>_DIAG family, and the subsystem
+	  it reports on is the FAR END.  Every other member renders a line for a
+	  human; this one records the exchange in a form that REPLAYS off the
+	  board, because making an ONU work against an OLT nobody owns is a
+	  dump+replay problem and a line in dmesg cannot be fed back into anything.
+
+	  It holds a ring of (sequence, time, O-state, direction, bytes) records --
+	  the SEQUENCE and the STATE, not just frames -- and it owns both the
+	  renderer and the parser, so the host replays a capture through the same
+	  code the board wrote it with.  Time is an EXPLICIT INPUT: this tier reads
+	  no clock, so a replay is deterministic and a capture taken on one board
+	  replays on another, or on x86 with no board at all.
+
+	  The differential that consumes it is rtl9607c-test step 32: it feeds the
+	  recorded downstream PDUs back through our own OMCI responder and compares
+	  our answer with the recorded one.  A canned replay that echoes recorded
+	  bytes proves nothing; that one can DISAGREE, and a disagreement is where
+	  a foreign OLT's expectation differs from ours.
+
+	  WHY THIS IS NOT A QUIRK TABLE.  Stock answers the same problem with a
+	  detection-free bitmask: four masks in its flash MIB select up to 45 tiny
+	  per-OLT plugins by filename.  Nothing in it detects an OLT -- a human
+	  sets the mask per deployment.  We have ONE OLT on this bench, so a quirk
+	  table built here would be shaped by one far end; the capture is what lets
+	  a second one be analysed before anything is written.  See
+	  dev/MEASURED-gpon_olt_diag.md.
+
+	  ★ WHY default y: same reasoning as its four siblings -- the spy/dump
+	  capability is first-class and is not stripped for production.
+	  ⚠ AND IT IS THE ONLY MEMBER WITH A RAM COST, SO THE NUMBER IS MEASURED AND
+	  STATED, NOT CHOSEN SILENTLY.  MEASURED 2026-09-15 from the built objects:
+	  the ring symbol is 16400 B of BSS (GPON_OLT_RECORDS 256 * 64 B + a 16 B
+	  header) in the one GPON driver an image builds, and the formatter is
+	  3764 B of text on taroko / 3648 B on interaptiv -- the largest of the five
+	  members, because it carries a PARSER as well as a renderer.  A build that
+	  must shed every byte sets this to n and the facility is ABSENT, not
+	  silenced.  The default is the operator's to flip.
+
 config GPON_OMCI_DIAG
 	bool "GPON OMCI per-message diagnostics (message type, ME, Get masks)"
 	depends on GPON_CORE

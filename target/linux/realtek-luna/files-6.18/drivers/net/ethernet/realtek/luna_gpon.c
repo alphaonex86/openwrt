@@ -33,10 +33,13 @@
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/ktime.h>	/* the far-end capture timestamps its records */
+#include <linux/math64.h>	/* div_u64: ns -> us without a 64-bit divide */
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/of.h>
 #include "gpon_gem_diag.h"
+#include "gpon_olt_diag.h"	/* the far-end capture: replayed off the board */
 #include "luna_gpon_nic.h"
 #include "luna_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
 #include "luna_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
@@ -6132,6 +6135,43 @@ static void luna_data_alloc_changed(void *sh, u16 alloc, bool assigned)
 	luna_data_tcont_from_assign(alloc, assigned);
 }
 
+#ifdef CONFIG_GPON_OLT_DIAG
+/* The far end's own conversation.  Written under luna_omci_lock (the lock that
+ * already serializes this shell's OMCI path) and read one record at a time, so
+ * /proc/oltcap never holds it across a whole dump. */
+static struct gpon_olt_capture luna_olt_cap;
+
+static int oltcap_proc_show(struct seq_file *s, void *v)
+{
+	char line[160];
+	unsigned int i, n;
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	n = gpon_olt_capture_count(&luna_olt_cap);
+	gpon_olt_diag_header(&luna_olt_cap, line, sizeof(line));
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	seq_printf(s, "%s\n", line);
+	for (i = 0; i < n; i++) {
+		/* zero-initialised so a NULL fetch can never leave an uninitialised
+		 * record in scope; the loop breaks on it anyway. */
+		struct gpon_olt_rec r = { 0 };
+		const struct gpon_olt_rec *p;
+
+		spin_lock_irqsave(&luna_omci_lock, flags);
+		p = gpon_olt_capture_at(&luna_olt_cap, i);
+		if (p)
+			r = *p;
+		spin_unlock_irqrestore(&luna_omci_lock, flags);
+		if (!p)
+			break;
+		if (gpon_olt_diag_line(&r, line, sizeof(line)))
+			seq_printf(s, "%s\n", line);
+	}
+	return 0;
+}
+#endif /* CONFIG_GPON_OLT_DIAG */
+
 static void luna_omci_poll(void)
 {
 	unsigned int budget = LUNA_OMCI_POLL_BUDGET;
@@ -6153,6 +6193,15 @@ static void luna_omci_poll(void)
 		luna_omci.count--;
 		n = omci_onu_input_ex(luna_omci.onu, frame.msg, frame.len,
 				      response, &accepted);
+#ifdef CONFIG_GPON_OLT_DIAG
+		/* The clock is read HERE and handed in: the core tier reads none,
+		 * which is what makes a capture replay deterministically. */
+		gpon_olt_capture_exchange(&luna_olt_cap,
+					  div_u64(ktime_get_boottime_ns(), 1000),
+					  (u8)luna_ploam.state,
+					  frame.msg, frame.len,
+					  n == OMCI_LEN ? response : NULL, n);
+#endif
 		if (accepted.kind != OMCI_ACCEPT_NONE) {
 			luna_omci.accepted++;
 			if (accepted.kind == OMCI_ACCEPT_RESET) {
@@ -8148,6 +8197,9 @@ skip_bosa_init:
 	proc_create_single("bosadump", 0444, NULL, bosadump_proc_show);
 	proc_create_single("pidump", 0444, NULL, pidump_proc_show);
 	proc_create_single("swdump", 0444, NULL, swdump_proc_show);
+#ifdef CONFIG_GPON_OLT_DIAG
+	proc_create_single("oltcap", 0444, NULL, oltcap_proc_show);
+#endif
 
 	/* Upstream burst CONFIG + laser-enable timing. The GTC MAC ...
 	 * dev/MEASURED-luna_gpon.c.md sec 264. */
@@ -8306,6 +8358,9 @@ static void __exit rtl9602c_gpon_exit(void)
 	remove_proc_entry("bosadump", NULL);
 	remove_proc_entry("pidump", NULL);
 	remove_proc_entry("swdump", NULL);
+#ifdef CONFIG_GPON_OLT_DIAG
+	remove_proc_entry("oltcap", NULL);
+#endif
 	if (ponip_base)
 		iounmap(ponip_base);
 	if (swcore_base)

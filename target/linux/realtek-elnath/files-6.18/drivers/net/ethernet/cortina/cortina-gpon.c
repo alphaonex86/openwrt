@@ -17,6 +17,8 @@
 #include <linux/of_net.h>	/* of_get_mac_address() -- the DT rung of the ladder */
 #include <linux/platform_device.h>
 #include <linux/proc_fs.h>
+#include <linux/ktime.h>	/* the far-end capture timestamps its records */
+#include <linux/math64.h>	/* div_u64: ns -> us without a 64-bit divide */
 #include <linux/ratelimit.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -40,6 +42,7 @@
 #include "gpon_omci_me.h"	/* G.988 ME model: struct omci_onu, the store */
 #include "gpon_omci_trace.h"	/* G.988 decode-to-a-buffer for the log    */
 #include "gpon_omci_diag.h"	/* the ONE per-PDU trace line, every family */
+#include "gpon_olt_diag.h"	/* the far-end capture: replayed off the board */
 #include "gpon_omci_mic.h"	/* G.984.4 MIC dialect: gpon_omci_mic_conv() */
 #include "gpon_gem_us.h"	/* upstream GEM/T-CONT mapping + bind verdict */
 #include "gpon_data_plan.h"	/* armed-vs-provisioned reconcile + undo verdict */
@@ -443,6 +446,9 @@ struct cortina_gpon {
 	void __iomem *glb;		/* ioremap of the GLB reset/clock window */
 	void __iomem *gpio;		/* ioremap of the PER_GPIO window */
 	struct proc_dir_entry *proc;
+#ifdef CONFIG_GPON_OLT_DIAG
+	struct proc_dir_entry *oltcap_proc;	/* the far-end capture dump */
+#endif
 
 	/* post-O5 servicing (ISR top half -> event ring -> work bottom half) */
 	int irq;			/* GIC SPI 1, shared NE global line */
@@ -2311,6 +2317,54 @@ static void cg_veip_avc_work(struct work_struct *work)
 	mutex_unlock(&cg->sn_lock);
 }
 
+#ifdef CONFIG_GPON_OLT_DIAG
+/* The far end's own conversation.  Written and read under cg->omci_lock, the
+ * lock that already serializes this shell's OMCI path; the reader copies ONE
+ * record at a time so /proc/oltcap never holds it across a whole dump. */
+static struct gpon_olt_capture cg_olt_cap;
+
+/* The PON-MAC numbers its states from 0 (0 = O1), the core enum from 1.  A
+ * value the MAC does not name maps to COULD NOT ASK, never to a state. */
+static u8 cg_olt_ostate(struct cortina_gpon *cg)
+{
+	u8 st = CG_ONU_STATE(cg_mac_rd(cg, CG_REG_GPON_ONU));
+
+	return st < 7 ? (u8)(st + 1) : GPON_OLT_OSTATE_UNKNOWN;
+}
+
+static int cg_oltcap_show(struct seq_file *s, void *v)
+{
+	struct cortina_gpon *cg = READ_ONCE(cg_singleton);
+	char line[160];
+	unsigned int i, n;
+
+	if (!cg)
+		return 0;
+	spin_lock_bh(&cg->omci_lock);
+	n = gpon_olt_capture_count(&cg_olt_cap);
+	gpon_olt_diag_header(&cg_olt_cap, line, sizeof(line));
+	spin_unlock_bh(&cg->omci_lock);
+	seq_printf(s, "%s\n", line);
+	for (i = 0; i < n; i++) {
+		/* zero-initialised so a NULL fetch can never leave an uninitialised
+		 * record in scope; the loop breaks on it anyway. */
+		struct gpon_olt_rec r = { 0 };
+		const struct gpon_olt_rec *q;
+
+		spin_lock_bh(&cg->omci_lock);
+		q = gpon_olt_capture_at(&cg_olt_cap, i);
+		if (q)
+			r = *q;
+		spin_unlock_bh(&cg->omci_lock);
+		if (!q)
+			break;
+		if (gpon_olt_diag_line(&r, line, sizeof(line)))
+			seq_printf(s, "%s\n", line);
+	}
+	return 0;
+}
+#endif /* CONFIG_GPON_OLT_DIAG */
+
 /* Per-message OMCI trace. DEFAULT OFF. The always-on ...
  * dev/MEASURED-cortina-gpon.c.md sec 98. */
 static bool cg_omci_trace;
@@ -2503,6 +2557,16 @@ static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
 		cg_omci_tx(cg, resp);
 	if (unlikely(cg_omci_trace))
 		cg_omci_trace_one(cg, pdu, OMCI_LEN, resp, n);
+#ifdef CONFIG_GPON_OLT_DIAG
+	/* The clock is read HERE and handed in: the core tier reads none, which
+	 * is what makes a capture replay deterministically. */
+	spin_lock_bh(&cg->omci_lock);
+	gpon_olt_capture_exchange(&cg_olt_cap,
+				  div_u64(ktime_get_boottime_ns(), 1000),
+				  cg_olt_ostate(cg), pdu, OMCI_LEN,
+				  n == OMCI_LEN ? resp : NULL, n);
+	spin_unlock_bh(&cg->omci_lock);
+#endif
 }
 
 static void cg_isr_work(struct work_struct *work)
@@ -3395,6 +3459,9 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 		cortina_ni_pon_rx_hook_set(cg_rx_omci);
 	cg_wan_create(cg);	/* Stage D: the gpon0 WAN netdev */
 	cg->proc = proc_create_data("gpon", 0644, NULL, &cg_proc_ops, cg);
+#ifdef CONFIG_GPON_OLT_DIAG
+	cg->oltcap_proc = proc_create_single("oltcap", 0444, NULL, cg_oltcap_show);
+#endif
 	platform_set_drvdata(pdev, cg);
 	dev_info(dev, "cortina-gpon phase-0 probe complete (/proc/gpon)\n");
 	return 0;
@@ -3415,6 +3482,12 @@ static void cortina_gpon_remove(struct platform_device *pdev)
 		proc_remove(cg->proc);
 		cg->proc = NULL;
 	}
+#ifdef CONFIG_GPON_OLT_DIAG
+	if (cg->oltcap_proc) {
+		proc_remove(cg->oltcap_proc);
+		cg->oltcap_proc = NULL;
+	}
+#endif
 
 	/*  3. the DS hook, and it WAITS for a NAPI callback already inside it --
 	 *     a bare store published NULL and returned while a reader still held

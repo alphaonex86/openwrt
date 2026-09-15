@@ -245,6 +245,15 @@ obj-$(CONFIG_GPON_OMCI_DIAG) += gpon_omci_diag.o
 # INTO A BUFFER only; the family owns the rate limit and the level.
 obj-$(CONFIG_GPON_GEM_DIAG) += gpon_gem_diag.o
 
+# The FAR END's own conversation, recorded so it can be replayed off the board:
+# the fifth GPON_<SUBSYSTEM>_DIAG member and the only one whose output is meant
+# for a MACHINE.  Renderer and parser sit together on purpose -- the host replay
+# (rtl9607c-test step 32) loads a capture through the same code the board wrote
+# it with, so no lossy step can sit between the two halves of the differential.
+# Gated (CONFIG_GPON_OLT_DIAG, default y: see the Kconfig help, which states the
+# 16 KiB of BSS it costs).
+obj-$(CONFIG_GPON_OLT_DIAG) += gpon_olt_diag.o
+
 # ITU-T G.984.3 PLOAM activation state machine (O1..O7) and message builders.
 # ONE kernel consumer today (realtek-luna): the Elnath PON-MAC runs activation
 # in silicon, so there is no second copy this de-duplicates.  It is here for the

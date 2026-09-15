@@ -231,10 +231,12 @@ void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx)
 	l34_field_set(w, L34_EXTIP_NHIDX_LSP, L34_EXTIP_NHIDX_W, nhidx);
 }
 
-/* ARP entry: gateway IP -> the L2 entry holding its MAC. */
-void l34_arp_encode(u32 *w, u32 gw_ip, unsigned int l2idx)
+/* ARP CAM entry: one DESTINATION address -> the L2 entry holding its MAC.  The
+ * die searches this table by the packet's destination, so the gateway is one
+ * destination among many and not what the key means. */
+void l34_arp_encode(u32 *w, u32 dst_ip, unsigned int l2idx)
 {
-	l34_field_set(w, L34_ARP_IP_LSP,    L34_ARP_IP_W,    gw_ip);
+	l34_field_set(w, L34_ARP_IP_LSP,    L34_ARP_IP_W,    dst_ip);
 	l34_field_set(w, L34_ARP_VALID_LSP, L34_ARP_VALID_W, 1);
 	l34_field_set(w, L34_ARP_NHIDX_LSP, L34_ARP_NHIDX_W, l2idx);
 }

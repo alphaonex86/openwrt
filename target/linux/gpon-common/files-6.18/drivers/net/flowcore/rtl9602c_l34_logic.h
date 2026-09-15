@@ -99,8 +99,10 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_NH_NHIDX_LSP	8	/* -> L2 unicast entry holding the dst MAC */
 #define L34_NH_NHIDX_W		11
 
-/* ARP_CAM (type 13, 2 words, 128 slots). The MAC lives in the L2 table; this
- * holds the gateway IP and the L2 index where its MAC is resolved. */
+/* ARP_CAM (type 13, 2 words, 128 slots).  The die searches it by the packet's
+ * DESTINATION address, so an entry is one destination -> the L2 entry holding
+ * that destination's MAC; the gateway is one such destination, not the field's
+ * meaning.  Pinned by rtl9607c-test step 17p. */
 #define L34_ARP_IP_LSP		0
 #define L34_ARP_IP_W		32
 #define L34_ARP_VALID_LSP	32
@@ -159,7 +161,7 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx);
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx);
 void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx);
 void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx);
-void l34_arp_encode(u32 *w, u32 gw_ip, unsigned int l2idx);
+void l34_arp_encode(u32 *w, u32 dst_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);
 int l34_l2uc_sts_index(u32 sts);
 

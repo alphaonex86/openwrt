@@ -2377,7 +2377,7 @@ static void cg_omci_trace_one(struct cortina_gpon *cg, const u8 *pdu,
 			      unsigned int len, const u8 *resp, int n)
 {
 	static DEFINE_RATELIMIT_STATE(rs, 5 * HZ, 512);
-	char line[128];
+	char line[GPON_OMCI_DIAG_LINE_MAX];
 
 	/* ★★ THE WHOLE LINE IS THE CORE'S (gpon_omci_diag_line), ...
 	 * dev/MEASURED-cortina-gpon.c.md sec 130. */
@@ -2899,6 +2899,13 @@ static void cg_wan_create(struct cortina_gpon *cg)
 		return;
 	strscpy(ndev->name, "gpon0", sizeof(ndev->name));
 	ndev->netdev_ops = &cg_wan_ops;
+	/* The kernel's offload paths key on the FEATURE BIT, not on the presence
+	 * of .ndo_setup_tc: without it `ethtool -k` says "hw-tc-offload: off
+	 * [fixed]", nft cannot build a hardware flowtable, fw4 falls back to
+	 * software silently, and the hook below is never called - which reads
+	 * exactly like a working accelerator. */
+	ndev->hw_features |= NETIF_F_HW_TC;
+	ndev->features |= NETIF_F_HW_TC;
 	eth_hw_addr_set(ndev, mac);
 	SET_NETDEV_DEV(ndev, cg->dev);
 	netif_carrier_off(ndev);

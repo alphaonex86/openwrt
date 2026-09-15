@@ -25,6 +25,7 @@
 #include <linux/uaccess.h>
 
 #include "rtl9602c_l34.h"
+#include "gpon_flow_offload.h"
 
 #define L34_EXE_POLL_US		2000	/* engine clears EXE well under this */
 
@@ -489,6 +490,11 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 
 /* ⚠ `hits_seen` IS RATE-DEPENDENT AND THE NODE SAYS SO. The ...
  * dev/MEASURED-rtl9602c_l34.c.md sec 10. */
+/* ★ CONFIG_GPON_FLOW_DIAG gates the READ only.  The bring-up WRITE below is a
+ * control, not a measurement: dropping it with a diagnostic flag would change
+ * behaviour, and this family is DIAG -- it reports, it never decides. */
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+
 static const char *const l34_rt_process_name[4] = { "CPU", "DROP", "ARP", "NH" };
 
 static void l34_proc_show_rt(struct seq_file *sf, struct rtl9602c_l34 *l,
@@ -604,8 +610,28 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 			   l->edge.lan_mac, L34_NETIF_LAN);
 	/* ★ THE THREE COUNTS THAT SEPARATE FOUR DIFFERENT SILENCES, ...
 	 * dev/MEASURED-rtl9602c_l34.c.md sec 12. */
-	seq_printf(sf, "binds %u\noffered %u\ncore_refused %u\ninstalls %u\nremovals %u\nrefusals %u\nds_legs %u\n",
-		   l->binds, l->offered, l->core_refused, l->installs,
+	/* ★ THE CORE'S OWN LINE, identical on every family: which of the
+	 * lifecycle's sixteen refusal causes fired, and how often.  The four
+	 * fields below it are what only THIS shell can read; `cap` is the chip's
+	 * own table size and `hits` its hit witness. */
+	{
+		struct gpon_flow_diag d = {
+			.valid = GPON_FDIAG_HAS_OFFERED |
+				 GPON_FDIAG_HAS_LIVE |
+				 GPON_FDIAG_HAS_CAPACITY |
+				 GPON_FDIAG_HAS_HITS,
+			.offered = l->offered,
+			.live = l->installs - l->removals,
+			.capacity = L34_NAPT_ENTRIES,
+			.hw_hits = l->hits_seen,
+		};
+		char line[256];
+
+		gpon_flow_offload_diag(l->fo, &d, line, sizeof(line));
+		seq_printf(sf, "%s\n", line);
+	}
+	seq_printf(sf, "binds %u\noffered %u\ninstalls %u\nremovals %u\nrefusals %u\nds_legs %u\n",
+		   l->binds, l->offered, l->installs,
 		   l->removals, l->refusals, l->ds_legs);
 	/* ★ THE FEW LINES THAT DECIDE, ON DEMAND -- not a log flood. ...
 	 * dev/MEASURED-rtl9602c_l34.c.md sec 15. */
@@ -633,6 +659,17 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	mutex_unlock(&l->lock);
 	return 0;
 }
+
+#else	/* the facility is ABSENT, and the node says so rather than printing
+	 * counters nobody measured */
+static int l34_proc_show(struct seq_file *sf, void *v)
+{
+	(void)v;
+	seq_puts(sf,
+		 "flowdump: diagnostics not compiled in (CONFIG_GPON_FLOW_DIAG=n); the bring-up write still works\n");
+	return 0;
+}
+#endif
 
 static int l34_proc_open(struct inode *ino, struct file *fp)
 {

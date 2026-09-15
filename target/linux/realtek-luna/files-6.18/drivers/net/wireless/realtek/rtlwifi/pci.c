@@ -1277,6 +1277,30 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 	return 0;
 }
 
+/* ★ ONLY RX RING 0 EXISTS AS FAR AS THE HARDWARE IS CONCERNED, so only ring 0
+ * is allocated.  _rtl_pci_rx_interrupt() drains RTL_PCI_RX_MPDU_QUEUE and
+ * nothing else, and the chip is handed exactly one RX ring base address
+ * (rtl8192fe: REG_RX_DESA <- rx_ring[RX_MPDU_QUEUE].dma).  Nothing in rtlwifi
+ * ever reads RTL_PCI_RX_CMD_QUEUE, yet it was allocated and filled with
+ * `rxringcount` receive buffers no hardware could write into and no code could
+ * take back out.
+ *
+ * MEASURED 2026-09-15 on RTL9602C/HSGQ/X111W, /proc/allocinfo, unchanged
+ * across a 3.4 GB load -- a sizing decision, not a leak:
+ *
+ *	16777216  1024  net/core/skbuff.c:618  func:kmalloc_reserve
+ *
+ * 1024 = 2 rings x 512 descriptors, and dev_alloc_skb(9100) lands in a 16 KiB
+ * kmalloc_large bucket, so half of that 16 MiB was unreachable -- on a product
+ * whose RAM budget is 64 MB.  The 8 MiB this recovers costs nothing on air:
+ * the ring it drops was never attached to the hardware.
+ *
+ * ⚠ ALLOC, FREE AND RESET MUST WALK THIS SAME BOUND.  A smaller allocation loop
+ * beside a larger free loop would dma_free_coherent() a ring that was never
+ * mapped, which is why this is one constant and not three edits.
+ */
+#define RTL_PCI_RX_QUEUE_USED	1
+
 static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 {
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
@@ -1418,7 +1442,7 @@ static int _rtl_pci_init_trx_ring(struct ieee80211_hw *hw)
 	/* rxring_idx 0:RX_MPDU_QUEUE
 	 * rxring_idx 1:RX_CMD_QUEUE
 	 */
-	for (rxring_idx = 0; rxring_idx < RTL_PCI_MAX_RX_QUEUE; rxring_idx++) {
+	for (rxring_idx = 0; rxring_idx < RTL_PCI_RX_QUEUE_USED; rxring_idx++) {
 		ret = _rtl_pci_init_rx_ring(hw, rxring_idx);
 		if (ret)
 			return ret;
@@ -1433,7 +1457,7 @@ static int _rtl_pci_init_trx_ring(struct ieee80211_hw *hw)
 	return 0;
 
 err_free_rings:
-	for (rxring_idx = 0; rxring_idx < RTL_PCI_MAX_RX_QUEUE; rxring_idx++)
+	for (rxring_idx = 0; rxring_idx < RTL_PCI_RX_QUEUE_USED; rxring_idx++)
 		_rtl_pci_free_rx_ring(hw, rxring_idx);
 
 	for (i = 0; i < RTL_PCI_MAX_TX_QUEUE_COUNT; i++)
@@ -1449,7 +1473,7 @@ static int _rtl_pci_deinit_trx_ring(struct ieee80211_hw *hw)
 	u32 i, rxring_idx;
 
 	/*free rx rings */
-	for (rxring_idx = 0; rxring_idx < RTL_PCI_MAX_RX_QUEUE; rxring_idx++)
+	for (rxring_idx = 0; rxring_idx < RTL_PCI_RX_QUEUE_USED; rxring_idx++)
 		_rtl_pci_free_rx_ring(hw, rxring_idx);
 
 	/*free tx rings */
@@ -1469,7 +1493,7 @@ int rtl_pci_reset_trx_ring(struct ieee80211_hw *hw)
 	u32 bufferaddress;
 	/* rxring_idx 0:RX_MPDU_QUEUE */
 	/* rxring_idx 1:RX_CMD_QUEUE */
-	for (rxring_idx = 0; rxring_idx < RTL_PCI_MAX_RX_QUEUE; rxring_idx++) {
+	for (rxring_idx = 0; rxring_idx < RTL_PCI_RX_QUEUE_USED; rxring_idx++) {
 		/* force the rx_ring[RX_MPDU_QUEUE/
 		 * RX_CMD_QUEUE].idx to the first one
 		 *new trx flow, do nothing

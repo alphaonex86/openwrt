@@ -9,12 +9,16 @@
 
 #include "gpon_flow.h"
 
-int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key)
+int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key,
+			  enum gpon_flow_refusal *why)
 {
 	u16 addr_type = 0;
 
-	if (!rule || !key)
+	if (!rule || !key) {
+		if (why)
+			*why = GPON_FLOW_REF_BAD_ARGS;
 		return -EINVAL;
+	}
 
 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
 		struct flow_match_control m;
@@ -22,18 +26,26 @@ int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key)
 		flow_rule_match_control(rule, &m);
 		addr_type = m.key->addr_type;
 	}
-	if (addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS)
+	if (addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS) {
+		if (why)
+			*why = GPON_FLOW_REF_NOT_IPV4;
 		return -EOPNOTSUPP;	/* IPv4 NAPT only, as before */
+	}
 
-	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC))
+	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+		if (why)
+			*why = GPON_FLOW_REF_NO_BASIC;
 		return -EOPNOTSUPP;
-	else {
+	} else {
 		struct flow_match_basic m;
 
 		flow_rule_match_basic(rule, &m);
 		if (m.key->ip_proto != IPPROTO_TCP &&
-		    m.key->ip_proto != IPPROTO_UDP)
+		    m.key->ip_proto != IPPROTO_UDP) {
+			if (why)
+				*why = GPON_FLOW_REF_NOT_TCP_UDP;
 			return -EOPNOTSUPP;
+		}
 		key->ip_protocol = m.key->ip_proto;
 	}
 
@@ -45,9 +57,11 @@ int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key)
 		key->ip_da = be32_to_cpu(m.key->dst);
 	}
 
-	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
+	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
+		if (why)
+			*why = GPON_FLOW_REF_NO_PORTS;
 		return -EOPNOTSUPP;
-	else {
+	} else {
 		struct flow_match_ports m;
 
 		flow_rule_match_ports(rule, &m);

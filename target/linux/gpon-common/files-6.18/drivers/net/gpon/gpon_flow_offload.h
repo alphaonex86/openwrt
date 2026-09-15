@@ -85,6 +85,14 @@ int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
  * dev/MEASURED-gpon_flow_offload.h.md sec 8. */
 int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 			  bool ds_leg, struct gpon_flow_act *act,
-			  struct net_device **odev_out);
+			  struct net_device **odev_out,
+			  enum gpon_flow_refusal *why);
+
+/* CONFIG_GPON_FLOW_DIAG: render the lifecycle's own line.  @d carries what only
+ * the family can read (its offer count, the engine's live/capacity/hits), each
+ * field n/a unless its GPON_FDIAG_HAS_* bit is set.  Returns the length; with
+ * the flag off the one line says the facility is ABSENT, never zeros. */
+int gpon_flow_offload_diag(const struct gpon_flow_offload *fo,
+			   const struct gpon_flow_diag *d, char *out, size_t sz);
 
 #endif /* GPON_FLOW_OFFLOAD_H */

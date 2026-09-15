@@ -2646,6 +2646,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 				dev_warn(dev, "L34: could not bind the TC lifecycle to the device; software forwarding\n");
 				ep->fo = NULL;
 			}
+			/* the flowdump node renders the lifecycle's own diag line */
+			ep->l34.fo = ep->fo;
 #endif
 		}
 	}

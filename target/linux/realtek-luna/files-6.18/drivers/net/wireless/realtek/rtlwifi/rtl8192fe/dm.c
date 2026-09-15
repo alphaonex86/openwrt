@@ -12,15 +12,7 @@
 #include "fw.h"
 #include "trx.h"
 
-/* Dynamic-management (DM) layer for the RTL8192F.
- *
- * The 8192F is a 2T2R 2.4 GHz 802.11n part built on the same 11N PHY/DM
- * register block as the mainline rtl8192ee.  The control algorithms below
- * (DIG, false-alarm statistics, EDCA turbo, primary-CCA, CFO/ATC tracking,
- * rate-adaptive mask, dynamic ARFB) have the same shape as that reference;
- * the chip-specific anchors (thermal-meter RF reg, default swing indices,
- * DIG bounds) carry 8192F values.
- */
+/* Dynamic-management (DM) layer for the RTL8192F. The 8192F ... -- dev/MEASURED-dm.c.md sec 1. */
 
 static int rtl92fe_dump_rf;
 module_param_named(dump_rf, rtl92fe_dump_rf, int, 0644);
@@ -681,13 +673,8 @@ static void rtl92fe_dm_dynamic_atc_switch(struct ieee80211_hw *hw)
 				return;
 			}
 		}
-		/* Reset crystal cap to the baseline trimmed by hw_init. The
-		 * RTL8192F holds the crystal load-cap in the AFE (XTAL1 =
-		 * REG_AFE_PLL_CTRL[6:1], XTAL0 = REG_AFE_XTAL_CTRL[30:25]) — NOT
-		 * in REG_MAC_PHY_CTRL[23:12] like the older 8192EE. Re-assert the
-		 * AFE-programmed cap (read it back so we never reset to the
-		 * invalid efuse 0x00 on this board), undoing any CFO drift while
-		 * un-LINKED. */
+		/* Reset crystal cap to the baseline trimmed by hw_init. The ...
+		 * dev/MEASURED-dm.c.md sec 2. */
 		{
 			u32 xtal1 = rtl_read_dword(rtlpriv, REG_AFE_PLL_CTRL);
 			u32 xtal0 = rtl_read_dword(rtlpriv, REG_AFE_XTAL_CTRL);
@@ -754,12 +741,8 @@ static void rtl92fe_dm_dynamic_atc_switch(struct ieee80211_hw *hw)
 			else if (rtldm->crystal_cap < 0)
 				rtldm->crystal_cap = 0;
 
-			/* Apply to the 8192F AFE crystal-cap location (XTAL1 =
-			 * REG_AFE_PLL_CTRL[6:1], XTAL0 = REG_AFE_XTAL_CTRL[30:25]).
-			 * The old 8192EE wrote REG_MAC_PHY_CTRL[23:12], which on
-			 * the 8192F is unrelated — writing there never re-trims the
-			 * crystal (RF stays off-frequency) and clobbers an unrelated
-			 * MAC/PHY field. */
+			/* Apply to the 8192F AFE crystal-cap location (XTAL1 = ...
+			 * dev/MEASURED-dm.c.md sec 3. */
 			{
 				u32 xtal1 = rtl_read_dword(rtlpriv,
 							  REG_AFE_PLL_CTRL);
@@ -865,13 +848,7 @@ void rtl92fe_dm_txpower_tracking_callback(struct ieee80211_hw *hw)
 		dm->thermalvalue_lck = thermalvalue;
 	}
 
-	/* TODO(8192f): apply the per-path OFDM/CCK TX-power swing-index
-	 * correction here. The full delta-to-swing LUT and the BB TXAGC /
-	 * 0x86xx CCK-filter rewrites need on-hardware validation against the
-	 * RTL8192F TX-power-by-rate calibration before being driven live; the
-	 * trigger/meter/IQK-LCK re-cal scaffolding above is complete and the
-	 * thermal value is tracked so the watchdog stays correctly wired.
-	 */
+	/* TODO(8192f): apply the per-path OFDM/CCK TX-power ... -- dev/MEASURED-dm.c.md sec 4. */
 
 	dm->thermalvalue = thermalvalue;
 }
@@ -989,12 +966,8 @@ static void rtl92fe_dm_init_dynamic_atc_switch(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 
-	/* Seed the CFO-tracking crystal cap from the value hw_init actually
-	 * programmed into the AFE (REG_AFE_PLL_CTRL[6:1]), NOT from
-	 * efuse.crystalcap: this board's WiFi efuse reads 0x00 (invalid). If
-	 * we seeded 0x00 here, the un-LINKED reset path below would later
-	 * write 0x00 back into the AFE and de-trim the 25 MHz crystal ->
-	 * frequency offset -> RF goes deaf and stops transmitting. */
+	/* Seed the CFO-tracking crystal cap from the value hw_init ...
+	 * dev/MEASURED-dm.c.md sec 5. */
 	rtlpriv->dm.crystal_cap =
 		(rtl_read_dword(rtlpriv, REG_AFE_PLL_CTRL) >> 1) & 0x3f;
 

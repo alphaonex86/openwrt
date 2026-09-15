@@ -1,35 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
- * TIER: CORE.  ⚠ NOT in the STRICT host-buildable subset -- it uses Linux's TC
- * offload API and an rhashtable on purpose.  See "THE THREE TIERS" in
- * gpon_common.h: the line is the REGISTER, not Linux.
- *
- * gpon_flow_offload -- the TC hardware-offload LIFECYCLE, once.
- *
- * ★★ WHY THIS EXISTS (operator, 2026-08-28): *"generaliza para todos los
- * hardware que no hacen offload y los que sí, así en la familia es solo un
- * #ifdef"*.  A family with a flow accelerator supplies the ops below; a family
- * without one compiles none of this -- on Luna that is not an object saved but
- * a fatal error avoided, since <net/flow_offload.h> pulls in a TC stack that
- * target does not build.
- *
- * ★★★ THE SEAM IS WHERE READING THE CODE PUT IT, not where it was first drawn.
- * A draft contract offered is_lan_side / wan_vid / wan_vlan_programmable plus
- * install/remove/stats; `cn_flow_replace()` is ~850 lines whose generic and
- * silicon halves are INTERLEAVED, not stacked (a PPPoE leg gate reading a
- * driver-held session shadow, a lazy one-time DS arm that touches hardware, an
- * egress L3-IF program, a VLAN readback by literal bit number out of the FIB),
- * so a core reaching for `wan_vid()` would only have named the two or three of
- * those it could see.  Hence:
- *
- *   CORE   -- what nf_flow_table means and what a cookie map costs: dedup,
- *             action DECODE, NAT-shape refusal, entry allocation, insert with
- *             its undo, destroy, stats.
- *   FAMILY -- every decision that reads or writes silicon, in `install`, with
- *             `remove`/`stats` beside it.  It is deliberately allowed to be
- *             large: that is exactly the code that MUST NOT be shared, and
- *             naming it once is what lets the 200 lines around it be shared.
- */
+/* TIER: CORE. ⚠ NOT in the STRICT host-buildable subset -- it ...
+ * dev/MEASURED-gpon_flow_offload.h.md sec 1. */
 #ifndef GPON_FLOW_OFFLOAD_H
 #define GPON_FLOW_OFFLOAD_H
 
@@ -40,16 +11,8 @@
 struct net_device;
 struct flow_cls_offload;
 
-/*
- * WHAT TO DO to the flow, in vocabulary no accelerator owns.
- *
- * ★ ONE address and ONE port, not two.  That is nf_flow_table's shape, not a
- * limitation we chose: a masqueraded flow is offered as TWO rules that mirror
- * each other (flow_offload_ipv4_snat / _port_snat), the ORIGINAL rewriting the
- * source and the REPLY restoring the destination.  A doubly-NAT'd flow emits
- * both mangles on one leg and is refused -- correctly, because an entry
- * carries one rewrite.
- */
+/* WHAT TO DO to the flow, in vocabulary no accelerator owns. ...
+ * dev/MEASURED-gpon_flow_offload.h.md sec 2. */
 struct gpon_flow_act {
 	u32 nat_addr;		/* host order					*/
 	u16 nat_port;		/* host order					*/
@@ -61,45 +24,23 @@ struct gpon_flow_act {
 	u8  dmac_valid;		/* BOTH ETH mangle halves were seen		*/
 };
 
-/*
- * The devices the rule names, and which leg this is.  The core holds a
- * REFERENCE on `idev` for the whole of `prepare` and `install`, because the
- * one existing implementation needs it there and dropping it earlier would
- * force the family to re-derive a device it was already handed.
- */
+/* The devices the rule names, and which leg this is. The core ...
+ * dev/MEASURED-gpon_flow_offload.h.md sec 3. */
 struct gpon_flow_ctx {
 	struct net_device *idev;	/* the rule's META ingress	*/
 	struct net_device *odev;	/* the REDIRECT target		*/
 	bool ds_leg;			/* the WAN->LAN reply leg	*/
 };
 
-/*
- * ⚠ `install` OWNS THE INDEX IT RETURNS.  The core stores it against the
- * cookie and hands it back on remove; it never interprets it.  An engine whose
- * indices mean something (a hash bucket, a table row) keeps that meaning
- * private, which is what stops the core growing a second idea of the hardware.
- */
+/* ⚠ `install` OWNS THE INDEX IT RETURNS. The core stores it ...
+ * dev/MEASURED-gpon_flow_offload.h.md sec 4. */
 struct gpon_flow_ops {
 	/* Which side of the box is this netdev on?  The core needs it before it
 	 * can decode the actions at all: the leg discriminates every mangle. */
 	bool (*is_lan_side)(void *sh, struct net_device *dev);
 
-	/*
-	 * EVERY decision that must read or write silicon, AND the install.
-	 * Returns 0, or a negative errno -- -EOPNOTSUPP means "this flow stays
-	 * on the software fastpath", which is a NORMAL outcome and not an
-	 * error, so the core neither logs nor counts it as one.
-	 *
-	 * ★ ONE CALL AND NOT TWO, decided by reading the one implementation: a
-	 * separate `prepare` was drafted and the Cortina engine has nothing to
-	 * put in it, because its refusals are INTERLEAVED with its programming
-	 * (it arms DS, programs an egress, then refuses if the WAN VLAN will not
-	 * fit the action).  Splitting it would run a boundary through the middle
-	 * of one decision and leave an unused hook on every other family.
-	 *
-	 * The engine may write `priv` freely: it is this flow's private state,
-	 * it lives as long as the entry, and the core never reads it.
-	 */
+	/* EVERY decision that must read or write silicon, AND the ...
+	 * dev/MEASURED-gpon_flow_offload.h.md sec 5. */
 	int (*install)(void *sh, const struct gpon_flow_key *key,
 		       const struct gpon_flow_act *act,
 		       const struct gpon_flow_ctx *ctx, void *priv,
@@ -116,12 +57,8 @@ struct gpon_flow_ops {
 	 * N anonymous unsupported reasons. */
 	void (*note_vlan_action)(void *sh, bool ds_leg, u16 vid);
 
-	/*
-	 * Bytes of per-entry family state, appended to the core's entry and
-	 * handed back as `priv` on every call.  ONE allocation, and the family
-	 * keeps its own fields (a CRC, an age bucket, a table reference)
-	 * without the core learning what they are.
-	 */
+	/* Bytes of per-entry family state, appended to the core's ...
+	 * dev/MEASURED-gpon_flow_offload.h.md sec 6. */
 	size_t priv_size;
 };
 
@@ -131,17 +68,8 @@ struct gpon_flow_offload *gpon_flow_offload_new(const struct gpon_flow_ops *ops,
 						void *sh);
 void gpon_flow_offload_free(struct gpon_flow_offload *fo);
 
-/*
- * Tear down EVERY installed flow.  A family calls this when something it owns
- * changes underneath the entries -- the Cortina engine does it on a PPPoE
- * session change, because all upstream flows share one egress L3-IF and a stale
- * entry would emit the wrong session header the moment that word is rewritten.
- *
- * ⚠ THE CORE OWNS THIS, and it has to: the family's own reverse map cannot
- * remove an entry from the cookie table, and walking the table while removing
- * from it is the use-after-free the previous implementation wrote a paragraph
- * about avoiding.
- */
+/* Tear down EVERY installed flow. A family calls this when ...
+ * dev/MEASURED-gpon_flow_offload.h.md sec 7. */
 void gpon_flow_offload_flush(struct gpon_flow_offload *fo);
 
 /* The three TC verbs, dispatched by cookie. */
@@ -153,11 +81,8 @@ int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 			    struct flow_cls_offload *f);
 
-/*
- * Decode a rule's ACTIONS.  Split out of replace() so a family that still owns
- * its own lifecycle can adopt the decode alone -- and so it can be tested
- * without a device.
- */
+/* Decode a rule's ACTIONS. Split out of replace() so a family ...
+ * dev/MEASURED-gpon_flow_offload.h.md sec 8. */
 int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 			  bool ds_leg, struct gpon_flow_act *act,
 			  struct net_device **odev_out);

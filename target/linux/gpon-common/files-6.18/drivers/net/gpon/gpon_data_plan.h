@@ -55,11 +55,8 @@
  * masked before. */
 #include "gpon_gem_us.h"
 
-/* What the shell has actually armed in silicon. Allocation zero is a legal
- * default Alloc-ID (G.984.3 Table 5-2), so presence is explicit. alloc_bound
- * records a successful CAM binding or OMCC ride and survives partial failures
- * until that binding is undone. installed still means the WHOLE path succeeded.
- * The existing GEM-zero sentinel is a separate, unresolved policy limitation. */
+/* What the shell has actually armed in silicon. Allocation ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 7. */
 struct gpon_data_armed {
 	u16	alloc;		/* Alloc-ID armed in the T-CONT CAM */
 	bool	alloc_bound;	/* never inferred from numeric alloc or installed */
@@ -101,30 +98,8 @@ enum gpon_data_plan {
 	GPON_DATA_TEARDOWN,
 };
 
-/*
- * WHY the data path is not up -- and this is a SEPARATE question from what to
- * do about it.
- *
- * ★★★ IT EXISTS BECAUSE `WAIT` HAS FIVE CAUSES AND ONE NAME, AND THE DIFFERENCE
- *     BETWEEN THEM IS THE DIFFERENCE BETWEEN FOUR DIFFERENT REPAIRS.  The
- *     comment on `enum gpon_data_plan` above already says a shell that
- *     collapses "do nothing" and "do nothing YET" cannot say why the data path
- *     never came up; this is the same defect one layer down.  MEASURED on the
- *     X111W 2026-09-13: the OLT completes a whole provisioning burst, we answer
- *     every one of 109 messages rc=0 including the ME 262 Set that assigns
- *     Alloc-ID 0x0100, and ~2 s later it DEACTIVATES us -- while `data_owner`
- *     reads `admitted=0 alloc_bound=0`.  Nothing in the driver could say WHICH
- *     precondition was missing, so nothing could distinguish "the OLT never
- *     authorised this Alloc-ID over PLOAM" from "the OMCC transport is down"
- *     from "ME 268 never named a GEM port" -- three different faults wearing
- *     one word.
- *
- * ⚠ THE ORDER HERE MIRRORS `gpon_data_plan_decide` DELIBERATELY, and a
- *   differential pins that: for every input, this returns NONE exactly when the
- *   plan is KEEP, INSTALL or REPLACE.  A blocker that disagreed with the
- *   verdict would be worse than none -- it would explain a decision nobody
- *   made.
- */
+/* WHY the data path is not up -- and this is a SEPARATE ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 1. */
 enum gpon_data_blocker {
 	GPON_DATA_BLOCK_NONE = 0,	/* nothing blocks: KEEP / INSTALL / REPLACE */
 	GPON_DATA_BLOCK_NO_INPUT,	/* a NULL reached us: OUR defect, not the OLT's */
@@ -154,15 +129,8 @@ static inline bool gpon_data_alloc_valid(u16 alloc)
 	return alloc <= GPON_GEM_US_ALLOC_MASK && alloc != 0x00fe && alloc != 0x00ff;
 }
 
-/**
- * gpon_data_armed_is_stale - is the armed identity no longer the wanted one?
- * @armed: what the shell put in silicon
- * @want:  what the OLT provisioned, plus the live OMCC binding
- *
- * Split out from the verdict so a caller (and the differential) can ask it on
- * its own.  Nothing armed is never stale — there is nothing to be stale.
- * Pure: no state, no side effect, safe from any context including softirq.
- */
+/* gpon_data_armed_is_stale - is the armed identity no longer ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 2. */
 static inline bool gpon_data_armed_is_stale(const struct gpon_data_armed *armed,
 					    const struct gpon_data_want *want)
 {
@@ -178,21 +146,8 @@ static inline bool gpon_data_armed_is_stale(const struct gpon_data_armed *armed,
 	       (armed->rides_omcc && armed->alloc != want->omcc_alloc);
 }
 
-/**
- * gpon_data_plan_decide - what should happen to the WAN data path right now
- * @armed: what the shell put in silicon
- * @want:  what the OLT provisioned, plus the live OMCC binding
- *
- * The caller ACTS and owns its shadows, and must update them ONLY after the
- * register writes succeeded: on failure the OLD identity has to survive, so the
- * next event retries to convergence instead of latching a half-done install.
- *
- * ORDER MATTERS: staleness is computed BEFORE the "provisioned yet?" gate,
- * because a deprovision still owes a teardown of whatever is armed; testing the
- * gate first would leave a stale CAM entry armed forever.
- *
- * Pure: no state, no side effect, safe from any context including softirq.
- */
+/* gpon_data_plan_decide - what should happen to the WAN data ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 3. */
 static inline enum gpon_data_plan
 gpon_data_plan_decide(const struct gpon_data_armed *armed,
 		      const struct gpon_data_want *want)
@@ -214,17 +169,8 @@ gpon_data_plan_decide(const struct gpon_data_armed *armed,
 	return GPON_DATA_INSTALL;
 }
 
-/**
- * gpon_data_plan_why - what is the data path WAITING FOR?
- * @armed: what the shell put in silicon
- * @want:  what the OLT provisioned, plus the live OMCC binding
- *
- * NONE means nothing is blocking -- the plan is KEEP, INSTALL or REPLACE, and
- * a TEARDOWN is not blocked either: it is work to do, and its cause is named
- * by the same blocker that made the wanted mapping unusable.
- *
- * Pure: no state, no side effect, safe from any context including softirq.
- */
+/* gpon_data_plan_why - what is the data path WAITING FOR? ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 4. */
 static inline enum gpon_data_blocker
 gpon_data_plan_why(const struct gpon_data_armed *armed,
 		   const struct gpon_data_want *want)
@@ -255,32 +201,16 @@ static inline const char *gpon_data_plan_name(enum gpon_data_plan p)
 	return "?";
 }
 
-/* Which parts of a teardown apply to the identity that is actually armed.
- * ★ BOTH NON-TRIVIAL FIELDS ARE ONE INVARIANT: THE OMCC'S T-CONT IS SACRED.  On
- *   a single-alloc OLT it carries OMCI and PLOAM, so disabling its queues or
- *   invalidating its CAM entry to tear a data path down takes the management
- *   channel with it — and an ONU that cannot answer an OMCI audit gets
- *   DEACTIVATED.
- * ★ THERE IS DELIBERATELY NO FIELD FOR THE US PORT-STAMP CLEAR: it is
- *   unconditional in the shell, in ride mode too (clearing the stamps is
- *   precisely what stops the data GEM riding), and an always-true field is a
- *   check that cannot fail. */
+/* Which parts of a teardown apply to the identity that is ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 5. */
 struct gpon_data_undo {
 	bool	drain_tcont;	/* disable + flush the DATA T-CONT's VoQs first */
 	bool	unbind_gem;	/* invalidate the unicast DS GEM CAM entry */
 	bool	unbind_alloc;	/* invalidate the data T-CONT CAM entry */
 };
 
-/**
- * gpon_data_undo_plan - which teardown steps apply to what is armed
- * @armed:      what the shell put in silicon
- * @omcc_alloc: the Alloc-ID currently bound to the OMCC's own T-CONT
- * @out:        filled in; never read
- *
- * It says WHICH steps apply and nothing about their ORDER, because the order is
- * a hardware fact that differs per family (drain before CAM).
- * Pure: no state, no side effect, safe from any context including softirq.
- */
+/* gpon_data_undo_plan - which teardown steps apply to what is ...
+ * dev/MEASURED-gpon_data_plan.h.md sec 6. */
 static inline void gpon_data_undo_plan(const struct gpon_data_armed *armed,
 				       u16 omcc_alloc,
 				       struct gpon_data_undo *out)

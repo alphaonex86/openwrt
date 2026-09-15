@@ -1,42 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Cortina-Access QSPI flash controller ("cortina,ca-qspi") — spi-mem driver
- * for the Realtek RTL9607F "Elnath" GPON ONU SoC (Cortina CA8277C "TAURUS").
- *
- * Small PIO engine, one 0x50-byte register window ("qspi-base", on the
- * X400AXF at 0x4_F4324000), no interrupts, no clock gate to manage (the
- * block is always clocked; the boot ROM/U-Boot load from it).  Serves the
- * board's SPI-NAND (Fudan FM25S01A on this board — supported by the
- * mainline SPI-NAND core) through the generic "spi-nand" child node.
- *
- * On this platform the flash holds the STOCK firmware plus the per-board
- * factory-provisioning UBI volume (ubi_Config: config_hs.xml with
- * ELAN_MAC_ADDR / GPON_SN).  Our OpenWrt runs from RAM and only ever needs
- * to READ that data, and the DTS marks every partition read-only — but the
- * controller itself implements the full op set (write kicks are also what
- * carry SET-FEATURE etc. to the chip's volatile config registers).
- *
- * Programming model (register/bit facts confirmed against the live board:
- * this exact sequence is what the stock 5.10 kernel drives; stock dmesg
- * probes it as "ca-qspi ... mode_bits=0x0000" and boots from it):
- *
- *   A flash command is described by an "access code" (a hardware sequence
- *   selector, ACCESS[11:8]) plus the flash opcode.  Three shapes cover the
- *   whole SPI-NAND op set:
- *     0x0  opcode only                      (RESET, WRITE ENABLE, ...)
- *     0x5  opcode + address, no data        (PAGE READ, PROGRAM EXEC, ERASE)
- *     0xF  "extended": opcode + optional address/dummy + data phase, the
- *          geometry given in EXT_ACCESS {opcode, dummy-1, addr-1, count-1}
- *   Data moves 32 bits at a time through DATA (little-endian byte order):
- *   each word is clocked by writing the start bit (plus the write-access
- *   bit for output) to BUSY and polling the busy bits clear.
- *
- * TAURUS (CA8277C) specifics baked in (this driver targets the RTL9607F):
- *   - BUSY completion polls bits {16,1} clear (older chips: bit 1 only);
- *   - EXT_ACCESS data count is programmed with the FULL transfer length
- *     (older chips clamp the field to the 4-byte burst window);
- *   - the TIMING register is left at reset (older chips program it).
- */
+/* Cortina-Access QSPI flash controller ("cortina,ca-qspi") — ...
+ * dev/MEASURED-spi-cortina-qspi.c.md sec 1. */
 
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -81,13 +45,8 @@
 #define CA_QSPI_AC_OP_ADDR	0x5	/* opcode + address */
 #define CA_QSPI_AC_EXTENDED	0xf	/* geometry from EXT_ACCESS */
 
-/*
- * EXT_ACCESS: all three count fields are programmed as COUNT-1 and simply
- * wrap into their mask when the phase is absent (a 0-dummy op programs the
- * dummy field as 0x3f, a no-address op programs the address field as 7).
- * That wrap is the vendor-programmed, silicon-proven encoding for "phase
- * absent" on this hardware — do not "fix" it to 0.
- */
+/* EXT_ACCESS: all three count fields are programmed as ...
+ * dev/MEASURED-spi-cortina-qspi.c.md sec 2. */
 #define CA_QSPI_EXT_OPCODE(op)	((op) & GENMASK(7, 0))
 #define CA_QSPI_EXT_DATA(n)	(((n) << 8) & GENMASK(20, 8))
 #define CA_QSPI_EXT_ADDR(n)	(((n) << 21) & GENMASK(23, 21))

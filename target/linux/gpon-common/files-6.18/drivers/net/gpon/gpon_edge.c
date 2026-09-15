@@ -16,13 +16,8 @@
 
 #include "gpon_edge.h"
 
-/*
- * The L3 interface above a driver's netdev.  On a router built the ordinary
- * way the LAN port is enslaved to a bridge and the address lives THERE, so
- * reading the port's own in_device finds nothing at all.  The master is asked
- * structurally; no name is matched, because "br-lan" is a distribution's
- * convention and not a fact about the device.
- */
+/* The L3 interface above a driver's netdev. On a router built ...
+ * dev/MEASURED-gpon_edge.c.md sec 1. */
 static struct net_device *gpon_edge_l3_dev(struct net_device *dev)
 {
 	struct net_device *master = netdev_master_upper_dev_get_rcu(dev);
@@ -88,19 +83,8 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 	memset(e, 0, sizeof(*e));
 	rcu_read_lock();
 
-	/*
-	 * ★★ THE ROUTE COMES FIRST, AND IT NAMES THE WAN L3 DEVICE.
-	 *
-	 * ⚠ THE OBVIOUS ORDER IS WRONG AND THE BENCH PROVED IT. Reading the WAN
-	 * address off the driver's own netdev (or its MASTER upper) finds
-	 * NOTHING the moment the WAN rides a VLAN: `gpon0.46` is an UPPER of
-	 * `gpon0` but not its master, so the address sits on a device that
-	 * lookup never reaches and the engine refused a perfectly healthy WAN
-	 * with "carries no IPv4 address yet". Asking the FIB which device this
-	 * flow leaves through answers for the tagged and untagged cases with
-	 * one mechanism, and for a PPP or tunnel WAN it answers with a device
-	 * the check below then rejects -- which is the right answer too.
-	 */
+	/* ★★ THE ROUTE COMES FIRST, AND IT NAMES THE WAN L3 DEVICE. ⚠ ...
+	 * dev/MEASURED-gpon_edge.c.md sec 2. */
 	rt = ip_route_output_key(dev_net(wan), &fl4);
 	if (IS_ERR(rt)) {
 		*why = "no route to the flow's destination";
@@ -112,12 +96,8 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 		goto out_put;
 	}
 	wan_l3 = rt->dst.dev;
-	/*
-	 * ⚠ AND IT MUST LEAVE THROUGH THE PORT THIS ENGINE OWNS. A PPPoE or
-	 * tunnel WAN egresses through a device the accelerator cannot express,
-	 * and the tables would then describe a path the packet never takes --
-	 * an entry that reads back healthy and blackholes.
-	 */
+	/* ⚠ AND IT MUST LEAVE THROUGH THE PORT THIS ENGINE OWNS. A ...
+	 * dev/MEASURED-gpon_edge.c.md sec 3. */
 	if (!gpon_edge_rides(wan_l3, wan)) {
 		*why = "the WAN route leaves through a device this engine does not drive";
 		ret = -EOPNOTSUPP;

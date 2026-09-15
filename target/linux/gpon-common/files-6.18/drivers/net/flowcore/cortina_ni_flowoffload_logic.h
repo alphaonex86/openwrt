@@ -1,13 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * cortina_ni_flowoffload_logic.h -- logic hoisted out of cortina-ni-flowoffload.c.
- *
- * Every function here was moved MECHANICALLY under one rule: it touches no
- * MMIO, calls no kernel service, and reads no file-scope state of the shell
- * it left. Operator, 2026-08-28: a port should be "una lista de registros
- * y tal vez algunos workaround", and that is only true once the LOGIC
- * exists in one place instead of once per board.
- */
+/* cortina_ni_flowoffload_logic.h -- logic hoisted out of ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 1. */
 #ifndef _CORTINA_NI_FLOWOFFLOAD_LOGIC_H
 #define _CORTINA_NI_FLOWOFFLOAD_LOGIC_H
 
@@ -24,32 +17,8 @@ u32 cn_l3e_proc_parse_ip(const char *s);
 /* the 92-byte packed SW key below = the CRC input (chip fact) */
 #define CN_L3E_KEY_BYTES		92	/* packed key = CRC input */
 
-/* ------------------------------------------------------------------ */
-/* ★ HW HDR_I descriptor layout - the key the SWO engine ACTUALLY      */
-/* hashes.  The engine does NOT hash our SW cn_l3e_key (the 92-byte    */
-/* aal_hash_key_t); it hashes the 128-byte L3FE_HDR_I descriptor the   */
-/* classify/parse stage builds for a packet.  So a flow's fields must  */
-/* be packed into HDR_I bit positions before feeding the SWO - the     */
-/* SW-tuple -> HDR_I conversion below (cn_l3e_build_hdri).             */
-/*                                                                     */
-/* Bit offsets are LSB-first within the 128-byte little-endian buffer, */
-/* recovered TIER-1 from a single-bit SWO learn on the live engine     */
-/* under the 5-tuple mask (each field's bits proven to move the CRC),  */
-/* and CONFIRMED TIER-2 (2026-07-25) against the stock ca-ne.ko HDR_I  */
-/* build aal_hash_crc_sw_hw_calc_check, which packs the same fields    */
-/* into a 128-byte stack buffer: the port pair is one 32-bit window at */
-/* buffer bit 74 (dport <<2 into the word at byte 9, sport <<18, and   */
-/* an and-mask preserving everything outside bits 74..105), ip_da_0 at */
-/* 233 / ip_sa_0 at 361 (the 16-byte stores at byte 29 and 45 with a   */
-/* 1-bit pre-shift), ip_protocol <<4 into the word at byte 61 = 492,   */
-/* and the two 1-bit flags <<16 / <<17 in that same word = 504 / 505.  */
-/* These are the 9607F "07f" layout, which differs from the sibling    */
-/* gen2 struct in the IP region (+24 at the DA, +20 after).  NOTE the  */
-/* shipping binary also disagrees with the aal-77c HEADER at ip_ver /  */
-/* ip_vld (the header's extra ip_mtu_en/ip_mtu_enc would put them at   */
-/* 509/510): the BINARY is the product, so 504/505 stand - do not      */
-/* "correct" them to the header's values.                              */
-/* ------------------------------------------------------------------ */
+/* ★ HW HDR_I descriptor layout - the key the SWO engine ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 2. */
 #define CN_L3E_HDRI_BYTES		128
 #define CN_L3E_HDRI_WORDS		(CN_L3E_HDRI_BYTES / 4)
 /* 5-tuple + IP validity - each proven LIVE (moves the SWO CRC) on the real
@@ -63,24 +32,12 @@ u32 cn_l3e_proc_parse_ip(const char *s);
 #define CN_HDRI_IP_PROTO		492	/* IP protocol, 8b */
 #define CN_HDRI_IP_VER			504	/* 1b: 0 = IPv4 */
 #define CN_HDRI_IP_VLD			505	/* 1b: 1 = has an IP header */
-/* profile id stamp: HDR_I t2_ctrl (== the SW key's ctrl_set_id).  Position is
- * chip-cut dependent - a_cut(rev'A', ca_soc_data==0x41) [961:964], b_cut
- * [965:968] (tier-2 confirmed: the stock packer branches on that soc field and
- * inserts the 4-bit stamp at bit 1 vs bit 5 of the word at buffer byte 120);
- * BOTH are masked-out under the routed-flow mask (mask 0, board-
- * verified 2026-07-18), so this stamp does NOT affect a 5-tuple flow's CRC and
- * the cut choice is non-load-bearing here.  Placed at the a_cut offset,
- * mirroring stock aal_hash_crc_sw_hw_calc_check (hdr_i.t2_ctrl = ctrl_set_id).
- * (07f HDR_I has NO separate table_id field - table selection is t0/t1/t2_ctrl,
- * and the SW key's table_id is always mask-zeroed before the CRC.) */
+/* profile id stamp: HDR_I t2_ctrl (== the SW key's ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 3. */
 #define CN_HDRI_T2_CTRL			961	/* 4b, a_cut */
 
-/* ------------------------------------------------------------------ */
-/* Flow key / action - packed to the engine's exact bit layout.        */
-/* u64 bitfields, LSB-first on arm64: matches the on-DDR layout the    */
-/* stock driver emits.  Only the fields our 5-tuple mask leaves live   */
-/* need real values; everything the mask covers is zeroed before CRC.  */
-/* ------------------------------------------------------------------ */
+/* Flow key / action - packed to the engine's exact bit layout
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 4. */
 
 struct cn_l3e_key {
 	/* L4 */
@@ -226,44 +183,21 @@ struct cn_pppoe_punt_info {
 u32 cn_pppoe_punt_classify(const u8 *f, unsigned int len, u16 exp_sid,
 			   struct cn_pppoe_punt_info *pi);
 
-/* ------------------------------------------------------------------ */
-/* SWO CRC algebra - one MSB-first CRC LFSR step per polynomial.       */
-/* (d << 1) ^ (msb ? poly : 0), textbook normal-form CRC math.  The    */
-/* shell's SWO selftest uses these to assert the on-chip engine steps  */
-/* the polynomial correctly across adjacent key bits - the polynomials */
-/* are an engine fact both silicons must agree on, the stepping is     */
-/* pure arithmetic, so both live beside the other CRC primitives.      */
-/* ------------------------------------------------------------------ */
+/* SWO CRC algebra - one MSB-first CRC LFSR step per polynomial
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 5. */
 #define CN_L3E_SWO_POLY32		0x04C11DB7u
 #define CN_L3E_SWO_POLY16		0x1021u
 
 u32 cn_l3e_poly32_step(u32 d);
 u16 cn_l3e_poly16_step(u16 d);
 
-/* ------------------------------------------------------------------ */
-/* The packed 4-slot TPID table: slots 0-3 as {lo, hi} halves of two   */
-/* 32-bit words - slot i = (i & 1) ? (w[i>>1] >> 16) : (w[i>>1] &      */
-/* 0xffff).  The extraction was spelled character-for-character in TWO */
-/* shell functions (the DMA-AFT slot search and the L3FE parser-gate   */
-/* walk); this makes the packing a single fact.  The 4-slot count is   */
-/* intrinsic to the packing (two words of two halves), matching the    */
-/* register pair's CA_DMA_AFT_TPID_SLOTS.                              */
-/* ------------------------------------------------------------------ */
+/* The packed 4-slot TPID table: slots 0-3 as {lo, hi} halves ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 6. */
 u16 cn_tpid_slot_at(const u32 w[2], unsigned int i);
 int cn_tpid_find(const u32 w[2], u16 tpid);	/* slot index, or -1 */
 
-/*
- * cn_wan_vlan_walk_verdict() verdicts - the under-encap tail of the shell's
- * cn_wan_vlan_programmable(), i.e. everything decided AFTER the WAN chain
- * walk has run.  The DECLINE ORDER is part of the policy (a frame refused
- * for its TPID must never be counted as a missing sid), and it must mirror
- * cn_flow_refuse_vlan_wan()'s arms about WHICH flows are VLAN-carrying -
- * pure here so that ordering is host-testable, exactly like the already-
- * hoisted cn_pppoe_leg_check().  The shell keeps the walk itself, the
- * direct-802.1Q-upper arm (board-certified, deliberately not routed through
- * the walk), the mode gates that decide whether the walk runs at all, and
- * the decline ledger.
- */
+/* cn_wan_vlan_walk_verdict() verdicts - the under-encap tail ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 7. */
 enum cn_wan_vlan_verdict {
 	CN_WAN_VLAN_OK_PPPOE = 0,	/* tag + session both expressible */
 	CN_WAN_VLAN_WALK_MISMATCH,	/* walk failed, or resolved another vid */
@@ -277,30 +211,12 @@ enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
 						  bool tpid_8021q, int sid,
 						  bool ac_mac_vld);
 
-/* ===== round 3 (2026-09-02): the packed-slot idioms spelled per site ==== */
-
-/*
- * The TPID slot table's WRITE half - the mirror of cn_tpid_slot_at above, so
- * the {lo, hi}-half packing is derived from ONE locate (pi_packed) on both
- * directions instead of being spelled again at the claim site in
- * cn_l3fe_tpid_ensure().  @word is the 32-bit word the caller already selected
- * (w[i >> 1]); only slot i's half is replaced.
- */
+/* ===== round 3 (2026-09-02): the packed-slot idioms spelled ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 8. */
 u32 cn_tpid_slot_store(u32 word, unsigned int i, u16 tpid);
 
-/*
- * ★ MAIN-HASH age SRAM slot geometry, ONE fact (this die - board-proven
- * 2026-07-23): a 32-slot age row is 2 DATA words at 2 BITS per slot, 16
- * slots/word (DATA2/DATA3 read back 0 = absent; the aal-77c *source* shows a
- * 4-bit/4-word layout, but the shipped silicon is 2-bit/2-word, matching the
- * shipping ca-ne.ko aal_hash_age_set disasm `bfi #2`).  slot.reg is the
- * WORD OFFSET within the row (0 = slots 0..15, 4 = slots 16..31); the shell
- * maps it to its register NAMES (AGE_DATA_LO/HI - which sit at DESCENDING
- * addresses, so the offset is deliberately not an address).  Insert/extract
- * are pi_packed_insert/pi_packed_extract on this slot - before the hoist the
- * shift/RMW math was spelled in cn_l3e_age_set, cn_l3e_age_get AND the
- * bucket sweep, three parallel spellings of one packing.
- */
+/* ★ MAIN-HASH age SRAM slot geometry, ONE fact (this die - ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 9. */
 struct pi_packed_slot cn_age2_slot(u32 idx);
 
 /* geometry + the 2-bit age codes (moved from the shell with the helpers
@@ -314,25 +230,12 @@ struct pi_packed_slot cn_age2_slot(u32 idx);
 #define CN_L3E_AGE_START	2
 #define CN_L3E_AGE_STATIC	3
 
-/*
- * One 16-slot age word of the batch traffic sweep: every slot the HW re-armed
- * above IDLE (a lookup hit sets it to START) is reported in @rearmed (bit k =
- * slot k of THIS word) and stepped back down to IDLE so the next sweep sees a
- * fresh re-arm; STATIC and FREE slots pass through untouched.  Returns the
- * rewritten word for the shell to commit.  Pure - the latch/commit GO cycle
- * and the two register reads/writes stay at the register.
- */
+/* One 16-slot age word of the batch traffic sweep: every slot ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 10. */
 u32 cn_age2_sweep_word(u32 w, u16 *rearmed);
 
-/*
- * SW way-pick inside the 8-way hash bucket (stock hb_size = 1): the dup scan,
- * then the free scan with the entry-0 guard (entry 0 is kept free because its
- * {crc16, slot} cache tag is all-zero and aliases an empty cache way).
- * @crc32_tbl is the per-entry install-CRC shadow (0 = free).  Returns 0 with
- * *idx_out = the chosen free entry; -EEXIST with *idx_out = the entry already
- * holding @crc32 (a normal dup, not an error); -ENOSPC with *idx_out = the
- * bucket base (the flow simply stays on the sw path).
- */
+/* SW way-pick inside the 8-way hash bucket (stock hb_size = ...
+ * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 11. */
 int cn_hs_way_pick(const u32 *crc32_tbl, u32 crc16, u32 crc32, u32 *idx_out);
 
 #endif /* _CORTINA_NI_FLOWOFFLOAD_LOGIC_H */

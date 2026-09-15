@@ -142,14 +142,8 @@
 #define LUNA_INTC_GIMR(w)	(0x00 + (w) * 4)
 #define LUNA_INTC_GISR(w)	(0x08 + (w) * 4)
 #define LUNA_INTC_IRR(i)	(0x10 + (i) * 4)
-/*
- * ⚠ SEVEN, AND IT IS COUNTED FROM THE HARDWARE, NOT DERIVED FROM THE INPUTS.
- * The routing is 4 bits per input, 8 inputs per word -- 64/8 = 8 words by that
- * arithmetic -- yet BOTH chips' vendor init writes SEVEN.  irq-rtl9602c.c
- * carried the derived 8 in a #define and then wrote 7 words explicitly, so the
- * constant and the code disagreed and only the code was right.  The table below
- * is sized by what the hardware is actually given.
- */
+/* ⚠ SEVEN, AND IT IS COUNTED FROM THE HARDWARE, NOT DERIVED ...
+ * dev/MEASURED-irq-luna.c.md sec 1. */
 #define LUNA_INTC_IRR_WORDS	7
 #define LUNA_INTC_PERIPH_EN	12	/* GIMR0 bit12 = master peripheral enable */
 
@@ -168,15 +162,8 @@ struct luna_intc_chip {
 
 static const struct luna_intc_chip rtl9602c_intc_chip = {
 	.name	= "RTL9602C",
-	/*
-	 * ⚠ TWO WORDS DIFFER FROM THE SIBLING'S, AND THEY ARE THIS BOARD'S OWN.
-	 * They were established EMPIRICALLY on the X111W and describe THAT
-	 * board's cascade: word 2 ends 0x...226 where the sibling has 0x...222,
-	 * and word 4 begins 0x6 where the sibling begins 0x3.  Keeping them in
-	 * the table is exactly why the two drivers could finally become one --
-	 * a shared routing constant would have silently inherited one board's
-	 * cascade onto the other, which is what the deferral warned about.
-	 */
+	/* ⚠ TWO WORDS DIFFER FROM THE SIBLING'S, AND THEY ARE THIS ...
+	 * dev/MEASURED-irq-luna.c.md sec 2. */
 	.irr	= { 0x03333330, 0x30302222, 0x00020226, 0x22020333,
 		    0x63333063, 0x32322022, 0x00333000 },
 	.cpu_stride = 0,	/* this driver arranges one block here */

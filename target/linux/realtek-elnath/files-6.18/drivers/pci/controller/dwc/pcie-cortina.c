@@ -1,25 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * PCIe root-complex host driver for Cortina-Access "Venus" SoCs
- * (RTL9607F / Elnath and family).
- *
- * Glue on top of the Synopsys DesignWare PCIe host core. The controller
- * exposes five register regions (glbl_regs, rc_dbi, config, iatu,
- * serdes_phy). This driver:
- *   - maps the glue (glbl_regs), DBI (rc_dbi) and unrolled-iATU (iatu)
- *     regions and hands DBI/iATU to the DWC core;
- *   - applies the SerDes PHY register table from DT (serdes-cfg-dataB);
- *   - runs the reset / power / PHY bring-up sequence and waits for the
- *     SerDes BER-notify;
- *   - tells the glue address decoder where the DBI/config and iATU
- *     windows live;
- *   - demultiplexes the single shared controller interrupt into MSI
- *     (via the DWC built-in MSI controller), legacy INTx and link-down;
- *   - drives LTSSM enable/link-up through the DWC core.
- *
- * Two such root complexes exist on Elnath; the WiFi endpoints
- * self-enumerate behind them.
- */
+/* PCIe root-complex host driver for Cortina-Access "Venus" ...
+ * dev/MEASURED-pcie-cortina.c.md sec 1. */
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -45,33 +26,8 @@
 /* DT property carrying the SerDes PHY init table as <offset value> u32 pairs */
 #define CORTINA_PCIE_SERDES_CFG_PROP	"serdes-cfg-dataB"
 
-/* SerDes lock status: one register per {lane,path}, polled until the CMU/PLL +
- * CDR/symbol lock bits assert.  Live stock reads 0x780f when fully linked, but
- * 0x780f's bit0 is the post-LTSSM RX-active bit and only sets once the DWC core
- * trains the link (which happens AFTER this glue's host_reset returns).  The
- * gate is the CMU/PLL lock (bits 11-14, mask 0x7800), which the SerDes reaches
- * cold from the in-reset table.  The full BER-qualify bit0 (0x780f) additionally
- * needs a converged RX auto-cal which does NOT complete on this driver (see the
- * WiFi memory: 0x7c bit4/cal-done never sets, stuck 0x500e, vs stock's 0x5010),
- * so the DWC LTSSM still stalls at Polling.Compliance cold. */
-/*
- * ★ ONE REGISTER, ONE NAME, AND THE LANE LIVES IN THE BASE (2026-09-04).
- * These four constants were a FORMULA written out by hand: the SerDes window
- * repeats per lane (stride 0x1000) and per sub-lane (stride 0x100), so
- * 0x007c/0x017c/0x107c/0x117c are the same register at (lane, sub) =
- * (0,0)/(0,1)/(1,0)/(1,1).  The rest of this file already computes that base --
- * `u32 b = lane * LANE_STRIDE + sub` -- and then wrote `s + b + 0x7c` with the
- * offset bare, ten times.  So the register had four names in one place and none
- * in the other.
- *
- * ⚠ THE INDIVIDUAL REGISTERS OF THIS WINDOW ARE NOT IN THE TIER-2 ORACLE.  The
- * vendor NAME->ADDRESS table covers 0xf4333000 only as S0_0_DUMMY_REG_BASE (and
- * _1, the S1 pair and GPHY the same way) -- base markers, no register
- * names.  That is a
- * blind spot, not an omission to fix: naming 0x2c or 0x34 from anything we have
- * would be inventing.  What the table DOES corroborate is the base itself and
- * the lane layout, which is why THAT is what gets named here.
- */
+/* SerDes lock status: one register per {lane,path}, polled ...
+ * dev/MEASURED-pcie-cortina.c.md sec 2. */
 #define CORTINA_PCIE_SERDES_SUB_STRIDE	0x100	/* two sub-lanes per lane */
 #define CORTINA_SERDES_BER_STAT		0x7c	/* within one sub-lane */
 #define CORTINA_SERDES_SUB(lane, sub) \
@@ -195,15 +151,8 @@ static inline void cortina_glbl_writel(struct cortina_pcie *cp, u32 val, u32 reg
 	writel(val, cp->glbl + reg);
 }
 
-/* ------------------------------------------------------------------ */
-/* SerDes PHY								      */
-/* ------------------------------------------------------------------ */
-
-/*
- * Apply the DT SerDes register table to each lane. The table is expressed
- * relative to the lane-0 window; every additional lane is programmed at a
- * fixed 0x1000 stride from the previous one.
- */
+/* SerDes PHY Apply the DT SerDes register table to each lane. ...
+ * dev/MEASURED-pcie-cortina.c.md sec 3. */
 static void cortina_pcie_serdes_phy_init(struct cortina_pcie *cp)
 {
 	int lane, i;
@@ -226,51 +175,16 @@ static void cortina_pcie_serdes_phy_init(struct cortina_pcie *cp)
 	}
 }
 
-/*
- * pcie2 SHORT RX calibration (stock k0 @0x913034, page0 only, single pass -- NO
- * lock-wait, NO re-strobe).  With the SerDes refclk ungated the CMU/PLL is
- * already locked by the time we get here, so one strobe converges and we copy the
- * HW-computed slicer code 0x7c[15:9] -> 0x90[6:0] under the 0x28 open/close latch
- * with 0x2c bit4 armed.  (This is the per-board RX code; the HW measures it.)
- */
-/* Defined after the reset-mgr macros/helpers below. */
+/* pcie2 SHORT RX calibration (stock k0 @0x913034, page0 only, ...
+ * dev/MEASURED-pcie-cortina.c.md sec 4. */
 static void cortina_pcie_serdes_hard_relock(struct cortina_pcie *cp);
 static void cortina_pcie_long_cal(struct cortina_pcie *cp, void __iomem *s,
 				  int lanes, void (*relock)(struct cortina_pcie *));
 
-/*
- * Stock's FULL RX-cal convergence FSM (k0 LONG path @0x91324c), single-lane
- * (pcie2) subset.  The minimal SHORT strobe (@0x913034) only MEASURES the slicer
- * code and drops the CMU lock on revB (0x780e/0x500e, bit0 never qualifies).  The
- * LONG path additionally runs the RX-EQ adaptation ramp (held-enables 0x34/0x08/
- * 0xbc/0x6c bracketing a 0x7c-bit4 poll + the 0x40 0x194->0x1a4->0xc walk that
- * commits the measured code into 0x0c/0x2c) and then a HARD CMU RELOCK
- * (phy+core reset assert->deassert around a phy re-power) that re-acquires the
- * CMU after the strobe -- the 9602C txPll_relock analogue.  Run IN-RESET (caller
- * holds PERST asserted).  All gaps usleep_range(10,20) unless noted.
- */
+/* Stock's FULL RX-cal convergence FSM (k0 LONG path ... -- dev/MEASURED-pcie-cortina.c.md sec 5. */
 #define CORTINA_SERDES_CALDONE	0x10	/* 0x7c bit4 = cal-done */
-/*
- * Run stock's RX-EQ adaptation ramp for ONE sub-lane (register base b = 0x000 or
- * 0x100).  The 0x24 bit9 CMU strobe is SHARED across the lane's two sub-lanes, so
- * it runs only when cmu=true (sub-lane 0); the RX-EQ held-enables + 0x40 walk +
- * captures are per-sub-lane.  Run the two sub-lanes SEQUENTIALLY (interleaving
- * them cancels the bit0 qualification).
- *
- * ★ NOT gpon_regseq MATERIAL (classified 2026-09-02: zero of the 51 accesses
- * convert; a falsifiable census agreed).  Every step misses the interpreter's
- * contract on >=1 axis: (1) all addresses are `s + b + off` -- `s` is THIS
- * controller's ioremap cookie (two RCs exist) and `b` the per-call sub-lane
- * base, while rd/wr take a bare u32 with no context cookie; (2) every settle
- * is usleep_range(10, 20) and GPON_REGSEQ_DLY is milliseconds-only; (3) the
- * cal-done poll runs at a 10-20 us cadence and CONTINUES on timeout -- the
- * release steps after it MUST still run or the held-enables stay asserted --
- * where GPON_REGSEQ_POLL is fixed 200 us and aborts the sequence; (4) three
- * writes carry a field copied from a live 0x7c read (-> 0x0c, 0x2c, 0x90) and
- * FLD takes literals; (5) the `cmu` conditionals would force two tables
- * duplicating the shared steps.  Converting any subset changes an analog
- * cal's timing or re-types the same silicon facts twice.
- */
+/* Run stock's RX-EQ adaptation ramp for ONE sub-lane ...
+ * dev/MEASURED-pcie-cortina.c.md sec 6. */
 static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool cmu)
 {
 	u32 l1_bit4 = 0;
@@ -304,17 +218,8 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	writel((readl(s + b + 0x0c) & ~0x3e) | ((c & 0x1f) << 1), s + b + 0x0c);
 	usleep_range(10, 20);
 	if (cmu) {
-		/* ★ L15 UNDO L1 -- AND IT MUST ACTUALLY UNDO IT (fixed 2026-09-07).
-		 * This unconditionally SET bit4, but L1 above only CLEARS it.  On
-		 * this board the pcie2 SerDes table ships 0x24 = 0x520c, whose bit4
-		 * is ALREADY 0, so L1 is a no-op and this "undo" was not undoing
-		 * anything -- it was setting a bit the sequence never touched,
-		 * leaving 0x521c where stock's own locked state reads 0x520c
-		 * (tier 1, dev/x400axf/stock/stock_serdes_locked.txt; corroborated
-		 * tier 2 by a Unicorn execution of the stock kernel, which writes
-		 * 0x24 = 0x520c and never 0x521c).
-		 * An undo of a no-op is a no-op: restore what L1 saved.
-		 */
+		/* ★ L15 UNDO L1 -- AND IT MUST ACTUALLY UNDO IT (fixed ...
+		 * dev/MEASURED-pcie-cortina.c.md sec 7. */
 		writel((readl(s + b + 0x24) & ~0x10) | l1_bit4, s + b + 0x24);
 		usleep_range(10, 20);
 	}
@@ -327,11 +232,8 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	usleep_range(10, 20);
 	writel(readl(s + b + 0x34) & ~0x2000, s + b + 0x34);	usleep_range(10, 20);	/* L20 rel-A (our silicon needs it) */
 
-	/* Finish ASYMMETRICALLY, matching stock's live-locked steady state:
-	 * sub-lane 0 (cmu) ends in MANUAL mode (0x2c=0xa91d) with a FROZEN slicer
-	 * code; sub-lane 1 ends in AUTO mode (0x2c=0xa90d) so its RX-EQ keeps
-	 * ADAPTING to the live signal and doesn't de-qualify (which caused the
-	 * bit0 bounce when both were frozen). */
+	/* Finish ASYMMETRICALLY, matching stock's live-locked steady ...
+	 * dev/MEASURED-pcie-cortina.c.md sec 25. */
 	writel(readl(s + b + 0x28) & ~0x60, s + b + 0x28);	usleep_range(10, 20);	/* open latch */
 	if (cmu) {
 		writel(readl(s + b + 0x2c) | 0x10, s + b + 0x2c);	usleep_range(10, 20);	/* manual */
@@ -342,24 +244,14 @@ static __maybe_unused void cortina_pcie_rx_eq_ramp(void __iomem *s, u32 b, bool 
 	}
 	writel(readl(s + b + 0x28) | 0x60, s + b + 0x28);	usleep_range(10, 20);	/* close latch */
 }
-/*
- * Stock's pcie2 SHORT RX cal (k0 @0x913034), verified byte-for-byte against a
- * Unicorn-ARM64 emulation of the real binary: exactly 8 page0 writes, NO cal-done
- * poll, and it does NOT touch page1 (0x1xx keeps its table values, staying AUTO).
- * The HW self-calibrates from the 0x24 bit9 strobe; the measured RX slicer code
- * 0x7c[15:9] is frozen into 0x90[6:0] under the 0x28 open/close latch bracket with
- * 0x2c bit4 (manual) armed.  (Our previous ramp was stock's pcie0 LONG cal --
- * ~35 extra writes that over-drove the analog and left bit0 marginal.)
- */
+/* Stock's pcie2 SHORT RX cal (k0 @0x913034), verified ...
+ * dev/MEASURED-pcie-cortina.c.md sec 8. */
 static void cortina_pcie_serdes_rx_cal(struct cortina_pcie *cp)
 {
 	void __iomem *s = cp->serdes;
 
-	/* pcie2 = 1 lane.  The stock SHORT cal doesn't converge on our silicon
-	 * (0x5010); the interleaved LONG cal that locks pcie0's 2-lane CMU (0x7e76)
-	 * does NOT lock a single lane (0x500f).  The SEQUENTIAL per-sub-lane ramp is
-	 * what reaches the CMU lock here (0x780e) -- CMU strobe once on sub-lane 0,
-	 * RX-EQ per sub-lane 0 then 1. */
+	/* pcie2 = 1 lane. The stock SHORT cal doesn't converge on our ...
+	 * dev/MEASURED-pcie-cortina.c.md sec 26. */
 	cortina_pcie_rx_eq_ramp(s, 0x000, true);	/* sub-lane 0 (with shared CMU strobe) */
 	cortina_pcie_rx_eq_ramp(s, 0x100, false);	/* sub-lane 1 (RX-EQ only) */
 	dev_info(cp->pci.dev, "rxcal(seq): 7c=%08x 17c=%08x\n",
@@ -414,19 +306,8 @@ static int cortina_pcie_parse_serdes_cfg(struct cortina_pcie *cp)
 	return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Reset / power bring-up						      */
-/* ------------------------------------------------------------------ */
-
-/*
- * RTL9607F reset-mgr / PHY-mux / GPIO for PCIe bring-up.  Facts from the stock DTB,
- * VERIFIED live (WiFi up = released+powered): 0xf43200a0=0x10000000 (core released),
- * 0xf43200a8=0x7AA (phy released), 0xf43200cc=0x01040113 (S2->PCIe mux),
- * 0xf432039c=0xF0FD318C (S2 powered/de-isolated), GPIO bank4 pin12 out+high (PERST#).
- * Our glue's reset/phy/clk were devm_*_optional no-ops (absent from DT); the SerDes
- * therefore stayed at power-on reset (DPHY held, lanes isolated/muxed to USB3) and
- * BER-notify could never assert.  Drive the registers directly (id-keyed).
- */
+/* Reset / power bring-up RTL9607F reset-mgr / PHY-mux / GPIO ...
+ * dev/MEASURED-pcie-cortina.c.md sec 9. */
 #define CA_RSTMGR_PHYS		0x4f4320000ULL
 #define CA_RSTMGR_SIZE		0x400
 #define CA_GPIO_PHYS		0x4f4329000ULL
@@ -436,27 +317,12 @@ static int cortina_pcie_parse_serdes_cfg(struct cortina_pcie *cp)
 #define CA_GLOBAL_CONFIG	0x0c8	/* clock gates (per-block ungate bits) */
 #define CA_PHY_CONTROL		0x0cc	/* SerDes->PCIe mux */
 #define CA_PHY_ISO_POWER	0x39c	/* SerDes lane power/isolation */
-/*
- * pcie2 has TWO clocks: the controller clock (gate_pcie2, bit14) and the SerDes
- * PHY/refclk (gate_pcie2_ps, bit24).  The bootloader ungates only the controller
- * (so the RC/DBI enumerate), leaving the SerDes refclk gated -- so the RX CMU/PLL
- * has no reference and its lock bits (0x7c bits 11,13) never set: the SerDes sits
- * at 0x500e cold forever, no matter how the RX auto-cal is strobed.  Ungate BOTH.
- */
+/* pcie2 has TWO clocks: the controller clock (gate_pcie2, ...
+ * dev/MEASURED-pcie-cortina.c.md sec 10. */
 #define CA_CLKEN_PCIE2		BIT(14)	/* gate_pcie2   : controller clock */
 #define CA_CLKEN_PCIE2_PS	BIT(24)	/* gate_pcie2_ps: SerDes PHY / refclk */
-/*
- * PERST# pad-function mux.  This is a GLOBAL pinctrl register that lives in the
- * rstmgr/GLB window (0xf4320140), NOT the per-GPIO bank window -- the pad mux and
- * the GPIO data/dir registers are in different blocks.  Bit9 = PERST0 (pcie0,
- * pin137), bit12 = PERST2 (pcie2, pin140); the bit must be set for the PERST# pad
- * to reach the GPIO controller.  On a cold POR this mux reads 0 (pad
- * disconnected), so the PCIe driver MUST set it itself: the GPON laser path
- * (cg_laser_on) writes the same 0x140=0x3B00 including these bits, but only at
- * activation -- long after PCIe probe -- so cold the endpoint never leaves reset
- * and never enumerates.  (The old code wrongly wrote this mux into the per-GPIO
- * window at 0xf4329140, which routed nothing.)
- */
+/* PERST# pad-function mux. This is a GLOBAL pinctrl register ...
+ * dev/MEASURED-pcie-cortina.c.md sec 11. */
 #define CA_GLB_GPIO_MUX4	0x140	/* rstmgr/GLB window: bank4 pad-function mux */
 #define CA_GPIO_B4_CFG		0x390	/* PER_GPIO window: bank4 pin dir (clear = output) */
 #define CA_GPIO_B4_OUT		0x394	/* PER_GPIO window: bank4 pin output level */
@@ -468,29 +334,13 @@ static int cortina_pcie_parse_serdes_cfg(struct cortina_pcie *cp)
 #define S2_PHY_PWR_SET		(BIT(12) | BIT(18) | BIT(28) | BIT(29))
 #define S2_PHY_PWR_CLR		(BIT(4) | BIT(11))
 #define S2_PERST		BIT(12)
-/*
- * Golden post-init register values, read live from stock (tier-1) on a fresh
- * COLD boot with WiFi up.  We write these wholesale rather than read-modify-
- * write, because the untouched bits differ between a cold POR and a warm
- * reboot -- an RMW inherits those and lands on the wrong value cold (which is
- * why cold BER-lock was intermittent while warm trained).  0x39c in particular
- * carries the SerDes lane power-up / de-isolation bits (low nibble 0x318C)
- * that a cold POR leaves clear.
- */
+/* Golden post-init register values, read live from stock ...
+ * dev/MEASURED-pcie-cortina.c.md sec 12. */
 #define CA_DPHY_RESET_GOLD	0x000007AAu	/* 0x0a8: phy(bit2) released, rest = stock */
 #define CA_PHY_ISO_POWER_GOLD	0xF0FD318Cu	/* 0x39c: lanes powered / de-isolated */
 
-/*
- * pcie0 / SerDes S0 (5 GHz) bring-up.  Stock brings pcie0/S0 up BEFORE pcie2;
- * its 2-lane LONG RX-cal (k0 @0x91324c) warms the SHARED SerDes analog
- * (CMU/bias) so pcie2's minimal SHORT cal then converges (0x780f) instead of
- * stalling at 0x500e.  With the pcie0 DT node enabled this sequence IS pcie0's
- * host reset (RTW8852CE 5 GHz enumerates behind it); without a node it still
- * runs once as a pcie2 precondition (scratch-mapped serdes, not enumerated).
- * S0 shares the rstmgr (0xf4320000) + GPIO (0xf4329000) windows at DIFFERENT
- * bits; only its serdes lives in its own window (0xf4333000).
- * Masks from the k0 phy_power_on table (@0x99d890, phy idx0+idx1) + stock DTB.
- */
+/* pcie0 / SerDes S0 (5 GHz) bring-up. Stock brings pcie0/S0 ...
+ * dev/MEASURED-pcie-cortina.c.md sec 13. */
 #define CA_S0_SERDES_PHYS	0x4f4333000ULL	/* pcie0 serdes_phy window */
 #define CA_S0_SERDES_SIZE	0x2000
 #define S0_LANES		2
@@ -502,15 +352,8 @@ static int cortina_pcie_parse_serdes_cfg(struct cortina_pcie *cp)
 #define S0_PHY_PWR_CLR		0x00000003u	/* 0x39c CLR */
 #define S0_PHY_PWR_OFF		0x00000003u	/* 0x39c isolate (power_off) */
 #define S0_PERST		BIT(9)		/* gpio bank4 pin9 (S2=pin12) */
-/*
- * pcie0's controller + SerDes-refclk gates in 0x0c8, from the stock DTB clock
- * nodes (gate_pcie0 operate-shift 0x0a, gate_pcie0_ps operate-shift 0x16).
- * Two independent tiers agree: the SAME DTB table's pcie2 shifts (0x0e/0x18)
- * match the live-verified CA_CLKEN_PCIE2/_PS bits, and both pcie0 bits are set
- * in the live-stock golden 0xc8 = 0x076445F0.  Idempotent when the bootloader
- * already ungated them (it does on this board -- the pcie0 LONG cal locked
- * cold before this ungate existed); kept for cold-boot determinism.
- */
+/* pcie0's controller + SerDes-refclk gates in 0x0c8, from the ...
+ * dev/MEASURED-pcie-cortina.c.md sec 14. */
 #define CA_CLKEN_PCIE0		BIT(10)	/* gate_pcie0   : controller clock */
 #define CA_CLKEN_PCIE0_PS	BIT(22)	/* gate_pcie0_ps: SerDes PHY / refclk */
 
@@ -519,11 +362,8 @@ static inline void ca_rmw(void __iomem *base, u32 off, u32 clr, u32 set)
 	writel((readl(base + off) & ~clr) | set, base + off);
 }
 
-/*
- * Hard CMU relock (stock LONG-cal @0x914108): re-assert phy+core reset, re-power
- * the PHY (0xcc mux + 0x39c lane power), deassert -> the CMU re-acquires lock
- * after the RX-cal strobe perturbed it (the 9602C txPll_relock analogue).
- */
+/* Hard CMU relock (stock LONG-cal @0x914108): re-assert ...
+ * dev/MEASURED-pcie-cortina.c.md sec 27. */
 static __maybe_unused void cortina_pcie_serdes_hard_relock(struct cortina_pcie *cp)
 {
 	/* Match pcie0's proven relock structure (which locks its CMU to 0x7e76):
@@ -538,11 +378,8 @@ static __maybe_unused void cortina_pcie_serdes_hard_relock(struct cortina_pcie *
 	ca_rmw(cp->rstmgr, CA_RST_BLOCK, S2_CORE_RST, 0);	usleep_range(1000, 2000);
 }
 
-/* ------------------------------------------------------------------ */
-/* pcie0 / S0 precondition (replays stock's pcie0-first LONG cal)      */
-/* ------------------------------------------------------------------ */
-
-/* RMW serdes reg `o` across `lanes` lanes (x stride) and both sub-lanes (+0,+0x100). */
+/* pcie0 / S0 precondition (replays stock's pcie0-first LONG ...
+ * dev/MEASURED-pcie-cortina.c.md sec 28. */
 static void s0_rmw_all(void __iomem *s, int lanes, u32 o, u32 clr, u32 set)
 {
 	int lane, sub;
@@ -629,26 +466,8 @@ static void cortina_pcie0_hard_relock(struct cortina_pcie *cp)
 	ca_rmw(cp->rstmgr, CA_RST_BLOCK, S0_CORE_RST, 0);	usleep_range(1000, 2000);
 }
 
-/* pcie0 serdes-cfg-dataB (stock DTB rtl9607f.dts:1311): lane0's two sub-lanes.
- * Lane1 (0x1000+) has no table and is shaped by the cal.  0x2c=0xa91d = MANUAL.
- *
- * ★ THE TWO SUB-LANES RUN THE SAME PROGRAM, and until 2026-09-02 nothing here
- *   said so.  DERIVED FROM THE TABLE ITSELF, not from a document: sub-lane 1
- *   repeats sub-lane 0's registers, in the same order, one stride higher, with
- *   exactly SEVEN differences -- 0x80 and 0x84 written only by sub-lane 0,
- *   0xbc only by sub-lane 1, and four registers carrying a different value
- *   (0x04, 0x74, 0x90, 0xc0).  Each one is marked on its own line below.
- *
- * ★ AND EACH BLOCK ENDS OUT OF ADDRESS ORDER: 0x24 is written LAST, after
- *   0xc8, in both sub-lanes.  That is the shape of a register that must land
- *   after the others, and a reader sorting this table by address would break
- *   the link with nothing to see.  The write order below is the contract.
- *
- * ⚠ NO REGISTER NAME IS INVENTED HERE.  This silicon's SerDes registers are
- *   not named anywhere in this tree, and making one up would read as a fact
- *   about hardware that nobody established.  What is added is STRUCTURE and
- *   what the table's own contents prove.
- */
+/* pcie0 serdes-cfg-dataB (stock DTB rtl9607f.dts:1311): ...
+ * dev/MEASURED-pcie-cortina.c.md sec 15. */
 #define CA_SDS_SUBLANE_STRIDE	0x100
 
 static void cortina_pcie0_serdes_table(void __iomem *s)
@@ -763,13 +582,8 @@ static void cortina_pcie_long_cal(struct cortina_pcie *cp, void __iomem *s,
 
 static bool cortina_pcie0_done;		/* S0 bring-up runs once, globally */
 
-/*
- * The full, proven S0 sequence: PERST0 route+assert -> core/phy reset assert ->
- * in-reset SerDes table (lane0 only; lane1 is shaped by the cal) -> phy power ->
- * reset deassert -> 2-lane LONG RX-cal (locks the CMU to 0x7e76) -> PERST0
- * deassert.  Shared by pcie0's own host reset (s = its DT-mapped serdes_phy)
- * and by the pcie2-only fallback precondition (s = scratch-mapped).
- */
+/* The full, proven S0 sequence: PERST0 route+assert -> ...
+ * dev/MEASURED-pcie-cortina.c.md sec 16. */
 static void cortina_pcie0_bringup_seq(struct cortina_pcie *cp, void __iomem *s)
 {
 	ca_rmw(cp->rstmgr, CA_GLOBAL_CONFIG, 0, CA_CLKEN_PCIE0 | CA_CLKEN_PCIE0_PS);
@@ -801,11 +615,8 @@ static void cortina_pcie0_bringup_seq(struct cortina_pcie *cp, void __iomem *s)
 	cortina_pcie0_done = true;
 }
 
-/*
- * Fallback when pcie0 has no (or a disabled) DT node: run the S0 sequence ONCE
- * before pcie2, purely to precondition the SHARED SerDes analog -- mirrors
- * stock's pcie0-first order.  pcie0 is not enumerated on this path.
- */
+/* Fallback when pcie0 has no (or a disabled) DT node: run the ...
+ * dev/MEASURED-pcie-cortina.c.md sec 29. */
 static void cortina_pcie0_precondition(struct cortina_pcie *cp)
 {
 	void __iomem *s = ioremap(CA_S0_SERDES_PHYS, CA_S0_SERDES_SIZE);
@@ -818,15 +629,8 @@ static void cortina_pcie0_precondition(struct cortina_pcie *cp)
 	iounmap(s);
 }
 
-/*
- * pcie0's own host reset (5 GHz RTW8852CE behind it).  The SAME proven S0
- * sequence, on the controller's DT-mapped windows, plus the endpoint power-up
- * wait (stock DTB ready-time = 0x96 = 150 ms) and the BER-notify poll.  The
- * DT serdes-cfg-dataB table is carried for reference but the sequence applies
- * the identical RE'd table via cortina_pcie0_serdes_table() -- lane0 only,
- * exactly as proven (the generic per-lane-stride DT apply would also write
- * lane1, diverging from the golden trace).
- */
+/* pcie0's own host reset (5 GHz RTW8852CE behind it). The ...
+ * dev/MEASURED-pcie-cortina.c.md sec 17. */
 static bool cortina_pcie0_host_reset(struct cortina_pcie *cp)
 {
 	cortina_pcie0_bringup_seq(cp, cp->serdes);
@@ -836,11 +640,8 @@ static bool cortina_pcie0_host_reset(struct cortina_pcie *cp)
 	return cortina_pcie_serdes_ber_notify(cp);
 }
 
-/*
- * Full controller bring-up.  Ordering and the ~1ms settling delays are hardware
- * requirements: the SerDes is reprogrammed while PHY+core are held in reset, PHY
- * reset releases before core, and BER-notify must be seen before PERST# releases.
- */
+/* Full controller bring-up. Ordering and the ~1ms settling ...
+ * dev/MEASURED-pcie-cortina.c.md sec 30. */
 static bool cortina_pcie_host_reset(struct cortina_pcie *cp)
 {
 	if (cp->idx == 0)
@@ -850,11 +651,8 @@ static bool cortina_pcie_host_reset(struct cortina_pcie *cp)
 	if (cp->idx != 2) {
 		dev_warn(cp->pci.dev, "reset seq only implemented for pcie0/pcie2 (id=%u)\n",
 			 cp->idx);
-		/* Nothing was attempted, so there is no lock to wait for: say so
-		 * rather than making the caller retry a sequence that does not
-		 * exist.  "not implemented" and "tried and failed" are different
-		 * answers and only the second is worth a retry.
-		 */
+		/* Nothing was attempted, so there is no lock to wait for: say ...
+		 * dev/MEASURED-pcie-cortina.c.md sec 31. */
 		return true;
 	}
 
@@ -880,17 +678,8 @@ static bool cortina_pcie_host_reset(struct cortina_pcie *cp)
 	ca_rmw(cp->gpio, CA_GPIO_B4_CFG, S2_PERST, 0);		/* dir = output */
 	ca_rmw(cp->gpio, CA_GPIO_B4_OUT, S2_PERST, 0);		/* drive low (assert) */
 
-	/* ⚠ RECOVERY ATTEMPT, 2026-09-07 -- keep or drop on the next boot's evidence.
-	 * PERST# used to be low for only the ~30 ms the sequence below takes.  That
-	 * is far past the PCIe minimum (100 us) for a healthy part, but this board
-	 * can reach a state where the endpoint's a-die crystal was switched off by
-	 * a previous driver (see rtw8192xb_pwr_off_func) and a short PERST# does
-	 * not restart it: measured tier 1, three consecutive warm boots -- two of
-	 * ours and one of the VENDOR image -- all lost the link with
-	 * "Link Fail!!!(ltssm = 0x3)".  An analog restart is not instant, so hold
-	 * the endpoint in reset long enough for one.  It costs every boot 200 ms
-	 * and it costs a healthy board nothing else.
-	 */
+	/* ⚠ RECOVERY ATTEMPT, 2026-09-07 -- keep or drop on the next ...
+	 * dev/MEASURED-pcie-cortina.c.md sec 18. */
 	msleep(200);
 
 	ca_rmw(cp->rstmgr, CA_RST_BLOCK, 0, S2_CORE_RST);	/* core_reset assert */
@@ -907,13 +696,8 @@ static bool cortina_pcie_host_reset(struct cortina_pcie *cp)
 	writel(CA_PHY_ISO_POWER_GOLD, cp->rstmgr + CA_PHY_ISO_POWER);
 	usleep_range(1000, 2000);
 
-	/* Stock reset order (k0 host_init @0x912d68): deassert PHY then CORE, but keep
-	 * DEVICE/PERST# ASSERTED across the RX cal (stock releases it late, @0x913234).
-	 * The active cal's 0x24 strobe perturbs the CMU; with PERST asserted the
-	 * endpoint is quiet so the cal is a clean SELF-cal and re-locks.  Running it
-	 * out-of-reset (PERST already high) drops the lock and can't re-lock on revB
-	 * -- the exact failure we saw.  So: phy release -> core release -> [PERST held]
-	 * -> cal -> PERST release -> BER-poll. */
+	/* Stock reset order (k0 host_init @0x912d68): deassert PHY ...
+	 * dev/MEASURED-pcie-cortina.c.md sec 19. */
 	writel(CA_DPHY_RESET_GOLD, cp->rstmgr + CA_RST_DPHY);	/* phy_reset deassert */
 	usleep_range(1000, 2000);
 	ca_rmw(cp->rstmgr, CA_RST_BLOCK, S2_CORE_RST, 0);	/* core_reset deassert */
@@ -992,17 +776,8 @@ static const struct dw_pcie_ops cortina_dw_pcie_ops = {
 	.stop_link	= cortina_pcie_stop_link,
 };
 
-/* ------------------------------------------------------------------ */
-/* MSI (DWC built-in controller, glue-owned demux)		      */
-/* ------------------------------------------------------------------ */
-
-/*
- * The DWC iMSI-RX controller lives in the DBI space (PCIE_MSI_INTR0_*), but
- * its output is muxed into the single shared glue interrupt rather than a
- * dedicated line, so this driver drives dw_handle_msi_irq() itself from the
- * demux handler instead of letting the core install a chained handler. The
- * bottom irq_chip below mirrors the DWC core's own MSI chip.
- */
+/* MSI (DWC built-in controller, glue-owned demux) The DWC ...
+ * dev/MEASURED-pcie-cortina.c.md sec 20. */
 static void cortina_pcie_msi_compose(struct irq_data *d, struct msi_msg *msg)
 {
 	struct dw_pcie_rp *pp = irq_data_get_irq_chip_data(d);
@@ -1064,18 +839,8 @@ static void cortina_pcie_msi_ack(struct irq_data *d)
 static void cortina_pcie_msi_noop_ack(struct irq_data *d) { }
 #endif
 
-/* Mirror the 6.18 mainline dw_pci_msi_bottom_irq_chip EXACTLY, including the
- * CONFIG_SMP redirect model: on SMP the per-device PCI-MSI chip template
- * (dw_pcie_init_dev_msi_info) forwards irq_pre_redirect into THIS parent
- * chip - a missing .irq_pre_redirect here is a NULL call = pc=0x0 Oops on
- * the FIRST device MSI (live-hit 2026-07-16: rtw89_core_start enabled the
- * 8852CE's MSI -> cortina_pcie_irq_handler -> dw_handle_msi_irq ->
- * irq_chip_pre_redirect_parent -> pc 0x0 -> panic-in-interrupt -> watchdog
- * reboot into NAND).  On SMP the ack runs in .irq_pre_redirect (before the
- * redirect to the target CPU) and .irq_ack must be a no-op; per-vector
- * affinity goes through irq_chip_redirect_set_affinity (this also replaces
- * the earlier -EINVAL affinity stub that papered over the same NULL-callback
- * class for pcie_bwnotif). */
+/* Mirror the 6.18 mainline dw_pci_msi_bottom_irq_chip ...
+ * dev/MEASURED-pcie-cortina.c.md sec 21. */
 static struct irq_chip cortina_pcie_msi_bottom_chip = {
 	.name			= "CA-PCIe-MSI",
 	.irq_compose_msi_msg	= cortina_pcie_msi_compose,
@@ -1273,21 +1038,8 @@ static int cortina_pcie_host_init(struct dw_pcie_rp *pp)
 	/* Keep the shared line quiet until MSI/INTx are wired up. */
 	cortina_glbl_writel(cp, 0, CA_PCIE_GLBL_INT_EN0);
 
-	/* ★ WHY THIS IS ONE SHOT AGAIN, AND WHAT WAS TRIED (2026-09-07).
-	 * pcie2 loses the link on most warm boots of this board -- "No BER
-	 * Notify!", "Link Fail!!!(ltssm = 0x3 - POLL_COMPLIANCE)", endpoint
-	 * 10ec:0192 absent -- and the same failure was reproduced on the VENDOR
-	 * firmware on the same board the same night, so it is not our bring-up
-	 * that is wrong.
-	 * A bounded re-run of this whole sequence was built and MEASURED: 8
-	 * re-runs across two boots, every one of them ending with the CMU still
-	 * not locked, at a cost of ~4 s of boot each.  It bought nothing, so it
-	 * is gone rather than left in as a comfort.  What DID recover a dead
-	 * endpoint is the longer PERST# hold above.
-	 * ⚠ pcie0 reports "not asserted" on EVERY boot and links up Gen.2 x1 every
-	 * time -- on that controller this poll is a FALSE NEGATIVE, which is why
-	 * only pcie2's result is worth a message at all.
-	 */
+	/* ★ WHY THIS IS ONE SHOT AGAIN, AND WHAT WAS TRIED ...
+	 * dev/MEASURED-pcie-cortina.c.md sec 22. */
 	if (!cortina_pcie_host_reset(cp) && cp->idx == 2)
 		dev_err(pci->dev,
 			"SerDes BER-notify not asserted -- the link is unlikely to train\n");
@@ -1369,16 +1121,8 @@ static int cortina_pcie_map_regions(struct platform_device *pdev,
 	return 0;
 }
 
-/*
- * /proc/cortina_pcie_serdes<id> -- live SerDes/glue register probe (spy tool,
- * kept as a first-class feature).  One entry PER controller (the id suffix
- * keeps the two root complexes from colliding on a shared name); the owning
- * cortina_pcie is carried as the PDE private data.  Commands (results go to
- * dmesg):
- *   r <hex_off>          read serdes_phy + off
- *   w <hex_off> <hex>    write serdes_phy + off
- *   g <hex_off>          read glbl_regs + off
- */
+/* /proc/cortina_pcie_serdes<id> -- live SerDes/glue register ...
+ * dev/MEASURED-pcie-cortina.c.md sec 23. */
 static ssize_t cortina_pcie_dbg_write(struct file *f, const char __user *ubuf,
 				      size_t len, loff_t *ppos)
 {
@@ -1463,12 +1207,8 @@ static int cortina_pcie_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/*
-	 * Clocks, resets and PHYs are optional so the root complex can come up
-	 * during bring-up before the platform clock/reset/PHY providers exist
-	 * (the bootloader has already enabled them). Once those providers land,
-	 * promote these to mandatory and wire the DT phandles.
-	 */
+	/* Clocks, resets and PHYs are optional so the root complex ...
+	 * dev/MEASURED-pcie-cortina.c.md sec 24. */
 	cp->bus_clk = devm_clk_get_optional_enabled(dev, NULL);
 	if (IS_ERR(cp->bus_clk))
 		return dev_err_probe(dev, PTR_ERR(cp->bus_clk),

@@ -25,14 +25,8 @@ void cortina_ni_l2fe_fdb_key(const u8 *mac, u32 *d3, u32 *d2, u32 *d1)
 	*d1 = (u32)(((mac[4] & 0x1f) << 8) | mac[5]) << 19;
 }
 
-/*
- * Declared deviation from moved-verbatim, both functions below: the shell
- * passed its device state (`const struct cortina_ni_rx *rx`) and read
- * rx->bringup_ticks; that struct is the shell's and cannot cross the tier,
- * so the tick count itself is the argument.  It stays u64 like the field it
- * mirrors - `unsigned int` would change the ladder at the 2^32 wrap.  The
- * bodies are otherwise verbatim.
- */
+/* Declared deviation from moved-verbatim, both functions ...
+ * dev/MEASURED-cortina_ni_rx_logic.c.md sec 1. */
 unsigned int cortina_ni_rx_bringup_period(u64 ticks)
 {
 	if (ticks <= CA_NI_RX_BRINGUP_FAST_TICKS)
@@ -52,17 +46,8 @@ bool cortina_ni_rx_bringup_due(u64 ticks)
 	return (ticks % period) == 0u;
 }
 
-/* ------------------------------------------------------------------ */
-/* Round two (2026-09-02).  Chip facts below are the RTL9607F's, from  */
-/* the same tier-1/tier-2 evidence the shell's register header cites;  */
-/* the cortina-ni-regs.h spellings whose only code uses moved here are */
-/* retired (dead defines, listed for deletion).                        */
-/* ------------------------------------------------------------------ */
-
-/* HEADER_A lspids that select a WAN delivery (chip facts; the same values
- * are still live in cortina-ni-regs.h for the shell's diag taps, which is
- * why the two shared ones are re-spelled token-identically in the header
- * rather than privately here). */
+/* Round two (2026-09-02). Chip facts below are the ...
+ * dev/MEASURED-cortina_ni_rx_logic.c.md sec 2. */
 
 enum ca_ni_rx_wan_class cortina_ni_rx_wan_class(u32 lspid)
 {
@@ -73,12 +58,8 @@ enum ca_ni_rx_wan_class cortina_ni_rx_wan_class(u32 lspid)
 	return CA_NI_RX_WAN_NONE;
 }
 
-/* The L2FE FDB action word (DATA0 of an APPEND) and CMD_RETURN layout.
- * ex-cortina-ni-regs.h spellings, single home now: action[5:0] = forward-to
- * ldpid; VALID bit 9; STATIC (no-age) bit 19; DA_PERMIT bit 20 (mandatory or
- * a DA hit won't forward); SA_PERMIT bit 21.  CMD_RETURN: status[3:0], 0x5 =
- * HIT; ext_status[16:4] = the 13-bit hash-table entry index (== the L3FE
- * forward action's mac_da_idx / aal-77c egr_lutidx). */
+/* The L2FE FDB action word (DATA0 of an APPEND) and ...
+ * dev/MEASURED-cortina_ni_rx_logic.c.md sec 3. */
 #define CA_NI_L2FE_FDB_LPID_MASK	0x3fu
 #define CA_NI_L2FE_FDB_VALID		(1u << 9)
 #define CA_NI_L2FE_FDB_STATIC		(1u << 19)
@@ -113,18 +94,8 @@ bool cortina_ni_l2fe_fdb_action_da(u32 action, u32 *ldpid)
 	return true;
 }
 
-/* ------------------------------------------------------------------ */
-/* The per-lport L2FE profile.  Stock init state (validated against    */
-/* live-stock leftovers of the last-touched entries); with the tables  */
-/* unprogrammed the pipeline forces every ingress frame to the         */
-/* blackhole ldpid BEFORE the FDB/DFT_FWD decision, which is why every */
-/* correctly-written forwarding table used to read back fine and do    */
-/* nothing.                                                            */
-/* ------------------------------------------------------------------ */
-
-/* The lport space (ex-cortina-ni-regs.h; their only code uses live here
- * now): eth NI0-6 = 0-6, CPU_0-7 = 0x10-0x17, L3_LAN = 0x19, MC = 0x1b,
- * GEM/LLID + CPU-MQ = 0x20-0x3f. */
+/* The per-lport L2FE profile. Stock init state (validated ...
+ * dev/MEASURED-cortina_ni_rx_logic.c.md sec 4. */
 #define CA_NI_LPORT_ETH_NI6		0x06
 #define CA_NI_LPORT_CPU_0		0x10
 #define CA_NI_LPORT_CPU_7		0x17
@@ -157,15 +128,8 @@ static const u8 ca_ni_vlan_chkid_map[CA_NI_L2FE_LPORT_COUNT] = {
 	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
 };
 
-/*
- * Declared deviation from moved-verbatim: the shell derived these values
- * inline between its writel()s; here the derivation is gathered into one
- * pure function so a host test can enumerate all 64 lports and byte-compare
- * against what the shell writes.  The VALUES and the branch structure are
- * verbatim.  The shell's `~BIT(i - 32)` was unsigned long on arm64 and was
- * truncated to 32 bits by writel(); `~(1u << ...)` is that same truncated
- * value computed in u32.
- */
+/* Declared deviation from moved-verbatim: the shell derived ...
+ * dev/MEASURED-cortina_ni_rx_logic.c.md sec 5. */
 void cortina_ni_rx_lport_profile(unsigned int lport,
 				 struct ca_ni_lport_profile *p)
 {

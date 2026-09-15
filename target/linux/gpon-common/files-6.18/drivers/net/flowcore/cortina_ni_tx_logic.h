@@ -1,13 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * cortina_ni_tx_logic.h -- logic hoisted out of cortina-ni-tx.c.
- *
- * Every function here was moved MECHANICALLY under one rule: it touches no
- * MMIO, calls no kernel service, and reads no file-scope state of the shell
- * it left. Operator, 2026-08-28: a port should be "una lista de registros
- * y tal vez algunos workaround", and that is only true once the LOGIC
- * exists in one place instead of once per board.
- */
+/* cortina_ni_tx_logic.h -- logic hoisted out of ...
+ * dev/MEASURED-cortina_ni_tx_logic.h.md sec 1. */
 #ifndef _CORTINA_NI_TX_LOGIC_H
 #define _CORTINA_NI_TX_LOGIC_H
 
@@ -15,33 +8,16 @@
 
 u64 ca_ni_mac_key(const u8 *mac);
 
-/* ------------------------------------------------------------------ */
-/* TX round (2026-09-02): the TX shell's DECISIONS move here -- the    */
-/* CPU->LAN egress-port pick with its DA/FDB codec, the ring-space     */
-/* arithmetic, the DMA-LSO VP->lspid classifier, the L2FE ARB          */
-/* ldpid->pdpid map semantics and the descriptor / PON HEADER_A        */
-/* encoders.  The shell keeps the table PROTOCOL: the DATA-register    */
-/* order, the GO kicks, the polls, the doorbells and the locks.        */
-/* ------------------------------------------------------------------ */
-
-/*
- * CPU->LAN egress policy (ex-cortina-ni-tx.c file-local enum; the values are
- * the lan_tx_mode module-param ABI and may not be renumbered).
- */
+/* TX round (2026-09-02): the TX shell's DECISIONS move here ...
+ * dev/MEASURED-cortina_ni_tx_logic.h.md sec 2. */
 enum {
 	CA_NI_LAN_TX_FIXED	= 0,	/* every frame -> the fixed port (revert) */
 	CA_NI_LAN_TX_FLOOD	= 1,	/* every frame -> every linked port     */
 	CA_NI_LAN_TX_LEARN	= 2,	/* learned port, flood fallback         */
 };
 
-/*
- * ★ DELIBERATE IDENTICAL REDEFINITION (same rule as cortina_ni_rx_logic.h).
- * The constant below spells the same value as cortina-ni-regs.h, token for
- * token.  The pick function range-checks WITH it and may not read the shell's
- * register header; the shell still includes both headers (its WARN message
- * prints the same bound), so if either side ever moves, every build of the
- * shell warns on the redefinition instead of the two homes drifting silently.
- */
+/* ★ DELIBERATE IDENTICAL REDEFINITION (same rule as ...
+ * dev/MEASURED-cortina_ni_tx_logic.h.md sec 3. */
 #define CA_NI_TX_DEST_LDPID_COUNT	16
 
 /* One FDB bucket for @mac; @mask = table size - 1 (a power of two).  The
@@ -56,12 +32,8 @@ u64 ca_ni_lan_fdb_ent(u64 mac_key, u32 port);
 /* -> the bound port, or -1 when invalid / keyed to another MAC. */
 int ca_ni_lan_fdb_ent_port(u64 ent, u64 mac_key);
 
-/*
- * The CPU->LAN egress-port decision for one frame.  Inputs are everything
- * the old shell-resident decision read; the outputs carry WHAT WAS DECIDED
- * so the shell can keep its own counters and its WARN (kernel services).
- * @ports is never empty.
- */
+/* The CPU->LAN egress-port decision for one frame. Inputs are ...
+ * dev/MEASURED-cortina_ni_tx_logic.h.md sec 4. */
 struct ca_ni_lan_tx_pick {
 	u32	ports;		/* egress port bitmap, never empty */
 	bool	hit;		/* learned unicast port used (shell: lan_hit++) */
@@ -89,11 +61,8 @@ u32 cortina_ni_tx_vp_lspid(unsigned int vp);
 /* L2FE ARB PDPID table index: {my_mac[7], dbuf[6], ldpid[5:0]}. */
 u32 cortina_ni_arb_idx(u32 my_mac, u32 dbuf, u32 ldpid);
 
-/*
- * What pdpid the vendor map (aal_port.c global port init) programs at ARB
- * index @idx, or -1 for an index this driver's init never writes.  One home
- * for the map SEMANTICS; the two shell walkers keep their write ORDER.
- */
+/* What pdpid the vendor map (aal_port.c global port init) ...
+ * dev/MEASURED-cortina_ni_tx_logic.h.md sec 6. */
 int cortina_ni_arb_pdpid(u32 idx);
 
 /* Direct-TX-to-LAN descriptor word1 (plain frame, no header-A, HP=11,
@@ -106,13 +75,8 @@ u32 cortina_ni_tx_desc1_dest(u32 port);
 u32 cortina_ni_tx_desc1_pon_sof(void);
 u32 cortina_ni_tx_desc1_pon_eof(u32 frame_len);
 
-/*
- * Fill the 16-byte DMA-LSO header block {LSO para0 = 0, LSO para1 =
- * @pkt_size, HEADER_A hi, HEADER_A lo} for a CPU-injected US PON frame.
- * Explicit little-endian byte math (this tier is endianness-agnostic).
- * fe_bypass + no_drop are unconditional on this path and the source lspid
- * is always CPU0; the caller chooses cos / ldpid / pol_id (OMCI vs data).
- */
+/* Fill the 16-byte DMA-LSO header block {LSO para0 = 0, LSO ...
+ * dev/MEASURED-cortina_ni_tx_logic.h.md sec 5. */
 #define CA_NI_PON_HDR_BLK_LEN	16	/* lso0 + lso1 + HEADER_A */
 void cortina_ni_pon_hdr_blk_fill(u8 *blk, u32 pkt_size, u32 cos, u32 ldpid,
 				 u32 pol_id);

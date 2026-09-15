@@ -1,48 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2026  Realtek RTL8192FE clean-room contributors */
-
-/*
- * RTL8192F (2T2R 802.11n PCIe) chip-init data tables.
- *
- * Every array here is WALKED BY THE HOST CPU in phy.c, one entry at a time,
- * through an ordinary register-write helper; nothing in this file is handed
- * to another engine as a block (the 8051 MCU firmware lives in fw.c, not
- * here).  Consumers:
- *
- *   RTL8192FE_PHY_REG_ARRAY    phy.c:phy_config_bb_with_hdr_file()
- *                              {addr, val} -> _rtl92fe_config_bb_reg()
- *                              (rtl_set_bbreg MASKDWORD)
- *   RTL8192FE_AGC_TAB_ARRAY    same function, AGC branch
- *                              {addr, val} -> rtl_set_bbreg + udelay(1)
- *   RTL8192FE_RADIOA_ARRAY     phy.c:rtl92fe_phy_config_rf_with_headerfile()
- *   RTL8192FE_RADIOB_ARRAY     {addr, val} -> rtl_set_rfreg (20-bit data)
- *   RTL8192FE_MAC_ARRAY        phy.c:_rtl92fe_phy_config_mac_with_headerfile()
- *                              {addr, val} -> rtl_write_byte (low byte only)
- *   RTL8192FE_PHY_REG_ARRAY_PG phy.c:phy_config_bb_with_pghdrfile()
- *                              -> _rtl92fe_store_tx_power_by_rate()
- *                              (fills tx_power_by_rate_offset[]; no HW write)
- *
- * The walkers can interpret special entries; make them visible here so a
- * table edit never trips over one blind:
- *
- *  - CONDITIONAL BLOCKS (PHY_REG, AGC, RADIO walkers): a first field
- *    >= 0xCDCDCDCD is a condition header tested by phy.c:_check_condition()
- *    (board type / interface / platform), and a SECOND field of 0xDEAD,
- *    0xCDEF or 0xCDCD terminates the block.  No such entry exists in these
- *    tables today -- every first field is a real register address.
- *  - DELAY PSEUDO-ADDRESSES, PHY_REG walker only
- *    (phy.c:_rtl92fe_config_bb_reg): 0xFE=50ms 0xFD=5ms 0xFC=1ms 0xFB=50us
- *    0xFA=5us 0xF9=1us.  None appear in this table today.
- *  - DELAY PSEUDO-ADDRESSES, RADIO walker (phy.c:_rtl92fe_config_rf_reg):
- *    address 0xFE or 0xFFE = mdelay(50).  RADIOA carries four such entries,
- *    spelled RF_DELAY_50MS below.
- *
- * The values are the RTL8192F register defaults, in the same shape the
- * mainline rtlwifi rtl8192ee sub-driver uses (RTL8192xE_*_ARRAY).
- * Register names come from reg.h; an address reg.h does not name stays
- * numeric.  DO NOT reorder, drop or edit entries: these program a radio,
- * and a changed entry is a silent on-air failure.
- */
+/* RTL8192F (2T2R 802.11n PCIe) chip-init data tables. Every ...
+ * dev/MEASURED-table.c.md sec 1. */
 
 #include "table.h"
 #include "reg.h"
@@ -55,11 +14,7 @@
 #define RF_DELAY_50MS		0x00000FFE, 0x00000000
 /* One MAC byte write: rtl_write_byte(hw, addr, val8). */
 #define MW(addr, val8)		(addr), (val8)
-/*
- * One AGC RSSI-table load through ROFDM0_AGCRSSITABLE (0xC78):
- * gain code for one RSSI index.  The low byte is 0x1F on every entry
- * (constant strobe/mask field of the table-write format).
- */
+/* One AGC RSSI-table load through ROFDM0_AGCRSSITABLE (0xC78) -- dev/MEASURED-table.c.md sec 3. */
 #define AGC_GAIN(idx, gain) \
 	ROFDM0_AGCRSSITABLE, (((u32)(gain) << 20) | ((u32)(idx) << 8) | 0x1F)
 /* One TX-power-by-rate row AS STORED: {TXAGC reg, byte mask, power codes}. */
@@ -371,22 +326,8 @@ u32 RTL8192FE_PHY_REG_ARRAY[] = {
 	BB(0x0F50, 0x00000000),
 };
 
-/*
- * TX-power-by-rate deltas: {TXAGC register, byte mask, power codes} triplets
- * (power codes are half-dB steps, e.g. 0x36 = 27 dB index).
- *
- * ** KNOWN MISMATCH WITH THE WALKER -- do not fix it from this side blind. **
- * phy.c:phy_config_bb_with_pghdrfile() consumes SIX fields per row as
- * {band, rf_path, tx_num, addr, bitmask, data} (the mainline rtl8192ee PG
- * shape, which carries a leading 0,0,0 per row); this data is the older
- * THREE-field shape with no band/path/txnum columns.  Read six-at-a-time,
- * every "band" field lands on a register address (0xE08, 0x86C, ...), fails
- * the band check in _rtl92fe_store_tx_power_by_rate(), and the whole table
- * is silently dropped: tx_power_by_rate_offset[] keeps the zeros its init
- * wrote.  Repairing this means changing phy.c or this data TOGETHER, against
- * vendor evidence -- it is deliberately left as-is here because this file's
- * bytes are frozen (see header).
- */
+/* TX-power-by-rate deltas: {TXAGC register, byte mask, power ...
+ * dev/MEASURED-table.c.md sec 2. */
 u32 RTL8192FE_PHY_REG_ARRAY_PG[] = {
 	PG3(RTXAGC_A_CCK1_MCS32, 0x0000FF00, 0x00003600),
 	PG3(RTXAGC_A_CCK1_MCS32, 0x0000FF00, 0x00003400),

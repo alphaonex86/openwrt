@@ -1,55 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware:
- * no register access, no clock, no lock, no allocator, no device pointer.
- * One source compiles for MIPS big-endian, ARM64 little-endian and x86.
- * Role: G.988 managed-entity model and MIB.
- *
- * Canonical tier rule, the file map and the guard name live in ONE place:
- * see "THE THREE TIERS" in gpon_common.h (this directory).
- * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17) —
- * it COMPILES this tier against stubs that declare no register accessor,
- * no clock, no lock and no allocator, so impurity cannot build.
- */
-/*
- * gpon_omci_me.c — the ITU-T G.988 MANAGED-ENTITY model and MIB store, common
- * to every OpenWrt GPON target in this tree.  Three parts: the board identity
- * pool plus the TABLE-DRIVEN attribute descriptors (one row per class+attribute)
- * with the ONE generic filler GET and MIB-Upload-Next share, so both byte-match
- * by construction; the STATIC MIB-Upload row table; and the DYNAMIC store of the
- * instances the OLT created.  It never parses a PDU, dispatches a message type,
- * builds a response envelope, stamps a trailer or computes a MIC — that is
- * gpon_omci_core.c, the MESSAGE layer, which calls in here.
- *
- * WHY IT IS COMMON — operator, 2026-08-05: "la idea es poner en común el código
- * que corresponde para no tener mucho duplicado".  Compiled by realtek-elnath
- * (RTL9607F, Cortina, aarch64 LITTLE-endian) and by dev/rtl9607c-test on x86-64
- * under ASan+UBSan.  NOT yet by realtek-luna (MIPS BIG-endian): Luna's own model
- * in rtl9602c_eth.c emits different bytes, so adopting this one is a behaviour
- * change with its own board gate, not code motion.  See gpon_omci_me.h.
- *
- * THE CORE/SHELL RULE: it decides, it never does.  No MMIO, no lock, no
- * allocation, no sleep, no clock — every byte of state lives in the
- * caller-provided struct omci_onu, and the shell reaches in only through
- * omci_onu_set_optical().  That purity is what lets the whole model be swept on
- * x86 instead of on a ~200 s board boot.
- *
- * ENDIANNESS: attribute integers are emitted big-endian by explicit byte math
- * (omci_attr_bytes()), never a struct or pointer cast over wire bytes.
- *
- * WHAT PINS IT: the table walk is byte-for-byte equivalent to the hand-written
- * filler it replaced over all 65536 attribute masks x every modelled
- * class/instance (dev/rtl9607c-test/omci_me_table_test), and the cross-vendor
- * G.988 behaviour by omci_conformance_test.  The CHECK COUNT is compared as
- * well as the colour — a green costing fewer checks is not the same green.
- *
- * PROVENANCE (code motion 2026-08-05 from realtek-elnath's omci_responder.c)
- * and the follow-ups found while moving, still OPEN — F11 omci_store_nth()
- * renumbering on a mid-upload Delete, F18 the "HSGQ-X411AXF" equipment ID on a
- * unit certified X400AXF, the 2026-09-02 identity-pool repair, and
- * omci_me_fill()'s unobservable `over` flag:
- * dev/MEASURED-gpon-omci-me-provenance-and-followups-2026-08-05.md
- */
+/* TIER: CORE (prefix gpon_) — protocol only. NEVER touches ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 1. */
 #include <linux/string.h>
 
 #include "gpon_common.h"	/* GPON_GEM_BIDIR -- G.988 ME 268 direction 3 */
@@ -96,12 +47,8 @@ struct omci_me_inst *omci_store_nth(struct omci_onu *o, u16 idx)
 	return NULL;
 }
 
-/* Insert one OLT-created instance.  Returns false when the store is FULL —
- * the caller must then NAK: a dropped Create answered OK keeps the ONU's
- * MIB-Data-Sync in lockstep with the OLT's lsync while the MIB diverged, so
- * the OLT's ME2 audit can never detect it.  NAKing freezes MDS instead, the
- * audit mismatches, and the OLT's own MIB-Reset wipes the store and
- * re-provisions from empty (the MDS-poison self-heal proven on this OLT). */
+/* Insert one OLT-created instance. Returns false when the ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 2. */
 bool omci_store_put(struct omci_onu *o, u16 class_id, u16 inst,
 		    const u8 *body, int blen)
 {
@@ -131,16 +78,8 @@ bool omci_store_put(struct omci_onu *o, u16 class_id, u16 inst,
 	return true;
 }
 
-/*
- * Apply a Set's attribute values to a provisioned instance.  The store holds
- * the instance's attribute bytes as an OPAQUE blob (an OLT-created class has
- * no descriptor table, so there is no attribute -> offset map for it), so a
- * Set writes its values at the head of the blob exactly as a Create does.
- * That is best-effort by construction and it is what an audit GET replays;
- * dropping the Set instead — the previous behaviour — made a
- * Create-then-Set-then-audit OLT (the common provisioning order) read back its
- * own Create defaults and re-Set forever.
- */
+/* Apply a Set's attribute values to a provisioned instance. ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 3. */
 void omci_store_merge(struct omci_me_inst *e, const u8 *val, int vlen)
 {
 	if (vlen <= 0)
@@ -163,22 +102,8 @@ void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst)
 	}
 }
 
-/*
- * ---- ME attribute model ----
- *
- * Constant attribute bytes live in ONE pool so a descriptor row can name
- * them with a 2-byte offset instead of a pointer (no relocation, no per-row
- * padding).  The pool is a struct with one NAMED member per G.988 identity
- * field: a row names its field (A_ID below), the offset is offsetof() and
- * the wire size is sizeof() over that member — so the reader of a row sees
- * WHICH field it serves, and a member whose length changes moves every
- * later offset WITH it instead of silently shifting the bytes under fixed
- * numbers.  The per-field _Static_asserts below pin each length to its
- * G.988 wire size, so the drift itself is a build error naming the field;
- * the flat 119-byte array this replaced could only assert the TOTAL, which
- * cannot tell 4+14 from 5+13.  Byte-for-byte equivalence with what the OLT
- * reads stays pinned by Step 4d's exhaustive GET-equivalence sweep on x86.
- */
+/* ME attribute model ---- Constant attribute bytes live in ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 4. */
 struct omci_identity {
 	/* vendor ID — ONU-G #1, Circuit-Pack #5.  The OLT recognizes HSGQ
 	 * ONUs; "XPON" was rejected. */
@@ -195,16 +120,8 @@ struct omci_identity {
 	u8 loid[24];
 	/* CTC #1 operation ID, zero-padded to 4 */
 	u8 operator_id[4];
-	/* all-zero source: SW-image #5 product code (25) and #6 hash (16),
-	 * VEIP #3 interdomain name (25), ONU-G #11 logical password / CTC #3
-	 * password (12).
-	 *
-	 * ⚠ IT WAS 16 BYTES AND THE LONGEST USER NOW WANTS 25.  Sizing this
-	 * region by its longest consumer is not decoration: the region is the
-	 * LAST member, so an A_ZERO row asking for more than it holds reads
-	 * off the END of the object.  ASan caught exactly that the day the
-	 * VEIP interdomain name (25) was corrected -- global-buffer-overflow
-	 * in omci_me_fill's memcpy, nine bytes past the end. */
+	/* all-zero source: SW-image #5 product code (25) and #6 hash ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 5. */
 	u8 zeros[25];
 };
 
@@ -252,25 +169,8 @@ enum omci_attr_src {
 	OMCI_SRC_MDS,		/* ME 2 #1 = the live MIB-Data-Sync */
 	OMCI_SRC_DYN,		/* v = enum omci_attr_dyn */
 	OMCI_SRC_STORE,		/* v = dense offset in the dynamic instance */
-	/*
-	 * A LONG attribute the 26-octet dense body cannot hold: ME 171's
-	 * 16-octet row table and its 24-octet DSCP map, ME 130's DSCP map, ME
-	 * 281's two multicast address tables.  v = enum omci_attr_tbl, naming
-	 * where the write goes.
-	 *
-	 * ★★ IT EXISTS SO THE WRITE IS NOT REFUSED.  omci_me_set() is ATOMIC:
-	 *    a mask bit naming an attribute no descriptor row carries comes
-	 *    back UNSUPPORTED and the WHOLE Set fails rc=9 -- which is exactly
-	 *    the ME 11 atomic refusal that stopped provisioning on both Luna
-	 *    boards.  An OLT writing one ME 171 row would have hit it on the
-	 *    first row it sent.
-	 * ⚠ AND A GET OF ONE ANSWERS ZEROS.  G.988 reads a table attribute with
-	 *   Get-Next, which this model does not implement (gpon_omci_core.c
-	 *   answers "end of table"), so the honest state is: the WRITE is
-	 *   modelled and kept, the READ-BACK is OWED.  An OLT that audits its
-	 *   own ME 171 table will re-write it; one that does not, and this
-	 *   bench's does not, is served correctly.
-	 */
+	/* A LONG attribute the 26-octet dense body cannot hold: ME ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 6. */
 	OMCI_SRC_TBL,
 };
 
@@ -285,13 +185,8 @@ enum omci_attr_tbl {
 /* The few attributes whose value is derived from the ME INSTANCE. */
 enum omci_attr_dyn {
 	OMCI_DYN_UNI_ADMIN,	/* ME 11 #5: accepted reported admin state */
-	/* ★★ TWO SELECTORS FOR ONE VALUE, ON PURPOSE.  #1 Expected and #2 Sensed
-	 *    read the SAME declared byte today, and that is correct: the boards'
-	 *    own stock reports them equal on a fixed integrated port.  They get
-	 *    SEPARATE selectors so the day #1 becomes settable -- stock declares
-	 *    it R/W -- the author has to decide what #2 does, instead of
-	 *    inheriting a write silently.  Sensed is what the port IS; an
-	 *    Expected the OLT wrote may not move it. */
+	/* ★★ TWO SELECTORS FOR ONE VALUE, ON PURPOSE. #1 Expected and ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 7. */
 	OMCI_DYN_UNI_EXPECTED,	/* ME 11 #1: the expected plug-in type */
 	OMCI_DYN_UNI_TYPE,	/* ME 11 #2: the SENSED type -- the capability */
 	OMCI_DYN_UNIG_ADMIN,	/* ME 264 #2: the same, for UNI-G */
@@ -308,13 +203,8 @@ enum omci_attr_dyn {
 	OMCI_DYN_ANIG_TX,	/* ME 263 #14: live TX optical level */
 };
 
-/*
- * One modelled attribute.  Rows of the same class are CONTIGUOUS and in
- * EMISSION order (G.988 packs a Get response in ascending attribute order, and
- * the order is what an OLT decoder walks — a swap silently misaligns the rest
- * of the reply).  A class with no modelled attributes carries one marker row
- * (attr 0), which is how "ME known, nothing to serve" is expressed.
- */
+/* One modelled attribute. Rows of the same class are ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 8. */
 struct omci_attr {
 	u16	class_id;
 	u16	v;
@@ -324,19 +214,8 @@ struct omci_attr {
 	u8	access;	/* verified dynamic layout: read=1, write=2, create=4 */
 };
 
-/* G.988 calls the attribute writable and this ONU has exactly ONE value it can
- * realise -- the one it already reports.  A Set asking for that value changes
- * nothing and is applied by definition; any OTHER value is a real change we do
- * not implement, and it is REFUSED, never stored and ignored.
- *
- * ★ THIS IS WHAT MADE PROVISIONING STOP, and the measurement is why the bit
- *   exists rather than a blanket "accept what stock declares".  The OLT's own
- *   Set on this board asks for mask 0x2818 -- #3 auto-detection configuration,
- *   #5 administrative state, #12 ARC, #13 ARC interval -- and EVERY value in it
- *   is 0x00, which is the G.988 default for all four (measured twice, artifact
- *   results/artifacts/me11_set_refusal/RTL9603CVD/LANLY/G24W/).  We modelled
- *   only #5 as writable, so the whole request came back rc=9 ATTR_FAILED and no
- *   OMCI followed.  Three of the four attributes asked for no change at all. */
+/* G.988 calls the attribute writable and this ONU has exactly ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 9. */
 #define OMCI_ACCESS_WRITE_UNCHANGED	8
 
 #define AT(cls, n, sz, s, arg)	{ (cls), (arg), (n), (sz), (s), 0 }
@@ -423,30 +302,16 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(7, 2,  1, OMCI_DYN_SW_FLAG),	/* #2  Is committed */
 	A_D(7, 3,  1, OMCI_DYN_SW_FLAG),	/* #3  Is active */
 	A_C(7, 4,  1, 1),			/* #4  Is valid */
-	/* ⚠ #5 AND #6 WERE ONE ROW UNTIL 2026-08-31: this table served the image
-	 * hash as #5, which is where the PRODUCT CODE lives. Measured against a
-	 * real ONU's own plugin (V2801RGW mib_SWImage.so: #5 ProductCode(25),
-	 * #6 ImageHash(16)) -- and it is our OWN comment that named the
-	 * attribute, so the off-by-one needed no reading of the spec to see.
-	 * An OLT getting #5 read 16B where 25 were due and everything after it
-	 * in the same response shifted. */
+	/* ⚠ #5 AND #6 WERE ONE ROW UNTIL 2026-08-31: this table ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 10. */
 	A_ZERO(7, 5, 25),			/* #5  Product code */
 	A_ZERO(7, 6, 16),			/* #6  Image hash */
 
 	/* ---- ME 11 PPTP Ethernet UNI (inst 0x0101) — THE HGU gate ---- */
 	A_D(11,  1, 1, OMCI_DYN_UNI_EXPECTED),	/* #1  Expected type */
 	A_D(11,  2, 1, OMCI_DYN_UNI_TYPE),	/* #2  Sensed type */
-	/* ★ THE WRITABLE SET IS STOCK'S OWN, MEASURED: both boards' `mib_EthUni.so`
-	 * registers the class with writable mask 0xb9fe = #1,3,4,5,8..15 (RE'd by
-	 * dev/re-tools/stock_me11_registration.py, identical on the two dies), and
-	 * what stock implements IS the standard here.  #2 sensed type, #6
-	 * operational state and #7 configuration indication are the three G.988
-	 * leaves out, and they stay read-only.  Every writable CONSTANT below is
-	 * A_CW: settable to the value it already serves and refused otherwise, so
-	 * an attribute with a physical side (#4 loopback, #15 power control) can
-	 * never be accepted and then ignored.  #1 expected type is dynamic and
-	 * per-instance and stock has no dedicated setter for it -- OWED, not
-	 * modelled writable here on a guess. */
+	/* ★ THE WRITABLE SET IS STOCK'S OWN, MEASURED: both boards' ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 11. */
 	A_CW(11,  3, 1, 0),			/* #3  Auto-detect config */
 	A_CW(11,  4, 1, 0),			/* #4  Eth loopback config */
 	A_D(11,  5, 1, OMCI_DYN_UNI_ADMIN),	/* #5  Admin state */
@@ -490,11 +355,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(45,  9, 1, 12, 7),		/* #9  MAC learning depth  MacLearningDepth */
 	A_ST(45, 10, 4, 13, 7),		/* #10 ageing time         DynamicFilteringAgeingTime */
 
-	/* ---- ME 47 MAC bridge port configuration data (mib_MacBriPortCfgData)
-	 * The ME that BINDS a bridge (#1) to a termination point (#4), which
-	 * for a WAN service is the ME 266 below.  #3 TP type says WHICH class
-	 * #4 points at and is carried as DATA: this model never branches on the
-	 * numeral, it follows the pointer, so no TP-type coding is assumed. */
+	/* ME 47 MAC bridge port configuration data ... -- dev/MEASURED-gpon_omci_me.c.md sec 39. */
 	A_ST(47,  1, 2,  0, 7),		/* #1  bridge ID pointer   BridgeIdPtr */
 	A_ST(47,  2, 1,  2, 7),		/* #2  port number         PortNum */
 	A_ST(47,  3, 1,  3, 7),		/* #3  TP type             TPType */
@@ -509,62 +370,13 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(47, 12, 2, 21, 3),		/* #12 inbound TD ptr      InboundTD */
 	A_ST(47, 13, 1, 23, 7),		/* #13 MAC learning depth  NumOfAllowedMac */
 
-	/*
-	 * ---- ME 49 MAC bridge port filter table data
-	 *      (mib_MacBridgePortFilterTable) -- the per-bridge-port MAC
-	 * filter.  ONE attribute and it is the whole ME: a table of 8-octet
-	 * rows the OLT WRITES (stock's own OltAcc is 3 = read|write, and there
-	 * is no set-by-create bit anywhere in the plugin).
-	 *
-	 * ★★ WHY IT IS NOT "ACKed AND IGNORED" LIKE THE OTHER SPINE CLASSES
-	 *    WERE.  Those arrive as a Create, and omci_store_create() ACKs any
-	 *    class.  This one never does: stock's own action mask for it is
-	 *    0x04000300 -- Set, Get and Get-Next, and NOT Create or Delete
-	 *    (against 0x350 = Create|Delete|Set|Get for ME 47 and ME 268; read
-	 *    statically out of each plugin's mibTable_init, and IDENTICAL on
-	 *    both Luna dies).  So the OLT SETS it, and until this row existed a
-	 *    Set of class 49 hit an instance that did not exist and came back
-	 *    rc=0x04 UNKNOWN_ME -- a refusal, mid-burst, which is the shape of
-	 *    the ME 11 atomic refusal that stopped provisioning on both Luna
-	 *    boards.  omci_config_apply now creates the instance with its
-	 *    bridge port, exactly as G.988 and stock's action mask say.
-	 *
-	 * ⚠ THE WRITE IS HELD, THE READ-BACK IS OWED, same as ME 171 #6: a Get
-	 *   of a table attribute answers zeros of the right WIDTH and Get-Next
-	 *   answers end-of-table, so an OLT that AUDITS its filter table will
-	 *   re-write it.  Re-writing is idempotent here (an ADD over a MAC we
-	 *   already hold replaces it), which is why the gap is a cost and not a
-	 *   fault.  OWED: the table Get/Get-Next encoding, settled by RE of
-	 *   libomci_mib.so's Get handler -- not by recalling G.988.
-	 */
+	/* ME 49 MAC bridge port filter table data ... -- dev/MEASURED-gpon_omci_me.c.md sec 12. */
 	A_TBL(49, 1, GPON_MAC_FILTER_ROW_LEN, OMCI_TBL_MAC_FILTER_ROW, 3),
-					/* #1  MAC filter table    MACFilterTable */
-
-	/* ---- ME 50 MAC bridge port bridge table data (mib_MacBriPortBriTblData)
-	 * ★ KNOWN, WITH NO MODELLED ATTRIBUTE, AND THAT IS THE HONEST ANSWER.
-	 *   Its single attribute is a TABLE (stock: `BriTbl`, type 5, 8-octet
-	 *   entries, read-only) and this core implements no table-attribute
-	 *   encoding at all -- Get-Next already answers end-of-table.  Serving
-	 *   a made-up size or a row of zeros would be a confident number nobody
-	 *   measured; naming the attribute UNSUPPORTED is what lets an OLT stop
-	 *   asking, which is this model's own doctrine for an attribute it does
-	 *   not serve.  ⚠ OWED: the Get encoding of a table attribute, settled
-	 *   by RE of libomci_mib.so's Get handler, not by recalling G.988.
-	 * ★ ITS INSTANCES ARE STILL REAL: G.988 makes this ME the ONU's, created
-	 *   and deleted WITH its bridge port, and omci_config_apply does exactly
-	 *   that -- so the OLT sees the instance exist and a Get answers about
-	 *   the right thing instead of UNKNOWN_ME. */
+					/* #1 MAC filter table MACFilterTable ---- ME 50 MAC bridge ...
+					 * dev/MEASURED-gpon_omci_me.c.md sec 13. */
 	A_NO_ATTRS(50),
 
-	/* ---- ME 52 MAC bridge port PM history data
-	 *      (mib_MacBridgePortPmMonitorHistoryData)
-	 * ⚠ COUNTERS, NOT A DATAPATH RULE -- and NOTHING FEEDS THEM YET.  They
-	 *   are served from the store, i.e. as the zeros a fresh PM interval
-	 *   legitimately holds, and an OLT reading zero here is reading "this
-	 *   ONU does not count bridge-port frames", not "no frames passed".
-	 *   OWED, at FAMILY tier: the per-bridge-port frame counters.  Modelling
-	 *   it is still strictly better than the opaque store it replaces, which
-	 *   replayed whatever the Create body happened to contain. */
+	/* ME 52 MAC bridge port PM history data ... -- dev/MEASURED-gpon_omci_me.c.md sec 14. */
 	A_ST(52, 1, 1,  0, 1),		/* #1 interval end time    IntervalEndTime (R) */
 	A_ST(52, 2, 2,  1, 7),		/* #2 threshold data 1/2   ThresholdData12Id */
 	A_ST(52, 3, 4,  3, 1),		/* #3 forwarded frames     ForwardedFrameCounter */
@@ -573,26 +385,16 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(52, 6, 4, 15, 1),		/* #6 received frames      ReceivedFrameCounter */
 	A_ST(52, 7, 4, 19, 1),		/* #7 received+discarded   ReceivedAndDiscardedCounter */
 
-	/*
-	 * ---- ME 78 VLAN tagging operation configuration data
-	 *      (mib_VlanTagOpCfgData) -- the pre-171 single-tag operation ME.
-	 * MEASURED: this plugin imports NO omci_wrapper_* on either Luna die, so
-	 * stock STORES it and programs nothing.  Modelling it and storing it is
-	 * therefore byte-for-byte what stock does here, and there is no family
-	 * install owed behind it. */
+	/* ME 78 VLAN tagging operation configuration data ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 15. */
 	A_ST(78, 1, 1, 0, 7),		/* #1  upstream op mode    UsTagOpMode */
 	A_ST(78, 2, 2, 1, 7),		/* #2  upstream TCI        UsTagTci */
 	A_ST(78, 3, 1, 3, 7),		/* #3  downstream op mode  DsTagOpMode */
 	A_ST(78, 4, 1, 4, 7),		/* #4  association type    Type */
 	A_ST(78, 5, 2, 5, 7),		/* #5  associated ME ptr   Pointer */
 
-	/*
-	 * ---- ME 79 MAC bridge port filter pre-assign table
-	 *      (mib_MacBridgePortFilterPreassign) -- the per-protocol drop
-	 * matrix.  Ten one-octet leaves and NO set-by-create bit on any of them
-	 * (stock's own OltAcc is 3 = read|write): G.988 has the ONU create this
-	 * ME with its bridge port, and the OLT then Sets it.  OWED at FAMILY
-	 * tier: stock reaches omci_wrapper_setGroupMacFilter from here. */
+	/* ME 79 MAC bridge port filter pre-assign table ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 16. */
 	A_ST(79,  1, 1, 0, 3),		/* #1  IPv4 multicast      IPv4McastFilter */
 	A_ST(79,  2, 1, 1, 3),		/* #2  IPv6 multicast      IPv6McastFilter */
 	A_ST(79,  3, 1, 2, 3),		/* #3  IPv4 broadcast      IPv4BcastFilter */
@@ -604,25 +406,14 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(79,  9, 1, 8, 3),		/* #9  ARP                 ARPFilter */
 	A_ST(79, 10, 1, 9, 3),		/* #10 PPPoE broadcast     PPPoeBcastFilter */
 
-	/*
-	 * ---- ME 84 VLAN tagging filter data (mib_VlanTagFilterData) -- the
-	 * per-bridge-port VLAN admit list.  Its dense body is EXACTLY the 26
-	 * octets the store holds, which is why the list is modelled whole.
-	 * MEASURED: VlanTagFilterDataDrvCfg on the RTL9602C is a log-only
-	 * `return 0` and the plugin imports no omci_wrapper_* on either die --
-	 * stock stores this list and programs nothing, so storing it is exact
-	 * parity and no family install is owed. */
+	/* ME 84 VLAN tagging filter data (mib_VlanTagFilterData) -- ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 17. */
 	A_ST(84, 1, 24,  0, 7),		/* #1  VLAN filter list    FilterTbl */
 	A_ST(84, 2,  1, 24, 7),		/* #2  forward operation   FwdOp */
 	A_ST(84, 3,  1, 25, 7),		/* #3  number of entries   NumOfEntries */
 
-	/*
-	 * ---- ME 130 802.1p mapper service profile (mib_Map8021pServProf) --
-	 * the OTHER way a GEM reaches a bridge port: priority -> interworking
-	 * TP, instead of one ME 266 per GEM.  An OLT that provisions this way
-	 * is not exotic, and a model carrying only ME 266 sees nothing at all
-	 * on one.  OWED at FAMILY tier: stock reaches setsVeipPriQ /
-	 * setsSingleVeipPriQ / setDscpRemap from here. */
+	/* ME 130 802.1p mapper service profile (mib_Map8021pServProf)
+	 * dev/MEASURED-gpon_omci_me.c.md sec 18. */
 	A_ST(130,  1, 2,  0, 7),	/* #1  TP pointer          TPPtr */
 	A_ST(130,  2, 2,  2, 7),	/* #2  P-bit 0 -> IW TP    IwTpPtrPbit0 */
 	A_ST(130,  3, 2,  4, 7),	/* #3  P-bit 1             IwTpPtrPbit1 */
@@ -638,22 +429,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(130, 12, 1, 19, 7),	/* #12 default P-bit mark  DefPbitMark */
 	A_ST(130, 13, 1, 20, 7),	/* #13 TP type             TPType */
 
-	/*
-	 * ---- ME 171 extended VLAN tagging operation configuration data
-	 *      (mib_ExtVlanTagOperCfgData) -- THE SUBSCRIBER VLAN.
-	 *
-	 * #6 is the row table and it is the whole point: every subscriber VLAN
-	 * the OLT expresses arrives there, 16 octets at a time, and a 26-octet
-	 * dense body cannot hold even two rows.  It goes to gpon_vlan_model's
-	 * own table (gpon_omci_vlan.h), decoded, with the layout read off
-	 * stock's own ExtVlanTagOperCfgDataDumpMib.
-	 *
-	 * #2 is the table's MAXIMUM SIZE and is served as OUR capacity, not as
-	 * whatever the OLT wrote: stock declares it writable and a written value
-	 * would make this ONU state a capacity it does not have.  That is the
-	 * one place in these seven where stock's own access byte is not
-	 * followed, and it is deliberate.
-	 */
+	/* ME 171 extended VLAN tagging operation configuration data
+	 * dev/MEASURED-gpon_omci_me.c.md sec 19. */
 	A_ST(171, 1, 1, 0, 7),		/* #1  association type    AssociationType */
 	A_C(171, 2, 2, GPON_EXT_VLAN_ROWS),
 					/* #2  table max size (R)  our capacity */
@@ -703,11 +480,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(264, 4, 2, 0x0000),			/* #4  Non-OMCI mgmt ID */
 	A_C(264, 5, 2, 0x0000),			/* #5  Relay-agent options */
 
-	/* ---- ME 266 GEM interworking termination point (mib_GemIwTp) ----
-	 * ★ THE LINK.  #1 points DOWN at the ME 268 that names the GEM port,
-	 *   #4 is what an ME 47 bridge port points at, and #7 selects the GAL
-	 *   profile below.  Without this class a modelled GEM has nowhere to
-	 *   go and the service has to come from uci. */
+	/* ME 266 GEM interworking termination point (mib_GemIwTp)
+	 * dev/MEASURED-gpon_omci_me.c.md sec 40. */
 	A_ST(266, 1, 2,  0, 7),		/* #1 GEM port CTP pointer GemCtpPtr */
 	A_ST(266, 2, 1,  2, 7),		/* #2 interworking option  IwOpt */
 	A_ST(266, 3, 2,  3, 7),		/* #3 service profile ptr  ServProPtr */
@@ -753,19 +527,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(278, 3, 1, 1),			/* #3  Policy */
 	A_C(278, 4, 1, 0),			/* #4  Priority/weight */
 
-	/*
-	 * ---- ME 280 GEM traffic descriptor (mib_GemTrafficDescriptor) --
-	 * CIR/PIR/CBS/PBS per GEM, pointed at by ME 268 #5 and #9.
-	 *
-	 * ⚠ EIGHT attributes, not G.988's eleven: stock implements ONE
-	 *   direction's four rates plus the colour set, IDENTICALLY on both
-	 *   Luna dies, and this table is the DEVICE's, not the spec's.
-	 * ⚠⚠ AND IT REACHES NO DRIVER PATH AT ALL -- MEASURED on both dies: the
-	 *   plugin imports no omci_wrapper_*, and pf_rg.ko's only two calls to
-	 *   rtk_rg_shareMeter_set are in pf_rtl96xx_SetDot1RateLimiter (a
-	 *   different, vendor ME) and in pf_rtl96xx_ResetMib (teardown).  So
-	 *   stock STORES this descriptor and meters nothing from it; storing it
-	 *   is exact parity and no family install is owed. */
+	/* ME 280 GEM traffic descriptor (mib_GemTrafficDescriptor)
+	 * dev/MEASURED-gpon_omci_me.c.md sec 20. */
 	A_ST(280, 1, 4,  0, 7),		/* #1  CIR                 CIR */
 	A_ST(280, 2, 4,  4, 7),		/* #2  PIR                 PIR */
 	A_ST(280, 3, 4,  8, 7),		/* #3  CBS                 CBS */
@@ -775,18 +538,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(280, 7, 1, 18, 7),		/* #7  egress colour mark  EgressColourMarking */
 	A_ST(280, 8, 1, 19, 7),		/* #8  meter type          MeterType */
 
-	/*
-	 * ---- ME 281 multicast GEM interworking termination point
-	 *      (mib_MultiGemIwTp) -- the DOWNSTREAM multicast path, and the ME
-	 * that NAMES the multicast GEM.  Both our shells hardcode
-	 * GPON_MCAST_GEM_PORT (4095) today, so an OLT that assigns a different
-	 * one is obeyed nowhere.  OWED at FAMILY tier: stock reaches
-	 * omci_wrapper_cfgGemFlow from here -- the SAME entry point the data
-	 * GEM install uses, which is why this one is the cheapest of the three
-	 * remaining family installs.
-	 * #5 and #6 are read-only on the wire and nothing on our side counts
-	 * PPTPs or tracks a per-ME operational state, so they are constants
-	 * rather than a store slot that would report whatever a Create left. */
+	/* ME 281 multicast GEM interworking termination point ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 21. */
 	A_ST(281, 1, 2, 0, 7),		/* #1  GEM CTP pointer     GemCtpPtr */
 	A_ST(281, 2, 1, 2, 7),		/* #2  interworking option IwOpt */
 	A_ST(281, 3, 2, 3, 7),		/* #3  service profile ptr ServProPtr */
@@ -803,11 +556,8 @@ static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 329 VEIP (inst 0x0601) — the HGU marker ---- */
 	A_C(329, 1, 1, 0),			/* #1  Admin state */
 	A_C(329, 2, 1, 0),			/* #2  Op state */
-	/* ⚠ THE SAME OFF-BY-ONE, and on the ME this port's WAN path depends on.
-	 * This row was #3 at 2 bytes; a real ONU's plugin (V2801RGW mib_VEIP.so)
-	 * has #3 InterDomainName(25) and #4 TcpUdpPtr(2). The 2-byte pointer was
-	 * the right VALUE at the wrong NUMBER, so it moves to #4 and #3 becomes
-	 * the 25-byte name it always was. */
+	/* ⚠ THE SAME OFF-BY-ONE, and on the ME this port's WAN path ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 41. */
 	A_ZERO(329, 3, 25),			/* #3  Interdomain name */
 	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
 
@@ -822,17 +572,8 @@ static const struct omci_attr omci_attrs[] = {
 						 * G.988 class ID) */
 };
 
-/*
- * Is @class_id in a G.988 vendor-reserved range (240..255, 350..399,
- * 65280..65535)?  An ONU cannot know WHICH vendor MEs a foreign OLT audits, so
- * the whole reserved space gets ONE policy: a KNOWN ME that models no
- * attributes.  UNKNOWN_ME here aborts an OLT's config load — proven on this
- * HSGQ OLT with classes 0xfff9 and 0xffb1, which used to be hard-coded one by
- * one.  Stock does the same job as DATA (/etc/omci_ignore_mib_tbl.conf lists
- * 255, 247, 65417, 65427, 65505..65509), i.e. a set of classes to answer
- * without modelling; a range policy is the same rule without the list.
- * Vendor MEs are intentionally absent from the MIB upload.
- */
+/* Is @class_id in a G.988 vendor-reserved range (240..255, ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 22. */
 static bool omci_vendor_class(u16 class_id)
 {
 	return (class_id >= 240 && class_id <= 255) ||
@@ -992,11 +733,8 @@ bool omci_me_mutable(u16 class_id)
 	case OMCI_ME_MAC_BRIDGE_PM:
 	case OMCI_ME_GEM_IW_TP:
 	case OMCI_ME_GAL_ETH_PROF:
-	/* The VLAN / classification half.  Every attribute stock declares is
-	 * modelled for each of them -- including the LONG ones, through
-	 * OMCI_SRC_TBL -- which is what makes the atomic Set safe here: an
-	 * unmodelled mask bit would come back UNSUPPORTED and end the OLT's
-	 * provisioning burst on the first VLAN row it wrote. */
+	/* The VLAN / classification half. Every attribute stock ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 42. */
 	case OMCI_ME_VLAN_TAG_OP:
 	case OMCI_ME_PREASSIGN_FILTER:
 	case OMCI_ME_VLAN_TAG_FILTER:
@@ -1026,17 +764,8 @@ void omci_me_reset_values(struct omci_onu *o)
 		o->tcont_alloc[i] = i ? 0x00ff : 0x0100;
 }
 
-/*
- * How many octets of DENSE attribute body @class_id's descriptor rows describe,
- * or 0 when the class has no store-backed row at all and its Create body stays
- * OPAQUE.  Derived from the table, so a width correction moves every reader.
- *
- * ⚠ A class whose rows would not fit omci_me_inst.body answers 0 and therefore
- *   falls back to the opaque path rather than writing past the buffer.  That is
- *   a coding error and not a runtime case: omci_service_spine_test's [a] arm
- *   asserts every dense class fits, so the day a row is added too wide the
- *   host gate says so instead of the store silently going opaque.
- */
+/* How many octets of DENSE attribute body @class_id's ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 23. */
 u8 omci_me_dense_len(u16 class_id)
 {
 	const struct omci_attr *a;
@@ -1049,28 +778,8 @@ u8 omci_me_dense_len(u16 class_id)
 	return end > OMCI_STORE_BODY ? 0 : (u8)end;
 }
 
-/*
- * Create carries only SBC attributes, with no mask.  A class with store-backed
- * descriptor rows is EXPANDED into its dense layout before the instance is
- * committed; a class with none keeps the opaque body.
- *
- * ★ ME 268 REFUSES A SHORT BODY AND THE SERVICE-SPINE CLASSES DO NOT, and the
- *   asymmetry is deliberate.  ME 268's body ARMS THE DATAPATH -- the WAN data
- *   GEM decision reads its Port-ID, T-CONT pointer and direction -- so a
- *   truncated Create must not arm a GEM built out of zeros.  The spine classes
- *   drive no hardware, so a Create that stops early stores what arrived and
- *   leaves the rest at the zero G.988 already gives a null pointer; the
- *   resolver below then reports an UNRESOLVED link instead of inventing one.
- *   Refusing there would be the atomic-refusal failure this model already paid
- *   for on ME 11 -- one rc=9 and the OLT's provisioning burst ends.
- * ⚠ AND THE DISTINCTION IS UNREACHABLE FROM THE WIRE, which is worth saying so
- *   nobody reads an interop risk into it: a baseline PDU is 48 octets and the
- *   message layer hands the whole 40-octet tail over, so @blen is always 40
- *   there.  It matters only to a DIRECT caller -- a family shell snooping a
- *   Create body it obtained some other way.  Both halves are pinned by
- *   omci_service_spine_test case [i], which calls this function directly for
- *   exactly that reason.
- */
+/* Create carries only SBC attributes, with no mask. A class ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 24. */
 bool omci_store_create(struct omci_onu *o, u16 class_id, u16 inst,
 		       const u8 *body, unsigned int blen)
 {
@@ -1103,12 +812,8 @@ bool omci_store_create(struct omci_onu *o, u16 class_id, u16 inst,
 	return omci_store_put(o, class_id, inst, dense, dlen);
 }
 
-/* Can this ONU actually realise the value the OLT asks for in THIS attribute?
- * The answer is per attribute and never per request, which is also why the
- * administrative bound moved here: it used to read values[0], the first octet
- * of the WHOLE request, and that is the administrative state only while ME 11
- * has exactly one writable attribute.  The moment a second one precedes it the
- * bound would have been checked against a stranger's octet. */
+/* Can this ONU actually realise the value the OLT asks for in ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 25. */
 static bool omci_set_value_realisable(const struct omci_attr *a, const u8 *v)
 {
 	u32 want = 0;
@@ -1185,16 +890,8 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		known |= bit;
 		if ((a->access & 2) ||
 		    (a->access & OMCI_ACCESS_WRITE_UNCHANGED) ||
-		    /* ME 11 #5 and ME 264 #2, the administrative states.  Both
-		     * are writable on EVERY instance this board declares, and
-		     * on no other: the two clauses were pinned to the literal
-		     * 0x0101, so a Set on the second, third or fourth UNI of
-		     * either class was refused with the instance present in the
-		     * MIB the OLT had just uploaded from us.
-		     * ⚠ AND ME 264 WAS WORSE BEFORE THAT: until the class was
-		     * modelled as mutable at all the Set never reached here,
-		     * was ACKed, advanced the MIB-Data-Sync and stored
-		     * nothing. */
+		    /* ME 11 #5 and ME 264 #2, the administrative states. Both are ...
+		     * dev/MEASURED-gpon_omci_me.c.md sec 26. */
 		    (pptp_slot >= 0 && a->attr == 5) ||
 		    (unig_slot >= 0 && a->attr == 2) ||
 		    (class_id == OMCI_ME_TCONT && inst >= 0x8000 &&
@@ -1259,13 +956,8 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		return e && a->v + a->size <= e->blen ? e->body + a->v : NULL;
 	}
 	case OMCI_SRC_TBL:
-		/* A table attribute read as a scalar.  G.988 reads one with
-		 * Get-Next and this model answers "end of table" there, so what
-		 * a Get can honestly serve is a zero-filled field of the right
-		 * WIDTH -- never a short one, which would misalign every
-		 * attribute after it in the same response.  The widest such
-		 * attribute in the model is 24 octets and omci_id.zeros is 25,
-		 * which the host gate asserts rather than assumes. */
+		/* A table attribute read as a scalar. G.988 reads one with ...
+		 * dev/MEASURED-gpon_omci_me.c.md sec 27. */
 		return a->size <= OMCI_ID_SIZEOF(zeros) ? omci_id.zeros : NULL;
 	case OMCI_SRC_ID:
 		return (const u8 *)&omci_id + a->v;
@@ -1331,18 +1023,8 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 	return scratch + 4 - a->size;
 }
 
-/*
- * ---- the ONE generic attribute filler ----
- * Shared by GET and MIB-Upload-Next so both byte-match.  @mask selects
- * attributes (bit15 = attr #1); the selected ones are emitted into [v..end)
- * in descriptor order, bounded.  An attribute that does not fit is SKIPPED and
- * a later smaller one may still be emitted (G.988 lets the reply carry what
- * fits and name the rest).
- *   *rmask_out = the attributes actually emitted,
- *   *known_out = every attribute this ME models, whether requested or not —
- *                which is what lets the caller distinguish "unsupported" from
- *                "did not fit" instead of answering success with a short mask.
- */
+/* the ONE generic attribute filler ---- Shared by GET and ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 28. */
 u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		u8 *v, const u8 *end, u16 *rmask_out, u16 *known_out)
 {
@@ -1386,14 +1068,7 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	return over ? OMCI_RC_ATTR_FAILED : OMCI_RC_OK;
 }
 
-/*
- * Build the static MIB-Upload row table: every auto-instantiated hardware ME
- * the HSGQ-G008 OLT expects to read back, split so each row's attributes fit
- * the 26-byte Upload-Next value area.  The OLT counts the ME 11 instances to
- * classify the ONU as HGU; an empty upload loops its "ONU config load fail".
- * This table is also the ONU's statement of WHICH INSTANCES exist, so a Set of
- * an instance not listed here (and never created) is answered 0x05.
- */
+/* Build the static MIB-Upload row table: every ... -- dev/MEASURED-gpon_omci_me.c.md sec 29. */
 static void omci_build_mib(struct omci_onu *o)
 {
 	u16 n = 0, dropped = 0;
@@ -1496,22 +1171,8 @@ static void omci_build_mib(struct omci_onu *o)
 				   OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
 				   OMCI_ATTR_BIT(5));
 
-	/* ME 277 Priority-Queue: only the single UNI's 8 queues.  The full
-	 * 96-row stock set made the upload so long the OLT's auth timer
-	 * deactivated us mid-config (proven on the 9602C).
-	 *
-	 * ⚠ THE 96 IS UNSOURCED AND THE SHIPPED DATA SAYS 64 (measured
-	 * 2026-08-31, OMCI-simulate/mib_init_pair.py): stock's own
-	 * /etc/omci_mib.cfg declares exactly 64 ME 277 records, 0xff00..0xff3f,
-	 * BYTE-IDENTICAL on the X111W and the G24W.  It is NOT corrected to 64
-	 * here, and that restraint is the point: stock has a SECOND creation
-	 * path (MIB_Set -> mib_AddEntry, from OMCI_ResetMib /
-	 * omci_mib_cfg_setup_me) that nobody has decoded, so 96 may well be the
-	 * live total and 64 only the file-declared part.  Changing the number to
-	 * match the half we can read would be inventing a measurement.
-	 * What settles it: count ME 277 instances in a live MIB-Upload from
-	 * stock.  The DECISION above is unaffected either way -- 64 and 96 are
-	 * both far more than 8, and the deactivation was observed. */
+	/* ME 277 Priority-Queue: only the single UNI's 8 queues. The ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 30. */
 	for (i = 0; i < 8; i++)
 		ROW(OMCI_ME_PRIORITY_QUEUE, i, OMCI_ATTR_BIT(1) |
 					       OMCI_ATTR_BIT(2) |
@@ -1529,41 +1190,14 @@ static void omci_build_mib(struct omci_onu *o)
 						       OMCI_ATTR_BIT(3) |
 						       OMCI_ATTR_BIT(4));
 
-	/* ★★ THE OTHER HALF OF THE #3/#4 CORRECTION ABOVE, AND IT WAS MISSING.
-	 * The attribute table was fixed against a real vendor plugin -- #3 is the
-	 * 25-octet Interdomain name, #4 the 2-octet TCP/UDP pointer -- and THIS
-	 * ROW was left as it had been computed when #3 was 2 octets.  So it went
-	 * on declaring 1|2|3 while 1+1+25 = 27 needs a 26-octet payload: the ONU
-	 * promised the OLT three attributes and could serve two.
-	 *
-	 * ⚠ WHAT THAT COSTS IS NOT COSMETIC.  An upload row whose returned mask
-	 * is short of its requested mask is the proven OLT re-GET churn-lock
-	 * class -- the OLT keeps asking for what it was told is there.  The host
-	 * case says so in its own words: "row mask 0xe000 but only 0xc000
-	 * servable (OLT re-GET loop)".
-	 *
-	 * Split so each row FITS: 1+2+4 = 4 octets, and #3 alone = 25.  #4 was
-	 * not uploaded at all before, so this also stops modelling an attribute
-	 * the OLT could never see. */
+	/* ★★ THE OTHER HALF OF THE #3/#4 CORRECTION ABOVE, AND IT WAS ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 31. */
 	ROW(OMCI_ME_VEIP, 0x0601, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
 				  OMCI_ATTR_BIT(4));
 	ROW(OMCI_ME_VEIP, 0x0601, OMCI_ATTR_BIT(3));
 
-	/*
-	 * ME 65530 (CTC LoID authentication) is deliberately NOT uploaded.
-	 * Stock models all four of its attributes (#1 Operation ID 4B, #2 LoID
-	 * 24B, #3 Password 12B, #4 Auth status 1B) and answers a Get on every
-	 * one of them, but keeps the whole CLASS out of the MIB upload: its
-	 * table descriptor carries stdType 0x104, and both MIB-Upload walkers
-	 * (row count and row packing alike) skip a table whose stdType has bit
-	 * 0x10 or 0x100 set.  The exclusion is per class and all-or-nothing --
-	 * the four attributes' optionType is 1, so none of them is filtered by
-	 * the separate per-attribute optionType & 0x31A rule.  Uploading a
-	 * SUBSET (what this used to do: #1|#4 then #2, dropping the 12-byte #3)
-	 * matches neither stock nor a complete upload and leaves the OLT with a
-	 * MIB copy the ONU can answer beyond.  A Get keeps working with no row:
-	 * omci_inst_exists() short-circuits on omci_vendor_class().
-	 */
+	/* ME 65530 (CTC LoID authentication) is deliberately NOT ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 32. */
 
 #undef ROW
 	o->nrows = n;
@@ -1575,12 +1209,8 @@ bool omci_onu_declare_unis(struct omci_onu *o,
 			   const u16 *unig_inst, const u8 *unig_mgmt_cap,
 			   u8 unig_n)
 {
-	/* The panel as it stands, so a refusal can put it back EXACTLY -- the
-	 * accepted administrative states and the undrained obligations
-	 * included.  Re-declaring the old instance ids would not do: that
-	 * resets both, and "nothing changed" would be false about the half
-	 * that matters to a port.  Three small inventories, ~64 bytes of
-	 * stack; the enclosing model is far too big to copy here. */
+	/* The panel as it stands, so a refusal can put it back ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 33. */
 	struct omci_uni_inv was_pptp = o->pptp_eth_uni, was_unig = o->uni_g;
 	u8 was_cap[OMCI_UNI_MAX], was_type[OMCI_UNI_MAX];
 	u8 i;
@@ -1600,11 +1230,8 @@ bool omci_onu_declare_unis(struct omci_onu *o,
 	}
 	omci_build_mib(o);
 	if (o->rows_dropped) {
-		/* ⚠ A PANEL THAT DOES NOT FIT IS PUT BACK, NOT LEFT INSTALLED.
-		 * Rows the OLT never uploaded are instances it will never
-		 * provision, so a half-sized panel is worse than the one that
-		 * was there -- and this function's contract, which the family
-		 * wrappers log, is that a refusal changes NOTHING. */
+		/* ⚠ A PANEL THAT DOES NOT FIT IS PUT BACK, NOT LEFT INSTALLED
+		 * dev/MEASURED-gpon_omci_me.c.md sec 43. */
 		o->pptp_eth_uni = was_pptp;
 		o->uni_g = was_unig;
 		memcpy(o->uni_g_mgmt_cap, was_cap, sizeof(was_cap));
@@ -1714,22 +1341,14 @@ enum omci_uni_decl omci_onu_declare_unis_be(struct omci_onu *o,
 
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 {
-	/* ⚠ THIS READS NOTHING OUT OF @o.  It is a COLD init: callers hand it
-	 * an object that has never been initialised -- several hand it an
-	 * uninitialised stack struct -- so touching a field before the memset
-	 * is an indeterminate read, not a way to keep the inventory.  Carrying
-	 * the inventory across an identity change is omci_onu_reinit()'s job,
-	 * and it is a separate function precisely so the cold path cannot try. */
+	/* ⚠ THIS READS NOTHING OUT OF @o. It is a COLD init: callers ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 34. */
 	memset(o, 0, sizeof(*o));
 	memcpy(o->sn, sn, 8);
 	omci_me_reset_values(o);
 	o->mds = mds_seed;
-	/* Seed the ANI-G optical levels with the static fallback: a fresh MIB must
-	 * be able to answer an ANI-G GET before the first DDM sample lands (the
-	 * OLT audits within seconds of O5).  anig_live stays false until the shell
-	 * publishes a real measurement. */
-	/* the walk ships ON with the measured threshold; a shell may override
-	 * either field after init for a bisect */
+	/* Seed the ANI-G optical levels with the static fallback: a ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 35. */
 	o->mds_adapt = true;
 	o->mds_adapt_reads = OMCI_MDS_ADAPT_READS;
 	o->anig_rx_level = OMCI_ANIG_RX_FALLBACK;
@@ -1792,29 +1411,8 @@ bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst)
 	return false;
 }
 
-/* ========================================================================
- * THE WAN DATA GEM -- which ME 268 the OLT meant for user traffic.
- *
- * G.988 clause 9.2.3, ME 268 (GEM Port Network CTP), Set-by-Create body, as
- * the store holds it (attribute 1 at body[0], i.e. the wire from octet 8):
- *
- *   body[0..1]  attr 1  GEM Port-ID          (12 significant bits, G.984.3)
- *   body[2..3]  attr 2  T-CONT pointer       (ME 262 instance)
- *   body[4]     attr 3  direction            1=US, 2=DS, 3=bidirectional
- *
- * ★ THE DIRECTION TEST IS THE LOAD-BEARING ONE, and it is why this may not be
- *   a first-match scan of class 268. On the lab OLT the FIRST ME 268 Create is
- *   the DS-only broadcast CTP (Port-ID 4095, T-CONT ptr 0, dir 2); the WAN one
- *   arrives afterwards. A scan without the test adopts the broadcast port and
- *   points the WAN at it -- which is exactly what the pre-2026-08-27 Luna
- *   snoop did, guarded only by a multicast Port-ID literal that a different
- *   OLT need not use.
- *
- * ★ AND THE ORDER OF THE REFUSALS IS DELIBERATE: shape (RUNT) before value
- *   (ZERO) before identity (OMCC/MCAST) before semantics (NOT_BIDIR), so the
- *   reported reason is always the FIRST thing wrong rather than whichever test
- *   happened to be written last.
- * ======================================================================== */
+/* THE WAN DATA GEM -- which ME 268 the OLT meant for user ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 36. */
 
 enum omci_dgem omci_dgem_classify(const u8 *body, u8 blen,
 				  u16 omcc_gem, u16 mcast_gem, u16 *port_id)
@@ -1922,13 +1520,8 @@ enum omci_tcont_verdict omci_tcont_snoop(u8 mt, const u8 *body,
 	else if (m == OMCI_MT_CREATE)
 		a = ((u16)body[0] << 8) | body[1];	/* SBC: alloc first */
 
-	/* ★★ 0xffff IS THE G.988 DEALLOCATE, NOT NOISE (2026-08-05).  An
-	 * `a != 0xffff` filter alone DROPPED it, so an OLT that detached the
-	 * T-CONT the standard way left the shell's shadow -- and therefore the
-	 * armed HW T-CONT CAM -- still matching an alloc-id the OLT was free
-	 * to hand to ANOTHER subscriber.  Only a MIB-Reset cleared it.  It is
-	 * the teardown half of the same message, and it is decided here so a
-	 * third board cannot re-lose it. */
+	/* ★★ 0xffff IS THE G.988 DEALLOCATE, NOT NOISE (2026-08-05). ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 37. */
 	if (a == 0xffff && cur_alloc && (!cur_inst || inst == cur_inst))
 		return OMCI_TCONT_DEALLOC;
 	if (a && a != 0xffff && a != cur_alloc) {
@@ -1946,45 +1539,8 @@ bool omci_dgem_delete(u8 mt, u16 inst, u16 cur_gem, u16 cur_inst)
 	return cur_gem && (!cur_inst || inst == cur_inst);
 }
 
-/* ========================================================================
- * THE WAN SERVICE SPINE -- where the OLT said this GEM port GOES.
- *
- * ★★★ WHY IT EXISTS.  We model ME 268, so we know the OLT named a GEM port.
- *     G.988 clause 9.3 says nothing about what that port is FOR until the
- *     chain is followed:
- *
- *         ME 268 GEM port network CTP   -- names the Port-ID
- *           ^  ME 266 #1
- *         ME 266 GEM interworking TP    -- interworks it, points at a GAL
- *           ^  ME 47 #4                    profile (ME 272) for the payload
- *         ME 47  MAC bridge port config -- hangs it on a bridge port
- *           |  ME 47 #1
- *         ME 45  MAC bridge service prof-- the bridge itself
- *
- *     Every one of those links is a POINTER the OLT wrote, and until the six
- *     classes were modelled there was nothing to follow: a Create was ACKed
- *     and its body kept opaque, so the ONU could not have said which bridge
- *     the OLT put its WAN on even in principle.
- *
- * ★ IT DECIDES AND NEVER DOES.  A pure read over the store: no MMIO, no
- *   allocation, no clock, no op table.  What a family does with the answer --
- *   and whether it installs anything at all -- is the family's, and today no
- *   family calls it: our WAN is an untagged IPoE interface built from uci and
- *   the GEM install is gated on ME 268 + ME 262 + PLOAM, unchanged by this.
- *   ⇒ this reports the OLT's INTENT so the two can be COMPARED; it does not
- *   yet act on it, and saying otherwise would be claiming a datapath repair
- *   nobody measured.
- *
- * ★ NO ATTRIBUTE OFFSET IS SPELLED HERE and no TP-type numeral is branched on.
- *   Values come through the descriptor table, and the chain is followed by
- *   matching POINTERS, so nothing in this code can go wrong about a G.988
- *   attribute-type coding nobody on this bench has measured.  ME 47 #3 is
- *   carried out as DATA for a caller that has its own evidence for it.
- * ======================================================================== */
-
-/* One attribute of a provisioned instance, as a host integer.  False when the
- * class is not dense, the instance is absent, or the attribute is not modelled
- * -- three different "no", all of which mean the chain does not resolve. */
+/* THE WAN SERVICE SPINE -- where the OLT said this GEM port ...
+ * dev/MEASURED-gpon_omci_me.c.md sec 38. */
 static bool omci_store_attr(struct omci_onu *o, u16 class_id, u16 inst,
 			    u8 attr, u32 *out)
 {

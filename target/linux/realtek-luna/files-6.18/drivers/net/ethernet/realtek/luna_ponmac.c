@@ -1,42 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * TIER: FAMILY (prefix luna_) -- silicon shared by one family. Registers and
- * bring-up sequences belong here; GPON PROTOCOL logic does not, that is the
- * core tier (drivers/net/gpon). The tier rule and the file map live in ONE
- * place: "THE THREE TIERS" in
- * gpon-common/files-6.18/drivers/net/gpon/gpon_common.h.
- *
- * Luna PON-MAC and SerDes bring-up for THREE chips: 9602C, 9603CVD, 9607C. The
- * prefix names Realtek's whole RTL960x series, but this file serves only the
- * Luna MIPS half of it; the RTL9607F is a Cortina Access NE core with its own
- * register map, driven by target/linux/realtek-elnath.
- *
- * An ORIGINAL, data-driven reimplementation. The per-chip register SEQUENCES --
- * which registers, what values, in what order, with what delays -- are
- * hardware-interface FACTS dictated by the silicon, extracted by observing the
- * bring-up, not copied code. They are expressed as declarative op-tables driven
- * by one small interpreter; loops and branches stay explicit code, tables are
- * only for straight-line register runs. Addresses are absolute physical and the
- * board injects rd/wr through struct luna_ops.
- *
- * Tested: the 9602C path on the X111W and the 9603CVD path on the G24W. The
- * 9607C path is register-faithful but UNTESTED -- no board on the bench.
- *
- * This file configures the pipe and never reads what flows through it: no
- * PLOAM, no OMCI, no ONU-ID, no alloc-id, no GEM port-id, no FSM. Luna's
- * struct gpon_shell_ops lives in luna_gpon.c, plus rtl9602c_eth.c for the OMCI
- * transmit. This file is a PEER of the Cortina bring-up, never a base class for
- * it -- the two silicons share no register.
- *   ! Do NOT add a gpon_shell_ops instance here. It could only be pointers into
- *     luna_gpon.c's statics, and it would have no caller in this file.
- *   ! Do NOT merge struct luna_ops into gpon_shell_ops. It is a raw register
- *     accessor {rd, wr} at a lower tier that happens to share the word "ops".
- *   ! luna_ponmac_serdes_cdr_reset() has no caller in the tree (the live reset
- *     is luna_gpon.c's own inline pulse under serdes_cdr_reset) and is kept as
- *     the family API for the boards not on the bench. It is NOT analog_relock
- *     despite the name: different registers, and wiring the two together would
- *     silently replace the cold-start TX-CMU relock ranging depends on.
- */
+/* TIER: FAMILY (prefix luna_) -- silicon shared by one ...
+ * dev/MEASURED-luna_ponmac.c.md sec 1. */
 
 #include "luna_ponmac.h"
 #include "luna_ponmac_logic.h"	/* hoisted logic */
@@ -46,11 +10,8 @@
 #include <linux/seq_file.h>
 #include <linux/bits.h>
 
-/*
- * The opcodes, the step and the interpreter are the core's (gpon_regseq.h).
- * What stays here is silicon fact: the tables, and the accessor reaching them.
- * The old names are kept as aliases so no table line had to be retyped.
- */
+/* The opcodes, the step and the interpreter are the core's ...
+ * dev/MEASURED-luna_ponmac.c.md sec 14. */
 #include "gpon_regseq.h"
 
 #define r960_op		gpon_regseq_op
@@ -90,13 +51,8 @@ static int r960_run(const struct luna_ops *o,
 	return gpon_regseq_run(&io, seq, n);
 }
 
-/* Per-chip bring-up tables and glue, from each chip's own register facts. Each
- * block is self-contained so a board links only what its chip id dispatches. */
-
-/* RTL9603CVD. The SerDes on this part is reached through plain memory-mapped
- * registers (no indirect command/data page window), so every analog/digital
- * tweak below is a direct RMW. Absolute addresses: SWCORE base 0x1b000000, with
- * the PON-IP sub-block in the 0x1bf0xxxx window. */
+/* Per-chip bring-up tables and glue, from each chip's own ...
+ * dev/MEASURED-luna_ponmac.c.md sec 2. */
 #define C3_SWBASE		0x1b000000u
 
 /* core / SerDes digital + analog block */
@@ -152,11 +108,8 @@ static void c3_flow2queue(const struct luna_ops *o, u32 flow, u32 pqid)
 	luna_rfwr(o, C3_PON_SID2QID + (flow / 4u) * 4u, lsb + 6u, lsb, pqid);
 }
 
-/*
- * ponmac_init: PON-MAC global defaults applied once before mode selection.
- * Per-T-cont and per-queue scheduler/rate programming belongs to the
- * datapath/scheduler driver, not to this table.
- */
+/* ponmac_init: PON-MAC global defaults applied once before ...
+ * dev/MEASURED-luna_ponmac.c.md sec 15. */
 static const struct r960_op c3_init[] = {
 	FLD(C3_SDS_ANA_COM09,  0,  0, 1),	/* BEN drive: TTL output enabled  */
 	FLD(C3_PON_BW_THRES,  29, 16, 5),	/* US last-grant BW threshold     */
@@ -171,12 +124,8 @@ static const struct r960_op c3_init[] = {
  * off, ending before the lane is switched into GPON mode.
  */
 static const struct r960_op c3_sds_pre[] = {
-	/* SDS_REG7[14] SP_CFG_NEG_CLKWR_A2D is PER-CHIP: the RTL9602C wants 0, this
-	 * die's own stock kernel sets 1 in dal_rtl9603cvd_switch_init (tier 2, G24W
-	 * k0.vmlinux @0x802dcd04) before the SerDes bring-up, and the value survives
-	 * the SDS reset. Set it before the reset so the RX latches the right edge.
-	 * It is NOT why this die's RX fails: with SDS_REG7 = stock exactly, SDS_SDET
-	 * still read 0 at O1 (2026-08-27). */
+	/* SDS_REG7[14] SP_CFG_NEG_CLKWR_A2D is PER-CHIP: the RTL9602C ...
+	 * dev/MEASURED-luna_ponmac.c.md sec 3. */
 	FLD(C3_SDS_REG7,      14, 14, 1),	/* A2D clock edge (9603CVD = 1)   */
 	FLD(C3_SDS_CFG,        4,  0, 0x1f),	/* lane mode: off (parked)        */
 	FLD(C3_WSDS_DIG_00,    4,  4, 1),	/* force 125 MHz reference clock   */
@@ -235,15 +184,8 @@ static const struct r960_op c3_sds_post[] = {
 /* the analog CDR / SD-power-on select bit, bit 10 of the analog common word */
 #define LUNA_SDS_ANA_CDR_SEL	BIT(10)
 
-/*
- * CDR re-seat, one owner for every Luna part: pulse the analog CDR-select bit,
- * let the loop settle, restore the word, then pulse the SerDes transfer-FIFO
- * reset. Only the ANALOG register differs per chip, so the difference is data.
- *
- * This is the GPON cold-start path (the TX-CMU re-lock at O3 entry). The two
- * mdelay(10)s are the settle the hardware needs, not padding: do not shorten
- * them, and do not make this function conditional on anything.
- */
+/* CDR re-seat, one owner for every Luna part: pulse the ...
+ * dev/MEASURED-luna_ponmac.c.md sec 4. */
 static int luna_cdr_reset(const struct luna_ops *o, u32 ana_reg, u32 wsds_reg)
 {
 	u32 v = o->rd(ana_reg);
@@ -324,17 +266,8 @@ static int rtl9603cvd_serdes_cdr_reset(const struct luna_ops *o)
 	return c3_cdr_reset(o);
 }
 
-/* RTL9607C. SerDes here is DIRECT MMIO: every analog/digital knob is its own
- * memory-mapped register written by RMW, with no indirect page window. The
- * straight-line analog/reset runs are op-tables; the per-tcont scheduler init
- * and the rev-dependent SerDes variant stay explicit code.
- *
- * Absolute addresses: SWCORE base 0x1b000000, PON-IP at 0x1bf0xxxx. This part
- * has a 5-deep PON port and a 0x100 per-port MAC stride, narrower than the
- * 9602C's 0x400.
- */
-
-/* PON-IP config / scheduler block (0x1bf0xxxx) */
+/* RTL9607C. SerDes here is DIRECT MMIO: every analog/digital ...
+ * dev/MEASURED-luna_ponmac.c.md sec 5. */
 #define C7_PON_SIDVALID		0x1bf02188u /* per-flow SID-valid bitmap (1b/elem)  */
 #define C7_PON_OMCI_CFG		0x1bf021a0u /* OMCI flow/SID select                 */
 #define C7_PON_BW_THRES		0x1bf0219cu /* upstream BW request thresholds       */
@@ -393,15 +326,8 @@ static int rtl9603cvd_serdes_cdr_reset(const struct luna_ops *o)
 #define C7_SDS_ANA_GPON37	0x1b040714u /* analog GPON: GPHY dly-clk/lock-up lim */
 #define C7_SDS_ANA_GPON43	0x1b04072cu /* analog GPON: TX delay-clock select    */
 #define C7_FIB_EXT_REG21	0x1b040e54u /* fiber ext: analog-ready status        */
-/* Read-only here, and deliberately so (2026-09-11). The three rev tables below
- * each used to open with WR(C7_FIB_REG0, 0x1140) -- "power on, PDOWN=0". No
- * Luna chip's own vendor GPON path makes that write: the FP_CFG_FIB_PDOWN clear
- * lives in the EPON and 1000Base-X FIBER_* cases only. The register is the
- * fiber-mode pseudo-PHY's Clause-22 BMCR and the lane leaves that PCS behind
- * once SDS_CFG commits it to GPON; both Luna boards' stock reads 0x1940 here,
- * PDOWN set, while ranged at O5 with SDS_SDET asserted.
- * UNVERIFIED ON HARDWARE -- no RTL9607C board is on the bench.
- */
+/* Read-only here, and deliberately so (2026-09-11). The three ...
+ * dev/MEASURED-luna_ponmac.c.md sec 6. */
 #define C7_FIB_REG0		0x1b040c00u /* [11] FP_CFG_FIB_PDOWN; diag read only */
 
 /* fixed chip parameters for the GPON datapath */
@@ -419,11 +345,8 @@ static int rtl9603cvd_serdes_cdr_reset(const struct luna_ops *o)
 /* one-shot init guard: drain T-conts only on a re-init */
 static int c7_init_done;
 
-/*
- * Packed/strided array element write. For arroff<32 one 32-bit word holds
- * 32/arroff elements and idx picks both word and bit offset; for arroff>=32
- * each element owns a word (byte stride arroff/8). 'len' is the field width.
- */
+/* Packed/strided array element write. For arroff<32 one ...
+ * dev/MEASURED-luna_ponmac.c.md sec 16. */
 static void c7_arr(const struct luna_ops *o, u32 base, u32 arroff,
 		   u32 idx, u32 lsp, u32 len, u32 val)
 {
@@ -516,11 +439,8 @@ static int c7_ponmac_init(const struct luna_ops *o, int rev, int subtype)
 	return 0;
 }
 
-/*
- * Shared GPON SID/OMCI front matter, identical before each rev's SerDes patch:
- * park every data flow invalid on T-cont 15 / queue 31, then dedicate the OMCI
- * flow its own T-cont/queue and point the OMCI SID select at it.
- */
+/* Shared GPON SID/OMCI front matter, identical before each ...
+ * dev/MEASURED-luna_ponmac.c.md sec 17. */
 static void c7_gpon_pre(const struct luna_ops *o)
 {
 	u32 f;
@@ -534,11 +454,8 @@ static void c7_gpon_pre(const struct luna_ops *o)
 	luna_rfwr(o, C7_PON_OMCI_CFG, 6, 0, C7_OMCI_FLOW);
 }
 
-/*
- * Shared GPON tail, identical after each rev's SerDes patch. The GPON mode
- * change needs a switch-core reset first; the 125 MHz clock is dropped for
- * power only once analog-ready asserts.
- */
+/* Shared GPON tail, identical after each rev's SerDes patch. ...
+ * dev/MEASURED-luna_ponmac.c.md sec 18. */
 static int c7_gpon_post(const struct luna_ops *o)
 {
 	u32 i;
@@ -568,11 +485,8 @@ static int c7_gpon_post(const struct luna_ops *o)
 	return 0;
 }
 
-/*
- * rev-A SerDes patch (mode V1): park the lane, force the 125 MHz reference on,
- * load the tuned TX CMU/PLL and RX CDR/CMU/EQ coefficients, switch to GPON,
- * then reset SerDes+MAC and re-arm BER-notify.
- */
+/* rev-A SerDes patch (mode V1): park the lane, force the 125 ...
+ * dev/MEASURED-luna_ponmac.c.md sec 19. */
 static const struct r960_op c7_sds_v1[] = {
 	FLD(C7_SDS_CFG,        4,  0, 0x1f),	/* lane mode: off (parked)        */
 	FLD(C7_WSDS_DIG_00,    4,  4, 0x1),	/* force 125 MHz reference clock   */
@@ -740,20 +654,8 @@ static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
 	return c7_cdr_reset(o);
 }
 
-/*
- * RTL9602C GPON PON-MAC / SerDes bring-up, clean-room op-table form. HW-TESTED
- * on the X111W; a faithful translation of luna_gpon.c's SerDes-init / PBO
- * steps into this file's op-table primitives, so the family-lib path behaves
- * identically to that sibling.
- *
- * Default parameter path baked in (the configuration that locks on hardware):
- * serdes_cdr_reset on, serdes_modev1_tx off (the golden analog table already
- * covers COM_REG02/03/08/24/25), serdes_tx_xtra off (D2A and sample-clock bits
- * forced to 0), full_serdes_reinit off.
- *
- * Absolute physical addresses: SDS/swcore 0x1B000000 + offset, PON-IP
- * 0x1BF00000 + offset. Symbols are c2_/C2_ prefixed to stay collision-free.
- */
+/* RTL9602C GPON PON-MAC / SerDes bring-up, clean-room ...
+ * dev/MEASURED-luna_ponmac.c.md sec 7. */
 #define C2_SWCORE_BASE		0x1B000000u	/* SDS / swcore offset base    */
 #define C2_PONIP_BASE		0x1BF00000u	/* PON-IP datapath offset base */
 
@@ -809,13 +711,8 @@ static const u32 c2_fib_reg0_banks[] = {
 	C2_FIB_REG(0, 0), C2_FIB_REG(1, 0), C2_FIB_REG(2, 0), C2_FIB_REG(3, 0),
 };
 
-/*
- * Full SerDes analog + WSDS golden table: the operating point the ONU runs at
- * O5. Initializer order IS write order; c2_program_analog() walks it front to
- * back. Status/monitor registers and the digital reset-B/clock bank
- * (DIG_00/18/1D) are deliberately excluded -- the ordered sequence below drives
- * those -- and FIB_REG0 power-down is cleared separately after each write.
- */
+/* Full SerDes analog + WSDS golden table: the operating point ...
+ * dev/MEASURED-luna_ponmac.c.md sec 8. */
 static const struct { u32 off; u32 val; } c2_analog[] = {
 	/* WSDS analog front, plus the hex-numbered WSDS_DIG RX-path config. */
 	{ C2_WSDS_ANA(0),             0x00000805 }, { C2_WSDS_ANA(2),             0x0000ffff },
@@ -961,20 +858,12 @@ static const struct r960_op c2_ponmac_init[] = {
 	FLD(C2_PON_SCH_CTRL, 18, 18, 0),	/* rev-A: clear PON_GEN_PIR_DROP    */
 };
 
-/* Drive SDS_ANA_COM REG01 (0x22584) = 0x73a4 (BEN_TTL_OUT bit14=1,
- * BENLA_LDOVREF[0]=0) and REG11 (0x225ac) RX_FILT_CONFIG[7:0] = 0 -- the only
- * two SerDes registers that differed between live stock and the board failing
- * the cold-start US-TX lock. The golden table sets them before the SDS reset
- * and the reset wipes them; stock applies its analog AFTER the reset. The
- * values are a tier-1 live-stock read; the mechanism behind them is not
- * established. 0 leaves both at reset defaults and sets BENLA_LDOVREF[0]. */
+/* Drive SDS_ANA_COM REG01 (0x22584) = 0x73a4 (BEN_TTL_OUT ...
+ * dev/MEASURED-luna_ponmac.c.md sec 9. */
 int luna_c2_stock_analog = 1;
 
-/* Program the FULL analog CMU/CDR golden table AFTER the SDS reset (stock rev-A
- * order) rather than before it. The reset wipes analog back to defaults, so the
- * pre-reset placement leaves the CMU and GPON CDR acquiring lock against reset
- * values -- the metastable per-power-on lock behind the cold-start "Laser out".
- * 0 keeps the legacy pre-reset placement. */
+/* Program the FULL analog CMU/CDR golden table AFTER the SDS ...
+ * dev/MEASURED-luna_ponmac.c.md sec 20. */
 int luna_c2_analog_postreset = 1;
 
 static int rtl9602c_ponmac_init(const struct luna_ops *o)
@@ -993,12 +882,8 @@ static int rtl9602c_ponmac_init(const struct luna_ops *o)
 	return 0;
 }
 
-/*
- * SerDes CDR-lock pulse (the stock CDR-reset behaviour): invert
- * SDS_ANA_COM_REG12 bit15 (REG_RX_SD_POR_SEL), hold 10 ms, restore, which
- * re-PORs the RX signal-detect path so the recovered CDR re-acquires cleanly.
- * It is REG12 and not REG08: REG08[15] is inside the reserved top-16 field.
- */
+/* SerDes CDR-lock pulse (the stock CDR-reset behaviour): ...
+ * dev/MEASURED-luna_ponmac.c.md sec 10. */
 static int rtl9602c_serdes_cdr_reset(const struct luna_ops *o)
 {
 	u32 cdr = o->rd(C2_SDS_ANA_COM_REG12);
@@ -1009,18 +894,8 @@ static int rtl9602c_serdes_cdr_reset(const struct luna_ops *o)
 	return 0;
 }
 
-/*
- * GPON SerDes bring-up, a faithful translation of the stock sequence. Ordering
- * is the whole game: program the analog CMU/CDR block FIRST with CFG_SDS_MODE
- * parked off, pulse the SDS+MAC reset to latch it, release the soft-reset-B
- * lines and force the 125M reference, arm the RX-CDR through a forced
- * RX-enable 0->1 edge, set the TX path and drive level, force signal-detect,
- * and only THEN switch CFG_SDS_MODE to GPON. A naive reset-then-configure
- * sequence ends with the same final register values and a CDR that never locks.
- */
-
-/* Step 1 + 3: park SDS mode off, clear force-SDS dummy / STOP_CLK, then pulse
- * the SDS config + datapath reset to latch the analog config (10 ms). */
+/* GPON SerDes bring-up, a faithful translation of the stock ...
+ * dev/MEASURED-luna_ponmac.c.md sec 11. */
 static const struct r960_op c2_sds_pre[] = {
 	FLD(C2_SDS_CFG, 4, 0, C2_SDS_MODE_OFF),	/* park CFG_SDS_MODE = off (0x1f) */
 	WR(C2_WSDS_DIG_01, 0),			/* clear force-SDS dummy          */
@@ -1048,13 +923,8 @@ static const struct r960_op c2_sds_rstb[] = {
 	DLY(10),
 };
 
-/*
- * Steps 5 + 6: burst-enable output with optic-LOS left un-forced (the external
- * BOSA drives SD), then arm the RX in order -- CDR analog front end on, settle,
- * line-rate select forced to the GPON rate, forced RX-enable driven through a
- * 0->1 edge to start the CDR, settle. Finish by letting the GTC framer drive
- * the laser gate.
- */
+/* Steps 5 + 6: burst-enable output with optic-LOS left ...
+ * dev/MEASURED-luna_ponmac.c.md sec 12. */
 static const struct r960_op c2_sds_rx_arm[] = {
 	FLD(C2_WSDS_DIG_18, 12, 12, 1),		/* BEN_OE = 1                     */
 	FLD(C2_WSDS_DIG_18, 15, 15, 0),		/* OPTIC_LOS_SEL_EPON = 0         */
@@ -1074,11 +944,7 @@ static const struct r960_op c2_sds_rx_arm[] = {
 	FLD(C2_SDS_FORCE_BEN, 0, 0, 0),		/* BEN_FORCE_MODE = 0 (GTC gates) */
 };
 
-/*
- * Step 6b + TX drive, with serdes_modev1_tx and serdes_tx_xtra off: the golden
- * analog table already covers COM_REG02/03/08/24/25, so the explicit ModeV1
- * block is skipped and the D2A/sample-clock bits are forced to 0 like stock.
- */
+/* Step 6b + TX drive, with serdes_modev1_tx and ... -- dev/MEASURED-luna_ponmac.c.md sec 21. */
 static const struct r960_op c2_sds_tx[] = {
 	FLD(C2_WSDS_DIG_1E,    5,  4, 0),	/* D2A interconnect = 0 (stock)   */
 	FLD(C2_SDS_REG7,      14, 14, 0),	/* SP_CFG_NEG_CLKWR_A2D = 0       */
@@ -1087,16 +953,8 @@ static const struct r960_op c2_sds_tx[] = {
 	FLD(C2_SDS_ANA_COM_REG22, 2, 0, 1),	/* REG_TX_EMP = 0x1               */
 };
 
-/*
- * Steps 7a + 7b: force signal-detect on so the MAC reset handshake (RST_DONE)
- * completes (MISC_REG02 = 0x3000), settle 10 ms, then finally select GPON mode
- * with the RX fully armed, settle 50 ms. Followed by a TX-interface reset-B
- * re-sync (DIG_1D[16] 0->1) so the TX serializer re-locks onto the connected
- * framer data now that GPON mode is live.
- */
-/* Skip, when 0, the TWO post-GPON-mode US-TX serializer perturbations stock
- * rev-A does not do: the DIG_1D[16] reset-B re-sync and the post-mode
- * serdesCdr_reset pulse. 1 = legacy. */
+/* Steps 7a + 7b: force signal-detect on so the MAC reset ...
+ * dev/MEASURED-luna_ponmac.c.md sec 13. */
 int luna_c2_postmode_perturb = 1;
 
 /* Milliseconds to wait after forcing the 125M ref and BEFORE releasing the
@@ -1197,11 +1055,8 @@ static int rtl9602c_ponmac_mode_set(const struct luna_ops *o,
 	if (luna_c2_analog_postreset)
 		c2_program_analog(o);
 
-	/* Step 4: force the 125M ref clock, optionally let the TX CMU PLL lock to it,
-	 * then release the interface reset-B lines. The TX serializer phase is
-	 * latched at the TX reset-B 0->1 edge, so a CMU-lock settle has to go HERE,
-	 * between the ref-force and the release -- at the end of mode_set the phase
-	 * is already latched. */
+	/* Step 4: force the 125M ref clock, optionally let the TX CMU ...
+	 * dev/MEASURED-luna_ponmac.c.md sec 22. */
 	if (luna_c2_skip_rstb_dance) {
 		/* Skip the dance: DIG_1D is already 0x1c000 and DIG_00 already 0xf30, and
 		 * the SDS reset does not clear them, so an assert->release would be a
@@ -1209,11 +1064,8 @@ static int rtl9602c_ponmac_mode_set(const struct luna_ops *o,
 		pr_info("luna-gpon: skip interface reset-B dance (DIG_1D=0x%x already released)\n",
 			o->rd(C2_WSDS_DIG_1D));
 	} else if (luna_c2_clkgate_rstb) {
-		/* Synchronous clock-gated reset-B release: legacy releases DIG_1D[14:16]
-		 * with the word divider FREE-RUNNING, the textbook async-reset-on-a-
-		 * running-divider that latches a metastable serializer word-phase. Gating
-		 * the clock across the dance and un-gating LAST restarts the divider on
-		 * one defined edge; the final register state is identical to legacy. */
+		/* Synchronous clock-gated reset-B release: legacy releases ...
+		 * dev/MEASURED-luna_ponmac.c.md sec 23. */
 		o->wr(C2_WSDS_DIG_00, C2_WSDS_DIG00_RUN | 1u);	/* STOP_CLK=1 (gate, 0xf31) */
 		ret = r960_run(o, c2_sds_rstb + 1, ARRAY_SIZE(c2_sds_rstb) - 1); /* reset-B dance, gated */
 		if (ret)
@@ -1304,11 +1156,8 @@ void luna_c7_diag(const struct luna_ops *o, struct seq_file *s)
 		!!(wsd18 & BIT(14)), !!(fib16 & BIT(2)), !!(fib16 & BIT(10)));
 }
 
-/*
- * NO CALLER TODAY (measured 2026-09-10 over the whole overlay):
- * luna_ponmac_mode_set() is the live path. Recorded rather than deleted -- an
- * unused bring-up entry point is owed either a caller or a removal.
- */
+/* NO CALLER TODAY (measured 2026-09-10 over the whole overlay)
+ * dev/MEASURED-luna_ponmac.c.md sec 24. */
 int luna_ponmac_init(enum luna_chip chip, int rev, int subtype,
 			const struct luna_ops *o)
 {

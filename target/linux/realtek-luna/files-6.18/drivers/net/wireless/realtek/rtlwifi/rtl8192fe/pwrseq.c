@@ -3,20 +3,7 @@
 
 #include "pwrseq.h"
 
-/*
- * Each flow below is a concatenation of one or more transition macros from
- * pwrseq.h followed by the terminator.  rtl_hal_pwrseqcmdparsing() in the
- * rtlwifi core consumes these tables; hw.c selects the right flow for each
- * power-state change (power on, radio off, card disable/enable, suspend,
- * resume, hardware power-down, and the firmware-driven LPS enter/leave).
- *
- * The arrays are dimensioned by the *_STEPS upper bounds.  A transition
- * macro that emits fewer entries than its bound leaves the tail zeroed; the
- * PWR_CMD_END entry from RTL8192F_TRANS_END stops the parser before it
- * reaches any unused slot.
- */
-
-/* Power-on: CARDEMU -> ACT. */
+/* Each flow below is a concatenation of one or more ... -- dev/MEASURED-pwrseq.c.md sec 1. */
 struct wlan_pwr_cfg rtl8192f_power_on_flow
 		[RTL8192F_TRANS_CARDEMU_TO_ACT_STEPS +
 		 RTL8192F_TRANS_END_STEPS] = {

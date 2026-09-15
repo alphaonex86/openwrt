@@ -1,30 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * cortina_gpon_logic.h -- logic hoisted out of cortina-gpon.c.
- *
- * Every function here was moved MECHANICALLY under one rule: it touches no
- * MMIO, calls no kernel service, and reads no file-scope state of the shell
- * it left. Operator, 2026-08-28: a port should be "una lista de registros
- * y tal vez algunos workaround", and that is only true once the LOGIC
- * exists in one place instead of once per board.
- */
+/* cortina_gpon_logic.h -- logic hoisted out of cortina-gpon.c
+ * dev/MEASURED-cortina_gpon_logic.h.md sec 1. */
 #ifndef _CORTINA_GPON_LOGIC_H
 #define _CORTINA_GPON_LOGIC_H
 
 #include <linux/types.h>
 #include <linux/bits.h>
 
-/*
- * Chip FACTS the hoisted logic computes over -- moved from cortina-gpon.c so
- * each is defined ONCE (the shell reads them back through this header, which
- * it already includes).  Field layouts and encodings only: register ADDRESSES
- * stay in the shell, per the hoist rule.
- */
-
-/* onu.state encoding (vendor aal_gpon.h): 0=O1 Initial, 1=O2 Standby,
- * 2=O3 SerialNumber, 3=O4 Ranging, 4=O5 Operation, 5=O6 POPUP, 6=O7 EmrgStop.
- * The shell latches it from CG_REG_GPON_ONU; cg_link_down_transition()
- * classifies over it. */
+/* Chip FACTS the hoisted logic computes over -- moved from ...
+ * dev/MEASURED-cortina_gpon_logic.h.md sec 2. */
 #define CG_STATE_RANGING	3
 #define CG_STATE_OPERATION	4
 #define CG_STATE_POPUP		5

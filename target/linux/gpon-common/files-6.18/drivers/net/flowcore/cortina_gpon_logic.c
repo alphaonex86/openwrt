@@ -14,33 +14,15 @@ u32 cg_sn_word(const u8 *p)
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
 }
 
-/*
- * ★★★ THE SERIAL-NUMBER CODEC MOVED TO THE COMMON CORE (2026-08-27), operator:
- * *"se deberia migrar ya todo los funciones del X400AXF a la familia ... el
- * resto no funciona y X400AXF fue muy verificado y funciona"*.
- *
- * The G.984.3 ONU-SN format is a SPEC, not a property of this silicon, so it
- * is decoded once in drivers/net/gpon/gpon_sn.c and both targets call it. The
- * implementation promoted there is THIS one -- it validated length, the vendor
- * characters and every hex digit, and refused a malformed string -- because
- * the Luna copy it replaces silently turned a bad digit into 0xff.
- *
- * These two remain as one-line shims ONLY so the ten call sites below and the
- * driver's -EINVAL contract are untouched by the move. Nothing else changed:
- * that is what makes this step verifiable on the board rather than argued.
- */
+/* ★★★ THE SERIAL-NUMBER CODEC MOVED TO THE COMMON CORE ...
+ * dev/MEASURED-cortina_gpon_logic.c.md sec 1. */
 int cg_sn_parse(const char *s, u8 out[8])
 {
 	return gpon_sn_parse(s, out) ? -EINVAL : 0;
 }
 
-/*
- * The exact inverse of cg_sn_word() above: unpack a 32-bit register value
- * into its 4 wire-order ASCII bytes + NUL (the vendor-id register).  An
- * endianness-agnostic codec carries both directions side by side so a
- * reviewer can check round-tripping.  Moved verbatim from cg_read_vendor();
- * the shell keeps the one register read.
- */
+/* The exact inverse of cg_sn_word() above: unpack a 32-bit ...
+ * dev/MEASURED-cortina_gpon_logic.c.md sec 2. */
 void cg_vendor_unpack(u32 v, char out[5])
 {
 	out[0] = (v >> 24) & 0xff;
@@ -50,15 +32,8 @@ void cg_vendor_unpack(u32 v, char out[5])
 	out[4] = '\0';
 }
 
-/*
- * One PDC map entry's DATA words, moved verbatim from cg_pdc_init():
- * idx < omcc_gems (the OMCC-reserved internal GEMs; the count is silicon
- * GEOMETRY and stays an INPUT, the precedent omci_dgem_classify() set) ->
- * CPU port 0, forwarding-engine bypass, no-drop, cos 6, pol_id 0x80+idx
- * (the 128..255 PON-DS policer bank); else (data GEMs) -> L3_WAN,
- * pol_id idx-8 (refined per-GEM at the OMCI Create in Stage D).
- * The shell keeps the indirect kick+poll write and the PDC_CTRL RMW.
- */
+/* One PDC map entry's DATA words, moved verbatim from ...
+ * dev/MEASURED-cortina_gpon_logic.c.md sec 3. */
 void cg_pdc_map_entry(u32 idx, u32 omcc_gems, u32 *d0, u32 *d1)
 {
 	if (idx < omcc_gems) {
@@ -73,14 +48,8 @@ void cg_pdc_map_entry(u32 idx, u32 omcc_gems, u32 *d0, u32 *d1)
 	}
 }
 
-/*
- * The PUC pvtbl entry's DATA0/1/2 words for one T-CONT, moved verbatim from
- * cg_puc_pvtbl_program().  queue_id = q + tcont*8, @ena gates bit 8 of each
- * 9-bit voqN field; the voqN fields are bit-split across the DATA words
- * exactly as the vendor packs them; schmode = 0 (strict priority),
- * entryvld = 1.  The shell keeps the five DATA writels, the indirect
- * kick+poll and the per-VoQ back-pressure/valid programming.
- */
+/* The PUC pvtbl entry's DATA0/1/2 words for one T-CONT, moved ...
+ * dev/MEASURED-cortina_gpon_logic.c.md sec 4. */
 void cg_puc_pvtbl_words(u32 tcont, bool ena, u32 *d0, u32 *d1, u32 *d2)
 {
 	u32 voq[CG_PUC_QUEUE_PER_TCONT];
@@ -96,15 +65,8 @@ void cg_puc_pvtbl_words(u32 tcont, bool ena, u32 *d0, u32 *d1, u32 *d2)
 	*d2 = ((voq[7] >> 1) & 0xff) | BIT(12);	/* schmode=0, entryvld=1 */
 }
 
-/*
- * O5 exit = link down (vendor condition; the same G.984.3 rule Luna must
- * apply, so this is also a dedupe seed): leaving Operation for anything but
- * POPUP, leaving POPUP for anything but Operation/Ranging (POPUP->Ranging is
- * the Type-B popup, kept alive), or entering EmergencyStop.  Moved verbatim
- * from cg_isr_work(); the verdict IS the shell's datapath-reset trigger, so
- * the hoist harness swept ALL 65536 (last, state) pairs against the old
- * expression -- edge-for-edge, not shape-for-shape.
- */
+/* O5 exit = link down (vendor condition; the same G.984.3 ...
+ * dev/MEASURED-cortina_gpon_logic.c.md sec 5. */
 bool cg_link_down_transition(u8 last, u8 state)
 {
 	return (last == CG_STATE_OPERATION && state != CG_STATE_OPERATION &&

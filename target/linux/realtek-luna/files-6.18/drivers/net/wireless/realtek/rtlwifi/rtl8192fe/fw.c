@@ -27,29 +27,7 @@ static void _rtl92fe_enable_fw_download(struct ieee80211_hw *hw, bool enable)
 			       rtl_read_byte(rtlpriv, REG_MCUFWDL) | BIT(0));
 
 		/* ★★ DRAIN THE ARM BEFORE THE FIFO IS WRITTEN -- and read this
-		 * note before re-deriving the obvious explanation, because the
-		 * obvious one was MEASURED FALSE.
-		 *
-		 * The write above is POSTED: mdelay() does not make it land, only
-		 * a READ does.  Without a read between them the enable can still
-		 * be in flight while the first FW-FIFO writes arrive, i.e. the
-		 * code-RAM window is written before it is armed.  This is the same
-		 * insight as the one-drain-per-page change below, applied to the
-		 * arm itself.
-		 *
-		 * ⚠ WHAT THIS IS *NOT*: mainline clears REG_MCUFWDL BIT(19) here
-		 * (byte +2 bit 3, "8051 reset") and I first wrote this block
-		 * claiming that was the fix -- the MCU executing out of the memory
-		 * being overwritten.  THE TRACE REFUTES IT: this board reports
-		 * MCUFWDL+2 = 0x60 at this point, so bit 3 was ALREADY 0 and the
-		 * clear changes no bit at all.  The clear is KEPT because mainline
-		 * does it and it costs nothing, but it is not the mechanism and
-		 * must not be recorded as one.
-		 *
-		 * ⚠ AND THE ATTRIBUTION IS STILL ONLY A HYPOTHESIS: the before/
-		 * after evidence is n=1 on each side, and this project has already
-		 * paid for a bisect where the same image gave one PASS and one
-		 * FAIL.  The failure RATE is owed. */
+		 * dev/MEASURED-fw.c.md sec 1. */
 		tmp = rtl_read_byte(rtlpriv, REG_MCUFWDL + 2);
 		rtl_dbg(rtlpriv, COMP_FW, DBG_LOUD,
 			"8051 run bit before download: MCUFWDL+2=0x%02x (bit3=%u)\n",
@@ -63,12 +41,7 @@ static void _rtl92fe_enable_fw_download(struct ieee80211_hw *hw, bool enable)
 	}
 }
 
-/* Push the firmware payload to the 8051 code RAM, one 4 KiB page at a time.
- * The blob is rounded up to the page granularity first; any remainder lands
- * in a final short page.  This part accepts at most eight pages.
- */
-/* FW-download FIFO inside the endpoint register window (auto-increments within
- * a page; the page index lives in REG_MCUFWDL+2[2:0]). */
+/* Push the firmware payload to the 8051 code RAM, one 4 KiB ... -- dev/MEASURED-fw.c.md sec 2. */
 #define FW_DL_FIFO_ADDR		0x4000	/* RTL8192F FW-RAM window (8192EE uses 0x1000) */
 
 /* The RTL8192F FW-download FIFO on this PCIe host is dword-access only: the
@@ -90,30 +63,8 @@ static void _rtl92fe_fw_page_write_dw(struct ieee80211_hw *hw, u32 page,
 		"FW page %u: %u byte(s) -> FIFO 0x%04x\n",
 		page, size, (unsigned int)FW_DL_FIFO_ADDR);
 
-	/* ★★ ONE READBACK PER PAGE, NOT ONE PER DWORD -- and the difference is
-	 * not a micro-optimisation, it is the difference between a blocking
-	 * access and a posted one.
-	 *
-	 * A PCIe WRITE is posted: the CPU issues it and moves on.  A READ is
-	 * not: the CPU stalls in the load until the completion returns, and if
-	 * the completion never comes there is no timeout to rescue it -- no
-	 * printk, no interrupt, no scheduler.  That is exactly the signature
-	 * this board shows (MEASURED 2026-09-01: total console silence, other
-	 * processes frozen mid-loop, rtl_pci interrupt count still 0).
-	 *
-	 * ⚠ AND THIS FUNCTION ALREADY CARRIED THE WARNING.  Its own comment
-	 * records that the core's byte-loop "locks the SoC host bus partway
-	 * through the first page" -- so accesses to this endpoint during the
-	 * download are ALREADY KNOWN to be able to wedge the host.  Putting a
-	 * blocking read between every pair of writes multiplies the exposure
-	 * by 1024 per page.
-	 *
-	 * The ordering the old comment wanted is still bought, where it is
-	 * actually needed: every dword of this page must land BEFORE the page
-	 * index changes, so ONE read after the page drains the posted-write
-	 * buffer at the only point the order matters.  Ordering BETWEEN dwords
-	 * of the same page is guaranteed by PCIe itself for posted writes to
-	 * the same endpoint; it never needed buying. */
+	/* ★★ ONE READBACK PER PAGE, NOT ONE PER DWORD -- and the ...
+	 * dev/MEASURED-fw.c.md sec 3. */
 	for (i = 0; i + 4 <= size; i += 4)
 		rtl_write_dword(rtlpriv, FW_DL_FIFO_ADDR + i,
 				(u32)buffer[i] | ((u32)buffer[i + 1] << 8) |
@@ -405,11 +356,8 @@ static void _rtl92fe_fill_h2c_command(struct ieee80211_hw *hw, u8 element_id,
 			break;
 		}
 
-		/* 4. Pack the H2C into the mailbox.  Short commands (<=3 bytes)
-		 * ride entirely in the 4-byte box behind the element id; longer
-		 * ones spill the tail into the matching ext box, which must be
-		 * written first so the id write in the main box latches both.
-		 */
+		/* 4. Pack the H2C into the mailbox. Short commands (<=3 bytes)
+		 * dev/MEASURED-fw.c.md sec 4. */
 		memset(boxcontent, 0, sizeof(boxcontent));
 		memset(boxextcontent, 0, sizeof(boxextcontent));
 		boxcontent[0] = element_id;
@@ -609,11 +557,8 @@ void rtl92fe_set_fw_media_status_rpt_cmd(struct ieee80211_hw *hw, u8 mstatus,
 					 u8 macid)
 {
 	u8 parm[3] = { 0, 0, 0 };
-	/* parm[0]: bit0=0 disconnect / 1 connect
-	 *          bit1=0 update one MACID / 1 update a MACID..MACID_End range
-	 * parm[1]: MACID (infra-STA self = 0; AP/ADHOC peer = aid+1)
-	 * parm[2]: MACID_End
-	 */
+	/* parm[0]: bit0=0 disconnect / 1 connect bit1=0 update one ...
+	 * dev/MEASURED-fw.c.md sec 5. */
 	SET_H2CCMD_MSRRPT_PARM_OPMODE(parm, mstatus);
 	SET_H2CCMD_MSRRPT_PARM_MACID_IND(parm, 0);
 	SET_H2CCMD_MSRRPT_PARM_MACID(parm, macid);
@@ -630,11 +575,7 @@ void rtl92fe_set_fw_media_status_rpt_cmd(struct ieee80211_hw *hw, u8 mstatus,
 
 #define TOTAL_RESERVED_PKT_LEN	1024
 
-/* Reserved-page template downloaded to the firmware: beacon, PS-Poll, null,
- * probe-response, QoS-null and BT-QoS-null frames at fixed 128-byte page
- * offsets.  The per-association addresses are patched in at install time; the
- * placeholder MAC/BSSID bytes here are overwritten before download.
- */
+/* Reserved-page template downloaded to the firmware: beacon, ... -- dev/MEASURED-fw.c.md sec 6. */
 static u8 reserved_page_packet[TOTAL_RESERVED_PKT_LEN] = {
 	/* page 0 beacon */
 	0x80, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,

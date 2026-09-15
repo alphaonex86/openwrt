@@ -7,14 +7,8 @@
 
 #include "gpon_regseq.h"
 
-/*
- * Read-modify-write bits [msb:lsb].  Exported because a caller that needs ONE
- * field outside a sequence would otherwise write the mask arithmetic again --
- * and a mask computed twice is a mask that will differ once.
- *
- * ⚠ THE FULL-WORD CASE IS SEPARATE ON PURPOSE: `1u << 32` is undefined
- * behaviour, so msb=31,lsb=0 cannot go through the general formula.
- */
+/* Read-modify-write bits [msb:lsb]. Exported because a caller ...
+ * dev/MEASURED-gpon_regseq.c.md sec 1. */
 void gpon_regseq_fld(const struct gpon_regseq_io *io, u32 addr,
 		     u8 msb, u8 lsb, u32 val)
 {
@@ -23,11 +17,8 @@ void gpon_regseq_fld(const struct gpon_regseq_io *io, u32 addr,
 	io->wr(addr, (io->rd(addr) & ~mask) | ((val << lsb) & mask));
 }
 
-/*
- * Run one sequence. -> 0, or -ETIMEDOUT naming nothing: the CALLER knows which
- * sequence it handed over and can say what timed out; this function cannot,
- * and inventing a message here would put a hardware name in the core.
- */
+/* Run one sequence. -> 0, or -ETIMEDOUT naming nothing: the ...
+ * dev/MEASURED-gpon_regseq.c.md sec 2. */
 int gpon_regseq_run(const struct gpon_regseq_io *io,
 		    const struct gpon_regseq_op *seq, unsigned int n)
 {

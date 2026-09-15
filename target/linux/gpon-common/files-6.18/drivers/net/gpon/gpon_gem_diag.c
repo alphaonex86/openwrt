@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
- * TIER: CORE, strict host-buildable subset.  See gpon_gem_diag.h for what this
- * is and why the data path's blocker is a first-class name rather than a probe
- * somebody re-adds every time an ONU reaches O5 with no GEM.
- */
+/* TIER: CORE, strict host-buildable subset. See ... -- dev/MEASURED-gpon_gem_diag.c.md sec 1. */
 #include <linux/kernel.h>
 #include <linux/types.h>
 

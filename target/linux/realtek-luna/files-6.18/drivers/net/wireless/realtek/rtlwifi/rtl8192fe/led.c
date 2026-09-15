@@ -6,17 +6,7 @@
 #include "reg.h"
 #include "led.h"
 
-/* The RTL8192F drives its software LEDs through the LED configuration
- * register (REG_LEDCFG0) rather than the generic GPIO-pin-control register
- * used by some other parts.  Each of the two LED outputs has, within that
- * 32-bit register, a 3-bit control-mode field, a 1-bit software on/off value
- * and a 1-bit IO-mode select; a separate enable bit gates the LED GPIO pad.
- *
- * Software control is selected by writing 0 into the control-mode field; the
- * LED then follows the software value bit (1 = driven on, 0 = driven off).
- */
-
-/* LED0 sits in the low half-word, LED1 in the next byte up. */
+/* The RTL8192F drives its software LEDs through the LED ... -- dev/MEASURED-led.c.md sec 1. */
 #define	LEDCFG0_LED0_CTL_MASK		0x00000007	/* bits [2:0]  */
 #define	LEDCFG0_LED0_SW_VAL		BIT(3)
 #define	LEDCFG0_LED0_IO_OUTPUT		BIT(7)		/* 0 = output  */

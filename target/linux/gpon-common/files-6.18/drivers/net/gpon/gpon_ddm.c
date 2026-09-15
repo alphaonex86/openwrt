@@ -1,46 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * gpon_ddm.c -- optical diagnostic (DDM) unit conversion.
- *
- * ONE implementation of 0.1 uW -> centi-dBm, for every family.  It used to be
- * spelled twice, and the two spellings did NOT agree: measured over the whole
- * 16-bit input domain they returned a different answer for 64159 of the 65535
- * defined inputs, differing by up to 27 centi-dBm.
- *
- * Both were approximations of the same closed form, which both files stated in
- * their own comments:
- *
- *	cdBm = 1000 * log10(raw) - 4000
- *
- * so the disagreement was decidable without a vendor reference or an optical
- * meter -- just run each one against that formula over all 65535 words:
- *
- *	octave-interpolating table (kept here) : mean  1.47, worst  3.36 centi-dBm
- *	single straight line per octave        : mean 18.18, worst 27    centi-dBm
- *
- * (Measure that error as a REAL number.  Two earlier passes accumulated it in
- * an integer, truncated 3.36 to "3", and one of them wrote the truncated
- * figure into a comment that stood for months.)
- *
- * The table is ~12x closer, so it is the one that survived.  Note what this
- * means for the family that lost: its published optical levels move by up to
- * 0.27 dB, always TOWARDS the declared formula.
- */
+/* gpon_ddm.c -- optical diagnostic (DDM) unit conversion. ONE ...
+ * dev/MEASURED-gpon_ddm.c.md sec 1. */
 
 #include "gpon_ddm.h"
 
-/*
- * log10 of the mantissa, in milli-decades, sampled every 1/16 of an octave.
- *
- * NOT a magic table: entry k is exactly
- *
- *	MANT_LOG10[k] = round(1000 * log10(1 + k/16))
- *
- * so a reader can regenerate every one of these 17 numbers, and the last is
- * necessarily 1000*log10(2) = 301 -- the same constant the octave term uses
- * below.  16 intervals is what makes the residual smaller than the 1 centi-dBm
- * the callers can actually print.
- */
+/* log10 of the mantissa, in milli-decades, sampled every 1/16 ...
+ * dev/MEASURED-gpon_ddm.c.md sec 2. */
 static const u16 MANT_LOG10[17] = {
 	  0,  26,  51,  75,  97, 118, 138, 158, 176,
 	194, 211, 227, 243, 258, 273, 287, 301,

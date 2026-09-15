@@ -24,15 +24,8 @@ static void rtl92fe_init_aspm_vars(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
-	/**
-	 * ASPM PS mode.
-	 * 0 - Disable ASPM,
-	 * 1 - Enable ASPM without Clock Req,
-	 * 2 - Enable ASPM with Clock Req,
-	 * 3 - Always Enable ASPM with Clock Req,
-	 * 4 - Always Enable ASPM without Clock Req.
-	 * The RTL8192F PCIe endpoint uses the clock-request path by default.
-	 */
+	/* ASPM PS mode. 0 - Disable ASPM, 1 - Enable ASPM without ...
+	 * dev/MEASURED-sw.c.md sec 1. */
 	rtlpci->const_pci_aspm = 3;
 
 	/* Setting for PCI-E device */
@@ -41,22 +34,12 @@ static void rtl92fe_init_aspm_vars(struct ieee80211_hw *hw)
 	/* Setting for PCI-E bridge */
 	rtlpci->const_hostpci_aspm_setting = 0x02;
 
-	/**
-	 * In Hw/Sw Radio Off situation.
-	 * 0 - Default,
-	 * 1 - From ASPM setting without low Mac Pwr,
-	 * 2 - From ASPM setting with low Mac Pwr,
-	 * 3 - Bus D3
-	 */
+	/* In Hw/Sw Radio Off situation. 0 - Default, 1 - From ASPM ...
+	 * dev/MEASURED-sw.c.md sec 2. */
 	rtlpci->const_hwsw_rfoff_d3 = 0;
 
-	/**
-	 * This setting works for those device with
-	 * backdoor ASPM setting such as EPHY setting.
-	 * 0 - Not support ASPM,
-	 * 1 - Support ASPM,
-	 * 2 - According to chipset.
-	 */
+	/* This setting works for those device with backdoor ASPM ...
+	 * dev/MEASURED-sw.c.md sec 3. */
 	rtlpci->const_support_pciaspm = rtlpriv->cfg->mod_params->aspm_support;
 }
 
@@ -71,12 +54,8 @@ static int rtl92fe_init_sw_vars(struct ieee80211_hw *hw)
 	rtlpci->msi_support = rtlpriv->cfg->mod_params->msi_support;
 	rtlpriv->btcoexist.btc_ops = rtl_btc_get_ops_pointer();
 
-	/* RTL8192F uses the packet-buffer-descriptor ("new") TRX ring flow
-	 * (separate RX buffer descriptors), like the RTL8192EE. The rtl_pci
-	 * core selects the RX/TX descriptor setup path from this flag; without
-	 * it the core drives the legacy HW_DESC_RXBUFF_ADDR path that this
-	 * driver's trx.c does not implement (-> rxdesc WARN, probe -EAFNOSUPPORT).
-	 */
+	/* RTL8192F uses the packet-buffer-descriptor ("new") TRX ring ...
+	 * dev/MEASURED-sw.c.md sec 4. */
 	rtlpriv->use_new_trx_flow = true;
 
 	rtlpriv->dm.dm_initialgain_enable = true;
@@ -233,20 +212,11 @@ static const struct rtl_hal_ops rtl8192fe_hal_ops = {
 };
 
 static struct rtl_mod_params rtl92fe_mod_params = {
-	/* HW CCMP: the 8192F HW TX-encrypt is fixed by the cam.c CAM-fill ORDER
-	 * (Entry1-after-Entry0, see rtl_cam_program_entry) -- previously the generic
-	 * word0-last order latched a stale TX key so the peer couldn't decode. With
-	 * the correct order the HW engine does line-rate CCMP. (SW crypto,
-	 * .sw_crypto=true, is the fallback stopgap if the HW path ever regresses.) */
+	/* HW CCMP: the 8192F HW TX-encrypt is fixed by the cam.c ...
+	 * dev/MEASURED-sw.c.md sec 6. */
 	.sw_crypto = false,
-	/* This is an AP product: firmware/inactive power-save must be OFF.
-	 * These defaults are inherited from the STA-mode template, but the
-	 * framework's rtl_lps_enter_core has no AP guard, so ~10s after AP
-	 * bring-up with little traffic the FW dozes the radio -> beacons stop
-	 * (hostapd still reports AP-ENABLED), the AP goes deaf to auth/assoc,
-	 * and only a re-kick (wifi reload) wakes it for another ~10s. That is
-	 * the "AP not on-air / first assoc works then later ones time out" bug.
-	 * An AP must never sleep its radio; keep LPS/IPS disabled. */
+	/* This is an AP product: firmware/inactive power-save must be ...
+	 * dev/MEASURED-sw.c.md sec 5. */
 	.inactiveps = false,
 	.swctrl_lps = false,
 	.fwctrl_lps = false,

@@ -1,18 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * MAY THIS ONU RANGE, AND WHAT MUST CHANGE IF NOT.
- *
- * The decision is protocol, not silicon: an ONU may transmit upstream only
- * when it knows who it is AND its laser can burst. Both families ask exactly
- * that question, so it is asked ONCE, here, with no MMIO and no device -- which
- * is also what makes the LIVE re-provision path testable, and it is the path
- * that had the defects.
- *
- * ⚠ WHY IT IS A PLAN AND NOT A BOOL. A refusal on a board that is ALREADY
- *   ranging has to CLEAR the GO bit, not merely decline to set it. A shell that
- *   returns early from a fresh-probe path looks correct and leaves a live ONU
- *   transmitting under an identity it has just been told is wrong.
- */
+/* MAY THIS ONU RANGE, AND WHAT MUST CHANGE IF NOT. The ...
+ * dev/MEASURED-gpon_range_gate.h.md sec 1. */
 #ifndef _GPON_RANGE_GATE_H
 #define _GPON_RANGE_GATE_H
 
@@ -35,17 +23,8 @@ struct gpon_range_request {
 	bool laser_wanted;	/* the operator has not switched the laser off */
 };
 
-/*
- * THE ORDER IS THE ANSWER, which is why this is three flags and not a verdict.
- *
- * ⚠ A LIVE RE-PROVISION MUST QUIESCE BEFORE IT PROGRAMS ANYTHING. The serial
- *   number and the MAC configuration are documented as write-while-en=0, and a
- *   serial CHANGED through /proc arrives with en ALREADY SET -- so a plan that
- *   merely said "arm" left the identity being rewritten under a running FSM,
- *   and the driver's own "config while en=0" comment was false on exactly the
- *   path a subscriber travels. The laser is programmed between the two, because
- *   its bus traffic must not happen while the part is still bursting either.
- */
+/* THE ORDER IS THE ANSWER, which is why this is three flags ...
+ * dev/MEASURED-gpon_range_gate.h.md sec 2. */
 struct gpon_range_action {
 	bool quiesce;		/* FIRST: clear the GO bit                   */
 	bool program;		/* THEN: program the laser, config, and arm  */

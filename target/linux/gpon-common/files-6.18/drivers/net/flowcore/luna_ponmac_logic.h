@@ -1,13 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * luna_ponmac_logic.h -- logic hoisted out of luna_ponmac.c.
- *
- * Every function here was moved MECHANICALLY under one rule: it touches no
- * MMIO, calls no kernel service, and reads no file-scope state of the shell
- * it left. Operator, 2026-08-28: a port should be "una lista de registros
- * y tal vez algunos workaround", and that is only true once the LOGIC
- * exists in one place instead of once per board.
- */
+/* luna_ponmac_logic.h -- logic hoisted out of luna_ponmac.c. ...
+ * dev/MEASURED-luna_ponmac_logic.h.md sec 1. */
 #ifndef _LUNA_PONMAC_LOGIC_H
 #define _LUNA_PONMAC_LOGIC_H
 

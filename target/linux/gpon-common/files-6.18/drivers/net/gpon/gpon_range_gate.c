@@ -18,14 +18,8 @@ void gpon_range_plan(const struct gpon_range_request *r,
 	if (!r)
 		return;
 
-	/*
-	 * NOTHING TO DO comes first AND touches no hardware: re-confirming the
-	 * serial already in force on a healthy link must not quiesce it, must
-	 * not re-drive the laser's bus, and must not re-range. But it is only
-	 * "nothing to do" when everything else is as it should be -- the first
-	 * cut tested the identity alone, so switching ranging OFF, or a laser
-	 * that had just failed to program, both came back as "already fine".
-	 */
+	/* NOTHING TO DO comes first AND touches no hardware: ...
+	 * dev/MEASURED-gpon_range_gate.c.md sec 1. */
 	if (r->ranging_now && r->identity_defined && !r->identity_changed &&
 	    r->activation_wanted && r->laser_wanted) {
 		a->activated = true;

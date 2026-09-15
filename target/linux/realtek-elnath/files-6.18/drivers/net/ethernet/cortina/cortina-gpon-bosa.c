@@ -1,26 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Semtech GN25L95 BOSA (burst-mode laser driver + APD/TIA) boot initialization
- * for the Realtek RTL9607F "Elnath" GPON ONU.
- *
- * The external BOSA sits on the SoC per_i2c bus at slave 0x51 (the SFF-8472
- * "A2h" diagnostic address).  Out of power-on reset the laser driver is
- * unprogrammed: the bias/modulation/APD DAC tables are empty and TX is gated,
- * so the ONU never bursts upstream and the OLT reports "Laser out".  The
- * vendor programs it on every boot from userspace ("rtkbosa", fed by the
- * per-board /var/config/rtkbosa_k.bin calibration file); this file reproduces
- * that init in-kernel so the laser is ready BEFORE the ranging FSM starts.
- *
- * Register model (verified on-wire against the live stock init, ftrace i2c
- * capture dev/x400axf/stock/bosa/rtkbosa_i2c_trace.txt — our sequence below
- * byte-matches all 638 init writes):
- *   - all writes are plain 2-byte {reg, val}; reads = reg pointer + 1 byte
- *   - regs 0x00-0x7F are un-paged; 0x80-0xFF are paged via table-select 0x7F
- *   - no inter-write delay is required (stock runs back-to-back at 100 kHz)
- *
- * The essential laser gate at the end of the sequence: TX_CTL(0x6E) bit6 = 0
- * (soft TX-disable cleared, after a 1->0 reset pulse) and PON_CTL(0x6F) = 0.
- */
+/* Semtech GN25L95 BOSA (burst-mode laser driver + APD/TIA) ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 1. */
 
 #include <linux/device.h>
 #include <linux/errno.h>
@@ -60,15 +40,8 @@
 /* pages (tables) of the 0x80-0xFF window */
 #define BOSA_PAGE_ALARM		0x01	/* table 1: alarm/warning enables */
 #define BOSA_PAGE_DEVICE	0x02	/* table 2: device settings, slopes/offsets */
-/*
- * ⚠ THE TABLE-4 / TABLE-5 LABELS ARE DISPUTED, ONE TIER EACH (2026-09-05):
- * these two names and cortina-gpon-bosa-cal.h say 4 = bias, 5 = modulation;
- * the vendor's own GN25L95 rtkbosa source programs table 4 from its
- * MODULATION-LUT region and table 5 from its BIAS-LUT region.  Neither is
- * measured on this board.  The VALUES are not in question -- both sides map
- * tables 4/5/6 to cal 0x280/0x300/0x380 -- only which LUT each one holds.
- * Do not build on either label until it is settled.
- */
+/* ⚠ THE TABLE-4 / TABLE-5 LABELS ARE DISPUTED, ONE TIER EACH ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 2. */
 #define BOSA_PAGE_BIAS_LUT	0x04	/* table 4: bias-DAC LUT (label disputed, above) */
 #define BOSA_PAGE_MOD_LUT	0x05	/* table 5: modulation-DAC LUT (label disputed, above) */
 #define BOSA_PAGE_APD_LUT	0x06	/* table 6: APD LUT */
@@ -111,16 +84,8 @@ static int bosa_io_wr(void *ctx, u8 slave, u8 reg, u8 val)
 	return ret;
 }
 
-/*
- * POSITIVE identification. The sequence is the CORE's -- 11 bus events, three
- * conditions, taken from both units' own stock detectors -- so adding the Luna
- * boards costs a call and not a second opinion about what this part is.
- *
- * ⚠ AN ACK IS NOT AN IDENTIFICATION, and neither is one register. An unrouted
- *   i2c pinmux fake-ACKs every write and answers 0x00; a LOCKED part answers
- *   D1 perfectly well; and a GN28L9x can answer it too. This driver asked D1
- *   alone until 2026-09-12 and would have accepted all three.
- */
+/* POSITIVE identification. The sequence is the CORE's -- 11 ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 3. */
 static int bosa_identify(struct device *dev)
 {
 	struct gn_op probe[GN_PROBE_OPS];
@@ -154,24 +119,8 @@ static int bosa_identify(struct device *dev)
 	return 0;
 }
 
-/*
- * WHERE THE CALIBRATION COMES FROM, AND WHY THERE IS NO SECOND SOURCE.
- *
- * These numbers are PER UNIT: this optical subassembly's own bias, modulation
- * and APD DAC tables, measured at the factory and stored on the board itself.
- * Another unit's numbers drive the laser to the wrong operating point while
- * every log line reads healthy -- there is no error to see, which is precisely
- * why a fallback is not a safety net here but a silent fault.
- *
- * ⚠ THIS DRIVER SHIPPED A COMPILED COPY OF ONE UNIT'S CALIBRATION UNTIL
- *   2026-09-12, and reached for it whenever the runtime file was absent,
- *   short or unreadable. It is gone: absent, short or unreadable is now a
- *   REFUSAL. A laser that does not burst is a fault anyone can see; a laser
- *   burning another box's numbers is one nobody can.
- *
- * The file is staged by gpon-provision, which reads it out of this board's own
- * factory partition -- the same store stock's rtkbosa reads.
- */
+/* WHERE THE CALIBRATION COMES FROM, AND WHY THERE IS NO ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 4. */
 #define CG_BOSA_CAL_FW	"rtkbosa_k.bin"
 
 static const u8 *bosa_calibration(struct device *dev, const struct firmware **fw)
@@ -194,20 +143,8 @@ static const u8 *bosa_calibration(struct device *dev, const struct firmware **fw
 	return (*fw)->data;
 }
 
-/*
- * Program the GN25L95 from this unit's calibration.
- *
- * The sequence itself is common code (drivers/net/flowcore/gn25l95_cal_logic.c)
- * and is proven byte-for-byte against stock driving the real part: 646 bus
- * events, same slave, register, value and ORDER -- see
- * dev/rtl9607c-test/gn25l95_cal_diff_test.c.  What lives here is only the
- * shell: the bus, the identification and the reporting.
- *
- * ⚠ HEAP, NOT STACK.  The plan is GN_OPS_MAX operations and this is a 32-bit
- *   MIPS/ARM kernel with an 8 KiB thread stack; the plan alone is most of it.
- *
- * Idempotent; call before the GPON ranging FSM is enabled.
- */
+/* Program the GN25L95 from this unit's calibration. The ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 5. */
 int cg_bosa_init(struct device *dev)
 {
 	const struct firmware *fw = NULL;
@@ -257,17 +194,8 @@ int cg_bosa_init(struct device *dev)
 		goto out;
 	}
 
-	/*
-	 * Report the laser gate state: TX_CTL bit6 == 0, PON_CTL == 0.
-	 *
-	 * ⚠ THE READS THEMSELVES ARE PART OF THE VERDICT, and their return codes
-	 *   were dropped: a bus that died immediately after the last write still
-	 *   returned 0 here, so the driver went on to range with the whole
-	 *   programming unconfirmed. What the BITS mean is a separate question
-	 *   and is left exactly as it was -- a WARNING, because nothing on this
-	 *   board's own stock has been measured to say otherwise. The proven
-	 *   fault is the ignored I/O failure, and that is what now propagates.
-	 */
+	/* Report the laser gate state: TX_CTL bit6 == 0, PON_CTL == 0
+	 * dev/MEASURED-cortina-gpon-bosa.c.md sec 6. */
 	{
 		u8 tx = 0xff, pon = 0xff;
 		int rd = bosa_rd(dev, BOSA_REG_TX_CTL, &tx);
@@ -291,34 +219,12 @@ out:
 	return ret;
 }
 
-/*
- * One-shot full GN25L95 register dump to dmesg (`echo 'bosa dump' >
- * /proc/gpon`), for diffing the cold power-on BOSA state against the stock
- * golden (the cold-vs-warm DS-RX/LOF investigation: config the stock daemon
- * programs survives a warm reboot inside the BOSA but is lost on a
- * power-cycle).  Read-only apart from the table-select register 0x7F, which
- * is saved and restored.  Reads 0x00-0xFF of every table stock touches:
- * 0-6 (rtkbosa programs 1/2/4/5/6 and selects 0/3 for its part-ID probes),
- * 0x86/0x87/0xFF (selected by the same probes, read-only in the trace) and
- * 0x80/0x81 (written by stock's LD_disable.sh, NOT by rtkbosa — the trace
- * holds zero selects of either); 0x00-0x7F is un-paged so it repeats per page — a
- * free consistency check against bus noise.  ~3k reads at 100 kHz ≈ 1.5 s,
- * one shot, never touches the PON engine.
- */
+/* One-shot full GN25L95 register dump to dmesg (`echo 'bosa ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 7. */
 int cg_bosa_dump(struct device *dev)
 {
-	/*
-	 * Every table stock selects, each with WHY it is worth a dump.
-	 * Evidence = the X400AXF's own /bin/rtkbosa v2.24 (objdump of
-	 * is_semtech_gn2xl9x, is_uxfastic_ux33xx, is_realtek_rtl8290c/rtl8291
-	 * and their {dev, table, reg, expected} arrays), cross-checked against
-	 * the ftrace of its run (dev/x400axf/stock/bosa/rtkbosa_i2c_trace.txt);
-	 * tables 0x80/0x81 come from stock's LD_disable.sh, not from rtkbosa.
-	 * WHAT the GN25L95 keeps in tables 0x03/0x80/0x81/0x86/0x87 is named
-	 * nowhere — not in this tree, not in the stock binary, and the vendor
-	 * source names 0x80-0x83 only for the GN28L96/97, a different part whose
-	 * names do not transfer — so those entries name what stock DOES there.
-	 */
+	/* Every table stock selects, each with WHY it is worth a dump
+	 * dev/MEASURED-cortina-gpon-bosa.c.md sec 8. */
 	static const u8 pages[] = {
 		0x00,			/* table 0: the SFF-8472 A2h upper page (tables
 					 * 0/1 alias it); the Semtech-series probe selects
@@ -397,15 +303,8 @@ int cg_bosa_dump(struct device *dev)
 		}
 	}
 
-	/*
-	 * ⚠ RESTORE, THEN SAY WHETHER IT WORKED. This claimed "page restored to
-	 *   0x%02x" whatever the write returned, and returned 0 however many
-	 *   reads had failed -- so a dump over a dead bus reported a clean run
-	 *   and left the part on whichever page it had last selected, which is
-	 *   the state a concurrent calibration would then write into.
-	 *   Restoration is still ATTEMPTED after a read failure: the page is
-	 *   shared, and leaving it wrong is worse than the failure that got here.
-	 */
+	/* ⚠ RESTORE, THEN SAY WHETHER IT WORKED. This claimed "page ...
+	 * dev/MEASURED-cortina-gpon-bosa.c.md sec 9. */
 	restore = bosa_wr(dev, BOSA_REG_PAGE, curpage);
 	if (restore) {
 		/* ⚠ SAY WHICH PAGE IT IS ACTUALLY ON, or say we do not know. The
@@ -427,26 +326,8 @@ int cg_bosa_dump(struct device *dev)
 	return ret;
 }
 
-/*
- * Read the SFF-8472 A2h real-time diagnostics (bytes 96..105 = regs 0x60-0x69):
- * temperature, Vcc, TX bias, TX power, RX power.  The scaling and the
- * "unavailable" policy live in cortina-gpon-ddm.h so they are host-testable;
- * this is only the bus half.
- *
- * SLEEPS (the i2c master takes a mutex and polls with msleep) — PROCESS CONTEXT
- * ONLY.  Never call this from the OMCI RX path, an IRQ, a softirq or under a
- * spinlock.
- *
- * All ten registers are in the UN-PAGED 0x00-0x7F window, so unlike
- * cg_bosa_dump() this must NOT touch the table-select register 0x7F: whatever
- * page the init sequence left selected stays selected.  Ten byte-reads at
- * 100 kHz cost about 1 ms, which is why the value is sampled on demand and
- * there is no polling timer.
- *
- * Returns an enum cg_ddm_status (CG_DDM_OK == 0).  A dead bus is reported
- * loudly, rate-limited, because it is the exact signature of the cold-boot
- * "i2c0 pinmux unrouted" failure that also leaves the laser unprogrammed.
- */
+/* Read the SFF-8472 A2h real-time diagnostics (bytes 96..105 ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 10. */
 int cg_bosa_ddm_read(struct device *dev, struct cg_bosa_ddm *d)
 {
 	u8 raw[CG_DDM_LEN] = { 0 };
@@ -466,11 +347,8 @@ int cg_bosa_ddm_read(struct device *dev, struct cg_bosa_ddm *d)
 	return d->status;
 }
 
-/*
- * Always-on spy hook for /proc/gpon: read back the laser-gate registers live
- * (un-paged only — never flips the table-select out from under nothing, but
- * stay conservative).  Laser bursts when tx_ctl bit6 == 0 and pon_ctl == 0.
- */
+/* Always-on spy hook for /proc/gpon: read back the laser-gate ...
+ * dev/MEASURED-cortina-gpon-bosa.c.md sec 11. */
 void cg_bosa_proc_show(struct device *dev, struct seq_file *m)
 {
 	u8 tx = 0xff, pon = 0xff;

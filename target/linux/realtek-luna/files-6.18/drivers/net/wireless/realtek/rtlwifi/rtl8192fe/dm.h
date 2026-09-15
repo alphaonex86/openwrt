@@ -4,13 +4,7 @@
 #ifndef	__RTL8192FE_DM_H__
 #define __RTL8192FE_DM_H__
 
-/* Dynamic-mechanism tuning thresholds for the RTL8192F.
- * The dynamic-management (DM) machinery here mirrors the algorithm used by
- * the mainline rtl8192ee driver; only the chip-specific numeric anchors are
- * 8192F values.  The 8192F is a 2T2R 2.4 GHz 802.11n part, so the DIG / EDCA /
- * primary-CCA / CFO-tracking logic is identical in shape to the 8192E and the
- * 11N-PHY DM register block is shared.
- */
+/* Dynamic-mechanism tuning thresholds for the RTL8192F. The ... -- dev/MEASURED-dm.h.md sec 1. */
 
 #define	OFDMCCA_TH				500
 #define	BW_IND_BIAS				500

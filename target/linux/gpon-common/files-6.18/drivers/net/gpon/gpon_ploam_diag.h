@@ -1,37 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
- * TIER: CORE, and in the STRICT host-buildable subset -- a struct, the sample
- * points, and a string formatter.  No register, no bus, no device pointer, no
- * lock, no clock: the caller's time arrives as an argument.
- *
- * gpon_ploam_diag -- WHAT is worth reading at an activation transition, and
- * the SHAPE of the line that reports it.
- *
- * ★ WHY IT EXISTS (2026-09-06).  The O4 wall on both Luna boards was split by
- * hand-adding the BWmap acceptance counters to the Deactivate line, reading one
- * boot and reverting -- and the same probe had already been hand-added on the
- * Cortina board.  The third time is a defect in the ENVIRONMENT: "between
- * Assign_ONU-ID and what followed, did a grant reach us, did our GTC accept it,
- * and did the two ONU-ID registers agree" is the same question on every
- * silicon, so it is asked ONCE and each family answers it from its own
- * registers through `struct gpon_ploam_diag`.
- *
- * ★ THE CONTRACT THAT KEEPS A PHANTOM OUT OF THE LOG.  A family fills only what
- * its silicon ESTABLISHES and sets the matching GPON_PDIAG_HAS_* bit; a clear
- * bit renders `n/a`, never 0.  "0 grants" is a device finding and "could not
- * ask" is not, and spelled alike a reader cannot tell them apart.
- *
- * ★ MEASURED ON THE RTL9602C, 2026-09-06: its DS misc counters are
- * CLEAR-ON-READ -- ploam_acpt read 30, then 6, then 0 across three reads
- * ~60 ms apart while the OLT kept talking, and /proc/gpon's two lines over the
- * same words print the second as 0 for the same reason.  A value is "since the
- * previous read" and two readers steal from each other; recorded here because
- * a human reading `bwm_acpt=0` needs to know which zero it is.
- *
- * ⚠ The CALLER owns level, rate and sampling.  This file only FORMATS INTO A
- *   BUFFER, so it cannot flood, and with CONFIG_GPON_PLOAM_DIAG=n it is not
- *   built at all.
- */
+/* TIER: CORE, and in the STRICT host-buildable subset -- a ...
+ * dev/MEASURED-gpon_ploam_diag.h.md sec 1. */
 #ifndef GPON_PLOAM_DIAG_H
 #define GPON_PLOAM_DIAG_H
 
@@ -43,11 +12,8 @@
 enum gpon_ploam_diag_point {
 	GPON_PDIAG_ASSIGN,		/* Assign_ONU-ID accepted -> O4 (one per copy the OLT sends) */
 	GPON_PDIAG_RANGING_TIME,	/* Ranging_Time accepted -> O5: the ranging grant WAS answered */
-	/* ★★★ THE EARLY LADDER: a dwell at O1, O2 or O3 (2026-09-08). Every
-	 * other point here is a TRANSITION, so a board that never leaves O1
-	 * produced no line at all -- the G24W's stall, undiagnosable for that
-	 * reason alone. The O-state rides in the line's `ostate`, so ONE point
-	 * covers O1, O2 and O3 without three near-identical cases. */
+	/* ★★★ THE EARLY LADDER: a dwell at O1, O2 or O3 (2026-09-08). ...
+	 * dev/MEASURED-gpon_ploam_diag.h.md sec 7. */
 	GPON_PDIAG_EARLY,
 	GPON_PDIAG_DEACT,		/* Deactivate_ONU-ID: the window closed without ranging     */
 	GPON_PDIAG_NONE,		/* not a sample point                                        */
@@ -67,18 +33,7 @@ enum gpon_ploam_diag_point {
 #define GPON_PDIAG_HAS_RNG_REQ		0x800u
 #define GPON_PDIAG_HAS_ALL		0xfffu
 
-/*
- * ★ THE READER'S LATENESS IS PART OF THE READING (2026-09-07).  At the SECOND
- * Assign_ONU-ID the lines showed six DS PLOAMs accepted since the first, and
- * zero at the third and at the Deactivate: every message of the OLT's 240 ms
- * sequence had already reached the silicon before the software handled the
- * second one, so the software was draining a backlog and the ONU-ID written at
- * the first Assign went into a window the OLT had partly spent.  Counters
- * reported without saying how late their reader was cannot show that.  Hence
- * `poll_gap_ms` (the shell's poll cadence as it actually ran) and
- * `rx_burst_idx` (DS PLOAMs this same poll dequeued before the one reported:
- * 0 = fresh, N = a backlog of N).
- */
+/* ★ THE READER'S LATENESS IS PART OF THE READING ... -- dev/MEASURED-gpon_ploam_diag.h.md sec 2. */
 struct gpon_ploam_diag {
 	u32 valid;		/* GPON_PDIAG_HAS_*: a clear bit is COULD NOT ASK       */
 	u32 ploam_acpt;		/* DS PLOAMs that passed the ONU-ID filter               */
@@ -87,13 +42,8 @@ struct gpon_ploam_diag {
 	u32 bwm_inv;		/* BWmap grants invalid                                  */
 	u32 us_ploam_tx;	/* upstream PLOAMs the MAC actually transmitted, every kind (CPU normal+urgent, auto No_message+SN): the "did we ANSWER the grant" half */
 	u32 us_sn_tx;		/* of those, the auto-fired Serial_Number_ONU -- the one a ranging grant is answered with */
-	/* ★ THE TWO THAT DECIDE THE O4 FORK (2026-09-07).  The Luna GTC counts,
-	 * in hardware, the Serial_Number REQUESTS and the RANGING REQUESTS it
-	 * received -- a ranging grant addressed to this ONU is a distinct event to
-	 * the silicon, counted whether or not anything was transmitted back.  So
-	 * `rng_req` > 0 in O4 means the OLT DID grant us and the fault is in our
-	 * answer; 0 means no ranging request reached the GTC at all.  `sn_req` is
-	 * the in-line positive control: the SN request(s) answered in O3. */
+	/* ★ THE TWO THAT DECIDE THE O4 FORK (2026-09-07). The Luna ...
+	 * dev/MEASURED-gpon_ploam_diag.h.md sec 3. */
 	u32 sn_req;		/* Serial_Number requests the GTC received since the previous read */
 	u32 rng_req;		/* ranging requests the GTC received since the previous read */
 	u32 poll_gap_ms;	/* ms between the start of the poll handling this message and the start of the previous poll */
@@ -102,19 +52,8 @@ struct gpon_ploam_diag {
 	u8  ds_onu_id;		/* the ONU-ID the downstream filter holds (readback)     */
 };
 
-/*
- * ★ THE ACCEPTED-GRANT CAPTURE, accumulated between two sample points
- * (2026-09-07).  The Luna GTC keeps a capture buffer of the BWmap allocations
- * it ACCEPTED, post-filter -- measured on the RTL9602C with a second ONU Online
- * on the same PON: 20 s of capture held exactly ONE entry, the SN grant we
- * answered, and none of the other ONU's.  The shell harvests it every poll
- * while activating, decodes its own capture format and hands over counts plus
- * the raw words of the last PLOAMu allocation resolving to the OMCC T-CONT; the
- * core only counts and formats.
- *
- * `valid` clear = COULD NOT ASK, every field n/a.  Set, a zero is a zero: "no
- * grant accepted between these two points" is the finding this exists for.
- */
+/* ★ THE ACCEPTED-GRANT CAPTURE, accumulated between two ...
+ * dev/MEASURED-gpon_ploam_diag.h.md sec 4. */
 #define GPON_BWCAP_HAS			0x01u
 
 struct gpon_bwcap_diag {
@@ -130,13 +69,8 @@ struct gpon_bwcap_diag {
 	u32 last_raw1;
 };
 
-/*
- * One line, fields in a fixed order:
- *   bwcap-diag <point> t=<ms>ms O<state> harvests=.. nonempty=.. entries=..
- *              ploamu=.. omcc_ploamu=.. tconts=0x.. overfl=.. last=<raw0>/<raw1>
- * `last=-` when no OMCC-PLOAMu entry was accepted (a real absence);
- * every field n/a when GPON_BWCAP_HAS is clear.  scnprintf semantics.
- */
+/* One line, fields in a fixed order: bwcap-diag <point> ...
+ * dev/MEASURED-gpon_ploam_diag.h.md sec 5. */
 int gpon_bwcap_diag_format(char *out, size_t sz, enum gpon_ploam_diag_point p,
 			   u32 t_ms, u8 ostate, const struct gpon_bwcap_diag *b);
 
@@ -148,15 +82,8 @@ enum gpon_ploam_diag_point gpon_ploam_diag_point_of(enum gpon_ploam_ev ev);
 /* "assign" / "ranging_time" / "deact"; "?" for anything else, never NULL. */
 const char *gpon_ploam_diag_point_name(enum gpon_ploam_diag_point p);
 
-/*
- * One line, fields in a fixed order so a reader can grep it:
- *   ploam-diag <point> t=<ms>ms O<state> ploam_acpt=.. bwm_acpt=.. bwm_fail=..
- *              bwm_inv=.. us_ploam_tx=.. us_onu_id=.. ds_onu_id=..
- *              us_sn_tx=.. poll_gap_ms=.. rx_burst=.. sn_req=.. rng_req=..
- * with `n/a` wherever the matching GPON_PDIAG_HAS_* bit is clear.  `t_ms` is
- * the caller's clock (this layer has none); `ostate` the O-state 1..5 at the
- * moment of the read.  scnprintf semantics: never more than `sz - 1`.
- */
+/* One line, fields in a fixed order so a reader can grep it: ...
+ * dev/MEASURED-gpon_ploam_diag.h.md sec 6. */
 int gpon_ploam_diag_format(char *out, size_t sz, enum gpon_ploam_diag_point p,
 			   u32 t_ms, u8 ostate, const struct gpon_ploam_diag *d);
 

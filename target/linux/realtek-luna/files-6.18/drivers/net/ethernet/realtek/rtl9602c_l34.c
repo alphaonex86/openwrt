@@ -599,6 +599,31 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	struct rtl9602c_l34 *l = sf->private;
 	unsigned int i, now = 0;
 
+	/* ★★★ THE GATE'S OWN STATE COMES FIRST, AND BEFORE THE LOCK.  This node
+	 * used to be created INSIDE `if (hw_nat)`, so the one question it exists
+	 * to answer -- why does the engine install nothing? -- could not be asked
+	 * while the engine was off: the file simply did not exist, which reads as
+	 * "this image has no accelerator instrumentation" rather than "the knob is
+	 * 0".  It is registered unconditionally now, so the ANSWER has to live
+	 * here.
+	 *
+	 * ⚠ BEFORE `mutex_lock`, NOT AFTER: with the gate closed
+	 * `rtl9602c_l34_init()` never ran, so `l->lock` was never `mutex_init`ed
+	 * and taking it is undefined behaviour.  `l->ready` is safe to read
+	 * because the private area of the netdev is zeroed by
+	 * devm_alloc_etherdev() long before this can be opened.
+	 */
+	if (!l || !l->ready) {
+		seq_puts(sf,
+			 "engine NOT INITIALISED\n"
+			 "The L34 flow engine is gated on the rtl9602c_eth.hw_nat module\n"
+			 "parameter and it is 0 in this boot, so the engine was never brought\n"
+			 "up and nothing below it was ever established. This is a CONFIG\n"
+			 "state, not a device finding: no flow was refused, because none was\n"
+			 "ever offered to an engine that does not exist.\n");
+		return 0;
+	}
+
 	/* A table read writes the shared command register. Serialize the whole
 	 * snapshot against flow installs, raw writes and other readers. */
 	mutex_lock(&l->lock);

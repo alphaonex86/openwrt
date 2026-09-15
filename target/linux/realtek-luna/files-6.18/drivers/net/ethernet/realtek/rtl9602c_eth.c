@@ -2663,6 +2663,20 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &rtl9602c_eth_netdev_ops;
+	/* ★★★ ADVERTISE THE TC-OFFLOAD CAPABILITY, OR THE HOOK ABOVE IS NEVER
+	 * CALLED.  MEASURED 2026-09-15 on the X111W: this driver installed
+	 * `.ndo_setup_tc` and set NO features at all, so `ethtool -k` reported
+	 * `hw-tc-offload: off [fixed]`, fw4's `nft_try_hw_offload()` check failed,
+	 * fw4 fell back to a SOFTWARE flowtable without telling anyone, and
+	 * /proc/flowdump read `offered=0 refused=0 why{}` -- nothing was ever
+	 * offered to an accelerator that is present and programmed.  The kernel's
+	 * offload paths key on this BIT, never on the presence of the hook.
+	 *
+	 * ⚠ It is `hw_features` too, so `ethtool -K` can turn it off: a capability
+	 *   nobody can disable is one nobody can A/B.
+	 */
+	ndev->hw_features |= NETIF_F_HW_TC;
+	ndev->features |= NETIF_F_HW_TC;
 	/* Permit a LIVE MAC change (no iface down/up): the per-board ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 120. */
 	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
@@ -2704,6 +2718,13 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			SET_NETDEV_DEV(wan, dev);
 			strscpy(wan->name, "gpon0", IFNAMSIZ);
 			wan->netdev_ops = &rtl9602c_eth_wan_ops;
+			/* The WAN netdev is a member of the same fw4 flowtable, and the
+			 * hardware-offload probe is ALL-OR-NOTHING: `nft_try_hw_offload()`
+			 * builds ONE test flowtable holding EVERY device and rejects the
+			 * lot if any one of them cannot take `flags offload`.  gpon0 must
+			 * therefore advertise exactly what eth0 does. */
+			wan->hw_features |= NETIF_F_HW_TC;
+			wan->features |= NETIF_F_HW_TC;
 			/* Initial WAN MAC = board MAC + offset; re-derived at open + on eth0 MAC
 			 * changes once rtk_factory provisions the real board MAC onto eth0. */
 			rtl9602c_wan_mac(wmac, ndev->dev_addr);

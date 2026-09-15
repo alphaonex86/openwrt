@@ -59,6 +59,10 @@ ca_ni_rx_buf_locate(u32 pa, u32 base, const struct ca_ni_rx_pool_geom *g,
 
 	out->off_in_region = off;
 
+	/* ⚠ OPEN, and deliberately NOT repaired here: the descriptor's PA field is
+	 * 128-byte grained while the pool grid is the buffer size, so a MID-BUFFER
+	 * PA is representable and would be recycled verbatim.
+	 * dev/MEASURED-cortina_ni_rx_geom.h.md sec 12. */
 	if (off < g->pool0_bytes) {
 		out->buf_max = ca_ni_rx_usable_end(g->pool0_bufsz, g->tailroom);
 		out->rpa = pa;

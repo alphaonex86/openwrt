@@ -8,7 +8,7 @@
  * and the buffer-descriptor segment count (BUFDESC_SEG_NUM) are provided by
  * the shared rtlwifi PCI core (pci.h / wifi.h); this sub-driver reuses them.
  */
-#define RX_DESC_NUM_92F					512
+#define RX_DESC_NUM_92F					384
 
 /* TX DMA ring depth (descriptors). MUST equal the SW ring ... -- dev/MEASURED-def.h.md sec 1. */
 #define TX_DESC_NUM_92F					128

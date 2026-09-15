@@ -156,13 +156,15 @@ static void _rtl_init_hw_ht_capab(struct ieee80211_hw *hw,
 	struct rtl_phy *rtlphy = &(rtlpriv->phy);
 
 	ht_cap->ht_supported = true;
+	/* IEEE80211_HT_CAP_MAX_AMSDU is NOT set: this advertises the 3839-byte
+	 * A-MSDU every HT receiver must accept, not the optional 7935 one, and
+	 * 3839 is what one RX buffer holds here.  There is no HT encoding for
+	 * "no A-MSDU".  dev/FINDING-wifi-rx-rings-to-the-ht-floor-2026-09-15.md
+	 */
 	ht_cap->cap = IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
 	    IEEE80211_HT_CAP_SGI_40 |
 	    IEEE80211_HT_CAP_SGI_20 |
-	    IEEE80211_HT_CAP_DSSSCCK40 | IEEE80211_HT_CAP_MAX_AMSDU;
-
-	if (rtlpriv->rtlhal.disable_amsdu_8k)
-		ht_cap->cap &= ~IEEE80211_HT_CAP_MAX_AMSDU;
+	    IEEE80211_HT_CAP_DSSSCCK40;
 
 	/*
 	 *Maximum length of AMPDU that the STA can receive.

@@ -995,6 +995,13 @@ void rtl92fe_set_desc(struct ieee80211_hw *hw, u8 *pdesc8, bool istx,
 	bool dma64 = rtlpriv->cfg->mod_params->dma64;
 	__le32 *pdesc = (__le32 *)pdesc8;
 
+	/* The chip may never be told to write more than the mapping below it
+	 * is long: pci.c maps RTL_PCI_RX_BUFFER_SIZE, the RX_PREPARE case
+	 * below programs MAX_RECEIVE_BUFFER_SIZE + RX_DESC_SIZE.
+	 */
+	BUILD_BUG_ON(MAX_RECEIVE_BUFFER_SIZE + RX_DESC_SIZE >
+		     RTL_PCI_RX_BUFFER_SIZE);
+
 	if (istx) {
 		switch (desc_name) {
 		case HW_DESC_TX_NEXTDESC_ADDR:

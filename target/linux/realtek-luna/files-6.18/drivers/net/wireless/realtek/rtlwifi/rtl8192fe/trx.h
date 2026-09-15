@@ -14,7 +14,12 @@
 #define USB_HWDESC_HEADER_LEN				40
 
 #define RX_DESC_SIZE					24
-#define MAX_RECEIVE_BUFFER_SIZE				8192
+/* Sized to the 3839-byte A-MSDU an HT receiver must accept, not to the 7935
+ * one it may: + RX_DESC_SIZE this is 4042, which is 3839 + 56 (QoS/HTC hdr,
+ * CCMP, MIC, FCS) + 147 (this chip's own worst-case prepend).
+ * dev/FINDING-wifi-rx-rings-to-the-ht-floor-2026-09-15.md
+ */
+#define MAX_RECEIVE_BUFFER_SIZE				4018
 
 /* ---- TX descriptor (64 bytes / 16 dwords) ---------------------------- */
 

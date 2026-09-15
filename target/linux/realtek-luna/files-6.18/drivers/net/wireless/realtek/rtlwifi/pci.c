@@ -1165,7 +1165,11 @@ static void _rtl_pci_init_trx_var(struct ieee80211_hw *hw)
 	if (!rtl_priv(hw)->use_new_trx_flow)
 		rtlpci->txringcount[BE_QUEUE] = RT_TXDESC_NUM_BE_QUEUE;
 
-	rtlpci->rxbuffersize = 9100;	/*2048/1024; */
+	/* rtl8192fe/trx.c BUILD_BUG_ONs this >= MAX_RECEIVE_BUFFER_SIZE +
+	 * RX_DESC_SIZE.  Upstream's 9100 asked for an 8K A-MSDU and bought a
+	 * 16 KiB kmalloc bucket per descriptor.
+	 */
+	rtlpci->rxbuffersize = RTL_PCI_RX_BUFFER_SIZE;
 	rtlpci->rxringcount = RTL_PCI_MAX_RX_COUNT;	/*64; */
 }
 

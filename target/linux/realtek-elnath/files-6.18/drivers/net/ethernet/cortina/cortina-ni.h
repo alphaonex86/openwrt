@@ -18,6 +18,9 @@
 
 /* platform driver name; also what `ethtool -i` reports */
 #define CA_NI_DRV_NAME		"cortina-ni"
+/* ONE spelling: the driver's match table and the early NE quiesce both
+ * resolve the node from this. */
+#define CA_NI_DT_COMPATIBLE	"cortina,ni-interface"
 
 /* peek "window" selector for the peri block (not a DT window index) */
 #define CA_NI_PEEK_PERI		0xff

@@ -989,6 +989,60 @@ static u32 cortina_ni_block_reset_pulse(void __iomem *rst, u32 bit)
 	return held;
 }
 
+/* ★★★ TAKE THE NE OUT OF THE PREVIOUS BOOT STAGE'S HANDS.
+ * dev/MEASURED-cortina-ni.c.md sec 30.  One implementation, two callers: the
+ * postcore_initcall below and probe.  The sequence is stock's own
+ * ca_ni_global_reset order (ni, l2fe, l2tm, l3fe, tqm; index 4 = sdram skipped).
+ */
+static void cortina_ni_ne_quiesce(void __iomem *glb)
+{
+	static const int order[] = { 0, 1, 2, 3, 5 };	/* ni,l2fe,l2tm,l3fe,tqm */
+	int j;
+
+	writel(CA_NI_GLB_BLOCK_RESET_VAL, glb + CA_NI_GLB_BLOCK_RESET);
+	for (j = 0; j < ARRAY_SIZE(order); j++) {
+		u32 v = readl(glb + CA_NI_GLB_BLOCK_RESET);
+
+		writel(v | BIT(order[j]), glb + CA_NI_GLB_BLOCK_RESET);
+		mdelay(1);
+		writel(v & ~BIT(order[j]), glb + CA_NI_GLB_BLOCK_RESET);
+	}
+	mdelay(100);					/* final settle (stock) */
+}
+
+/* ★★★ AND IT MUST RUN BEFORE LINUX FILLS THE MEMORY THE ENGINE IS WRITING TO.
+ * dev/MEASURED-cortina-ni.c.md sec 31.  postcore_initcall is before
+ * rootfs_initcall (populate_rootfs), which is before the device_initcall this
+ * driver probes at; this board's image is an initramfs, so with the quiesce at
+ * probe the whole rootfs sat in RAM for 5-7 seconds while an engine nobody
+ * owned kept DMA-ing to the boot loader's buffers.  Pinned by
+ * dev/rtl9607c-test/ni_dma_owner_test case [f].
+ */
+static int __init cortina_ni_early_quiesce(void)
+{
+	struct device_node *np;
+	void __iomem *glb;
+	u32 was;
+
+	np = of_find_compatible_node(NULL, NULL, CA_NI_DT_COMPATIBLE);
+	if (!np)
+		return 0;			/* not this board */
+	glb = of_iomap(np, CA_NI_WIN_GLB);
+	of_node_put(np);
+	if (!glb) {
+		pr_warn("%s: early quiesce: GLB window unmapped - the NE keeps the boot loader's DMA targets until probe\n",
+			CA_NI_DRV_NAME);
+		return 0;
+	}
+	was = readl(glb + CA_NI_GLB_BLOCK_RESET);
+	cortina_ni_ne_quiesce(glb);
+	pr_info("%s: NE quiesced before rootfs (block_reset 0x%08x -> 0x%08x)\n",
+		CA_NI_DRV_NAME, was, readl(glb + CA_NI_GLB_BLOCK_RESET));
+	iounmap(glb);
+	return 0;
+}
+postcore_initcall(cortina_ni_early_quiesce);
+
 /* Bring up the L3QM block. Stock ca_ni_global_reset pulses ...
  * dev/MEASURED-cortina-ni.c.md sec 12. */
 static void __maybe_unused cortina_ni_qm_reset(struct cortina_ni *ni)
@@ -1053,20 +1107,12 @@ static int cortina_ni_probe(struct platform_device *pdev)
 	if (ni->win[CA_NI_WIN_GLB]) {
 		void __iomem *glb = ni->win[CA_NI_WIN_GLB];
 		/* ★★ build64: the EXACT stock ca_ni_global_reset sequence ...
-		 * dev/MEASURED-cortina-ni.c.md sec 16. */
-		static const int order[] = { 0, 1, 2, 3, 5 };	/* ni,l2fe,l2tm,l3fe,tqm (SKIP 4=sdram) */
+		 * dev/MEASURED-cortina-ni.c.md sec 16.  The early initcall above
+		 * has normally already done this; repeating it costs 105 ms and
+		 * keeps probe correct on a kernel where the initcall did not run. */
 		u32 was = readl(glb + CA_NI_GLB_BLOCK_RESET);
-		int j;
 
-		writel(CA_NI_GLB_BLOCK_RESET_VAL, glb + CA_NI_GLB_BLOCK_RESET);
-		for (j = 0; j < ARRAY_SIZE(order); j++) {
-			u32 v = readl(glb + CA_NI_GLB_BLOCK_RESET);
-
-			writel(v | BIT(order[j]), glb + CA_NI_GLB_BLOCK_RESET);	/* ASSERT one */
-			mdelay(1);
-			writel(v & ~BIT(order[j]), glb + CA_NI_GLB_BLOCK_RESET);	/* DEASSERT it */
-		}
-		mdelay(100);					/* final settle (stock) */
+		cortina_ni_ne_quiesce(glb);
 		dev_info(dev, "ne-reset: sequential ni,l2fe,l2tm,l3fe,tqm at probe start (0x%08x -> 0x%08x)\n",
 			 was, readl(glb + CA_NI_GLB_BLOCK_RESET));
 	}
@@ -1116,7 +1162,7 @@ static int cortina_ni_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id cortina_ni_of_match[] = {
-	{ .compatible = "cortina,ni-interface" },
+	{ .compatible = CA_NI_DT_COMPATIBLE },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, cortina_ni_of_match);

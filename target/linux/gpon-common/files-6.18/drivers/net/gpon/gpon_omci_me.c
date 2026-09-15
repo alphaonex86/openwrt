@@ -172,6 +172,12 @@ enum omci_attr_src {
 	/* A LONG attribute the 26-octet dense body cannot hold: ME ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 6. */
 	OMCI_SRC_TBL,
+	/* ★★ A COUNTER THIS MODEL DECLARES AND THIS ONU CANNOT ESTABLISH.
+	 * It occupies its dense slot (so the layout stays stock's) and serves
+	 * NO VALUE: the Get leaves its bit out of the response mask, which puts
+	 * it in the ATTRIBUTES-FAILED word -- G.988's own "could not ask".
+	 * A missing counter rendered as 0 is a measurement nobody took. */
+	OMCI_SRC_CNT,
 };
 
 /* Where an OMCI_SRC_TBL write goes. */
@@ -241,6 +247,9 @@ struct omci_attr {
 #define A_MDS(cls, n)		AT(cls, n, 1, OMCI_SRC_MDS, 0)
 #define A_D(cls, n, sz, dyn)	AT(cls, n, sz, OMCI_SRC_DYN, dyn)
 #define A_NO_ATTRS(cls)		AT(cls, 0, 0, OMCI_SRC_CONST, 0)
+/* a read-only COUNTER at dense offset @off that nothing feeds: see
+ * OMCI_SRC_CNT.  It keeps the dense layout stock's and answers COULD NOT ASK. */
+#define A_CNT(cls, n, sz, off)	{ (cls), (off), (n), (sz), OMCI_SRC_CNT, 1 }
 
 static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 2 ONU-Data (inst 0) ---- */
@@ -379,11 +388,12 @@ static const struct omci_attr omci_attrs[] = {
 	/* ME 52 MAC bridge port PM history data ... -- dev/MEASURED-gpon_omci_me.c.md sec 14. */
 	A_ST(52, 1, 1,  0, 1),		/* #1 interval end time    IntervalEndTime (R) */
 	A_ST(52, 2, 2,  1, 7),		/* #2 threshold data 1/2   ThresholdData12Id */
-	A_ST(52, 3, 4,  3, 1),		/* #3 forwarded frames     ForwardedFrameCounter */
-	A_ST(52, 4, 4,  7, 1),		/* #4 delay exceeded disc  DelayExceededDiscard */
-	A_ST(52, 5, 4, 11, 1),		/* #5 MTU exceeded disc    MtuExceededDiscard */
-	A_ST(52, 6, 4, 15, 1),		/* #6 received frames      ReceivedFrameCounter */
-	A_ST(52, 7, 4, 19, 1),		/* #7 received+discarded   ReceivedAndDiscardedCounter */
+	/* #3..#7 ARE COUNTERS AND NOTHING COUNTS. ... -- dev/MEASURED-gpon_omci_me.c.md sec 44. */
+	A_CNT(52, 3, 4,  3),		/* #3 forwarded frames     ForwardedFrameCounter */
+	A_CNT(52, 4, 4,  7),		/* #4 delay exceeded disc  DelayExceededDiscard */
+	A_CNT(52, 5, 4, 11),		/* #5 MTU exceeded disc    MtuExceededDiscard */
+	A_CNT(52, 6, 4, 15),		/* #6 received frames      ReceivedFrameCounter */
+	A_CNT(52, 7, 4, 19),		/* #7 received+discarded   ReceivedAndDiscardedCounter */
 
 	/* ME 78 VLAN tagging operation configuration data ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 15. */
@@ -772,7 +782,7 @@ u8 omci_me_dense_len(u16 class_id)
 	unsigned int end = 0;
 
 	for (a = omci_me_find(class_id); a && a->class_id == class_id; a++)
-		if (a->src == OMCI_SRC_STORE &&
+		if ((a->src == OMCI_SRC_STORE || a->src == OMCI_SRC_CNT) &&
 		    (unsigned int)a->v + a->size > end)
 			end = (unsigned int)a->v + a->size;
 	return end > OMCI_STORE_BODY ? 0 : (u8)end;
@@ -959,6 +969,8 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		/* A table attribute read as a scalar. G.988 reads one with ...
 		 * dev/MEASURED-gpon_omci_me.c.md sec 27. */
 		return a->size <= OMCI_ID_SIZEOF(zeros) ? omci_id.zeros : NULL;
+	case OMCI_SRC_CNT:
+		return NULL;		/* could not ask -- never a zero */
 	case OMCI_SRC_ID:
 		return (const u8 *)&omci_id + a->v;
 	case OMCI_SRC_SN:

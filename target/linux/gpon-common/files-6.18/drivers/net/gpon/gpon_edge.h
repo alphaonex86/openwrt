@@ -1,26 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * TIER: CORE.  Like gpon_flow_offload it is not in the STRICT host-buildable
- * subset -- it reads Linux's own routing state on purpose.  The line is the
- * REGISTER, not Linux: there is no MMIO, no device pointer, no table word and
- * no chip fact anywhere below.
+ * TIER: CORE, not in the STRICT subset -- it reads Linux's own routing state on
+ * purpose.  No MMIO, no device pointer, no table word, no chip fact below.
  *
- * gpon_edge -- the router EDGE, read from the LIVE kernel.
+ * gpon_edge -- the router EDGE, read from the LIVE kernel.  Every flow
+ * accelerator here needs the same five things before it can rewrite a packet:
+ * which source address and MAC the WAN egresses with, which next hop it
+ * egresses THROUGH, and which subnet is behind the LAN.  None is a property of
+ * any silicon, so deriving it once costs the next board a TABLE, not a copy.
  *
- * ★ WHY IT IS CORE AND NOT PER-CHIP.  Every flow accelerator in this tree has
- * to be told the same five things before it can rewrite a packet: which source
- * address and MAC the WAN side egresses with, which next hop it egresses
- * THROUGH, and which subnet is behind the LAN.  None of that is a property of
- * any silicon -- it is what Linux already decided -- so deriving it once here
- * costs the next board a TABLE and not a copy of this file.
- *
- * ★ AND IT IS PULLED, NOT PUSHED.  A notifier chain was the obvious shape and
- * it is the wrong one: the values are wanted at exactly one moment, when a
- * flow is being installed, and at that moment they are all resolved by
- * construction (the flow exists because Linux forwarded a packet along them).
- * Pulling keeps the whole mechanism free of a workqueue, a timer and a lock,
- * and it cannot go stale -- the caller compares what it reads against what it
- * last programmed.
+ * ★ PULLED, NOT PUSHED.  A notifier chain was the obvious shape and is the
+ * wrong one: the values are wanted at exactly one moment, when a flow is being
+ * installed, and are all resolved by construction then (the flow exists because
+ * Linux forwarded a packet along them).  Pulling keeps the mechanism free of a
+ * workqueue, a timer and a lock, and it cannot go stale.
  *
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
@@ -33,9 +26,9 @@
 struct net_device;
 
 /*
- * Addresses are HOST order.  Every engine here packs its own table words with
- * explicit shift/mask, so a network-order value in this struct would only be a
- * second place to get the byte order wrong.
+ * Addresses are HOST order.  Every engine packs its own table words with
+ * explicit shift/mask, so a network-order value here would only be a second
+ * place to get the byte order wrong.
  */
 struct gpon_edge {
 	u32	wan_ip;			/* the address a US frame is NAT'd to	*/
@@ -58,9 +51,9 @@ struct gpon_edge {
  * naming a probe address nobody chose.
  *
  * Returns 0, or a negative errno with *why naming what is not established.
- * ⚠ A failure is a NORMAL outcome (the gateway is not resolved yet, the WAN
- * runs over a device this engine cannot express); *why exists so the caller
- * can say WHICH, instead of reporting one anonymous refusal.
+ * ⚠ A failure is a NORMAL outcome (gateway not resolved yet, WAN over a device
+ * this engine cannot express); *why exists so the caller can say WHICH, instead
+ * of reporting one anonymous refusal.
  */
 int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 		   u32 peer, struct gpon_edge *e, const char **why);

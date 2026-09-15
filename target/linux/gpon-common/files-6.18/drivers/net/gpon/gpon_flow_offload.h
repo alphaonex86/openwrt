@@ -8,38 +8,27 @@
  *
  * ★★ WHY THIS EXISTS (operator, 2026-08-28): *"generaliza para todos los
  * hardware que no hacen offload y los que sí, así en la familia es solo un
- * #ifdef"*.  A family whose silicon has a flow accelerator supplies the ops
- * below; a family without one compiles none of this (CONFIG_GPON_FLOW_OFFLOAD
- * is not set, and on Luna that is not an object saved -- it is a fatal error
- * avoided, because <net/flow_offload.h> pulls in a TC stack that target does
- * not build).
+ * #ifdef"*.  A family with a flow accelerator supplies the ops below; a family
+ * without one compiles none of this -- on Luna that is not an object saved but
+ * a fatal error avoided, since <net/flow_offload.h> pulls in a TC stack that
+ * target does not build.
  *
- * ─────────────────────────────────────────────────────────────────────────
- * ★★★ THE SEAM IS NOT WHERE I FIRST DREW IT, AND THE CODE SAID SO.
+ * ★★★ THE SEAM IS WHERE READING THE CODE PUT IT, not where it was first drawn.
+ * A draft contract offered is_lan_side / wan_vid / wan_vlan_programmable plus
+ * install/remove/stats; `cn_flow_replace()` is ~850 lines whose generic and
+ * silicon halves are INTERLEAVED, not stacked (a PPPoE leg gate reading a
+ * driver-held session shadow, a lazy one-time DS arm that touches hardware, an
+ * egress L3-IF program, a VLAN readback by literal bit number out of the FIB),
+ * so a core reaching for `wan_vid()` would only have named the two or three of
+ * those it could see.  Hence:
  *
- * The first version of this header offered "3 questions + 3 engine calls":
- * is_lan_side / wan_vid / wan_vlan_programmable, then install/remove/stats.
- * That contract is WRONG, and only READING the one existing implementation
- * showed it -- no classifier could have.  `cn_flow_replace()` is ~850 lines,
- * and its generic and silicon halves are not stacked, they are INTERLEAVED:
- * a PPPoE leg gate whose input is a driver-held session SHADOW; a lazy
- * one-time DS arm that touches hardware; an egress L3-IF program; a VLAN
- * readback BY LITERAL BIT NUMBER out of the FIB table.  None of that is a
- * fact about TC, and a core that reached for `wan_vid()` would have been
- * reaching for the two or three of those it happened to be able to name.
- *
- * So the seam is drawn where it actually falls:
- *
- *   CORE  -- what nf_flow_table means, and what a cookie map costs:
- *            the dedup, the action DECODE, the NAT-shape refusal, the entry
- *            allocation, the insert with its undo, destroy, stats.
- *   FAMILY-- ONE call, `prepare`, holding every decision that needs to read
- *            or write silicon, and `install`/`remove`/`stats` under it.
- *
- * `prepare` is deliberately allowed to be large.  It is not a wart: a 400-line
- * prepare in the family is exactly the code that MUST NOT be shared, and
- * naming it once is what lets the 200 lines around it be shared at all.
- * ─────────────────────────────────────────────────────────────────────────
+ *   CORE   -- what nf_flow_table means and what a cookie map costs: dedup,
+ *             action DECODE, NAT-shape refusal, entry allocation, insert with
+ *             its undo, destroy, stats.
+ *   FAMILY -- every decision that reads or writes silicon, in `install`, with
+ *             `remove`/`stats` beside it.  It is deliberately allowed to be
+ *             large: that is exactly the code that MUST NOT be shared, and
+ *             naming it once is what lets the 200 lines around it be shared.
  */
 #ifndef GPON_FLOW_OFFLOAD_H
 #define GPON_FLOW_OFFLOAD_H
@@ -101,14 +90,12 @@ struct gpon_flow_ops {
 	 * on the software fastpath", which is a NORMAL outcome and not an
 	 * error, so the core neither logs nor counts it as one.
 	 *
-	 * ★ IT IS ONE CALL AND NOT TWO, and that was decided by reading the one
-	 * implementation rather than by taste.  A separate `prepare` was
-	 * drafted; the Cortina engine has nothing to put in it, because its
-	 * refusals are INTERLEAVED with its programming -- it arms the DS
-	 * direction, programs an egress, then refuses if the WAN VLAN will not
-	 * fit the action.  Splitting that in two would have meant a boundary
-	 * running through the middle of one decision, and an unused hook on
-	 * every other family forever.
+	 * ★ ONE CALL AND NOT TWO, decided by reading the one implementation: a
+	 * separate `prepare` was drafted and the Cortina engine has nothing to
+	 * put in it, because its refusals are INTERLEAVED with its programming
+	 * (it arms DS, programs an egress, then refuses if the WAN VLAN will not
+	 * fit the action).  Splitting it would run a boundary through the middle
+	 * of one decision and leave an unused hook on every other family.
 	 *
 	 * The engine may write `priv` freely: it is this flow's private state,
 	 * it lives as long as the entry, and the core never reads it.

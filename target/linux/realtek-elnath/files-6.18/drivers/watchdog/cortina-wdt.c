@@ -337,73 +337,35 @@ static const struct watchdog_ops cortina_wdt_ops = {
 /*
  * Turn an expired counter into a chip reset.
  *
- * These bits are outside the watchdog's own register window, which is the
- * whole reason this is a separate step: a fully and correctly programmed
- * PER_WDT on a SoC whose glue is untouched counts down and does nothing.
+ * These bits are outside the watchdog's own register window, which is the whole
+ * reason this is a separate step: a fully and correctly programmed PER_WDT on a
+ * SoC whose glue is untouched counts down and does nothing.
  *
- * ⚠ OPEN, MEASURED 2026-08-10 -- OUR RESET DOES NOT LEAVE A RESET *REASON*.
- *
- * The vendor firmware exposes /proc/realtek/reboot_reason.  Established as a
- * real witness on STOCK before believing anything from it, which is the only
- * way to tell a finding from a phantom:
- *
- *	stock's OWN watchdog fired (its feeder SIGSTOPped)  -> reads 3
- *	stock rebooted cleanly                              -> reads 0
- *	OUR watchdog fired                                  -> reads 0  (twice)
- *
- * So the node DOES discriminate, and a reset we cause is not recorded as a
- * watchdog reset.  That matters in the field: it is how an operator tells "the
- * watchdog recovered a hang" from "the power went out", and without it the
- * recovery this driver provides is invisible exactly when it is needed.
- *
- * IT IS NOT A RESET-PATH DIFFERENCE, and both candidates are ruled out by
- * measurement so nobody re-chases them.  The reset ENABLES are identical: live
- * on stock GLOBAL_GLOBAL_CONFIG reads 0x076445f0 and at the U-Boot prompt
- * 0x076455f0 -- bits 4..8 set in both, before this driver runs, and the only
- * write below is an OR, which cannot clear them.  Nor is the PER_WDT
- * programming: stock live reads CTRL=0xff918003, PS=0x1e847, DIV=1000, i.e.
- * WDTEN|RSTEN with a delay field of 0xff918, and this driver computes that same
- * delay from the same device-tree value.  The one difference is LD (stock 60 s,
- * ours whatever userspace asks), which is a timeout, not a reset path.
- *
- * ★ THE MECHANISM, established from the vendor's own shipped code: the value is
- * a SOFTWARE BREADCRUMB, not a hardware reset-cause latch.  It lives in
- * GLOBAL_SOFTWARE (0xf43201c4) bits [3:0] -- named in the vendor's own
- * register table -- and the vendor's kernel writes it:
- *
- *	1  from a reboot notifier, i.e. an orderly reboot
- *	2  from a panic notifier
- *	3  when the watchdog is STARTED
- *
- * The node is sampled ONCE at kernel init and cached, and nothing in the
- * bootloader or userspace ever writes it, so a late read is not a timing
- * artefact.  Our kernel writes none of them, which is exactly why every reset
- * we cause reads 0.  That accounts for all four of our readings without any
- * appeal to the reset path.
+ * ⚠ OPEN, MEASURED 2026-08-10 -- OUR RESET DOES NOT LEAVE A RESET *REASON*, and
+ *   the full investigation is
+ *   dev/MEASURED-x400axf-reset-reason-breadcrumb-2026-08-10.md.  In short:
+ *   /proc/realtek/reboot_reason DOES discriminate on stock (its own watchdog
+ *   fired -> 3, clean reboot -> 0) and reads 0 after OURS fires, twice.  It is
+ *   NOT a reset-path difference -- the reset enables are identical live
+ *   (GLOBAL_GLOBAL_CONFIG 0x076445f0 on stock, 0x076455f0 at the U-Boot prompt,
+ *   bits 4..8 set in both, and the only write below is an OR) and so is the
+ *   PER_WDT programming.  The value is a SOFTWARE BREADCRUMB in GLOBAL_SOFTWARE
+ *   (0xf43201c4) bits [3:0] that the vendor kernel writes (1 orderly reboot,
+ *   2 panic, 3 watchdog STARTED); ours writes none, which accounts for every
+ *   reading.
  *
  * ⚠⚠ AND THE OBVIOUS "FIX" WOULD INSTALL A PHANTOM.  `3` means THE WATCHDOG WAS
- * ARMED, not "the watchdog fired" -- stock arms it on every boot, so 3 is its
- * steady state and it reads 3 after a power cut just the same.  Writing 3 from
- * .start and calling the result WDIOF_CARDRESET would publish a witness that is
- * true whenever the previous boot merely ENABLED a watchdog.  That is the
- * phantom-witness family this port has already paid for twice.
+ *   ARMED, not "it fired" -- stock arms it on every boot, so 3 is its steady
+ *   state and survives a power cut.  Writing 3 from .start and calling it
+ *   WDIOF_CARDRESET would publish a witness true whenever the previous boot
+ *   merely ENABLED a watchdog: the phantom-witness family this port has already
+ *   paid for twice.  A PARTIAL adoption is worse than none (the vendor's
+ *   userspace counts an "abnormal reboot" whenever the value exceeds 1), so a
+ *   correct adoption needs all three writers and two of them are SoC-level.
  *
- * ⚠ A PARTIAL adoption is WORSE THAN NONE, which is why this is left as a
- * scoped decision rather than a two-line patch: the vendor's own userspace
- * counts an "abnormal reboot" whenever the value exceeds 1, so a driver that
- * wrote 3 on arm WITHOUT also writing 1 on an orderly reboot would make every
- * clean reboot of our firmware look abnormal to the vendor's tooling.  A
- * correct adoption needs all three writers, and the reboot/panic ones are
- * SoC-level concerns that do not belong to a watchdog driver.
- *
- * ⇒ Recorded as a DECLARED difference: our resets leave no vendor-readable
- * reason.  Also measured: wdd.bootstatus is never set here, so
- * /sys/class/watchdog/watchdog0/bootstatus reads 0 on our image -- but stock
- * cannot report it either (its own watchdog advertises no WDIOF_CARDRESET and
- * never populates bootstatus), so this is a gap in BOTH, not a regression.  And
- * it could not be observed on the dev rig anyway: our image is TFTP->RAM, so a
- * watchdog reset lands the board on the NAND vendor image and our own
- * bootstatus is never read after a bite.  That needs a NAND install.
+ * ⇒ DECLARED difference, not a regression: stock cannot report bootstatus
+ *   either.  And it could not be observed on the dev rig anyway -- our image is
+ *   TFTP->RAM, so a watchdog reset lands the board on the NAND vendor image.
  */
 static void cortina_wdt_enable_soc_reset(struct cortina_wdt *wdt)
 {

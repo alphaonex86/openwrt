@@ -13,18 +13,16 @@
  *
  * It does NOT parse a PDU, dispatch a message type, build an envelope, stamp a
  * trailer or compute a MIC — that is gpon_omci_core.{h,c}, which CALLS this
- * one.  The seam is deliberate: G.988 message rules are identical on every ONU
- * ever built, while the set of MEs a product serves is a property of the
- * PRODUCT.
+ * one.  G.988 message rules are identical on every ONU ever built; the set of
+ * MEs a product serves is a property of the PRODUCT.
  *
- * Table-driven is a FOOTPRINT decision as much as a design one (these ONUs ship
- * <=64 MB RAM and a small NAND), and it is what makes three cross-vendor
- * invariants STRUCTURAL instead of per-case: every reply bounded by the Get
- * value area, the attribute set of an ME derivable (so a Get can NAME what it
- * does not support and what did not fit, instead of answering success with a
- * short mask and generating OLT re-GET churn), and one policy per
- * vendor-reserved class range instead of a list of the class IDs one OLT
- * happened to ask for.
+ * Table-driven is a FOOTPRINT decision (<=64 MB RAM, small NAND) and it makes
+ * three cross-vendor invariants STRUCTURAL rather than per-case: every reply
+ * bounded by the Get value area; the attribute set of an ME derivable, so a Get
+ * NAMES what it does not support and what did not fit instead of answering
+ * success with a short mask and generating OLT re-GET churn; and one policy per
+ * vendor-reserved class RANGE instead of a list of the class IDs one OLT asked
+ * for.
  *
  * ⚠ realtek-luna does NOT compile this yet: it carries a third, independently
  *   written model in rtl9602c_eth.c on file-scope globals, with a different
@@ -113,25 +111,23 @@ struct omci_mib_row {
  * The instances of ONE UNI class the ONU presents, and the administrative
  * state each of them last ACCEPTED.
  *
- * ★ ME 11 (PPTP Ethernet UNI) AND ME 264 (UNI-G) GET ONE OF THESE EACH, AND
- *   THE TWO INVENTORIES ARE INDEPENDENT.  They are not two views of one list:
- *   the X400AXF reports a UNI-G at 0x0604 that has no PPTP Ethernet UNI beside
- *   it (and 0x0604 is not the VEIP, which is 0x0601).  Folding them into one
- *   table would invent an instance on one class or drop one from the other.
+ * ★ ME 11 (PPTP Ethernet UNI) AND ME 264 (UNI-G) GET ONE EACH, AND THE TWO
+ *   INVENTORIES ARE INDEPENDENT -- not two views of one list: the X400AXF
+ *   reports a UNI-G at 0x0604 with no PPTP Ethernet UNI beside it (0x0604 is
+ *   not the VEIP, which is 0x0601).  Folding them would invent an instance on
+ *   one class or drop one from the other.
  *
  * ★ THE KEY IS THE FULL u16.  The G24W numbers its fourth PPTP Ethernet UNI
  *   0x0401 while the first three are 0x0101..0x0103, so 0x0101 and 0x0401
- *   share a low byte and differ in the slot: an 8-bit port index identifies
- *   nothing here.
+ *   share a low byte: an 8-bit port index identifies nothing here.
  *
- * ★ AND NOTHING IN THIS FILE COMBINES THE TWO STATES.  Whether a locked UNI-G
- *   also stops the PPTP -- and which physical port either of them is -- is a
- *   FAMILY question with a per-board answer: own stock keys its Ethernet-UNI
- *   apply on the MANAGEMENT CAPABILITY value (0, 1, 2), not on a port index,
- *   and the G24W runs the apply for all three values while the X400AXF skips
- *   whenever the capability is 1.  ⚠ THAT IS NOT "the X400AXF skips one port":
- *   all four of its Ethernet UNI-G rows report capability 1.  The core reports
- *   what was accepted, per class, and decides none of it.
+ * ★ NOTHING HERE COMBINES THE TWO STATES.  Whether a locked UNI-G also stops
+ *   the PPTP -- and which physical port either is -- is a FAMILY question with
+ *   a per-board answer: stock keys its Ethernet-UNI apply on the MANAGEMENT
+ *   CAPABILITY value (0, 1, 2), not a port index, and the G24W runs the apply
+ *   for all three while the X400AXF skips whenever the capability is 1.
+ *   ⚠ THAT IS NOT "the X400AXF skips one port": all four of its Ethernet UNI-G
+ *   rows report capability 1.  The core reports what was accepted, per class.
  */
 struct omci_uni_inv {
 	u16	inst[OMCI_UNI_MAX];	/* instance ids, [0, n) valid */

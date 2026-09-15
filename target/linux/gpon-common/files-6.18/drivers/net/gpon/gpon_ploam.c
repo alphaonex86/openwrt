@@ -1,131 +1,43 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware:
- * no register access, no clock, no lock, no allocator, no device pointer.
- * One source compiles for MIPS big-endian, ARM64 little-endian and x86.
- * Role: G.984.3 PLOAM activation FSM.
+ * TIER: CORE (prefix gpon_) — protocol only.  NEVER touches hardware: no
+ * register access, no clock, no lock, no allocator, no device pointer.  One
+ * source compiles for MIPS big-endian, ARM64 little-endian and x86.
+ * Canonical tier rule and file map: "THE THREE TIERS" in gpon_common.h.
+ * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17)
+ * COMPILES this tier against stubs declaring no accessor, clock, lock or
+ * allocator, so impurity cannot build.
  *
- * Canonical tier rule, the file map and the guard name live in ONE place:
- * see "THE THREE TIERS" in gpon_common.h (this directory).
- * Guard: dev/rtl9607c-test/gpon_layer_hostbuild_test.sh (suite step 17) —
- * it COMPILES this tier against stubs that declare no register accessor,
- * no clock, no lock and no allocator, so impurity cannot build.
- * ⚠ THE SHELL BELOW IS NAMED luna_gpon.c, AND HAS BEEN RENAMED TWICE:
- *   gpon-rtl9602c.c / gpon-rtl960x.c until 2026-08-29, gpon-luna.c until
- *   2026-09-10 (file_prefix_guard: `gpon-luna` claimed core+family at once).
- *   THE LINE NUMBERS IN THE POINTERS BELOW WERE RE-FOUND BY TEXT at the
- *   2026-09-10 rename (citation_repair.py: each cited line's source text was
- *   located in today's file, and the two that could not be located uniquely
- *   were re-cited BY SYMBOL instead) -- so they point at today's content, not
- *   at the era they were written in.  That re-find is the whole reason the
- *   name could be rewritten at all: renaming without it turns a dated record
- *   into a claim about the current file, the 'wrong in a new way' that
- *   citation_guard warns a bare sed produces.
- */
-/*
- * gpon_ploam.c — G.984.3 PLOAM activation state machine (O1..O7):
- *                the HARDWARE-DECOUPLED protocol core.
+ * gpon_ploam.c — the G.984.3 PLOAM activation state machine (O1..O7): DS PLOAM
+ * dispatch, the O1->O5 transitions, the upstream message builders
+ * (Serial_Number, Password, Acknowledge, Encryption_Key, No_message), the
+ * burst-overhead and equalization-delay computations, and the periodic-poll
+ * decisions (SN re-offer, O5 keepalive, DS-LOS re-range debounce, O5
+ * provisioning watchdog).  Full contract: gpon_ploam.h.
  *
- * WHAT THIS IS
- *   The decision half of the ONU activation engine: downstream PLOAM dispatch,
- *   the O1->O5 transitions, the upstream message builders (Serial_Number,
- *   Password, Acknowledge, Encryption_Key, No_message), the burst-overhead and
- *   equalization-delay computations, and the periodic-poll decisions (SN
- *   re-offer cadence, O5 keepalive cadence, downstream-LOS re-range debounce,
- *   O5 provisioning watchdog). See gpon_ploam.h for the full contract.
+ * WHY IT IS COMMON (operator, 2026-08-05: *"la idea es poner en común el código
+ * que corresponde para no tener mucho duplicado"*).  Measured honestly: only
+ * realtek-luna consumes it TODAY -- Elnath's MAC runs PLOAM in silicon -- so it
+ * earns its place through offline adversarial testing and the roadmap, not
+ * through de-duplication.
  *
- * WHY IT IS COMMON  (operator, 2026-08-05: "en openwrt debería estar
- *   estructurado algo así: rtl960x* para la familia para tener código común"
- *   … "la idea es poner en común el código que corresponde para no tener mucho
- *   duplicado")
- *   Compiled from the shared tree into BOTH OpenWrt targets — realtek-luna
- *   (MIPS32 big-endian) and realtek-elnath (ARM64 little-endian) — and onto
- *   x86-64 for the offline differential/fuzz suite. Every wire field is read
- *   with explicit byte math, so the same source produces the same decisions on
- *   all three. Measured honestly: only realtek-luna consumes it TODAY (Elnath's
- *   MAC runs PLOAM in silicon); it earns its place through offline adversarial
- *   testing and the roadmap, not through de-duplication — the header says so at
- *   length rather than claiming a saving that does not exist.
+ * PROVENANCE: pure code motion out of realtek-luna's luna_gpon.c, which is at
+ * stock parity.  Nothing was "improved" on the way: a defect found while moving
+ * was moved UNCHANGED, because a fix folded into a move makes the next
+ * regression un-bisectable.
+ * ⚠ The shell has been renamed TWICE (gpon-rtl9602c.c / gpon-rtl960x.c until
+ *   2026-08-29, gpon-luna.c until 2026-09-10).  The `:NNN` pointers below were
+ *   re-found BY TEXT at that rename (citation_repair.py), so they name today's
+ *   content; a bare sed would have turned a dated record into a false claim
+ *   about the current file.
  *
- * THE CORE / SHELL RULE THIS FILE OBEYS
- *   This file DECIDES; the shell DOES. ★ IT MUST NEVER GAIN AN MMIO ACCESS —
- *   no readl/writel/ioremap, no jiffies or timers, no sleeping or delays, no
- *   locks, no allocation, no printk, no device pointers. Time enters as an
- *   explicit `now_ms` argument and as the shell-advanced tick counter. The one
- *   hardware value a decision genuinely needs mid-flight (US_MIN_DELAY) arrives
- *   through an op. The offline gate greps this file for those tokens and
- *   requires zero.
- *
- * PROVENANCE AND FIDELITY
- *   Pure code motion out of
- *   realtek-luna/files-6.18/drivers/net/ethernet/realtek/luna_gpon.c,
- *   which is at stock parity. Every block names the source lines it came from.
- *   Nothing was "improved" on the way: where a defect was found it was moved
- *   unchanged and recorded below, because a fix folded into a move makes the
- *   next regression un-bisectable.
- *
- * FOLLOW-UPS — found while moving, DELIBERATELY NOT FIXED HERE
- *   P1  gpon_tcont_installed is never set true anywhere in the driver
- *       (declared :967, cleared :6339/:6569/:6658/:6695, read only by two log
- *       sites :6282/:6422). Both readers therefore report a constant false.
- *   P2  RESOLVED here — see "THE THREE SESSION-STATE FIXES" below.
- *   P3  RESOLVED here — see "THE THREE SESSION-STATE FIXES" below.
- *   P4  In the burst-overhead build, `boh_len` is u8 and is assigned
- *       `rep + t3 + 3`, which is computed as int and can reach 262 before the
- *       truncation — so the `> GPON_PLOAM_BOH_MAX_LEN` clamp on the next line
- *       cannot see a value that already wrapped. Needs t3 >= 249 from the OLT's
- *       Extended_Burst_Length; no real OLT sends that. Moved verbatim.
- *   P5  The Assign_ONU-ID comment block (:6242-6259) describes omcc_alloc being
- *       captured from Assign_Alloc-ID "for subsequent re-ranges". It is not:
- *       the 2026-07-03 root-cause fix stopped writing it (:6440) and grep finds
- *       no writer, so it is the module_param override only. Comment is stale;
- *       the code it describes is correct and is moved as-is.
- *   P6  Password/Acknowledge/Encryption_Key all build m[0] = our ONU-ID, while
- *       the Request_Password, Key_Switching_Time and BER_interval cases accept
- *       a broadcast 0xff — where our ONU-ID may still be 0xff. Harmless on the
- *       wire because the hardware rewrites the field (ONUID_OVRD), but the
- *       BUILT buffer and the TRANSMITTED frame disagree, so a buffer-level
- *       differential against the oracle mismatches unless the oracle models the
- *       override. Decide which side is authoritative before writing that test.
- *   P7  Elnath resolves four of these cases differently and G.988/G.984.3 side
- *       with Elnath: Disable_SN should move the ONU to O7 (here: O1, so we
- *       re-announce the serial number the OLT just disabled), an O5->O7 drop is
- *       not detected, and O6 POPUP tears down where Elnath keeps the session
- *       alive. Not changed: this target is off the rig and each is a wire
- *       behaviour change needing its own board gate.
- *
- * THE THREE SESSION-STATE FIXES (the old FOLLOW-UPs P2 and P3), each pinned by
- * an adversarial-OLT case in dev/rtl9607c-test/gpon_data_bind_test.c (step 19)
- * that was SEEN to fail on the pre-fix source, and by
- * gpon_data_bind_policy_test.c (step 19b) over the shipping Luna driver.
- *
- *   1. THE DATA T-CONT LATCH SURVIVED EVERY TEARDOWN.  data_tcont_installed had
- *      no teardown clear at all; its ONLY clear site is the OLT's explicit
- *      Deallocate, which additionally requires `alloc == data_alloc`, i.e. the
- *      Alloc-ID of the session that has just ended.  So a re-config that hands
- *      out a DIFFERENT Alloc-ID was refused by the install guard, and the one
- *      path that could have recovered was waiting for an Alloc-ID the OLT will
- *      never send again: the WAN data T-CONT stayed dark until a reboot.  All
- *      four teardowns now clear it, together with data_alloc, exactly as they
- *      already cleared its three siblings.
- *
- *   2. data_gem_solicited NOW FOLLOWS THE IDENTITY, NOT THE PATH.  The four
- *      teardowns diverged three ways and only two said why.  The rule that
- *      explains all four is that the flag means "the OLT currently holds a
- *      GEM-CTP for THIS ONU identity": an OLT Deactivate/Disable_SN
- *      deprovisions us (CLEAR, it re-sends ME 268 on re-admit); the two
- *      ONU-INITIATED re-ranges leave the OLT's provisioning untouched (KEEP —
- *      clearing them is the proven "internet doesn't come back after I
- *      reconnect the fiber"); and the serial-number reprovision makes us a
- *      DIFFERENT ONU, so what the OLT holds is not ours (CLEAR — keeping it
- *      installed the data GEM the moment the new identity reached O5,
- *      proactively ahead of the new session's own ME 268, which is precisely
- *      the second-admit churn-lock this gate exists to prevent).
- *
- *   3. THE DATA GEM PORT-ID IS THE OLT'S.  It arrived in ME 268 attribute 1 and
- *      was discarded, and the install wrote a per-board constant.  It is now
- *      carried through data_gem_port into the install op, the way the OMCC's
- *      GEM Port-ID has always come from Configure_Port-ID.
+ * ★ THE OPEN FOLLOW-UPS (P1, P4..P7) AND THE THREE SESSION-STATE FIXES that
+ *   closed P2/P3 are recorded verbatim in
+ *   dev/MEASURED-gpon-ploam-followups-and-session-state-2026-09-14.md.
+ *   P1 and P4..P7 are OPEN, not retired.  The fixes are pinned by
+ *   dev/rtl9607c-test/gpon_data_bind_test.c (step 19), SEEN to fail on the
+ *   pre-fix source, and by gpon_data_bind_policy_test.c (step 19b) over the
+ *   shipping Luna driver.
  */
 
 #include "gpon_sn.h"	/* the one ONU-SN codec */

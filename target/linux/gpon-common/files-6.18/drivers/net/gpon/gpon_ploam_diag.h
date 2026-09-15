@@ -8,33 +8,29 @@
  * the SHAPE of the line that reports it.
  *
  * ★ WHY IT EXISTS (2026-09-06).  The O4 wall on both Luna boards was split by
- * hand-adding the BWmap acceptance counters to the Deactivate log line,
- * building, reading one boot, and reverting -- and the same class of probe
- * had already been hand-added on the Cortina board before that.  The third
- * time is a defect in the environment, not a missing log line: the question
- * "between Assign_ONU-ID and what followed, did a grant reach us, did our GTC
- * accept it, and did the two ONU-ID registers agree" is the same on every
- * silicon.  So it is asked ONCE, here, and each family answers it from its
- * own registers through `struct gpon_ploam_diag`.
+ * hand-adding the BWmap acceptance counters to the Deactivate line, reading one
+ * boot and reverting -- and the same probe had already been hand-added on the
+ * Cortina board.  The third time is a defect in the ENVIRONMENT: "between
+ * Assign_ONU-ID and what followed, did a grant reach us, did our GTC accept it,
+ * and did the two ONU-ID registers agree" is the same question on every
+ * silicon, so it is asked ONCE and each family answers it from its own
+ * registers through `struct gpon_ploam_diag`.
  *
- * ★ THE CONTRACT THAT KEEPS A PHANTOM OUT OF THE LOG.  A family fills only
- * what its silicon ESTABLISHES and sets the matching GPON_PDIAG_HAS_* bit; a
- * clear bit renders as `n/a`, never as 0.  On a counter, "0 grants" is a
- * device finding and "could not ask" is not, and a reader cannot tell them
- * apart once both are spelled the same.
+ * ★ THE CONTRACT THAT KEEPS A PHANTOM OUT OF THE LOG.  A family fills only what
+ * its silicon ESTABLISHES and sets the matching GPON_PDIAG_HAS_* bit; a clear
+ * bit renders `n/a`, never 0.  "0 grants" is a device finding and "could not
+ * ask" is not, and spelled alike a reader cannot tell them apart.
  *
  * ★ MEASURED ON THE RTL9602C, 2026-09-06: its DS misc counters are
- * CLEAR-ON-READ (ploam_acpt read 30, then 6, then 0 across three reads
- * ~60 ms apart while the OLT kept talking; /proc/gpon's two lines that read
- * the same words print the second as 0 for the same reason).  A value is
- * therefore "since the previous read", and two readers steal from each other.
- * The family owning the read says so beside its accessor; it is recorded
- * here because the consumer of this line is a human, and a human reading
- * `bwm_acpt=0` needs to know which zero it is.
+ * CLEAR-ON-READ -- ploam_acpt read 30, then 6, then 0 across three reads
+ * ~60 ms apart while the OLT kept talking, and /proc/gpon's two lines over the
+ * same words print the second as 0 for the same reason.  A value is "since the
+ * previous read" and two readers steal from each other; recorded here because
+ * a human reading `bwm_acpt=0` needs to know which zero it is.
  *
- * ⚠ The CALLER owns the policy -- level, rate, and which points it samples.
- *   This file only ever FORMATS INTO A BUFFER; it cannot print, so it cannot
- *   flood, and with CONFIG_GPON_PLOAM_DIAG=n it is not built at all.
+ * ⚠ The CALLER owns level, rate and sampling.  This file only FORMATS INTO A
+ *   BUFFER, so it cannot flood, and with CONFIG_GPON_PLOAM_DIAG=n it is not
+ *   built at all.
  */
 #ifndef GPON_PLOAM_DIAG_H
 #define GPON_PLOAM_DIAG_H
@@ -72,17 +68,16 @@ enum gpon_ploam_diag_point {
 #define GPON_PDIAG_HAS_ALL		0xfffu
 
 /*
- * ★ THE READER'S LATENESS IS PART OF THE READING (2026-09-07).  The first
- * night's lines showed, at the SECOND Assign_ONU-ID, six DS PLOAMs accepted
- * since the first -- and zero at the third and at the Deactivate.  So every
- * message of the OLT's 240 ms sequence had already reached the silicon before
- * the software handled the second one: the software was draining a backlog,
- * and the ONU-ID it wrote at the first Assign was written into a window the
- * OLT had partly spent.  A line that reports the silicon's counters without
- * saying how late the software that read them was cannot show that.  Hence
- * `poll_gap_ms` (the shell's own poll cadence, as it actually ran) and
- * `rx_burst_idx` (how many DS PLOAMs this same poll had already dequeued
- * before the one being reported: 0 = fresh, N = a backlog of N).
+ * ★ THE READER'S LATENESS IS PART OF THE READING (2026-09-07).  At the SECOND
+ * Assign_ONU-ID the lines showed six DS PLOAMs accepted since the first, and
+ * zero at the third and at the Deactivate: every message of the OLT's 240 ms
+ * sequence had already reached the silicon before the software handled the
+ * second one, so the software was draining a backlog and the ONU-ID written at
+ * the first Assign went into a window the OLT had partly spent.  Counters
+ * reported without saying how late their reader was cannot show that.  Hence
+ * `poll_gap_ms` (the shell's poll cadence as it actually ran) and
+ * `rx_burst_idx` (DS PLOAMs this same poll dequeued before the one reported:
+ * 0 = fresh, N = a backlog of N).
  */
 struct gpon_ploam_diag {
 	u32 valid;		/* GPON_PDIAG_HAS_*: a clear bit is COULD NOT ASK       */
@@ -110,17 +105,15 @@ struct gpon_ploam_diag {
 /*
  * ★ THE ACCEPTED-GRANT CAPTURE, accumulated between two sample points
  * (2026-09-07).  The Luna GTC keeps a capture buffer of the BWmap allocations
- * it ACCEPTED (measured on the RTL9602C with a second ONU Online on the same
- * PON: 20 s of capture held exactly ONE entry, the SN grant we answered, and
- * none of the other ONU's -- the engine is post-filter).  The shell harvests
- * it every poll while activating and adds into this; the core only counts and
- * formats.  What an entry LOOKS like is the silicon's business: the shell
- * decodes its own capture format and hands over counts, plus the raw words of
- * the last PLOAMu allocation that resolved to the OMCC T-CONT, for a human.
+ * it ACCEPTED, post-filter -- measured on the RTL9602C with a second ONU Online
+ * on the same PON: 20 s of capture held exactly ONE entry, the SN grant we
+ * answered, and none of the other ONU's.  The shell harvests it every poll
+ * while activating, decodes its own capture format and hands over counts plus
+ * the raw words of the last PLOAMu allocation resolving to the OMCC T-CONT; the
+ * core only counts and formats.
  *
- * `valid` is the HAS bit set: a family without such an engine leaves it clear
- * and every field renders n/a.  With it set, a zero is a zero: "no grant
- * accepted between these two points" is the device finding this exists for.
+ * `valid` clear = COULD NOT ASK, every field n/a.  Set, a zero is a zero: "no
+ * grant accepted between these two points" is the finding this exists for.
  */
 #define GPON_BWCAP_HAS			0x01u
 

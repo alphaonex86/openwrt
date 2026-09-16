@@ -83,6 +83,15 @@ enum l34_tbl {
 /* Two more index CHOICES the same argument covers, and they ...
  * dev/MEASURED-rtl9602c_l34.h.md sec 5. */
 #define L34_RT_CPU_SLOT_OFF	8	/* L3ROUTE[netif + 8] = that netif's CPU self-route */
+
+/* The general LPM pool: L3ROUTE[2..7].  The table's convention is
+ * L3ROUTE[netif] = that netif's local route and L3ROUTE[netif + 8] = its CPU
+ * self-route, and this driver provisions exactly TWO netifs (0 = WAN, 1 = LAN),
+ * so slots 2..7 are unreachable by that convention and free for real routes.
+ * ⚠ THE CONSTRAINT IS LOAD-BEARING: provisioning a third netif would collide,
+ * so l34_rt_pool_slot() refuses an index the pool cannot hold. */
+#define L34_RT_POOL_BASE	2
+#define L34_RT_POOL_N		6
 #define L34_ARP_WAN_BASE	64	/* the WAN half of the 128-entry ARP table */
 
 /* L2 unicast table (the gateway/peer destination MAC). ...

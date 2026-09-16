@@ -158,6 +158,7 @@ void l34_napt_encode(u32 *w, u16 naptr_idx);
 void l34_netif_encode(u32 *w, const u8 *mac, u32 ip, u16 vlan);
 void l34_rt_wan_encode(u32 *w, u8 netif_idx);
 void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx);
+void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx);
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx);
 void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx);
 void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx);

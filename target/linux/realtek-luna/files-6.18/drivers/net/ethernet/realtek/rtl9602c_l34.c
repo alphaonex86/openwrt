@@ -287,7 +287,7 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 			   const u8 *wan_mac, u32 gw_ip, const u8 *gw_mac,
 			   u8 wan_port, u16 vlan)
 {
-	struct l34_prog_step step[6] = { { 0 } };
+	struct l34_prog_step step[7] = { { 0 } };
 	int l2idx, ret;
 
 	if (!l->ready)
@@ -351,6 +351,17 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[5].idx = idx + L34_RT_CPU_SLOT_OFF;
 	step[5].words = L34_WORDS_L3ROUTE;
 	l34_rt_cpu_encode(step[5].w, wan_ip, idx);
+
+	/* The UPPER half of the default route.  MASK is a prefix CODE (0 => /1),
+	 * so /0 cannot be expressed and the local route above covers 0.0.0.0/1
+	 * ONLY -- every destination at or above 128.0.0.0 had no LPM match, and
+	 * an offloaded flow to one is dropped while software forwards it fine.
+	 * Two /1 entries express what /0 cannot.  RE: stock writes one routing
+	 * entry per route (rtk_l34_routingTable_set); this is the same table. */
+	step[6].tbl = L34_TBL_L3ROUTE;
+	step[6].idx = L34_RT_POOL_BASE + idx;
+	step[6].words = L34_WORDS_L3ROUTE;
+	l34_rt_wan_net_encode(step[6].w, 0x80000000u, 1, idx);
 
 	ret = l34_prog_run(step, ARRAY_SIZE(step), l34_prog_wr, l);
 out:

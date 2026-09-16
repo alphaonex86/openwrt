@@ -150,6 +150,26 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
 }
 
+/* A WAN-side network route: process=ARP, INT=0 (external), pointing at the WAN
+ * netif so the packet leaves through its nexthop.
+ *
+ * The prefix is a CODE (mask = prefix - 1), so /0 CANNOT BE EXPRESSED at all --
+ * 0 already means /1.  A default route therefore needs TWO entries, 0.0.0.0/1
+ * and 128.0.0.0/1, and writing only the first (which is what IP/MASK left at 0
+ * gives) covers barely half the address space: every destination at or above
+ * 128.0.0.0 has no LPM match and an offloaded flow to it is dropped.
+ */
+void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx)
+{
+	l34_field_set(w, L34_RT_IP_LSP,        L34_RT_IP_W,        net);
+	l34_field_set(w, L34_RT_MASK_LSP,      L34_RT_MASK_W,      prefix - 1);
+	l34_field_set(w, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_ARP);
+	l34_field_set(w, L34_RT_INT_LSP,       L34_RT_INT_W,       0);	/* WAN */
+	l34_field_set(w, L34_RT_DENTIF_LSP,    L34_RT_DENTIF_W,    netif_idx);
+	l34_field_set(w, L34_RT_RT2WANINF_LSP, L34_RT_RT2WANINF_W, 1);
+	l34_field_set(w, L34_RT_VALID_LSP,     L34_RT_VALID_W,     1);
+}
+
 /* The /32 CPU self-route (mask code 31): traffic addressed to ...
  * dev/MEASURED-rtl9602c_l34_logic.c.md sec 4. */
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx)

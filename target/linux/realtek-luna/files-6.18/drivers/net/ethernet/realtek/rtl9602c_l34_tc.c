@@ -118,6 +118,9 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		return ret;
 	}
 	*idx_out = f->hw_index;
+	/* Remember it so the dump can read the entry back -- see L34_RECENT. */
+	ep->l34.recent_idx[ep->l34.recent_n % L34_RECENT] = (u16)f->hw_index;
+	ep->l34.recent_n++;
 	return 0;
 }
 

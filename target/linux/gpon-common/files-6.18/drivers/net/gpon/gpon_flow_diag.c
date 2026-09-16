@@ -58,7 +58,7 @@ static int diag_u32(char *out, size_t sz, const char *tag,
 int gpon_flow_diag_line(const struct gpon_flow_tally *t,
 			const struct gpon_flow_diag *d, char *out, size_t sz)
 {
-	unsigned int i, refused = 0;
+	unsigned int i, refused = 0, by_design = 0;
 	int pos;
 
 	if (!out || !sz)
@@ -78,11 +78,23 @@ int gpon_flow_diag_line(const struct gpon_flow_tally *t,
 		return pos + scnprintf(out + pos, sz - pos,
 				       " | installed=n/a refused=n/a (no tally)");
 
+	/* ★ BY_DESIGN IS NOT A REFUSAL AND MAY NOT BE COUNTED AS ONE.  The enum's
+	 * own comment says so -- the family DECLINED because this leg needs no
+	 * flow of its own -- and on a board where every DS leg declines, summing
+	 * it made `refused` read as a near-total refusal (14494 of 14502) of an
+	 * engine that was working exactly as designed.
+	 */
+	by_design = t->n[GPON_FLOW_REF_BY_DESIGN];
 	for (i = GPON_FLOW_OK + 1; i < GPON_FLOW_REF__COUNT; i++)
-		refused += t->n[i];
-	pos += scnprintf(out + pos, sz - pos, " | installed=%u refused=%u last=%s",
-			 t->n[GPON_FLOW_OK], refused,
-			 refused ? gpon_flow_refusal_name(t->last) : "none");
+		if (i != GPON_FLOW_REF_BY_DESIGN)
+			refused += t->n[i];
+	pos += scnprintf(out + pos, sz - pos, " | installed=%u refused=%u",
+			 t->n[GPON_FLOW_OK], refused);
+	if (by_design)
+		pos += scnprintf(out + pos, sz - pos, " by-design=%u", by_design);
+	pos += scnprintf(out + pos, sz - pos, " last=%s",
+			 (refused || by_design) ? gpon_flow_refusal_name(t->last)
+						: "none");
 
 	/* Only the causes that FIRED, so a healthy board prints nothing here. */
 	pos += scnprintf(out + pos, sz - pos, " why{");

@@ -59,11 +59,24 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	*idx_out = 0;
 	if (!ep || !ep->l34.ready)
 		return -ENODEV;
+	/* Record the key BEFORE any refusal: a flow that is declined is exactly
+	 * the one nothing else names.  See struct l34_offer. */
+	{
+		struct l34_offer *o = &ep->l34.recent_offer[ep->l34.offer_n %
+							    L34_RECENT];
+
+		o->sip   = k->ip_sa;
+		o->dip   = k->ip_da;
+		o->sport = k->l4_sport;
+		o->dport = k->l4_dport;
+		o->proto = k->ip_protocol;
+		ep->l34.offer_n++;
+	}
 	/* ⚠ THE REPLY LEG IS NOT A REFUSAL AND MAY NOT BE COUNTED AS ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 6. */
 	if (ctx->ds_leg || a->nat_is_da) {
 		ep->l34.ds_legs++;
-		return -EOPNOTSUPP;
+		return GPON_FLOW_DECLINED;
 	}
 
 	/* ★ THE VALUES FIRST, THE FLOW SECOND. The interface tables ...

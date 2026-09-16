@@ -27,10 +27,32 @@ enum gpon_flow_refusal {
 	GPON_FLOW_REF_ACTION_ID,	/* an action verb we do not implement   */
 	GPON_FLOW_REF_INCOMPLETE,	/* redirect / NAT / port: one missing   */
 	GPON_FLOW_REF_NOMEM,
-	GPON_FLOW_REF_ENGINE,		/* the family's install() said no       */
+	GPON_FLOW_REF_ENGINE,		/* the family's install() FAILED        */
+	GPON_FLOW_REF_BY_DESIGN,	/* the family DECLINED: this leg needs
+					 * no flow of its own. NOT a refusal,
+					 * and counting it as one made the
+					 * ledger report half of every offer as
+					 * an engine failure -- measured on the
+					 * X111W: 14504 of 28988.             */
 	GPON_FLOW_REF_TABLE_INSERT,	/* the cookie map refused the entry     */
 	GPON_FLOW_REF__COUNT
 };
+
+/* `install()` says the leg needs no flow of its own.  POSITIVE on purpose: 0 is
+ * installed and every negative is an errno, so this cannot collide -- and it
+ * lives here, beside the function that READS it, because the two are ONE
+ * convention and splitting them is how a sign rule drifts. */
+#define GPON_FLOW_DECLINED	1
+
+/* Which cause an install() return carries.  PURE, and it is the ONE place that
+ * decision lives: `install()` returns 0 installed, a POSITIVE value for a
+ * by-design decline, and a negative errno for a real refusal.  ⚠ THE ERRNO
+ * CANNOT CARRY IT -- Luna answers -EOPNOTSUPP both for the reply leg and for
+ * every genuine refusal, so a core that read the errno would have to guess. */
+static inline enum gpon_flow_refusal gpon_flow_install_cause(int err)
+{
+	return err > 0 ? GPON_FLOW_REF_BY_DESIGN : GPON_FLOW_REF_ENGINE;
+}
 
 /* Never NULL, "?" for an out-of-enum value. */
 const char *gpon_flow_refusal_name(enum gpon_flow_refusal r);

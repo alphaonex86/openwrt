@@ -24,6 +24,7 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 
+#include "luna_l34_acc.h"
 #include "rtl9602c_l34.h"
 #include "gpon_flow_offload.h"
 
@@ -41,32 +42,17 @@ static inline void l34_wr(struct rtl9602c_l34 *l, u32 off, u32 val)
 
 /* l34_field_get() moved to rtl9602c_l34_logic.c (flowcore, ...
  * dev/MEASURED-rtl9602c_l34.c.md sec 1. */
+/* ★ THE BODY MOVED TO FAMILY TIER, 2026-09-16 (luna_l34_acc.h).  This is the ONE
+ * thing this family's two L3/L4 engines share -- the NAPT model here and the
+ * FLOWBASED model on the RTL9603CVD -- and it lived as `static` inside the file
+ * belonging to exactly one of them, so a second die could only get it by copying.
+ * Nothing the engine sees changes: this chip's four addresses and its command-word
+ * layout are the same values, now expressed as a per-die TABLE. */
 static int l34_tbl_op(struct rtl9602c_l34 *l, enum l34_tbl type, u16 idx,
 		      u32 *w, unsigned int n, bool write)
 {
-	u32 cmd, exe = write ? L34_CMD_WR_EXE : L34_CMD_RD_EXE;
-	unsigned int i, t;
-
-	if (write)
-		for (i = 0; i < n; i++)
-			l34_wr(l, L34_WDATA + 4 * i, w[i]);
-
-	cmd = exe | ((type & L34_CMD_TYPE_MASK) << L34_CMD_TYPE_SHIFT) |
-	      (idx & L34_CMD_IDX_MASK);
-	l34_wr(l, L34_CMD, cmd);
-
-	for (t = 0; t < L34_EXE_POLL_US; t++) {
-		if (!(l34_rd(l, L34_CMD) & exe))
-			break;
-		udelay(1);
-	}
-	if (l34_rd(l, L34_CMD) & exe)
-		return -ETIMEDOUT;
-
-	if (!write)
-		for (i = 0; i < n; i++)
-			w[i] = l34_rd(l, L34_RDATA + 4 * i);
-	return 0;
+	return luna_l34_tbl_op(l->sw, &luna_l34_acc_rtl9602c, (u8)type, idx,
+			       w, n, write);
 }
 
 static int l34_tbl_write(struct rtl9602c_l34 *l, enum l34_tbl type, u16 idx,
@@ -641,6 +627,15 @@ static void l34_proc_show_recent(struct seq_file *sf, struct rtl9602c_l34 *l)
 {
 	u32 w[L34_WORDS_NAPTR_IN] = { 0 };
 	unsigned int i, n;
+
+	n = l->offer_n < L34_RECENT ? l->offer_n : L34_RECENT;
+	seq_printf(sf, "recent flow keys OFFERED (%u of %u):\n", n, l->offer_n);
+	for (i = 0; i < n; i++) {
+		const struct l34_offer *o = &l->recent_offer[i];
+
+		seq_printf(sf, "  offer %pI4h:%u -> %pI4h:%u proto %u\n",
+			   &o->sip, o->sport, &o->dip, o->dport, o->proto);
+	}
 
 	n = l->recent_n < L34_RECENT ? l->recent_n : L34_RECENT;
 	seq_printf(sf, "recent NAPT entries (%u of %u installed):\n",

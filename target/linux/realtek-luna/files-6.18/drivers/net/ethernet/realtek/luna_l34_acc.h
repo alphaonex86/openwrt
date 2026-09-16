@@ -134,12 +134,29 @@ static const struct luna_l34_acc luna_l34_acc_rtl9602c = {
  * Every access still REFUSES, for the remaining reason and not the old one --
  * a bit position is not a field's meaning.
  */
+/*
+ * MEASURED 2026-09-16 from this die's OWN register list in the board's stock
+ * kernel: NAT_TBL_ACCESS_CTRL (0x801100) carries six fields, and the layout is
+ * bit-identical on the RTL9607C, which is the cross-check.  [24] and [19:16]
+ * are PROVEN roles -- rg_asic_table_write sets exactly those two -- and [15:0]
+ * is the index field the 9603CVD path uses; [25] is read-execute by
+ * elimination and agrees with what this driver already ships for the 9602C.
+ * dev/re-tools/FINDING-flowbased-entry-layout-recovered-2026-09-16.md
+ */
+static const struct luna_l34_cmd_layout luna_l34_cmd_rtl9603cvd = {
+	.rd_exe		= BIT(25),
+	.wr_exe		= BIT(24),
+	.type_shift	= 16,		/* [19:16] table type */
+	.type_mask	= 0xf,
+	.idx_mask	= 0xffff,	/* [15:0] entry index */
+};
+
 static const struct luna_l34_acc luna_l34_acc_rtl9603cvd = {
 	.cmd		= 0x801100,
 	.clr		= 0x801104,
 	.rdata		= 0x801110,
 	.wdata		= 0x801180,
-	.cmd_layout	= NULL,		/* NOT ESTABLISHED -- refuses, never guesses */
+	.cmd_layout	= &luna_l34_cmd_rtl9603cvd,
 };
 
 /**

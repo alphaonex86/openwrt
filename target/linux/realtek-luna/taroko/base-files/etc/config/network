@@ -36,7 +36,18 @@ config globals 'globals'
 config device
 	option name 'br-lan'
 	option type 'bridge'
-# ★★★ ONE BRIDGE PORT PER PHYSICAL JACK, which is stock's own shape: its br0
+# ⚠⚠ REVERTED 2026-09-16 PENDING A CONTROL, and the measurement is why.
+# With the per-jack bridge (and rtl9602c_eth.port_vlans=1) the board itself
+# stayed healthy -- host->board ping 4/4, board->far-end ping 0% loss, the
+# per-socket RX counters discriminating correctly -- but TRANSIT through it
+# stopped: offload_ab's software leg went from 104.7/105.1 Mbps to no rate
+# at all, with iperf3 returning a book carrying no bits_per_second. A LAN
+# client's frames are what the per-port VLAN path changes, and nothing else
+# in that run changed, so the bridge goes back to the shape that forwards
+# until the cause is found. The DRIVER half stays (port_vlans defaults 0),
+# so nothing is lost and the experiment is one bootarg away.
+#
+# ONE BRIDGE PORT PER PHYSICAL JACK is stock's own shape: its br0
 # carries eth0.2 and eth0.3 (its capture shows both, with eth0.2 the one holding
 # the cable). Our switch used to give EVERY port SW_DEFAULT_VID, so the CPU saw
 # one untagged domain and a single bare eth0 was all that could exist -- the
@@ -50,8 +61,7 @@ config device
 # ⚠ The VIDs are DERIVED, not typed: SW_PORT_VID_BASE (2) + the copper port
 # index, with the CPU and PON ports excluded from the chip's own map. On this
 # die that is ports 0 and 1 -> VIDs 2 and 3, which is exactly what stock shows.
-	list ports 'eth0.2'
-	list ports 'eth0.3'
+	list ports 'eth0'
 
 config interface 'lan'
 	option device 'br-lan'

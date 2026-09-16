@@ -1,8 +1,16 @@
 #
-# RTL9602C "Luna" GPON ONU — fixed network layout for the X111W bring-up image.
+# RTL9603CVD "Luna" GPON ONU (subtarget interaptiv) — the network layout for THIS SoC.
 #
-# Topology: the on-chip switch core bridges both Ethernet jacks (port0 = FE/100M,
-# port1 = GE/1000M) behind the single CPU GMAC netdev (eth0), so eth0 carries
+# ★ PER SoC, NOT PER TARGET (operator, 2026-09-15: "es por SoC"). Until this
+# split the RTL9603CVD booted the RTL9602C's file, which describes TWO copper
+# jacks; this die has FOUR (the G24W is declared FE1/FE2/FE3/GE) and its switch
+# map differs (cpu_port 5, pon_port 4, six ports, and the LUT block moved).
+# Nothing here diverges YET -- the split is deliberately content-identical so it
+# changes no behaviour -- and that is the point: it is what makes a per-SoC
+# difference expressible at all.
+#
+# Topology: the on-chip switch core bridges the Ethernet jacks (this die has four)
+# behind the single CPU GMAC netdev (eth0), so eth0 carries
 # the whole wired LAN. WAN is the GPON datapath, presented to the CPU on VLAN 2
 # (eth0.2) once the ONU activates (O5/OMCI). LAN and WAN are deliberately kept
 # on separate L3 interfaces so the ONU ROUTES + NATs between them (firewall

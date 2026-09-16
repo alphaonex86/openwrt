@@ -119,12 +119,20 @@ static const struct luna_l34_acc luna_l34_acc_rtl9602c = {
  * engine forwarding) while the NAPT model's page answers 1024 words of zero on
  * this die -- two independent tiers agreeing on where the engine is.
  *
- * LAYOUT: NOT ESTABLISHED, deliberately NULL.  The addresses being one page
- * apart says nothing about the bits inside the command word, and this family
- * already has a measured case of a block MOVING between these two revisions.
- * Recovering it means reading `rtk_fc_flowEntry_path12_setting` out of that
- * board's own stock kernel, which needs symbol addresses (the image carries a
- * kallsyms table and no .symtab).  Until then every access REFUSES.
+ * LAYOUT: NOT ESTABLISHED IN THIS TABLE, and still deliberately NULL -- but the
+ * BLOCKER NAMED BELOW IS GONE SINCE 2026-09-16, so do not re-derive it: the
+ * layout IS readable, see FINDING-flowbased-entry-layout-recovered-2026-09-16.md
+ * (8 entry words, 56 field writes for path1/2, from that board's own kernel).
+ * What is still owed is the MEANING of each field and our own mapping onto it,
+ * which is why every access here still refuses.
+ *
+ * The addresses being one page apart says nothing about the bits inside the
+ * command word, and this family already has a measured case of a block MOVING
+ * between these two revisions.
+ * That read is DONE: the image's kallsyms table decodes (53512 symbols), all
+ * three path setters are in it, and their ins/ext streams give the layout.
+ * Every access still REFUSES, for the remaining reason and not the old one --
+ * a bit position is not a field's meaning.
  */
 static const struct luna_l34_acc luna_l34_acc_rtl9603cvd = {
 	.cmd		= 0x801100,

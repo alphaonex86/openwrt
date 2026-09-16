@@ -36,7 +36,22 @@ config globals 'globals'
 config device
 	option name 'br-lan'
 	option type 'bridge'
-	list ports 'eth0'
+# ★★★ ONE BRIDGE PORT PER PHYSICAL JACK, which is stock's own shape: its br0
+# carries eth0.2 and eth0.3 (its capture shows both, with eth0.2 the one holding
+# the cable). Our switch used to give EVERY port SW_DEFAULT_VID, so the CPU saw
+# one untagged domain and a single bare eth0 was all that could exist -- the
+# per-socket information was destroyed in the switch, not missing from the
+# netdev layer.
+# ⚠⚠ IT TRAVELS WITH THE DRIVER HALF: these netdevs exist only while
+# rtl9602c_eth is programming per-port VIDs (rtl9602c_eth.port_vlans=1). Without
+# that bootarg the bridge carries nothing and the board is unreachable on the
+# LAN -- recoverable here because the dev loop is TFTP->RAM, so a powerctl
+# restart returns the board to flash.
+# ⚠ The VIDs are DERIVED, not typed: SW_PORT_VID_BASE (2) + the copper port
+# index, with the CPU and PON ports excluded from the chip's own map. On this
+# die that is ports 0 and 1 -> VIDs 2 and 3, which is exactly what stock shows.
+	list ports 'eth0.2'
+	list ports 'eth0.3'
 
 config interface 'lan'
 	option device 'br-lan'

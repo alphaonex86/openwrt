@@ -30,6 +30,33 @@
 /* US-OMCI TX tuning knobs (see rtl9602c_eth_omci_xmit): the ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 2. */
 static unsigned int omci_sid_idx = 4;	/* PON_SID one-hot shift (word3[28:23]); 4 = SID-64 classify slot (RX_SID group [4]) */
+/* ★★★ ONE VID PER LAN PORT, so the CPU can tell the sockets apart.
+ * Stock does exactly this (tier 2, its own kernel: it runs
+ * 'brctl addif br0 eth0.%d' and a 'vconfig rem' loop over
+ * /sys/class/net | grep eth0.), which is why a stock
+ * X111W shows eth0.2/eth0.3 and ours shows one bare eth0: we give EVERY port
+ * SW_DEFAULT_VID, so the per-socket information is destroyed in the switch
+ * before the CPU sees it, and no netdev layer can get it back.
+ *
+ * ⚠ DEFAULT OFF, AND THAT IS NOT TIMIDITY. Turning it on moves LAN traffic
+ * onto TAGGED frames at the CPU port, so bare eth0 stops receiving and
+ * the board is unreachable over LAN until eth0.<vid> netdevs exist and
+ * are
+ * bridged. The image must carry BOTH halves or it locks itself out; the knob
+ * is what lets the two land in separate, testable steps.
+ */
+static unsigned int port_vlans;
+module_param(port_vlans, uint, 0644);
+MODULE_PARM_DESC(port_vlans,
+		 "one VID per LAN port so the CPU can tell sockets apart (default 0 = every port on SW_DEFAULT_VID, as before). 1 REQUIRES eth0.<vid> netdevs in the image or LAN goes dark");
+
+/* The per-port VID base. Stock's own numbering is FOUND, never chosen -- its
+ * X111W shows eth0.2/eth0.3 -- so this base only has to make the VIDs
+ * DISTINCT and not collide with SW_DEFAULT_VID; which VID reaches which
+ * PRINTED socket is a cable-move measurement (lan_map.py --ask), exactly as
+ * this project's panel-map rule requires. */
+#define SW_PORT_VID_BASE	2u
+
 module_param(omci_sid_idx, uint, 0644);
 MODULE_PARM_DESC(omci_sid_idx, "US-OMCI PON_SID one-hot shift count (default 4 = SID-64 classify slot)");
 
@@ -265,7 +292,27 @@ static int rtl9602c_l34_setup_tc(struct net_device *dev,
  * offload-vs-AQM comparison is one bootarg apart rather than one build.  The
  * default is the OPERATOR'S: it decides which datapath ships, and that decision
  * is taken with measured throughput and loaded latency, never quietly here. */
-static int hw_nat = 0;	/* default off (gated); engine armed lazily on first offload, never at boot */
+static int hw_nat = 1;	/* ON by default (operator, 2026-09-15) */
+/* ★★★ THE DEFAULT IS 1, AND IT IS THE OPERATOR'S CALL, NOT AN INFERENCE.
+ * (2026-09-15: *"=1 por defecto y corrigir"*.)  The standing objective has
+ * always been *"mantener el acelerador de hardware activo por defecto"*, and 0
+ * contradicted it silently: at 0 neither the TC lifecycle handle nor the
+ * /proc node exists, so the board forwarded in software at 11% of stock with
+ * its CPU at 100% and nothing could say why.
+ *
+ * MEASURED before flipping it, not after: `hwnat_wedge_ab.py` booted BOTH arms
+ * twice on the same image bytes and neither wedged -- 0/2 each, the host
+ * pinging the board's own LAN address as the deciding witness.  ⚠ That was at
+ * 10 pps, which is not traffic: it says the gate can be OPENED safely, never
+ * that the engine survives load.  The load question belongs to the benchmark.
+ *
+ * ⚠ AND OPENING IT IS NOT SUFFICIENT, which is why the old comment's "armed
+ * lazily on first offload" was wrong twice over: the thing it claimed to arm
+ * was CONSTRUCTED INSIDE THIS GATE, so nothing could arm it -- and with the
+ * gate open the engine still reads `provisioned 0` and `offered=0`.  What this
+ * default fixes is that the engine and its diagnostic EXIST; what installs a
+ * flow is still owed.
+ */
 module_param(hw_nat, int, 0444);
 MODULE_PARM_DESC(hw_nat, "enable RTL9602C switch L34 hardware NAT offload (0=off)");
 
@@ -608,15 +655,36 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 39. */
 		for (p = 0; p < SW_VLAN_PB_VID_PORTS; p++) {
 			void __iomem *w;
+			u32 vid = SW_DEFAULT_VID;
 
 			if (!(ep->swm->port_mask & BIT(p)))
 				continue;	/* not a port on this chip */
+
+			/* One VID per LAN port: member = that port + the CPU
+			 * port, UNTAGGED on the port and TAGGED toward the CPU,
+			 * which is what lets eth0.<vid> demux the socket. The
+			 * CPU port keeps SW_DEFAULT_VID itself. */
+			if (port_vlans && p != ep->swm->cpu_port) {
+				u32 mbr = BIT(p) | BIT(ep->swm->cpu_port);
+
+				vid = SW_PORT_VID_BASE + p;
+				iowrite32((BIT(p) << 4) | mbr,
+					  ep->sw + SW_TBL_WRDATA);
+				iowrite32(SW_TBL_VLAN_WR(vid),
+					  ep->sw + SW_TBL_CTRL);
+				if (gpon_ind_poll(&io, reg_make(SW_TBL_STS),
+						  SW_TBL_BUSY, SW_TBL_TRIES,
+						  rtl9602c_sw_tbl_pause) < 0)
+					netdev_warn(ep->ndev,
+						    "swcore VLAN table BUSY writing per-port VLAN %u for port %u: that socket will not be separable\n",
+						    vid, p);
+			}
 
 			w = ep->sw + sw_packed_off(SW_VLAN_PB_VID, p,
 						   SW_VLAN_PB_VID_BITS);
 			iowrite32(sw_packed_ins(ioread32(w), p,
 						SW_VLAN_PB_VID_BITS,
-						SW_DEFAULT_VID), w);
+						vid), w);
 		}
 		iowrite32(0xf, ep->sw + SW_VLAN_INGRESS);	/* ingress filter, ports 0-3 */
 		iowrite32(SW_VLAN_CTRL_VAL, ep->sw + SW_VLAN_CTRL); /* enable VLAN function */

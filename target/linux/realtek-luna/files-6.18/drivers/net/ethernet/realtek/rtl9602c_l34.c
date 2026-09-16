@@ -615,6 +615,15 @@ static void l34_proc_show_iface(struct seq_file *sf, struct rtl9602c_l34 *l)
 		seq_printf(sf, "netif[%u] blackholes %u\n", i,
 			   l34_iface_blackholes(netif, cpu_rt, ip, i) ? 1 : 0);
 	}
+	/* ★★ THE GENERAL LPM POOL, WHICH THE LOOP ABOVE COULD NOT REACH.  It
+	 * prints route[i] and route[i+8] for VALID netifs only, so an entry in
+	 * L3ROUTE[2..7] -- where a real route goes, netifs 2..7 never being
+	 * provisioned -- was written and then INVISIBLE.  Adding a table entry a
+	 * dump cannot show is how a repair becomes unverifiable: the upper half
+	 * of the default route landed there and could not be confirmed. */
+	for (i = 0; i < L34_RT_POOL_N; i++)
+		l34_proc_show_rt(sf, l, L34_RT_POOL_BASE + i);
+
 }
 
 static int l34_proc_show(struct seq_file *sf, void *v)

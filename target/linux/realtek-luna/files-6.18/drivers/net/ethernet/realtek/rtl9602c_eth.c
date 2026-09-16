@@ -664,7 +664,15 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 			 * port, UNTAGGED on the port and TAGGED toward the CPU,
 			 * which is what lets eth0.<vid> demux the socket. The
 			 * CPU port keeps SW_DEFAULT_VID itself. */
-			if (port_vlans && p != ep->swm->cpu_port) {
+			/* ⚠ COPPER SOCKETS ONLY.  The CPU port carries the tagged
+			 * trunk, and the PON port is the FIBRE -- giving either
+			 * its own LAN VID would put the WAN datapath in a
+			 * per-socket VLAN.  Both come from the chip's own map,
+			 * never from a literal: pon_port is 2 here and 4 on the
+			 * RTL9603CVD, so a hardcoded skip would be wrong on the
+			 * next board. */
+			if (port_vlans && p != ep->swm->cpu_port &&
+			    p != ep->swm->pon_port) {
 				u32 mbr = BIT(p) | BIT(ep->swm->cpu_port);
 
 				vid = SW_PORT_VID_BASE + p;

@@ -16,6 +16,20 @@
  * the command word's own field positions differ between dies -- so a new die
  * owes a TABLE here, never a driver, which is this port's whole strategy.
  *
+ * ★★★ AND FOR *FLOW ENTRIES* THIS IS THE WRONG MECHANISM ENTIRELY -- MEASURED
+ * 2026-09-16 from that board's own kernel (_rtk_rg_flowEntryWriteToDDR, a
+ * STATIC symbol recovered via kallsyms, so __ksymtab could never have named
+ * it).  The FLOWBASED die does NOT publish a flow entry through this indirect
+ * command path.  It keeps a DRAM SHADOW: memcpy a 32-byte entry at idx*32,
+ * then a cache WRITEBACK+INVALIDATE, and a separate ccInvalidFlow COMMAND to
+ * retire one -- because clearing a bit in DRAM does not tell an engine that may
+ * already hold the row.  VALID is bit 0 of word 0.  The 32 bytes agree with the
+ * layout derived independently from the writer's own ins stream (8 words).
+ * ⇒ a die of the FLOWBASED model owes an ALLOCATOR, a 32-byte PACKER, a
+ * COHERENT PUBLISH and an INVALIDATE command.  It does not owe a row here, and
+ * filling one in would be answering a question this table cannot ask.
+ * See dev/FINDING-flowbased-entries-live-in-dram-2026-09-16.md.
+ *
  * ⚠⚠ AND WHAT IS NOT ESTABLISHED REFUSES RATHER THAN GUESSING.  For the
  * RTL9603CVD the four addresses ARE established (its own chipdef, corroborated by
  * that board's stock capture: 43 non-zero words at the FLOWBASED page while the

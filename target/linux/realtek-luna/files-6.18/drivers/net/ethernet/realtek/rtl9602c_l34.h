@@ -134,6 +134,17 @@ struct rtl9602c_l34 {
 	u32		installs;	/* flows programmed into the engine	*/
 	u32		removals;
 	u32		hits_seen;	/* set hit bits observed -- see the node */
+	/* ★★ ONE READER FOR A CLEAR-ON-READ BITMAP.  L34_NAPT_HIT clears on
+	 * read, and it had TWO readers: the flowtable's per-flow liveness op
+	 * and /proc/flowdump.  Each consumed the other's evidence -- the
+	 * diagnostic could age a live flow OUT by clearing the bit its own GC
+	 * was about to look for, and the witness read zeros because the GC had
+	 * just harvested them.  The bitmap is now swept ONCE per jiffy into a
+	 * sticky shadow; liveness consumes only its OWN slot, and the
+	 * diagnostic consumes nothing, because a DIAG may not destroy evidence
+	 * a control path needs. */
+	u32		hit_shadow[L34_NAPT_ENTRIES / 32];
+	unsigned long	hit_swept;	/* jiffies of the last sweep */
 	u32		refusals;	/* flows left on the software path	*/
 	u32		ds_legs;	/* reply legs declined -- an EXPECTED non-event */
 	/* The last few NAPT indexes this driver INSTALLED, so the dump can read
@@ -149,6 +160,20 @@ struct rtl9602c_l34 {
 #define L34_RECENT		8
 	u16		recent_idx[L34_RECENT];
 	u8		recent_n;
+
+	/* The last few flow keys the core OFFERED, recorded BEFORE any refusal so
+	 * a declined one is visible too.  MEASURED 2026-09-16: offered=188,
+	 * installed=7, live=1, why{dup-cookie=87 engine=94} -- and the single LIVE
+	 * entry was UDP while the throughput legs were TCP, so what was being
+	 * accelerated was the latency probe.  Whether a TCP 5-tuple was ever
+	 * offered at all could not be asked: the counters name CAUSES, never the
+	 * flow they were about. */
+	struct l34_offer {
+		u32	sip, dip;
+		u16	sport, dport;
+		u8	proto;
+	}		recent_offer[L34_RECENT];
+	u8		offer_n;
 	u32		binds;		/* flowtable blocks this driver accepted	*/
 	u32		offered;	/* per-flow requests that REACHED this driver */
 	struct gpon_flow_offload *fo;	/* the COMMON lifecycle, for its diag line */

@@ -17,6 +17,7 @@
  */
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 #include "rtl9602c_l34_logic.h"	/* hoisted logic */
 #include <linux/errno.h>
 #include <linux/proc_fs.h>
@@ -218,14 +219,45 @@ int rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f)
 	return ret;
 }
 
+/* Sweep the clear-on-read hit bitmap into the sticky shadow, at most once per
+ * jiffy.  ⚠ THE COST IS BOUNDED AND IT IS THE POINT: the old per-flow read was
+ * ONE word per flow per GC cycle, so N flows cost N reads; this is at most 128
+ * reads per jiffy however many flows there are, i.e. cheaper above 128 entries
+ * and negligible below.  Caller holds `l->lock`. */
+static void l34_hit_sweep(struct rtl9602c_l34 *l)
+{
+	unsigned int i, now = 0;
+
+	/* wrap-safe, and a never-swept driver (hit_swept == 0) always sweeps */
+	if (l->hit_swept && !time_after(jiffies, l->hit_swept))
+		return;
+	l->hit_swept = jiffies;
+	for (i = 0; i < ARRAY_SIZE(l->hit_shadow); i++) {
+		u32 w = l34_rd(l, L34_NAPT_HIT + 4 * i);
+
+		if (!w)
+			continue;
+		now += hweight32(w);
+		l->hit_shadow[i] |= w;
+	}
+	l->hits_seen += now;
+}
+
 int rtl9602c_l34_flow_hit(struct rtl9602c_l34 *l, u16 hw_index, bool *active)
 {
-	u32 word;
+	unsigned int w = hw_index / 32u, b = hw_index % 32u;
 
 	if (!l->ready)
 		return -ENODEV;
-	word = l34_rd(l, L34_NAPT_HIT + 4 * (hw_index / 32));
-	*active = !!(word & BIT(hw_index % 32));
+	if (w >= ARRAY_SIZE(l->hit_shadow))
+		return -EINVAL;
+	mutex_lock(&l->lock);
+	l34_hit_sweep(l);
+	*active = !!(l->hit_shadow[w] & BIT(b));
+	/* consume THIS slot only: liveness is per flow, and clearing a
+	 * neighbour's bit is how the old single-word read aged other flows out */
+	l->hit_shadow[w] &= ~BIT(b);
+	mutex_unlock(&l->lock);
 	return 0;
 }
 
@@ -759,18 +791,19 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	l34_proc_show_iface(sf, l);
 	l34_proc_show_recent(sf, l);
 
-	/* ONE pass: the read is what clears the bitmap, so it cannot be walked
-	 * twice, and buffering 128 words on the kernel stack to print a summary
-	 * line first is not worth the frame. */
-	seq_puts(sf, "outbound NAPT hit bitmap (set bits = slots matched since the last read of this file):\n");
-	for (i = 0; i < L34_NAPT_ENTRIES / 32; i++) {
-		u32 w = l34_rd(l, L34_NAPT_HIT + 4 * i);
+	/* ★ A DIAG READS THE SHADOW AND CONSUMES NOTHING.  This used to read the
+	 * clear-on-read register itself, so looking at the diagnostic cleared the
+	 * bits the flowtable's own liveness op was about to test -- a witness
+	 * that aged out the flows it was measuring. */
+	l34_hit_sweep(l);
+	seq_puts(sf, "outbound NAPT hit bitmap (set bits = slots matched and not yet consumed by the liveness op):\n");
+	for (i = 0; i < ARRAY_SIZE(l->hit_shadow); i++) {
+		u32 w = l->hit_shadow[i];
 
 		now += hweight32(w);
 		if (w)
 			seq_printf(sf, "  [%4u] 0x%08x\n", i * 32, w);
 	}
-	l->hits_seen += now;
 	seq_printf(sf, "hits_now %u\nhits_seen %u\n", now, l->hits_seen);
 	mutex_unlock(&l->lock);
 	return 0;

@@ -41,6 +41,11 @@ struct gpon_flow_ops {
 
 	/* EVERY decision that must read or write silicon, AND the ...
 	 * dev/MEASURED-gpon_flow_offload.h.md sec 5. */
+	/* -> 0 installed; <0 the engine REFUSED; GPON_FLOW_DECLINED the family
+	 * declined BY DESIGN -- this leg needs no flow of its own, which is
+	 * not a failure and may not be tallied as one.  ⚠ THE ERRNO CANNOT
+	 * CARRY THAT DISTINCTION: Luna returns -EOPNOTSUPP both for the reply
+	 * leg and for every real refusal, so the core would have to guess. */
 	int (*install)(void *sh, const struct gpon_flow_key *key,
 		       const struct gpon_flow_act *act,
 		       const struct gpon_flow_ctx *ctx, void *priv,

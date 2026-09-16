@@ -255,7 +255,11 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	err = fo->ops->install(fo->sh, &key, &act, &ctx, entry_priv(entry),
 			       &entry->idx);
 	if (err) {
-		why = GPON_FLOW_REF_ENGINE;
+		/* A DECLINE IS NOT A FAILURE. TC still hears -EOPNOTSUPP so it
+		 * stops offering this leg, but the ledger says which it was. */
+		why = gpon_flow_install_cause(err);
+		if (err > 0)
+			err = -EOPNOTSUPP;
 		goto out_free;
 	}
 

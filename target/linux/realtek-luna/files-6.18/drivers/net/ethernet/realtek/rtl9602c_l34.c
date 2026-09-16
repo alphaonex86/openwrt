@@ -626,6 +626,69 @@ static void l34_proc_show_iface(struct seq_file *sf, struct rtl9602c_l34 *l)
 
 }
 
+/* The NAPT entries this driver most recently INSTALLED, read BACK from the
+ * silicon and decoded.  Until 2026-09-16 this node showed the hit BITMAP and
+ * the interface tables and never an entry, so the one question a non-matching
+ * flow raises -- does the installed key match the traffic? -- could not be
+ * asked from the board.  Nothing could disagree with us, so no measurement
+ * could catch a wrong field.  MEASURED that day: installs=15, live=1, hits=11
+ * across a 105 Mbps flow, with the CPU still at 83%.
+ *
+ * It reads what the HARDWARE holds, never what the driver believes it wrote:
+ * an entry the silicon rejected or rewrote is exactly the case worth seeing.
+ */
+static void l34_proc_show_recent(struct seq_file *sf, struct rtl9602c_l34 *l)
+{
+	u32 w[L34_WORDS_NAPTR_IN] = { 0 };
+	unsigned int i, n;
+
+	n = l->recent_n < L34_RECENT ? l->recent_n : L34_RECENT;
+	seq_printf(sf, "recent NAPT entries (%u of %u installed):\n",
+		   n, l->recent_n);
+	for (i = 0; i < n; i++) {
+		u16 idx = l->recent_idx[i];
+		u32 out[L34_WORDS_NAPT_OUT] = { 0 };
+		u32 intip, extport, intport, tcp, valid, in_idx;
+
+		/* ⚠⚠ TWO INDEX SPACES, AND CONFLATING THEM READS ZEROS FOREVER.
+		 * `hw_index` addresses NAPT_OUT (the hash slot), and that word
+		 * CARRIES the NAPTR_IN index -- L34_NAPT_HASHIN_IDX says so in
+		 * as many words. The first cut of this renderer read NAPTR_IN
+		 * AT the NAPT_OUT index and printed seven all-zero entries,
+		 * which reads exactly like "the silicon holds nothing" and is
+		 * a bug in the reader. The hit bitmap is indexed by hw_index
+		 * too, which is the cross-check: hits were non-zero while this
+		 * showed empty entries, and that contradiction is what caught
+		 * it. */
+		if (l34_tbl_read(l, L34_TBL_NAPT_OUT, idx, out,
+				 L34_WORDS_NAPT_OUT)) {
+			seq_printf(sf, "  napt_out[%4u] READ FAILED\n", idx);
+			continue;
+		}
+		in_idx = l34_field_get(out, L34_NAPT_HASHIN_IDX_LSP, 12);
+		seq_printf(sf, "  napt_out[%4u] valid %u -> naptr_in[%u] raw %08x\n",
+			   idx, l34_field_get(out, L34_NAPT_VALID_LSP, 1),
+			   in_idx, out[0]);
+		if (l34_tbl_read(l, L34_TBL_NAPTR_IN, in_idx, w,
+				 L34_WORDS_NAPTR_IN)) {
+			seq_printf(sf, "  naptr[%4u] READ FAILED\n", in_idx);
+			continue;
+		}
+		idx = (u16)in_idx;
+		intip   = l34_field_get(w, L34_NAPTR_INTIP_LSP, 32);
+		intport = l34_field_get(w, L34_NAPTR_INTPORT_LSP, 16);
+		extport = l34_field_get(w, L34_NAPTR_EXTPORT_LSP, 16);
+		tcp     = l34_field_get(w, L34_NAPTR_TCP_LSP, 1);
+		valid   = l34_field_get(w, L34_NAPTR_VALID_LSP, 2);
+		seq_printf(sf,
+			   "  naptr[%4u] %pI4h:%u -> extport %u %s valid %u extipidx %u raw %08x %08x %08x\n",
+			   idx, &intip, intport, extport, tcp ? "tcp" : "udp",
+			   valid,
+			   l34_field_get(w, L34_NAPTR_EXTIPIDX_LSP, 3),
+			   w[0], w[1], w[2]);
+	}
+}
+
 static int l34_proc_show(struct seq_file *sf, void *v)
 {
 	struct rtl9602c_l34 *l = sf->private;
@@ -699,6 +762,7 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 		seq_printf(sf, "last_refusal %s\n", l->refuse_why);
 
 	l34_proc_show_iface(sf, l);
+	l34_proc_show_recent(sf, l);
 
 	/* ONE pass: the read is what clears the bitmap, so it cannot be walked
 	 * twice, and buffering 128 words on the kernel stack to print a summary

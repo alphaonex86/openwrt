@@ -136,6 +136,19 @@ struct rtl9602c_l34 {
 	u32		hits_seen;	/* set hit bits observed -- see the node */
 	u32		refusals;	/* flows left on the software path	*/
 	u32		ds_legs;	/* reply legs declined -- an EXPECTED non-event */
+	/* The last few NAPT indexes this driver INSTALLED, so the dump can read
+	 * the entries BACK.  /proc/flowdump rendered the hit BITMAP and the
+	 * interface tables and never the entries, so *does the installed key
+	 * match the flow?* could not be asked from the board at all -- the shape
+	 * this project calls a register the driver writes and cannot read back,
+	 * where nothing can disagree with us.  MEASURED 2026-09-16: installs=15,
+	 * live=1, hits=11 across a 105 Mbps flow, i.e. an entry exists and the
+	 * traffic is not matching it, and no instrument could say which field is
+	 * wrong.  A ring, not a list: it costs 16 bytes and answers the question
+	 * for the flows that matter, which are the most recent. */
+#define L34_RECENT		8
+	u16		recent_idx[L34_RECENT];
+	u8		recent_n;
 	u32		binds;		/* flowtable blocks this driver accepted	*/
 	u32		offered;	/* per-flow requests that REACHED this driver */
 	struct gpon_flow_offload *fo;	/* the COMMON lifecycle, for its diag line */

@@ -212,8 +212,10 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 		return -EOPNOTSUPP;
 	}
 
-	/* The other direction may already hold this cookie. Refusing ...
-	 * dev/MEASURED-gpon_flow_offload.c.md sec 7. */
+	/* ⚠ NOT "the other direction": on 6.18 the cookie is the address of THIS
+	 * direction's own tuple, so the two legs never share one. A dup-cookie is
+	 * the SAME cookie delivered again -- most plausibly by the block-cb
+	 * fan-out. Refusing ... dev/MEASURED-gpon_flow_offload.c.md sec 7. */
 	if (rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params)) {
 		GPON_FLOW_NOTE(fo, GPON_FLOW_REF_DUP_COOKIE);
 		return -EEXIST;

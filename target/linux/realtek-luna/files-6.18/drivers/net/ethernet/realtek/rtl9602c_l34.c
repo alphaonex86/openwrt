@@ -287,7 +287,7 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 			   const u8 *wan_mac, u32 gw_ip, const u8 *gw_mac,
 			   u8 wan_port, u16 vlan)
 {
-	struct l34_prog_step step[5] = { { 0 } };
+	struct l34_prog_step step[6] = { { 0 } };
 	int l2idx, ret;
 
 	if (!l->ready)
@@ -339,6 +339,18 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[4].idx = L34_ARP_WAN_BASE + idx;
 	step[4].words = L34_WORDS_ARP;
 	l34_arp_encode(step[4].w, gw_ip, l2idx);
+
+	/* The /32 CPU self-route for the WAN address.  The LAN side has always
+	 * written one and this side never did, so l34_iface_blackholes() -- our
+	 * own predicate, "the engine claims traffic for this interface and
+	 * nothing terminates its OWN address locally" -- was true for the WAN
+	 * netif on every boot, and /proc/flowdump printed `netif[0] blackholes
+	 * 1` while nobody acted on it.  A NATed reply is addressed to this very
+	 * address.  dev/MEASURED-rtl9602c_l34.c.md sec 14. */
+	step[5].tbl = L34_TBL_L3ROUTE;
+	step[5].idx = idx + L34_RT_CPU_SLOT_OFF;
+	step[5].words = L34_WORDS_L3ROUTE;
+	l34_rt_cpu_encode(step[5].w, wan_ip, idx);
 
 	ret = l34_prog_run(step, ARRAY_SIZE(step), l34_prog_wr, l);
 out:

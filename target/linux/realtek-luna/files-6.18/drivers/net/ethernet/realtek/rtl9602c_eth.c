@@ -308,10 +308,16 @@ static int hw_nat = 1;	/* ON by default (operator, 2026-09-15) */
  *
  * ⚠ AND OPENING IT IS NOT SUFFICIENT, which is why the old comment's "armed
  * lazily on first offload" was wrong twice over: the thing it claimed to arm
- * was CONSTRUCTED INSIDE THIS GATE, so nothing could arm it -- and with the
- * gate open the engine still reads `provisioned 0` and `offered=0`.  What this
- * default fixes is that the engine and its diagnostic EXIST; what installs a
- * flow is still owed.
+ * was CONSTRUCTED INSIDE THIS GATE, so nothing could arm it.
+ *
+ * ✔ MEASURED 2026-09-16, and this comment used to end "with the gate open the
+ * engine still reads provisioned 0 and offered=0 ... what installs a flow is
+ * still owed".  That was true for one day.  With a forwarded connection through
+ * the board the engine reads offered=28988 installed=372 hits=3012 -- it
+ * installs flows and the hardware path counts hits.  What is still owed is
+ * narrower and is NOT about this gate: the case's own forged flow is software
+ * forwarded, and the leading explanation is our INSTRUMENT (the NAPT hit
+ * bitmap is clear-on-read and has two readers).
  */
 module_param(hw_nat, int, 0444);
 MODULE_PARM_DESC(hw_nat, "enable RTL9602C switch L34 hardware NAT offload (0=off)");

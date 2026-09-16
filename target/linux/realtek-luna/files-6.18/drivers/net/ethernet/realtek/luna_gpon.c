@@ -8,6 +8,7 @@
 #include <linux/spinlock.h>
 #include <gpon_omci_core.h>
 #include <gpon_omci_me.h>
+#include <gpon_omci_vlan.h>
 #include <gpon_omci_diag.h>
 #include <gpon_omci_trace.h>
 #include <linux/net.h>
@@ -4208,7 +4209,20 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		{0x18012000, 0x180120fc}, {0x18013400, 0x180134fc},
 		/* The PCIe host controller, so its link state can be COMPARED ...
 		 * dev/MEASURED-luna_gpon.c.md sec 165. */
-		{0x1b800000, 0x1b800ffc},	/* the flow/connection table	*/
+		/* ⚠⚠ THIS SPAN STOPPED ONE PAGE SHORT OF THE ENGINE, and the page
+		 * it did cover is the EMPTY one.  MEASURED 2026-09-16 on two
+		 * independent stock captures of the RTL9603CVD: the NAPT control
+		 * page 0x800000 answers 1024 words and every one is ZERO on that
+		 * die, while the FLOWBASED engine at 0x801000 carries 43 non-zero
+		 * words with the vendor forwarding.  So every capture of OURS held
+		 * the empty page and not one word of the engine this port is
+		 * missing -- swcore_blocks_from_capture said exactly that
+		 * ("NO DECLARED ACCESSOR REACHES 0x00801008.."), and no
+		 * stock-vs-ours diff could ever have shown it.
+		 * ⚠ Both pages are kept: which model a die carries is a DIE fact,
+		 * and a span that covered only the live one here would go blind on
+		 * the NAPT dies where the other page is the live one. */
+		{0x1b800000, 0x1b801ffc},	/* the flow/connection tables	*/
 		{0x18b00700, 0x18b0073c},	/* HOSTCFG: 0x728 = LTSSM state	*/
 		{0x18b01000, 0x18b0101c},	/* HOSTEXT: 0x008 = LTSSM enable	*/
 		{0x18000040, 0x1800005c},	/* SOC_PINMUX at 0x4c		*/
@@ -6218,7 +6232,7 @@ static void luna_omci_poll(void)
 		/* Preserve the shared request/response trace at its new owner. The
 		 * common predicate limits only bulk diagnostics, never acceptance. */
 		if (!gpon_omci_is_bulk(frame.msg, frame.len) || net_ratelimit()) {
-			char line[128];
+			char line[GPON_OMCI_DIAG_LINE_MAX];
 
 			if (gpon_omci_diag_line(frame.msg, frame.len,
 					       n == OMCI_LEN ? response : NULL, n,
@@ -6647,6 +6661,88 @@ static void luna_omci_service(void)
 	luna_data_reconcile();
 }
 
+/* ★★★ THE OLT'S VLAN SERVICE MODEL REACHES THIS FAMILY -- and what it can do
+ * with it is REPORTED rather than claimed.
+ *
+ * The core models the whole of ME 171: it decodes each row, DECIDES it into a
+ * filter+treatment, and hands it to a family through `struct gpon_vlan_ops`,
+ * counting four outcomes. Measured 2026-09-16: NO family filled that table and
+ * NOBODY called the walker, so the entire model -- decode, decide, emit -- was
+ * dead code, and the service the OLT provisions reached nothing at all. That is
+ * the same shape as `rtk_tr142.ko`, which is precisely this translation on the
+ * vendor side, and the same shape as `pf_rg`'s missing half.
+ *
+ * ⚠⚠ `rule_install` REFUSES, ON PURPOSE, AND THAT IS NOT A STUB. No Luna VLAN
+ * rule encoding has been MEASURED for these shapes: writing one from the switch
+ * VLAN tables because they look close would put an unmeasured rule on a WAN that
+ * works today, which is the defect this tree calls a value the author supplied
+ * where a human had to register one. A refusal is a THIRD answer and the ledger
+ * keeps it apart from "nobody was listening": `failed` means the family was
+ * asked and said no, `no_installer` means nothing was there to ask.
+ *
+ * ⇒ what this buys NOW is the measurement that was missing: the OLT's rows, per
+ * instance, with the shapes it actually asks for. The next increment implements
+ * those shapes and not a generic VLAN engine.
+ */
+static int luna_vlan_rule_install(void *ctx, const struct gpon_vlan_rule *r)
+{
+	(void)ctx; (void)r;
+	return -EOPNOTSUPP;	/* asked, and refused -- see the note above */
+}
+
+static int luna_vlan_rule_remove(void *ctx, const struct gpon_vlan_rule *r)
+{
+	(void)ctx; (void)r;
+	return -EOPNOTSUPP;
+}
+
+static const struct gpon_vlan_ops luna_vlan_ops = {
+	.rule_install	= luna_vlan_rule_install,
+	.rule_remove	= luna_vlan_rule_remove,
+};
+
+/* Walk every ME 171 the OLT provisioned and render what came back.  It installs
+ * nothing (see above), so reading this file cannot move the data path. */
+static void luna_vlan_service_show(struct seq_file *s)
+{
+	struct gpon_vlan_commit_result tot = { 0 }, one;
+	struct gpon_vlan_inst_attrs a = { 0 };
+	struct omci_onu *onu;
+	unsigned long flags;
+	unsigned int i, insts = 0;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	onu = luna_omci.onu;
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	if (!onu) {
+		seq_puts(s, "vlan_service: no ONU attached -- could not ask\n");
+		return;
+	}
+	/* ⚠ WALK THE MODEL'S OWN SLOTS. The first cut invented an accessor
+	 * (`gpon_ext_vlan_inst`) that does not exist -- the record carries its
+	 * own `inst` and `used`, so reading it is the honest enumeration. */
+	for (i = 0; i < GPON_EXT_VLAN_MAX; i++) {
+		u16 inst = onu->vlan.ext[i].inst;
+
+		if (!onu->vlan.ext[i].used ||
+		    !gpon_ext_vlan_nrow(&onu->vlan, inst))
+			continue;
+		insts++;
+		gpon_vlan_commit_inst(&onu->vlan, &luna_vlan_ops, NULL, inst,
+				      &a, &one);
+		tot.installed += one.installed;
+		tot.failed += one.failed;
+		tot.no_installer += one.no_installer;
+		tot.undecided += one.undecided;
+	}
+	seq_printf(s,
+		   "vlan_service: me171_inst=%u rows{installed=%u refused=%u no_installer=%u undecided=%u} attr_owed=%u\n",
+		   insts, tot.installed, tot.failed, tot.no_installer,
+		   tot.undecided, onu->vlan.attr_owed);
+	seq_puts(s,
+		 "vlan_service: refused = this family was ASKED and said no (no Luna rule encoding is measured for these shapes); undecided = the CORE could not represent the row\n");
+}
+
 static void luna_omci_seq_show(struct seq_file *s)
 {
 	unsigned long flags;
@@ -6663,6 +6759,7 @@ static void luna_omci_seq_show(struct seq_file *s)
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	seq_printf(s, "omci_queue: queued=%u pending=%u overflow=%u closed=%u accepted=%u resets=%u tx_errors=%u\n",
 		   queued, count, overflow, closed, accepted, resets, tx_errors);
+	luna_vlan_service_show(s);
 	seq_printf(s, "data_owner: admitted=%u installed=%u alloc_bound=%u alloc=%u gem=%u qid=%u error=%d\n",
 		   luna_gpon_data_ready(), READ_ONCE(luna_data.armed.installed),
 		   READ_ONCE(luna_data.armed.alloc_bound), READ_ONCE(luna_data.armed.alloc),

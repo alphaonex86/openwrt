@@ -1760,6 +1760,27 @@ static void cg_omci_declare_uni_panel(struct omci_onu *onu, struct device *dev)
 	of_node_put(np);
 }
 
+/* ★ ONE ARMING SITE FOR THE RESPONDER.  Two callers had grown the same three
+ * lines, and the ONLY difference between them is what an ALREADY-armed
+ * responder owes: stage C leaves it alone, while a cold-start re-arm must
+ * poison the MDS again.  The identity has to have ONE source of truth --
+ * rtl9607c-test/identity_source pins exactly that, and it was red on two
+ * omci_onu_init() call sites.  Caller holds cg->omci_lock.
+ * ⚠ A FIRST ARM DECLARES THE UNI PANEL AND A RE-ARM MUST NOT: the re-arm keeps
+ * the panel it already has, and reading the object again at that point is what
+ * the two callers were careful about before this was one function. */
+static void cg_omci_arm_locked(struct cortina_gpon *cg, bool reinit_if_armed)
+{
+	if (cg->omci_initialized) {
+		if (reinit_if_armed)
+			omci_onu_reinit(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
+	} else {
+		omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
+		cg_omci_declare_uni_panel(cg->omci, cg->dev);
+	}
+	cg->omci_initialized = true;
+}
+
 static int cg_data_teardown(struct cortina_gpon *cg)
 {
 	const struct gpon_gem_us_range *us_slots = &cg_us_data_slots;
@@ -2050,15 +2071,8 @@ static int cg_identity_prepare(struct cortina_gpon *cg)
 		spin_lock_bh(&cg->omci_lock);
 		/* A re-arm keeps the declared UNI panel; a first one has none to
 		 * keep and may not read the object at all.  The flag is the only
-		 * thing that tells the two apart, which is why it decides here. */
-		if (cg->omci_initialized) {
-			omci_onu_reinit(cg->omci, cg->sn,
-					OMCI_MDS_POISON_SEED);
-		} else {
-			omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
-			cg_omci_declare_uni_panel(cg->omci, cg->dev);
-		}
-		cg->omci_initialized = true;
+		 * thing that tells the two apart, and it decides inside. */
+		cg_omci_arm_locked(cg, true);
 		spin_unlock_bh(&cg->omci_lock);
 	}
 	return 0;
@@ -2144,11 +2158,9 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 		spin_lock_bh(&cg->omci_lock);
 		/* CUT SITE: the ME model + MIB reset MOVED to omci_onu_init() ...
 		 * dev/MEASURED-cortina-gpon.c.md sec 94. */
-		if (!cg->omci_initialized) {
-			omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
-			cg_omci_declare_uni_panel(cg->omci, cg->dev);
-			cg->omci_initialized = true;
-		}
+		/* Stage C arms a responder that is not armed yet and leaves an
+		 * armed one exactly as it is -- no MDS poison here. */
+		cg_omci_arm_locked(cg, false);
 		cg->omci_active = true;
 		spin_unlock_bh(&cg->omci_lock);
 		/* ★ RESUME ANY APPLY THE RESPONDER WAS NOT UP FOR: the drain returns

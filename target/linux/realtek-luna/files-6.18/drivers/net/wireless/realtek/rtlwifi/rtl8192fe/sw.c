@@ -1,5 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Clean-room mac80211 PCIe driver for the Realtek RTL8192F. */
+/* Clean-room mac80211 PCIe driver for the Realtek RTL8192F.
+ *
+ * ★★ WHY THIS DRIVER EXISTS AT ALL, MEASURED 2026-09-17 AND NOT ASSUMED. The
+ * standing rule is not to port what a newer mainline kernel already carries, so
+ * the question was asked of mainline directly rather than answered from memory:
+ *   - rtlwifi has NO rtl8192fe. Its Makefile on torvalds/linux master (>= 7.2,
+ *     Sept 2026) builds 8192ce, 8192cu, 8192se, 8192de, 8192du, 8723ae, 8723be,
+ *     8188ee, 8821ae and 8192ee -- and no `fe`. The 6.18.31 tree we build
+ *     against agrees.
+ *   - rtw88 does not claim the die either (8822b/c, 8723x/8703b/8723d, 8821c,
+ *     88xxa/8821a/8812a, 8814a), and nor does rtw89.
+ *   - The ONLY mainline code for this silicon is rtl8xxxu's 8192f.c, and it is
+ *     USB (rtl8192fu). Our part is PCIe, so it cannot serve us.
+ * => there is nothing upstream to switch to, and carrying this driver is
+ * justified rather than habitual. It is also ~24% of the whole port by line
+ * count (`code_share.py`), so the justification is worth writing down where the
+ * next person asks the question.
+ *
+ * ⚠ AND THE CONSEQUENCE FOR BUGS FOUND HERE: they are OURS. When the 40 MHz MAC
+ * data sub-channel and RX DFIR words were found unwritten (an AP up at 40 MHz
+ * delivering no HT40 data frame), the fix could not come from a mainline
+ * backport -- only the REGISTER FACTS could, from rtl8xxxu's USB driver for the
+ * same die, which programs all three correctly and still does on master.
+ */
 
 #include "../wifi.h"
 #include "../core.h"

@@ -48,5 +48,10 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 /* Byte-equality, so a caller can tell "the edge moved" from "nothing changed"
  * without re-deriving what any individual field means. */
 bool gpon_edge_same(const struct gpon_edge *a, const struct gpon_edge *b);
+/* True when everything EXCEPT the next hop matches -- i.e. the same WAN and LAN
+ * interfaces, reached for a destination that resolves to a different next hop.
+ * That is what an ON-LINK peer looks like, and it is a different question from
+ * gpon_edge_same(): the interface tables can stay, the next hop cannot. */
+bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b);
 
 #endif /* GPON_EDGE_H */

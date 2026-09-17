@@ -2213,13 +2213,13 @@ static void cg_optic_anig_show(struct cortina_gpon *cg, struct seq_file *m)
  * dev/MEASURED-cortina-gpon.c.md sec 96. */
 static void cg_optic_sample(struct cortina_gpon *cg, struct seq_file *m)
 {
-	struct cg_bosa_ddm d;
+	struct gpon_ddm_a2h d;
 	s32 rx_cdbm, tx_cdbm;
 
-	if (cg_bosa_ddm_read(cg->dev, &d) != CG_DDM_OK) {
+	if (cg_bosa_ddm_read(cg->dev, &d) != GPON_DDM_OK) {
 		if (m) {
 			seq_printf(m, "optic_ddm      = %s\n",
-				   cg_ddm_status_str(d.status));
+				   gpon_ddm_status_str(d.status));
 			cg_optic_anig_show(cg, m);
 		}
 		return;
@@ -2244,7 +2244,7 @@ static void cg_optic_sample(struct cortina_gpon *cg, struct seq_file *m)
 		unsigned int i;
 
 		seq_printf(m, "optic_ddm      = live (SFF-8472 A2h 0x%02x-0x%02x)\n",
-			   CG_DDM_BASE, CG_DDM_BASE + CG_DDM_LEN - 1);
+			   GPON_DDM_A2H_BASE, GPON_DDM_A2H_BASE + GPON_DDM_A2H_LEN - 1);
 		/* The RAW word sits beside every scaled value on purpose: the
 		 * 0.1 uW LSB is the one thing about RX power this module has not
 		 * independently confirmed (see cortina-gpon-ddm.h), so a reader must
@@ -2253,12 +2253,12 @@ static void cg_optic_sample(struct cortina_gpon *cg, struct seq_file *m)
 		cg_seq_cdbm(m, rx_cdbm);
 		seq_printf(m, " optic_tx_raw: 0x%04x\n", d.tx_pwr);
 		seq_printf(m, "optic_env:   temp_dc=%d bias_ua=%u tx_cdbm=",
-			   cg_ddm_temp_dc(d.temp), cg_ddm_bias_ua(d.bias));
+			   gpon_ddm_temp_dc(d.temp), gpon_ddm_bias_ua(d.bias));
 		cg_seq_cdbm(m, tx_cdbm);
-		seq_printf(m, " vcc_mv=%u\n", cg_ddm_vcc_mv(d.vcc));
+		seq_printf(m, " vcc_mv=%u\n", gpon_ddm_vcc_mv(d.vcc));
 		seq_printf(m, "optic_ddm_raw: %02x..%02x =",
-			   CG_DDM_BASE, CG_DDM_BASE + CG_DDM_LEN - 1);
-		for (i = 0; i < CG_DDM_LEN; i++)
+			   GPON_DDM_A2H_BASE, GPON_DDM_A2H_BASE + GPON_DDM_A2H_LEN - 1);
+		for (i = 0; i < GPON_DDM_A2H_LEN; i++)
 			seq_printf(m, " %02x", d.raw[i]);
 		seq_putc(m, '\n');
 		cg_optic_anig_show(cg, m);

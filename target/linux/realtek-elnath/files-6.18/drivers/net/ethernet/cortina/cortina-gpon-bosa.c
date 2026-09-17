@@ -328,22 +328,22 @@ int cg_bosa_dump(struct device *dev)
 
 /* Read the SFF-8472 A2h real-time diagnostics (bytes 96..105 ...
  * dev/MEASURED-cortina-gpon-bosa.c.md sec 10. */
-int cg_bosa_ddm_read(struct device *dev, struct cg_bosa_ddm *d)
+int cg_bosa_ddm_read(struct device *dev, struct gpon_ddm_a2h *d)
 {
-	u8 raw[CG_DDM_LEN] = { 0 };
+	u8 raw[GPON_DDM_A2H_LEN] = { 0 };
 	unsigned int i;
 	int io_err = 0;
 
-	for (i = 0; i < CG_DDM_LEN; i++) {
-		if (cg_i2c_read_byte(BOSA_I2C_ADDR, CG_DDM_BASE + i, &raw[i])) {
+	for (i = 0; i < GPON_DDM_A2H_LEN; i++) {
+		if (cg_i2c_read_byte(BOSA_I2C_ADDR, GPON_DDM_A2H_BASE + i, &raw[i])) {
 			io_err = 1;
 			break;
 		}
 	}
 
-	if (cg_ddm_decode(raw, io_err, d) != CG_DDM_OK)
+	if (gpon_ddm_a2h_decode(raw, io_err, d) != GPON_DDM_OK)
 		dev_warn_ratelimited(dev, "BOSA DDM: %s\n",
-				     cg_ddm_status_str(d->status));
+				     gpon_ddm_status_str(d->status));
 	return d->status;
 }
 

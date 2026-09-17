@@ -870,7 +870,7 @@ static DEFINE_MUTEX(cn_flow_offload_mutex);
 
 /* Flush every installed nf_flow_table flow (defined after the flow table
  * below); used on a PPPoE sid change - see BUG-B. */
-static void cn_l3e_flush_auto_flows(struct cn_l3e *l3e);
+static int cn_l3e_flush_auto_flows(struct cn_l3e *l3e);
 
 /* Cross-module gate probe for the WAN-side ingress admission: ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 33. */
@@ -974,8 +974,19 @@ int cortina_ni_wan_pppoe_session_set(u16 session)
 	/* ★ BUG-B: a REAL session-id change invalidates every ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 44. */
 	if (session != READ_ONCE(l3e->data_pppoe_session) &&
-	    atomic_read(&cn_flow_installed))
-		cn_l3e_flush_auto_flows(l3e);
+	    atomic_read(&cn_flow_installed)) {
+		int stale = cn_l3e_flush_auto_flows(l3e);
+
+		/* The session DID change upstream, so the new L3-IF is still
+		 * programmed below.  What this reports is narrower and worth
+		 * saying: at least one hardware entry still rewrites with the
+		 * OLD session id.  It keeps its software owner, so the next
+		 * flush or destroy retries it. */
+		if (stale)
+			pr_warn_ratelimited("cortina-l3fe: a flow installed for PPPoE session %#x would not retire (%d); it still rewrites with the old session until it is retried\n",
+					    READ_ONCE(l3e->data_pppoe_session),
+					    stale);
+	}
 
 	if (hw_l3_fwd) {
 		spin_lock_irqsave(&l3e->reg_lock, flags);
@@ -2267,11 +2278,11 @@ static int cn_flow_remove(void *sh, u32 idx, void *priv)
 	return 0;
 }
 
-static void cn_l3e_flush_auto_flows(struct cn_l3e *l3e)
+static int cn_l3e_flush_auto_flows(struct cn_l3e *l3e)
 {
 	/* ★ BUG-B: tear down EVERY installed offloaded flow. Called ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 99. */
-	gpon_flow_offload_flush(cn_fo);
+	return gpon_flow_offload_flush(cn_fo);
 }
 
 static int cn_flow_stats_op(void *sh, u32 idx, void *priv,

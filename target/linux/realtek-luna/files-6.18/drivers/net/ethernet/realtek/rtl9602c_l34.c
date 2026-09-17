@@ -221,23 +221,49 @@ int rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f)
 {
 	u32 zero[L34_WORDS_NAPTR_IN] = { 0 };
 	u32 napt[L34_WORDS_NAPT_OUT];
+	u16 naptr_idx;
 	int ret;
 
 	if (!l->ready)
 		return -ENODEV;
 	mutex_lock(&l->lock);
+	/* Finish what a previous attempt started.  See l34_flow.hw_naptr_owed:
+	 * the outbound slot is already zeroed, so hardware can no longer name
+	 * the rewrite entry and only this index can. */
+	if (f->hw_naptr_owed) {
+		naptr_idx = f->hw_naptr_owed - 1;
+		ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, zero,
+				    L34_WORDS_NAPTR_IN);
+		if (!ret) {
+			f->hw_naptr_owed = 0;
+			l->removals++;
+		}
+		goto out;
+	}
 	/* follow the outbound slot's pointer to also clear the rewrite entry */
 	ret = l34_tbl_read(l, L34_TBL_NAPT_OUT, f->hw_index, napt, L34_WORDS_NAPT_OUT);
-	if (!ret && l34_field_get(napt, L34_NAPT_VALID_LSP, L34_NAPT_VALID_W)) {
-		u16 naptr_idx = l34_field_get(napt, L34_NAPT_HASHIN_IDX_LSP,
-					      L34_NAPT_HASHIN_IDX_W);
+	if (ret || !l34_field_get(napt, L34_NAPT_VALID_LSP, L34_NAPT_VALID_W))
+		goto out;
+	naptr_idx = l34_field_get(napt, L34_NAPT_HASHIN_IDX_LSP,
+				  L34_NAPT_HASHIN_IDX_W);
 
-		l34_tbl_write(l, L34_TBL_NAPT_OUT, f->hw_index, zero,
-			      L34_WORDS_NAPT_OUT);
-		l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, zero,
-			      L34_WORDS_NAPTR_IN);
-		l->removals++;
+	/* ★ THE ORDER IS THE SAFETY PROPERTY.  The outbound slot is what the
+	 * lookup matches, so clearing it FIRST stops the flow; the rewrite
+	 * entry it pointed at is then unreachable and harmless.  The reverse
+	 * order would leave a live flow rewriting through a zeroed entry. */
+	ret = l34_tbl_write(l, L34_TBL_NAPT_OUT, f->hw_index, zero,
+			    L34_WORDS_NAPT_OUT);
+	if (ret)
+		goto out;	/* still referenced -- leave its rewrite entry */
+
+	ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, zero,
+			    L34_WORDS_NAPTR_IN);
+	if (ret) {
+		f->hw_naptr_owed = naptr_idx + 1;
+		goto out;	/* the flow is STOPPED but not fully retired */
 	}
+	l->removals++;
+out:
 	mutex_unlock(&l->lock);
 	return ret;
 }

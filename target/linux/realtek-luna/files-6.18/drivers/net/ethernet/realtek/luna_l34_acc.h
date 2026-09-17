@@ -119,20 +119,23 @@ static const struct luna_l34_acc luna_l34_acc_rtl9602c = {
  * engine forwarding) while the NAPT model's page answers 1024 words of zero on
  * this die -- two independent tiers agreeing on where the engine is.
  *
- * LAYOUT: NOT ESTABLISHED IN THIS TABLE, and still deliberately NULL -- but the
- * BLOCKER NAMED BELOW IS GONE SINCE 2026-09-16, so do not re-derive it: the
- * layout IS readable, see FINDING-flowbased-entry-layout-recovered-2026-09-16.md
- * (8 entry words, 56 field writes for path1/2, from that board's own kernel).
- * What is still owed is the MEANING of each field and our own mapping onto it,
- * which is why every access here still refuses.
+ * LAYOUT: ESTABLISHED 2026-09-16, and this paragraph said the opposite for a
+ * day after it stopped being true -- it still read "deliberately NULL ... every
+ * access here still refuses" while the table below carried a measured layout
+ * and the accesses went through.  A comment that describes the code's previous
+ * state is what a reader checks the silicon against.
  *
  * The addresses being one page apart says nothing about the bits inside the
  * command word, and this family already has a measured case of a block MOVING
- * between these two revisions.
- * That read is DONE: the image's kallsyms table decodes (53512 symbols), all
- * three path setters are in it, and their ins/ext streams give the layout.
- * Every access still REFUSES, for the remaining reason and not the old one --
- * a bit position is not a field's meaning.
+ * between these two revisions -- so the layout was READ rather than assumed:
+ * the image's kallsyms table decodes (53512 symbols), all three path setters
+ * are in it, and their ins/ext streams give it.  See
+ * FINDING-flowbased-entry-layout-recovered-2026-09-16.md.
+ *
+ * ⚠ WHAT IS STILL OWED IS THE *MEANING* OF EACH ENTRY FIELD and our own mapping
+ * onto it -- a bit position is not a field's meaning, and this table describes
+ * the COMMAND WORD, not the 32-byte flow entry, which this die does not publish
+ * through this path at all (see the note above).
  */
 /*
  * MEASURED 2026-09-16 from this die's OWN register list in the board's stock
@@ -189,6 +192,23 @@ static inline int luna_l34_tbl_op(void __iomem *sw,
 		return -EINVAL;
 	L = a->cmd_layout;
 	exe = write ? L->wr_exe : L->rd_exe;
+
+	/* ★★ A COMMAND THAT TIMED OUT CAN STILL OWN THE SHARED DATA BANK.  The
+	 * bank is four registers, not a per-command buffer: the engine reads it
+	 * while EXE is set, so writing the next op's words into it before BOTH
+	 * request bits have cleared hands the engine a mixture of two entries
+	 * and it will store one of them.  Nothing reports that -- the entry
+	 * reads back exactly as written.  Wait for the previous op to let go,
+	 * and refuse rather than proceed if it never does.
+	 * ⚠ It is BOTH bits, not `exe`: a read left executing owns the bank just
+	 * as a write does, and the poll below only ever clears our own. */
+	for (t = 0; t < LUNA_L34_EXE_POLL_US; t++) {
+		if (!(readl(sw + a->cmd) & (L->rd_exe | L->wr_exe)))
+			break;
+		udelay(1);
+	}
+	if (readl(sw + a->cmd) & (L->rd_exe | L->wr_exe))
+		return -ETIMEDOUT;
 
 	if (write)
 		for (i = 0; i < n; i++)

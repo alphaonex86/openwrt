@@ -15,6 +15,7 @@
 #define _RTL9602C_L34_H
 
 #include <linux/types.h>
+#include <linux/bitmap.h>
 #include <linux/mutex.h>
 #include <linux/io.h>
 
@@ -122,12 +123,16 @@ struct l34_flow {
 	u8	egress_netif;		/* L34_TBL_NETIF index of the output interface */
 	u8	nexthop;		/* L34_TBL_NEXTHOP index (gateway L2) */
 	u16	hw_index;		/* assigned NAPT slot, valid after add (for del/stats) */
-	/* A retirement that cleared the outbound slot and then failed to clear
-	 * the rewrite entry it pointed at leaves that index reachable NOWHERE
-	 * else: the outbound slot has been zeroed, so re-reading hardware can
-	 * no longer find it.  BIASED BY ONE -- 0 is a legal NAPTR index, so a
-	 * zero-filled l34_flow must decode to "nothing owed". */
-	u16	hw_naptr_owed;		/* NAPTR index + 1, 0 = the flow owes nothing */
+	/* ★★ THE IDENTITIES ARE RETAINED, NOT RE-READ FROM HARDWARE.  A write
+	 * that TIMED OUT does not establish whether the engine took it, so
+	 * neither index may be recycled and neither entry may be assumed gone.
+	 * Re-reading the outbound slot to find the rewrite index cannot work
+	 * either: retiring zeroes that slot, so a retry after a partial
+	 * retirement would find nothing and orphan the rewrite entry for the
+	 * life of the board.  Index 0 is VALID, so ownership is its own flag. */
+	u16	naptr_index;		/* retained after the outbound slot is cleared */
+	bool	out_owned, in_owned;	/* index zero is valid; writes may time out */
+	bool	installed;		/* this flow's contribution to `installs` */
 };
 
 struct rtl9602c_l34 {
@@ -137,6 +142,13 @@ struct rtl9602c_l34 {
 	bool		engine_on;	/* NAT engine enabled (deferred, lazy) */
 	bool		provisioned;	/* the interface tables hold real values */
 	struct gpon_edge edge;		/* ...and THESE are the values they hold */
+	/* ★ AN INVALID HARDWARE ROW MAY STILL HAVE A LIVE OR PENDING OWNER, so
+	 * the free-way scan may not offer it again: the row reads invalid while
+	 * a timed-out write is still in flight, and handing it to a second flow
+	 * puts two connections on one slot. 1 KiB, and it is the only thing that
+	 * knows the difference. */
+	DECLARE_BITMAP(out_reserved, L34_NAPT_ENTRIES);
+	DECLARE_BITMAP(in_reserved, L34_NAPT_ENTRIES);
 	u32		installs;	/* flows programmed into the engine	*/
 	u32		removals;
 	u32		hits_seen;	/* set hit bits observed -- see the node */

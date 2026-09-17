@@ -196,9 +196,16 @@ static int rtl9602c_l34_op_remove(void *sh, u32 idx, void *priv)
 	struct rtl9602c_eth *ep = sh;
 	struct rtl9602c_l34_priv *p = priv;
 
+	/* ⚠ `idx` IS THE CORE'S PUBLISHED INDEX AND IT IS NOT AN IDENTITY.  This
+	 * used to assign it over p->f.hw_index -- so a cleanup after an install
+	 * that failed BEFORE publishing arrived with 0 and retired entry zero,
+	 * which belongs to somebody else.  The flow's own retained indices are
+	 * the only ones that name what it actually claimed. */
+	(void)idx;
+	if (!p->f.out_owned && !p->f.in_owned)
+		return 0;	/* nothing claimed: cleanup succeeds, engine or not */
 	if (!ep || !ep->l34.ready)
 		return -ENODEV;
-	p->f.hw_index = (u16)idx;
 	return rtl9602c_l34_flow_del(&ep->l34, &p->f);
 }
 

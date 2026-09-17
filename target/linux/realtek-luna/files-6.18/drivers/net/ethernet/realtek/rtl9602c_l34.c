@@ -16,6 +16,7 @@
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
 #include <linux/bitops.h>
+#include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include "rtl9602c_l34_logic.h"	/* hoisted logic */
@@ -138,6 +139,13 @@ int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw)
 	return 0;
 }
 
+/* Caller holds the table mutex; cumulative counters are not ownership. */
+static bool l34_has_owners(struct rtl9602c_l34 *l)
+{
+	return !bitmap_empty(l->out_reserved, L34_NAPT_ENTRIES) ||
+	       !bitmap_empty(l->in_reserved, L34_NAPT_ENTRIES);
+}
+
 /* Scan the 4 ways of a hash bucket for the first slot whose VALID field is 0;
  * returns the entry index, a negative table error, or -ENOSPC if full. */
 static int l34_free_way(struct rtl9602c_l34 *l, enum l34_tbl type, u16 bucket,
@@ -145,10 +153,14 @@ static int l34_free_way(struct rtl9602c_l34 *l, enum l34_tbl type, u16 bucket,
 			unsigned int valid_w)
 {
 	u32 probe[L34_WORDS_NAPTR_IN];	/* sized to the widest entry */
+	const unsigned long *reserved = type == L34_TBL_NAPT_OUT ?
+		l->out_reserved : l->in_reserved;
 	unsigned int way;
 	int ret;
 
 	for (way = 0; way < L34_NAPT_WAYS; way++) {
+		if (test_bit((bucket << 2) + way, reserved))
+			continue;	/* invalid in hardware, still owned here */
 		ret = l34_tbl_read(l, type, (bucket << 2) + way, probe, words);
 		if (ret)
 			return ret;
@@ -170,6 +182,8 @@ int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 
 	if (!l->ready)
 		return -ENODEV;
+	if (f->out_owned || f->in_owned)
+		return -EBUSY;	/* installing over a live owner loses its indices */
 	if (f->l4proto != IPPROTO_TCP && f->l4proto != IPPROTO_UDP)
 		return -EOPNOTSUPP;
 	is_tcp = (f->l4proto == IPPROTO_TCP);
@@ -195,6 +209,14 @@ int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 		goto out;
 	}
 
+	/* ★ RESERVE BOTH IDENTITIES BEFORE EITHER COMMAND CAN BECOME VISIBLE.
+	 * A timeout does not establish whether hardware accepted the write, so
+	 * from here on the cleanup path must be able to name both rows. */
+	f->hw_index = napt_idx;
+	f->naptr_index = naptr_idx;
+	__set_bit(napt_idx, l->out_reserved);
+	__set_bit(naptr_idx, l->in_reserved);
+	f->out_owned = f->in_owned = true;
 	l34_naptr_encode(naptr, f->orig_sip, f->orig_sport, f->egress_netif,
 			 f->nat_sport, is_tcp);
 	ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, naptr, L34_WORDS_NAPTR_IN);
@@ -203,13 +225,10 @@ int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 
 	l34_napt_encode(napt, naptr_idx);
 	ret = l34_tbl_write(l, L34_TBL_NAPT_OUT, napt_idx, napt, L34_WORDS_NAPT_OUT);
-	if (ret) {
-		memset(naptr, 0, sizeof(naptr));	/* roll back the rewrite entry */
-		l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, naptr, L34_WORDS_NAPTR_IN);
-		goto out;
-	}
+	if (ret)
+		goto out;	/* the rewrite entry stays OWNED; flow_del clears it */
 
-	f->hw_index = napt_idx;
+	f->installed = true;
 	l->installs++;
 	ret = 0;
 out:
@@ -220,49 +239,40 @@ out:
 int rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f)
 {
 	u32 zero[L34_WORDS_NAPTR_IN] = { 0 };
-	u32 napt[L34_WORDS_NAPT_OUT];
-	u16 naptr_idx;
-	int ret;
+	int ret = 0;
 
+	if (!f->out_owned && !f->in_owned)
+		return 0;	/* nothing was ever claimed for this flow */
 	if (!l->ready)
 		return -ENODEV;
 	mutex_lock(&l->lock);
-	/* Finish what a previous attempt started.  See l34_flow.hw_naptr_owed:
-	 * the outbound slot is already zeroed, so hardware can no longer name
-	 * the rewrite entry and only this index can. */
-	if (f->hw_naptr_owed) {
-		naptr_idx = f->hw_naptr_owed - 1;
-		ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, zero,
-				    L34_WORDS_NAPTR_IN);
-		if (!ret) {
-			f->hw_naptr_owed = 0;
-			l->removals++;
-		}
-		goto out;
-	}
-	/* follow the outbound slot's pointer to also clear the rewrite entry */
-	ret = l34_tbl_read(l, L34_TBL_NAPT_OUT, f->hw_index, napt, L34_WORDS_NAPT_OUT);
-	if (ret || !l34_field_get(napt, L34_NAPT_VALID_LSP, L34_NAPT_VALID_W))
-		goto out;
-	naptr_idx = l34_field_get(napt, L34_NAPT_HASHIN_IDX_LSP,
-				  L34_NAPT_HASHIN_IDX_W);
-
 	/* ★ THE ORDER IS THE SAFETY PROPERTY.  The outbound slot is what the
-	 * lookup matches, so clearing it FIRST stops the flow; the rewrite
-	 * entry it pointed at is then unreachable and harmless.  The reverse
-	 * order would leave a live flow rewriting through a zeroed entry. */
-	ret = l34_tbl_write(l, L34_TBL_NAPT_OUT, f->hw_index, zero,
-			    L34_WORDS_NAPT_OUT);
-	if (ret)
-		goto out;	/* still referenced -- leave its rewrite entry */
-
-	ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, naptr_idx, zero,
-			    L34_WORDS_NAPTR_IN);
-	if (ret) {
-		f->hw_naptr_owed = naptr_idx + 1;
-		goto out;	/* the flow is STOPPED but not fully retired */
+	 * lookup matches, so clearing it FIRST stops the flow; the rewrite entry
+	 * it points at is then unreachable and harmless.  The reverse order
+	 * would leave a live flow rewriting through a zeroed entry -- and a
+	 * failed outbound clear must NOT go on to remove a rewrite entry that is
+	 * still referenced.  An index is released only once its row is proven
+	 * gone, so a retry finds both halves exactly where it left them. */
+	if (f->out_owned) {
+		ret = l34_tbl_write(l, L34_TBL_NAPT_OUT, f->hw_index, zero,
+				    L34_WORDS_NAPT_OUT);
+		if (ret)
+			goto out;
+		f->out_owned = false;
+		__clear_bit(f->hw_index, l->out_reserved);
 	}
-	l->removals++;
+	if (f->in_owned) {
+		ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, f->naptr_index, zero,
+				    L34_WORDS_NAPTR_IN);
+		if (ret)
+			goto out;
+		f->in_owned = false;
+		__clear_bit(f->naptr_index, l->in_reserved);
+	}
+	if (f->installed) {
+		l->removals++;	/* one removal per INSTALL, never per attempt */
+		f->installed = false;
+	}
 out:
 	mutex_unlock(&l->lock);
 	return ret;
@@ -363,6 +373,12 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 		return -EINVAL;
 
 	mutex_lock(&l->lock);
+	/* The NETIF entry is a CLAIM: rewriting it under a live flow moves
+	 * that flow's egress without its owner ever being told. */
+	if (l34_has_owners(l)) {
+		ret = -EBUSY;
+		goto out;
+	}
 	if (!l->engine_on)
 		l34_engine_on(l);
 
@@ -471,9 +487,16 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	l34_rt_cpu_encode(step[2].w, lan_ip, idx);
 
 	mutex_lock(&l->lock);
+	/* The NETIF entry is a CLAIM: rewriting it under a live flow moves
+	 * that flow's egress without its owner ever being told. */
+	if (l34_has_owners(l)) {
+		ret = -EBUSY;
+		goto out;
+	}
 	if (!l->engine_on)
 		l34_engine_on(l);
 	ret = l34_prog_run(step, ARRAY_SIZE(step), l34_prog_wr, l);
+out:
 	mutex_unlock(&l->lock);
 	return ret;
 }
@@ -544,19 +567,12 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 					     prefix, vlan);
 		pr_info("rtl9602c_l34: lan_setup -> %d\n", ret);
 	} else if (buf[0] == 'f') {
-		struct l34_flow f = { 0 };
-		unsigned int proto, sp, dp, nsp;
-
-		if (sscanf(buf, "f %u %x %u %x %u %x %u",
-			   &proto, &f.orig_sip, &sp, &f.orig_dip, &dp,
-			   &f.nat_sip, &nsp) != 7)
-			return -EINVAL;
-		f.l4proto = proto;
-		f.orig_sport = sp;
-		f.orig_dport = dp;
-		f.nat_sport = nsp;
-		ret = rtl9602c_l34_flow_add(l, &f);
-		pr_info("rtl9602c_l34: flow_add -> %d hw_index=%u\n", ret, f.hw_index);
+		/* ⚠ RETIRED, and not for tidiness: a stack-local l34_flow now
+		 * RESERVES both indices, and nothing outlives this call to
+		 * release them -- one manual add would take a NAPT pair out of
+		 * service until the module is reloaded.  Install through TC,
+		 * whose per-entry owner can retry the cleanup. */
+		return -EOPNOTSUPP;
 	} else if (buf[0] == 'x') {
 		/* Raw indirect table write: the companion of the read-back ...
 		 * dev/MEASURED-rtl9602c_l34.c.md sec 9. */
@@ -568,7 +584,15 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 		if (got < 3)
 			return -EINVAL;
 		mutex_lock(&l->lock);
-		ret = l34_tbl_write(l, (enum l34_tbl)tbl, tidx, w, got - 2);
+		/* The raw verb can address a row a live flow owns, and the
+		 * owner would never learn its entry had been rewritten.  ONE
+		 * exit: an early unlock here puts an unlock BEFORE the write in
+		 * the source, which is how a reader (and l34_iface_safety's
+		 * ordering arm) checks that the write is held. */
+		ret = -EBUSY;
+		if (!l34_has_owners(l))
+			ret = l34_tbl_write(l, (enum l34_tbl)tbl, tidx, w,
+					    got - 2);
 		mutex_unlock(&l->lock);
 		pr_info("rtl9602c_l34: raw write tbl %u idx %u words %u -> %d\n",
 			tbl, tidx, got - 2, ret);

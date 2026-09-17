@@ -481,11 +481,15 @@ int omci_onu_emit_alarm(struct omci_onu *o, u8 *out)
 	return OMCI_LEN;
 }
 
-void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
-		   const u8 *val, unsigned int vlen, u8 *out)
+/* ONE baseline frame layout for everything this core BUILDS, notification and
+ * request alike: TCI, type, DevID 0x0a, class, instance, mask, <= 30 value
+ * octets, then the shipped trailer and MIC. */
+static void omci_frame_build(u8 *out, u16 tci, u8 mt, u16 class_id, u16 inst,
+			     u16 mask, const u8 *val, unsigned int vlen)
 {
 	memset(out, 0, OMCI_LEN);
-	out[2] = OMCI_MT_AVC;
+	omci_put_be16(out, tci);
+	out[2] = mt;
 	out[3] = 0x0a;
 	omci_put_be16(out + 4, class_id);
 	omci_put_be16(out + 6, inst);
@@ -496,7 +500,20 @@ void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		memcpy(out + 10, val, vlen);
 	}
 	omci_finalize(out);
+}
+
+void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
+		   const u8 *val, unsigned int vlen, u8 *out)
+{
+	/* TCI 0: G.988 marks an ONU-autonomous notification with a zero TCI. */
+	omci_frame_build(out, 0, OMCI_MT_AVC, class_id, inst, mask, val, vlen);
 	o->avc_count++;
+}
+
+void omci_set_build(u8 *out, u16 tci, u16 class_id, u16 inst, u16 mask,
+		    const u8 *val, unsigned int vlen)
+{
+	omci_frame_build(out, tci, OMCI_MT_SET, class_id, inst, mask, val, vlen);
 }
 
 int omci_onu_emit_veip_up_avc(struct omci_onu *o, u8 *out)

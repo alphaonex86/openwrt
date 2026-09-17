@@ -3195,7 +3195,7 @@ static int cg_uni_test_set(struct cortina_gpon *cg, const char *arg)
 {
 	u32 rx0, drop0, mic0;
 	unsigned int inst, admin;
-	u8 msg[OMCI_LEN], n, i;
+	u8 msg[OMCI_LEN], admin_val;
 	int slot = -1, port;
 	u16 tci;
 
@@ -3206,12 +3206,8 @@ static int cg_uni_test_set(struct cortina_gpon *cg, const char *arg)
 	 *   would otherwise inject a Set for a UNI this board does not have, and
 	 *   the run would measure nothing while looking like it measured. */
 	spin_lock_bh(&cg->omci_lock);
-	if (cg->omci) {
-		n = cg->omci->pptp_eth_uni.n;
-		for (i = 0; i < n && i < OMCI_UNI_MAX; i++)
-			if (cg->omci->pptp_eth_uni.inst[i] == (u16)inst)
-				slot = i;
-	}
+	if (cg->omci)
+		slot = omci_uni_slot(&cg->omci->pptp_eth_uni, (u16)inst);
 	tci = ++cg_uni_test_tci;
 	spin_unlock_bh(&cg->omci_lock);
 	if (slot < 0) {
@@ -3222,16 +3218,12 @@ static int cg_uni_test_set(struct cortina_gpon *cg, const char *arg)
 	}
 	port = slot < cg_uni_port_n ? (int)cg_uni_port[slot] : -1;
 
-	memset(msg, 0, sizeof(msg));
-	omci_put_be16(msg, tci);		/* a UNIQUE tid per injection */
-	msg[2] = OMCI_MT_SET;			/* AR=0 and AK=0: no response */
-	msg[3] = 0x0a;				/* device identifier: baseline */
-	omci_put_be16(msg + 4, OMCI_ME_PPTP_ETH_UNI);
-	omci_put_be16(msg + 6, (u16)inst);
-	omci_put_be16(msg + 8, 0x0800);		/* attribute 5: administrative state */
-	msg[10] = (u8)admin;
-	omci_finalize(msg);			/* the SHIPPED stamper, so the
-						 * MIC gate below sees a real one */
+	/* ME 11 attribute 5, administrative state: a UNIQUE tid per injection,
+	 * AR=0 and AK=0 so no response is owed.  The octets and the stamper are
+	 * the core's, so the MIC gate below sees a real MIC. */
+	admin_val = (u8)admin;
+	omci_set_build(msg, tci, OMCI_ME_PPTP_ETH_UNI, (u16)inst, OMCI_ATTR_BIT(5),
+		       &admin_val, 1);
 
 	/* ★ THE REQUEST IS ANNOUNCED BEFORE IT IS SUBMITTED: the bottom half can
 	 *   consume it and complete on another CPU before a line printed after the

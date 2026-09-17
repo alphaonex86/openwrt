@@ -146,6 +146,13 @@ u16 omci_alarm_count(const struct omci_onu *o);
 void omci_emit_avc(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		   const u8 *val, unsigned int vlen, u8 *out);
 
+/* An OLT-side Set with NO acknowledgement asked (AR=0, AK=0), on the frame
+ * layout the AVC above uses.  The one spelling for a shell injecting a Set at
+ * its own responder (the uni_test / uni-test diagnostics) and for a host test
+ * modelling an OLT; both families spelled these octets by hand before. */
+void omci_set_build(u8 *out, u16 tci, u16 class_id, u16 inst, u16 mask,
+		    const u8 *val, unsigned int vlen);
+
 /* Store a 16-bit field big-endian, by explicit byte math.
  * ★ IN THE HEADER BECAUSE A SECOND COPY ALREADY EXISTED: the Luna ethernet
  *   driver carried a byte-identical one purely because this was static inline

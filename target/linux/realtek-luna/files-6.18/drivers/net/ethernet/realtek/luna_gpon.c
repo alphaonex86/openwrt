@@ -5936,8 +5936,8 @@ static void luna_uni_test_show(void)
 
 static int luna_uni_test_set(const char *val, const struct kernel_param *kp)
 {
-	u8 msg[OMCI_LEN];
-	unsigned int inst, admin, i;
+	u8 msg[OMCI_LEN], admin_val;
+	unsigned int inst, admin;
 	unsigned long flags;
 	bool declared = false;
 	u16 tci;
@@ -5956,9 +5956,7 @@ static int luna_uni_test_set(const char *val, const struct kernel_param *kp)
 	 *   the run would measure nothing while looking like it measured. */
 	spin_lock_irqsave(&luna_omci_lock, flags);
 	if (luna_omci.onu)
-		for (i = 0; i < luna_omci.onu->pptp_eth_uni.n; i++)
-			if (luna_omci.onu->pptp_eth_uni.inst[i] == (u16)inst)
-				declared = true;
+		declared = omci_uni_slot(&luna_omci.onu->pptp_eth_uni, (u16)inst) >= 0;
 	tci = ++luna_uni_test_tci;
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	if (!declared) {
@@ -5967,15 +5965,11 @@ static int luna_uni_test_set(const char *val, const struct kernel_param *kp)
 		return -ENODEV;
 	}
 
-	memset(msg, 0, sizeof(msg));
-	omci_put_be16(msg, tci);		/* a UNIQUE tid per injection */
-	msg[2] = OMCI_MT_SET;			/* AR=0 and AK=0: no response */
-	msg[3] = 0x0a;				/* device identifier: baseline */
-	omci_put_be16(msg + 4, OMCI_ME_PPTP_ETH_UNI);
-	omci_put_be16(msg + 6, (u16)inst);
-	omci_put_be16(msg + 8, 0x0800);		/* attribute 5: administrative state */
-	msg[10] = (u8)admin;
-	omci_finalize(msg);
+	/* ME 11 attribute 5, administrative state: a UNIQUE tid per injection,
+	 * AR=0 and AK=0 so no response is owed.  The octets are the core's. */
+	admin_val = (u8)admin;
+	omci_set_build(msg, tci, OMCI_ME_PPTP_ETH_UNI, (u16)inst, OMCI_ATTR_BIT(5),
+		       &admin_val, 1);
 
 	/* ★ THE REQUEST IS ANNOUNCED BEFORE IT IS SUBMITTED.  The FSM timer can
 	 *   consume it and the apply can complete on another CPU before a line

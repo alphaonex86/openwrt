@@ -3,7 +3,34 @@ config wifi-device 'radio0'
 	option phy 'phy0'
 	option channel '1'
 	option band '2g'
-	option htmode 'HT20'
+	# ★★ HT40 -- THE DEVICE MAXIMUM, AND ON THIS BAND AN EXPLICIT VALUE IS THE ONLY
+	# WAY TO REACH IT.  MEASURED 2026-09-17 in OpenWrt's own generator:
+	# lib/wifi/mac80211.uc takes `let width = band.max_width` and then, three lines
+	# later, `if (band_name == "2G") width = 20;` -- the 2.4 GHz width is PINNED to
+	# 20 MHz by construction, whatever the radio answers.  The detector beside it
+	# (usr/share/hostap/wifi-detect.uc) computes max_width = 40 correctly from
+	# `band.ht_capa & 0x2` and offers HT40 in `modes`; the generator then discards
+	# it on this band alone.  ⇒ deleting this file would NOT give the radio its own
+	# ceiling here, it would give HT20 again -- which is also why the X400AXF, which
+	# ships no wireless file at all, still comes up at its maximum: it is 5 GHz,
+	# where that clamp does not apply and `width = band.max_width` stands.
+	# ★ THE CEILING ITSELF IS NOT OURS TO PICK -- it is WIFI_MAX_HTMODE['2g'] in each
+	# board's own config.xml, derived from the operator's declared WIFI_MAX_STD 'HT'
+	# (802.11n defines 20 and 40 MHz and nothing wider) and cross-checked live: both
+	# phys answer HT20/HT40, ht_capa 0x106e, with ZERO VHT and ZERO HE lines.
+	# ⚠ CAPABILITY IS NOT PERMISSION and the regulator was asked, not assumed:
+	# `wifi_regdom.py --check 2412 40 above` answers ALLOWED, occupying 2402-2442 MHz
+	# inside Bolivia's permitted 2402-2482 @40 MHz, 20 dBm.
+	# ⚠ AGAINST STOCK THIS IS A *DECLARED* WIDTH DIFFERENCE, NEVER A HIDDEN ONE: what
+	# stock ships CONFIGURED on 2.4 GHz is a separate reading from what the radio CAN
+	# do, and a width difference is published as one row with a note naming both
+	# points -- it is never bolded and never refused.
+	# ⚠⚠ AND THE SHAPE OF THIS FILE REMAINS A DEFECT INDEPENDENT OF ITS VALUE: a fixed
+	# per-target /etc/config/wireless ships ONE radio's operating point to every board
+	# on the target, exactly as this project records for /etc/config/network.  It is
+	# correct for the two Luna boards TODAY only because both carry the same
+	# 2.4 GHz-only part; a Luna board with a 5 GHz radio would silently come up on 2g.
+	option htmode 'HT40'
 	option country 'BO'
 	option disabled '0'
 

@@ -24,6 +24,15 @@
 #define R8192F_IQK_RPT_RXB		0x0ec8
 #define R8192F_NP_ANTA			0x0e20
 #define R8192F_TAP_UPD_97F		0x0e24
+/* The 8192F's 40 MHz words beyond the RF-mode bit: the MAC's data
+ * sub-channel select and the BB's ADC-buffer clock, down-sampling factor
+ * and RX DFIR mode.  Named as mainline rtl8xxxu (the same die on USB) names
+ * them in rtl8192fu_config_channel(); the values are the ones it writes.
+ */
+#define R8192F_DATA_SUBCHANNEL		0x0483
+#define R8192F_ANTDIV_PARA1		0x0ca4
+#define R8192F_DOWNSAM_FACTOR		0x0c10
+#define R8192F_RX_DFIR_MOD_97F		0x0948
 
 /* CCK TX power-shaping filter (PSF) registers revised per channel. */
 #define R8192F_CCK0_TX_FILTER1		0x0a20
@@ -1675,6 +1684,16 @@ void rtl92fe_phy_set_bw_mode_callback(struct ieee80211_hw *hw)
 		break;
 	}
 
+	/* MAC data sub-channel: 2 = primary is the lower 20 MHz (secondary
+	 * above), 1 = upper, 0 = no secondary.  Without it the MAC keeps 20 MHz
+	 * data framing while the BB is at 40 MHz: association completes on the
+	 * duplicate-legacy management frames and no HT40 data frame is
+	 * delivered (measured on the G24W 2026-09-17: 0 of 1000 pings back).
+	 */
+	rtl_write_byte(rtlpriv, R8192F_DATA_SUBCHANNEL,
+		       !ht40 ? 0 :
+		       (mac->cur_40_prime_sc == PRIME_CHNL_OFFSET_LOWER ? 2 : 1));
+
 	/* BB-side bandwidth select.  The 8192F sets the FPGA RF-mode bit on
 	 * both BB sub-banks and re-programs the ADC/DAC clock dividers for
 	 * 40 MHz; the small-BW pseudo-noise weight is cleared first.
@@ -1684,10 +1703,13 @@ void rtl92fe_phy_set_bw_mode_callback(struct ieee80211_hw *hw)
 	rtl_set_bbreg(hw, RFPGA0_RFMOD, BRFMOD, ht40);
 	rtl_set_bbreg(hw, RFPGA1_RFMOD, BRFMOD, ht40);
 
-	/* ADC clock = 160 MHz, DAC clock = 80 MHz, ADC buffer clk. */
+	/* ADC clock = 160 MHz, DAC clock = 80 MHz, ADC buffer clk.  The buffer
+	 * clock is 0xca4[27:26]; this used to write 0xe24[27:26], a field
+	 * mainline never touches, and left the RX DFIR words below unset.
+	 */
 	rtl_set_bbreg(hw, RFPGA0_RFMOD, (BIT(10) | BIT(9) | BIT(8)), 0x4);
 	rtl_set_bbreg(hw, RFPGA0_RFMOD, (BIT(13) | BIT(12)), 0x2);
-	rtl_set_bbreg(hw, R8192F_TAP_UPD_97F, (BIT(27) | BIT(26)), 0x2);
+	rtl_set_bbreg(hw, R8192F_ANTDIV_PARA1, (BIT(27) | BIT(26)), 0x2);
 
 	switch (rtlphy->current_chan_bw) {
 	case HT_CHANNEL_WIDTH_20:
@@ -1703,6 +1725,14 @@ void rtl92fe_phy_set_bw_mode_callback(struct ieee80211_hw *hw)
 	}
 
 	rtl92fe_phy_rf6052_set_bandwidth(hw, rtlphy->current_chan_bw);
+
+	/* RX DFIR for the new width: TAP_UPD 0xe24[21:20], the down-sampling
+	 * factor 0xc10[29:28], and the DFIR mode word 0x948[8:0] (0x3 at
+	 * 40 MHz, 0x1a3 at 20 MHz).
+	 */
+	rtl_set_bbreg(hw, R8192F_TAP_UPD_97F, (BIT(21) | BIT(20)), 0x2);
+	rtl_set_bbreg(hw, R8192F_DOWNSAM_FACTOR, (BIT(29) | BIT(28)), 0x2);
+	rtl_set_bbreg(hw, R8192F_RX_DFIR_MOD_97F, 0x1ff, ht40 ? 0x3 : 0x1a3);
 	rtlphy->set_bwmode_inprogress = false;
 	rtl_dbg(rtlpriv, COMP_SCAN, DBG_LOUD, "\n");
 }

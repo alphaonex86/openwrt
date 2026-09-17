@@ -38,8 +38,37 @@ static bool rtl9602c_l34_is_lan_side(void *sh, struct net_device *dev)
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 5. */
 static int l34_refuse(struct rtl9602c_l34 *l, const char *why)
 {
+	unsigned int i;
+
 	l->refusals++;
 	l->refuse_why = why;			/* a static literal, always */
+	/* Key on the POINTER: the reasons are static literals, so this needs no
+	 * allocation and no comparison of text. A reason past the table is still
+	 * COUNTED, in the last slot, under a name that says so -- silently
+	 * dropping it would be the same blindness one slot smaller. */
+	for (i = 0; i < L34_REFUSE_REASONS; i++) {
+		if (l->refuse_tally[i].why == why) {		/* seen before */
+			l->refuse_tally[i].n++;
+			break;
+		}
+		if (!l->refuse_tally[i].why) {			/* first of its kind */
+			l->refuse_tally[i].why = why;
+			l->refuse_tally[i].n = 1;
+			break;
+		}
+	}
+	if (i == L34_REFUSE_REASONS) {
+		/* Table full and this reason is new: still COUNTED, in the last slot,
+		 * under a name saying the split stopped being exact there.
+		 * ⚠ The first cut could never reach this -- the overflow branch sat
+		 * inside a condition that had already excluded the only case that
+		 * reaches it, so a ninth reason was dropped in SILENCE while the
+		 * comment beside it promised the opposite. And the second cut returned
+		 * early from the loop, which skipped the log line below. */
+		l->refuse_tally[L34_REFUSE_REASONS - 1].why =
+			"(further reasons, table full)";
+		l->refuse_tally[L34_REFUSE_REASONS - 1].n++;
+	}
 	pr_debug_ratelimited("rtl9602c-l34: not offloading -- %s\n", why);
 	return -EOPNOTSUPP;
 }

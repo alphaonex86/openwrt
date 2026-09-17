@@ -822,6 +822,18 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 			   l->vlan_refused, l->vlan_refused_vid);
 	if (l->refuse_why)
 		seq_printf(sf, "last_refusal %s\n", l->refuse_why);
+	/* ★ AND THE SPLIT, which is the half `last_refusal` cannot give: it names a
+	 * cause without saying whether it was 1 of 722 or 722 of 722. Only
+	 * non-zero rows, so a healthy run prints nothing here. */
+	{
+		unsigned int i;
+
+		for (i = 0; i < L34_REFUSE_REASONS; i++)
+			if (l->refuse_tally[i].n)
+				seq_printf(sf, "refused_by %u %s\n",
+					   l->refuse_tally[i].n,
+					   l->refuse_tally[i].why);
+	}
 
 	l34_proc_show_iface(sf, l);
 	l34_proc_show_recent(sf, l);

@@ -131,6 +131,20 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		return ret;
 	}
 	*idx_out = f->hw_index;
+	/* ⚠⚠ SEED THE LIVENESS CLOCK, OR THE FLOW IS TORN DOWN BEFORE IT CAN EVER
+	 * BE HIT.  `priv` arrives ZEROED, `op_stats` writes `last_hit` only inside
+	 * its `if (active)` branch, and it reports `*lastused = p->last_hit` -- so
+	 * a flow installed and polled before its first packet matched answers
+	 * `lastused = 0`, which the flowtable GC reads as "idle since jiffies 0"
+	 * and retires immediately.
+	 *
+	 * MEASURED on the X111W: `installs == removals` EXACTLY on every sitting
+	 * (408/408, 30/30, 30/30) while the engine really was matching packets
+	 * (`hits=414`).  The asymmetry is the evidence -- Cortina seeds this at
+	 * install (`cortina-ni-flowoffload.c`, `entry->last_hit = jiffies` beside
+	 * `installed_at`) and its offload has always held.  A newly installed flow
+	 * is not an idle one. */
+	p->last_hit = jiffies;
 	/* Remember it so the dump can read the entry back -- see L34_RECENT. */
 	ep->l34.recent_idx[ep->l34.recent_n % L34_RECENT] = (u16)f->hw_index;
 	ep->l34.recent_n++;

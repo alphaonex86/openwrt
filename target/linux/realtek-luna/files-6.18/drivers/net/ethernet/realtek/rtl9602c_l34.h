@@ -122,6 +122,12 @@ struct l34_flow {
 	u8	egress_netif;		/* L34_TBL_NETIF index of the output interface */
 	u8	nexthop;		/* L34_TBL_NEXTHOP index (gateway L2) */
 	u16	hw_index;		/* assigned NAPT slot, valid after add (for del/stats) */
+	/* A retirement that cleared the outbound slot and then failed to clear
+	 * the rewrite entry it pointed at leaves that index reachable NOWHERE
+	 * else: the outbound slot has been zeroed, so re-reading hardware can
+	 * no longer find it.  BIASED BY ONE -- 0 is a legal NAPTR index, so a
+	 * zero-filled l34_flow must decode to "nothing owed". */
+	u16	hw_naptr_owed;		/* NAPTR index + 1, 0 = the flow owes nothing */
 };
 
 struct rtl9602c_l34 {

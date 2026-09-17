@@ -128,8 +128,19 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	if (!ep->l34.provisioned || !gpon_edge_same(&edge, &ep->l34.edge)) {
 		/* ⚠ THE INSTALLED FLOWS BELONG TO THE OLD EDGE. A NAPTR's ...
 		 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 9. */
-		if (ep->l34.provisioned)
-			gpon_flow_offload_flush(ep->fo);
+		if (ep->l34.provisioned) {
+			ret = gpon_flow_offload_flush(ep->fo);
+			/* A flow that would not retire STILL FORWARDS, and it
+			 * forwards through the interface tables we are about to
+			 * re-point at the new edge.  Re-pointing them now sends
+			 * that live flow to a gateway it was never NAT'd for. */
+			if (ret)
+				return l34_refuse(&ep->l34,
+						  "a flow installed for the "
+						  "previous edge would not "
+						  "retire, so its hardware "
+						  "entry still forwards");
+		}
 		ret = rtl9602c_l34_provision(&ep->l34, &edge);
 		if (ret) {
 			pr_warn_ratelimited("rtl9602c-l34: the interface tables would not program (%d); staying on software forwarding\n",

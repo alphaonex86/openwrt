@@ -307,13 +307,14 @@ int gpon_flow_offload_diag(const struct gpon_flow_offload *fo,
 #endif
 }
 
-void gpon_flow_offload_flush(struct gpon_flow_offload *fo)
+int gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 {
 	struct rhashtable_iter it;
 	struct gpon_flow_entry *e;
+	int ret = 0;
 
 	if (!fo || !fo->table_ready)
-		return;
+		return 0;
 
 	/* ⚠ REMOVING WHILE WALKING. rhashtable's iterator is ...
 	 * dev/MEASURED-gpon_flow_offload.c.md sec 9. */
@@ -322,23 +323,36 @@ void gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 		rhashtable_walk_start(&it);
 		e = rhashtable_walk_next(&it);
 		while (e && !IS_ERR(e)) {
+			int err;
+
 			rhashtable_walk_stop(&it);
-			fo->ops->remove(fo->sh, e->idx, entry_priv(e));
-			rhashtable_remove_fast(&fo->table, &e->node,
-					       gpon_flow_ht_params);
-			kfree(e);
+			err = fo->ops->remove(fo->sh, e->idx, entry_priv(e));
+			/* An entry the engine would NOT retire keeps its
+			 * software owner: freeing it here drops the only handle
+			 * that could ever retire it, so the hardware entry goes
+			 * on forwarding with nobody left to stop it. */
+			if (err) {
+				if (!ret)
+					ret = err;
+			} else {
+				rhashtable_remove_fast(&fo->table, &e->node,
+						       gpon_flow_ht_params);
+				kfree(e);
+			}
 			rhashtable_walk_start(&it);
 			e = rhashtable_walk_next(&it);
 		}
 		rhashtable_walk_stop(&it);
 	} while (e == ERR_PTR(-EAGAIN));
 	rhashtable_walk_exit(&it);
+	return ret;
 }
 
 int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f)
 {
 	struct gpon_flow_entry *entry;
+	int err;
 
 	if (!fo || !fo->table_ready)
 		return -EOPNOTSUPP;
@@ -348,7 +362,14 @@ int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 	if (!entry)
 		return -ENOENT;
 
-	fo->ops->remove(fo->sh, entry->idx, entry_priv(entry));
+	err = fo->ops->remove(fo->sh, entry->idx, entry_priv(entry));
+	/* THE SAME RULE AS THE FLUSH, one function over: an entry the engine
+	 * would not retire KEEPS its software owner, so the cookie still
+	 * resolves and the kernel's next destroy retries it.  Freeing it here
+	 * reports success, drops the only handle that could retire the hardware
+	 * entry, and leaves it forwarding for the life of the board. */
+	if (err)
+		return err;
 	rhashtable_remove_fast(&fo->table, &entry->node, gpon_flow_ht_params);
 	kfree(entry);
 	return 0;

@@ -75,7 +75,7 @@ void gpon_flow_offload_free(struct gpon_flow_offload *fo);
 
 /* Tear down EVERY installed flow. A family calls this when ...
  * dev/MEASURED-gpon_flow_offload.h.md sec 7. */
-void gpon_flow_offload_flush(struct gpon_flow_offload *fo);
+int gpon_flow_offload_flush(struct gpon_flow_offload *fo);
 
 /* The three TC verbs, dispatched by cookie. */
 int gpon_flow_offload_replace(struct gpon_flow_offload *fo,

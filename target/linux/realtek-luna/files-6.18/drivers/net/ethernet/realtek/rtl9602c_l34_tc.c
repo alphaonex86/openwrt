@@ -128,6 +128,24 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	if (!ep->l34.provisioned || !gpon_edge_same(&edge, &ep->l34.edge)) {
 		/* ⚠ THE INSTALLED FLOWS BELONG TO THE OLD EDGE. A NAPTR's ...
 		 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 9. */
+		/* ⚠⚠ ONE NEXT HOP, AND AN ON-LINK PEER WANTS ITS OWN.  Since the
+		 * core started serving on-link destinations (the next hop IS
+		 * the peer), a second WAN-subnet peer produces an edge that
+		 * differs ONLY in the next hop -- and these interface tables
+		 * hold exactly one.  Flushing here would retire every flow the
+		 * FIRST peer is using, once per new peer, so a change meant to
+		 * accelerate more traffic would accelerate less.  Refuse this
+		 * flow instead: it stays on the software path, the installed
+		 * ones keep theirs, and nothing is ever wrong on the wire.
+		 * ⇒ WHAT WOULD LIFT IT is a per-peer NEXTHOP/ARP allocator --
+		 * l34_flow already carries a `nexthop` index for it -- which is
+		 * a feature, not this repair. */
+		if (ep->l34.provisioned &&
+		    gpon_edge_same_iface(&edge, &ep->l34.edge) &&
+		    rtl9602c_l34_has_owners(&ep->l34))
+			return l34_refuse(&ep->l34,
+					  "this destination needs its own next "
+					  "hop and the interface tables hold one");
 		if (ep->l34.provisioned) {
 			ret = gpon_flow_offload_flush(ep->fo);
 			/* A flow that would not retire STILL FORWARDS, and it

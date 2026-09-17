@@ -72,6 +72,7 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 	struct net_device *lan_l3, *wan_l3;
 	struct flowi4 fl4 = { .daddr = htonl(peer) };
 	struct rtable *rt;
+	__be32 next_hop;
 	int ret = -EAGAIN;
 
 	*why = "";
@@ -91,8 +92,16 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 		ret = PTR_ERR(rt);
 		goto out;
 	}
-	if (rt->rt_gw_family != AF_INET) {
-		*why = "the route to the flow's destination has no IPv4 gateway";
+	/* ★★ AN ON-LINK DESTINATION HAS A NEXT HOP, AND IT IS THE PEER ITSELF.
+	 * AF_UNSPEC means the route needs no gateway because the destination is
+	 * on this interface's own subnet -- rt_nexthop() is the kernel's own
+	 * answer to "who do I hand this frame to", and it returns the daddr
+	 * there.  Refusing AF_UNSPEC turned every WAN-subnet destination into
+	 * "no IPv4 gateway", which is what the X111W's engine said to 1572
+	 * flows on 2026-09-15 for a bench sink on the ONU's own /24. */
+	if (rt->rt_gw_family != AF_INET && rt->rt_gw_family != AF_UNSPEC) {
+		*why = "the WAN route uses an unsupported gateway family";
+		ret = -EOPNOTSUPP;
 		goto out_put;
 	}
 	wan_l3 = rt->dst.dev;
@@ -109,9 +118,10 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 	}
 	e->wan_vlan = gpon_edge_vlan(wan_l3);
 	ether_addr_copy(e->wan_mac, wan_l3->dev_addr);
-	e->gw_ip = ntohl(rt->rt_gw4);
-	if (!gpon_edge_gw_mac(wan_l3, rt->rt_gw4, e->gw_mac)) {
-		*why = "the gateway's MAC is not resolved yet";
+	next_hop = rt_nexthop(rt, fl4.daddr);
+	e->gw_ip = ntohl(next_hop);
+	if (!gpon_edge_gw_mac(wan_l3, next_hop, e->gw_mac)) {
+		*why = "the next hop's MAC is not resolved yet";
 		goto out_put;
 	}
 
@@ -132,6 +142,15 @@ out_put:
 out:
 	rcu_read_unlock();
 	return ret;
+}
+
+bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b)
+{
+	return a->wan_ip == b->wan_ip && a->lan_ip == b->lan_ip &&
+	       a->lan_net == b->lan_net && a->wan_vlan == b->wan_vlan &&
+	       a->lan_vlan == b->lan_vlan && a->lan_prefix == b->lan_prefix &&
+	       ether_addr_equal(a->wan_mac, b->wan_mac) &&
+	       ether_addr_equal(a->lan_mac, b->lan_mac);
 }
 
 bool gpon_edge_same(const struct gpon_edge *a, const struct gpon_edge *b)

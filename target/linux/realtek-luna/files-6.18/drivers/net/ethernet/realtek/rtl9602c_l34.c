@@ -146,6 +146,18 @@ static bool l34_has_owners(struct rtl9602c_l34 *l)
 	       !bitmap_empty(l->in_reserved, L34_NAPT_ENTRIES);
 }
 
+/* The same question from OUTSIDE the lock, for a caller deciding whether a
+ * reprogram would cost somebody else their acceleration. */
+bool rtl9602c_l34_has_owners(struct rtl9602c_l34 *l)
+{
+	bool owned;
+
+	mutex_lock(&l->lock);
+	owned = l34_has_owners(l);
+	mutex_unlock(&l->lock);
+	return owned;
+}
+
 /* Scan the 4 ways of a hash bucket for the first slot whose VALID field is 0;
  * returns the entry index, a negative table error, or -ENOSPC if full. */
 static int l34_free_way(struct rtl9602c_l34 *l, enum l34_tbl type, u16 bucket,

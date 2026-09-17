@@ -3,6 +3,7 @@
  * dev/MEASURED-luna_gpon.c.md sec 1. */
 
 #include <linux/delay.h>
+#include <linux/leds.h>
 #include <linux/firmware.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
@@ -1383,6 +1384,84 @@ static void gpon_led_los_set(bool los)
 	gpon_led_los_val = v;
 }
 
+/* ---- the STANDARD interface: /sys/class/leds ----------------------------
+ *
+ * The panel was already driven (gpon_led_force/_claim/_port above) and the
+ * lamps were reachable from NOWHERE outside this file, so every led_* suite
+ * case blocked on "this image exposes no front-panel LED instrument" -- true
+ * about /sys/class/leds and misleading about the port. This registers the two
+ * lamps the CPU actually FORCES, so their brightness is the truth and not a
+ * guess; the driver keeps driving them from GPON state and a userspace write
+ * is an override the next state change takes back.
+ *
+ * ⚠ THE LINK LAMPS (FE/GE) ARE DELIBERATELY NOT REGISTERED. They are
+ * hardware-auto: the switch lights them from its own port link+activity and
+ * CPU_FORCE_MOD stays 0, so their force field reads 0 while the lamp is LIT.
+ * Publishing that as brightness=0 would be a counter that reads healthy while
+ * describing something else -- the exact defect this tree keeps paying for.
+ * Reporting them honestly means reading the PORT's link state, which lives in
+ * the Ethernet driver; that is owed work, not a thing to fake here. */
+struct luna_panel_led {
+	struct led_classdev cdev;
+	unsigned int idx;
+	bool registered;
+};
+
+static struct luna_panel_led luna_panel_leds[] = {
+	{ .cdev = { .name = "green:pon", .max_brightness = 1 } },
+	{ .cdev = { .name = "red:los",   .max_brightness = 1 } },
+};
+
+static void luna_panel_led_set(struct led_classdev *c, enum led_brightness b)
+{
+	struct luna_panel_led *l = container_of(c, struct luna_panel_led, cdev);
+
+	gpon_led_force(l->idx, b ? LED_FORCE_ON : LED_FORCE_OFF);
+}
+
+static enum led_brightness luna_panel_led_get(struct led_classdev *c)
+{
+	struct luna_panel_led *l = container_of(c, struct luna_panel_led, cdev);
+	/* ⚠ SWCORE, not the PON IP. The first cut read this with pi_packed_get(),
+	 * whose pi_rd() addresses a DIFFERENT BLOCK -- it would have returned a
+	 * confident brightness for a register that is not this lamp's. */
+	u32 v = (sw_rd(LED_FORCE_VALUE) >> (l->idx * 2)) & 3;
+
+	return v == LED_FORCE_OFF ? LED_OFF : LED_FULL;
+}
+
+static void gpon_led_sysfs_init(void)
+{
+	unsigned int i;
+	int rc;
+
+	luna_panel_leds[0].idx = PON_LED_IDX;
+	luna_panel_leds[1].idx = LOS_LED_IDX;
+	for (i = 0; i < ARRAY_SIZE(luna_panel_leds); i++) {
+		luna_panel_leds[i].cdev.brightness_set = luna_panel_led_set;
+		luna_panel_leds[i].cdev.brightness_get = luna_panel_led_get;
+		rc = led_classdev_register(NULL, &luna_panel_leds[i].cdev);
+		if (rc) {
+			pr_warn("luna-gpon: LED %s not exposed at /sys/class/leds (%d)\n",
+				luna_panel_leds[i].cdev.name, rc);
+			continue;
+		}
+		luna_panel_leds[i].registered = true;
+	}
+}
+
+static void gpon_led_sysfs_exit(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(luna_panel_leds); i++) {
+		if (luna_panel_leds[i].registered) {
+			led_classdev_unregister(&luna_panel_leds[i].cdev);
+			luna_panel_leds[i].registered = false;
+		}
+	}
+}
+
 /* Put the controller in parallel mode and claim the PON/LOS indices. Only the
  * two indices we own are touched, so any other panel LED keeps its power-on
  * configuration. */
@@ -1418,6 +1497,11 @@ static void gpon_led_init(void)
 
 	pr_info("luna-gpon: panel LEDs init (PON idx%u / LOS idx%u force-mode; FE idx%u / GE idx%u link-auto)\n",
 		PON_LED_IDX, LOS_LED_IDX, FE_LED_IDX, GE_LED_IDX);
+
+	/* Only now: the class devices describe lamps this function just claimed,
+	 * so a die that returned early above exposes NOTHING rather than a node
+	 * whose brightness nobody drives. */
+	gpon_led_sysfs_init();
 }
 
 
@@ -8436,6 +8520,9 @@ fail_maps:
 
 static void __exit rtl9602c_gpon_exit(void)
 {
+	/* Before any unmap: a class device outliving its register window is a
+	 * write through a stale ioremap the moment someone echoes to it. */
+	gpon_led_sysfs_exit();
 	mutex_lock(&bosa_lock);
 	luna_stopping = true;
 	if (luna_quiesce_locked())

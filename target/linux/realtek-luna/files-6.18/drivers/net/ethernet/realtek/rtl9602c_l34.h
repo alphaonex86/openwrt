@@ -145,6 +145,7 @@ struct rtl9602c_l34 {
 	 * a control path needs. */
 	u32		hit_shadow[L34_NAPT_ENTRIES / 32];
 	unsigned long	hit_swept;	/* jiffies of the last sweep */
+#define L34_REFUSE_REASONS 8	/* distinct refusal sites; a 9th is COUNTED as other */
 	u32		refusals;	/* flows left on the software path	*/
 	u32		ds_legs;	/* reply legs declined -- an EXPECTED non-event */
 	/* The last few NAPT indexes this driver INSTALLED, so the dump can read
@@ -180,6 +181,17 @@ struct rtl9602c_l34 {
 	u32		vlan_refused;	/* ...of those, ones carrying a VLAN tag */
 	u16		vlan_refused_vid;
 	const char	*refuse_why;	/* ...and the reason for the last one	*/
+	/* ★ AND A TALLY PER REASON, because the LAST one answers the wrong
+	 * question. MEASURED on the X111W: 722 engine refusals collapsed into one
+	 * count and one string, so "why did 1.6% of upstream flows install" could
+	 * not be asked at all -- the node named a cause and could not say whether
+	 * it was 1 of 722 or 722 of 722.
+	 * ⚠ The reasons are STATIC LITERALS (see l34_refuse), so the POINTER is the
+	 * key: no allocation, no strcmp, and a slot per distinct site. */
+	struct {
+		const char	*why;
+		u32		n;
+	} refuse_tally[L34_REFUSE_REASONS];
 };
 
 /* Public API (mainline flow-offload glue calls these). */

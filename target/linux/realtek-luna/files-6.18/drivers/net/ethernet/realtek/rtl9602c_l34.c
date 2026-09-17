@@ -112,6 +112,29 @@ int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw)
 	l->sw = sw;
 	mutex_init(&l->lock);
 	l->ready = true;	/* table-access ready; the engine is enabled lazily */
+
+	/* ⚠ DRAIN THE HIT BITMAP ONCE, AND DISCARD IT.  MEASURED 2026-09-16 on the
+	 * X111W with ZERO flows installed: L34_NAPT_HIT read back 82 of 128 words
+	 * NON-ZERO, 1278 of 2624 bits set (48.7%), no two words alike -- power-on
+	 * state, or what the vendor firmware left behind on a TFTP->RAM boot.
+	 * Either way it is not our traffic.
+	 *
+	 * Nothing cleared it, so the FIRST sweep OR'd all of it into `hit_shadow`
+	 * -- which is STICKY (`|=`) and is only ever cleared one slot at a time by
+	 * the liveness op.  A genuine hit is then invisible against a half-set
+	 * background and `hits_seen` carries a constant that has nothing to do
+	 * with packets, which is why `accel_witness_calibration` could not tell
+	 * offload-ON from software forwarding.
+	 *
+	 * The register is CLEAR-ON-READ, so reading it IS the clear: this loop
+	 * needs no write, and it deliberately does NOT touch `hit_shadow` or
+	 * `hits_seen` -- draining into them is exactly the bug. */
+	{
+		unsigned int i;
+
+		for (i = 0; i < L34_NAPT_ENTRIES / 32; i++)
+			(void)l34_rd(l, L34_NAPT_HIT + 4 * i);
+	}
 	return 0;
 }
 
@@ -749,6 +772,18 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	/* A table read writes the shared command register. Serialize the whole
 	 * snapshot against flow installs, raw writes and other readers. */
 	mutex_lock(&l->lock);
+
+	/* ★ A DIAG READS THE SHADOW AND CONSUMES NOTHING.  This used to read the
+	 * clear-on-read register itself, so looking at the diagnostic cleared the
+	 * bits the flowtable's own liveness op was about to test -- a witness
+	 * that aged out the flows it was measuring.
+	 *
+	 * ⚠ AND IT SWEEPS HERE, NOT BESIDE THE BITMAP PRINT.  It used to run AFTER
+	 * the flow-diag line was built, so that line reported `hits_seen` from
+	 * BEFORE this read's own sweep -- always one sweep stale, and 0 on the
+	 * first read however many bits the bitmap held.  MEASURED: a read with
+	 * nothing installed printed `hits=0` and then dumped 1278 set bits. */
+	l34_hit_sweep(l);
 	seq_printf(sf, "provisioned %u\n", l->provisioned ? 1 : 0);
 	if (l->provisioned)
 		seq_printf(sf, "wan %pI4h via %pI4h %pM netif %u\nlan %pI4h/%u %pM netif %u\n",
@@ -791,11 +826,6 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	l34_proc_show_iface(sf, l);
 	l34_proc_show_recent(sf, l);
 
-	/* ★ A DIAG READS THE SHADOW AND CONSUMES NOTHING.  This used to read the
-	 * clear-on-read register itself, so looking at the diagnostic cleared the
-	 * bits the flowtable's own liveness op was about to test -- a witness
-	 * that aged out the flows it was measuring. */
-	l34_hit_sweep(l);
 	seq_puts(sf, "outbound NAPT hit bitmap (set bits = slots matched and not yet consumed by the liveness op):\n");
 	for (i = 0; i < ARRAY_SIZE(l->hit_shadow); i++) {
 		u32 w = l->hit_shadow[i];

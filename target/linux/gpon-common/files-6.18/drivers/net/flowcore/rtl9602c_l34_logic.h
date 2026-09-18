@@ -109,6 +109,12 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_NH_KEEPPPP_W	2
 #define L34_NH_TYPE_ETHER	0	/* the value L34_NH_TYPE already wrote */
 #define L34_NH_TYPE_PPPOE	1
+/* KEEPPPPOP selects what happens to the session header on egress. The die
+ * offers three, and a router NATing LAN traffic onto a PPPoE WAN needs the
+ * third: the upstream frame arrives with no header and must GAIN one. */
+#define L34_NH_PPPOE_REPLACE	0	/* overwrite with PPPOE[pppidx]	*/
+#define L34_NH_PPPOE_KEEP	1	/* leave whatever arrived	*/
+#define L34_NH_PPPOE_KEEP_OR_ADD 2	/* keep, else add PPPOE[pppidx]	*/
 
 /* PPPOE table: 8 entries of ONE word, holding the negotiated session id. The
  * session is a property of the EGRESS, not of a flow, so one entry serves every

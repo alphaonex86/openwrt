@@ -38,6 +38,15 @@ struct gpon_edge {
 	u16	wan_vlan;		/* 0 = untagged				*/
 	u16	lan_vlan;
 	u8	lan_prefix;		/* LAN prefix length, 1..32		*/
+	/* The LIVE negotiated PPPoE session, 0 when the WAN is not PPPoE. It is
+	 * NOT read from the netdevice here: the routing layer has no portable
+	 * way to ask a ppp device for its session, while the flowtable already
+	 * hands it to us as FLOW_ACTION_PPPOE_PUSH. So the SHIM fills this from
+	 * the action, and it rides in the edge because that is what decides when
+	 * the interface tables must be rewritten -- a re-dialled session is a new
+	 * edge, and an engine still holding the old one encapsulates with a
+	 * session the far end has forgotten. */
+	u16	wan_pppoe_sid;
 };
 
 /* Fill *e from the live kernel state. @lan and @wan are the ...

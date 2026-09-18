@@ -218,7 +218,8 @@ struct rtl9602c_l34 {
 int  rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw);
 int  rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 			    const u8 *wan_mac, u32 gw_ip, const u8 *gw_mac,
-			    u8 wan_port, u16 vlan);
+			    u8 wan_port, u16 vlan,
+			    u16 pppoe_sid);
 int  rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 			    const u8 *lan_mac, u32 lan_net, u8 prefix, u16 vlan);
 int  rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e);

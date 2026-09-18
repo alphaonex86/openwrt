@@ -12,11 +12,14 @@
 
 /* The request octets a Get must hold before [8:9] can be read as its mask. */
 #define GET_MASK_END	10
-/* How many value octets a Set line renders.  Bounded on purpose -- see the
- * note in set_detail(). */
-#define SET_VALUE_OCTETS	8
 /* A Create has no mask: its attribute body starts where a Get puts one. */
 #define CREATE_BODY_START	8
+/* One past the last MESSAGE CONTENTS octet of a baseline PDU: [8:39].  What
+ * follows is the CPCS trailer and the MIC, which are not attribute data ...
+ * dev/MEASURED-gpon_omci_diag.c.md sec 7. */
+#define MSG_CONTENTS_END	40
+/* The widest octet run any one field renders: the whole contents area. */
+#define MAX_RENDER_OCTETS	(MSG_CONTENTS_END - CREATE_BODY_START)
 
 /* The detail a Get exchange carries. Appended at `*pos`; the ...
  * dev/MEASURED-gpon_omci_diag.c.md sec 1. */
@@ -54,16 +57,17 @@ static void append_octets(char *out, size_t sz, int *pos, const char *label,
 			  const u8 *pdu, unsigned int len, unsigned int from)
 {
 	static const char hexd[] = "0123456789abcdef";
-	char hex[2u * SET_VALUE_OCTETS + 1u];
-	unsigned int i;
+	char hex[2u * MAX_RENDER_OCTETS + 1u];
+	unsigned int n, i;
 
-	if (len < from + SET_VALUE_OCTETS)
+	if (from >= MSG_CONTENTS_END || len < MSG_CONTENTS_END)
 		return;			/* absent is not zero: print nothing */
-	for (i = 0; i < SET_VALUE_OCTETS; i++) {
+	n = MSG_CONTENTS_END - from;
+	for (i = 0; i < n; i++) {
 		hex[2u * i] = hexd[(pdu[from + i] >> 4) & 0xfu];
 		hex[2u * i + 1u] = hexd[pdu[from + i] & 0xfu];
 	}
-	hex[2u * SET_VALUE_OCTETS] = '\0';
+	hex[2u * n] = '\0';
 	*pos += scnprintf(out + *pos, sz - *pos, "%s%s", label, hex);
 }
 
@@ -110,8 +114,10 @@ static void set_detail(char *out, size_t sz, int *pos, const u8 *pdu,
 	}
 	*pos += scnprintf(out + *pos, sz - *pos, " mask=0x%04x",
 			  ((u16)pdu[8] << 8) | pdu[9]);
-	/* ★ THE FIRST VALUE OCTETS, AND ONLY THE FIRST. The mask ...
-	 * dev/MEASURED-gpon_omci_diag.c.md sec 6. */
+	/* ★ THE WHOLE VALUE AREA, RAW: the mask says WHICH attributes, the
+	 * octets say WHAT -- and [8:15] of a 16-octet ME 171 row is the
+	 * TREATMENT half, which an 8-octet limit hid ...
+	 * dev/MEASURED-gpon_omci_diag.c.md sec 6 and sec 7. */
 	append_octets(out, sz, pos, " val=", pdu, len, GET_MASK_END);
 	result_detail(out, sz, pos, pdu, len, resp, resp_len);
 }

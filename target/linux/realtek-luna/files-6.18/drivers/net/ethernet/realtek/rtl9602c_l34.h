@@ -51,6 +51,7 @@
  * dev/MEASURED-rtl9602c_l34.h.md sec 2. */
 enum l34_tbl {
 	L34_TBL_L3ROUTE		= 0,	/* 16 entries, 2 words: LPM route -> nexthop */
+	L34_TBL_PPPOE		= 1,	/* 8 entries,  1 word:  the negotiated session id */
 	L34_TBL_NEXTHOP		= 2,	/* 16 entries, 1 word:  egress intf + L2 (ARP) index */
 	L34_TBL_NETIF		= 3,	/* 16 entries, 4 words: per-interface MAC/VLAN/MTU/IP */
 	L34_TBL_EXTIP		= 4,	/* 8 entries,  3 words: external (WAN) IP -> nexthop */
@@ -61,6 +62,7 @@ enum l34_tbl {
 
 /* Word counts per table type (data-bank words moved per op). */
 #define L34_WORDS_L3ROUTE	2
+#define L34_WORDS_PPPOE		1
 #define L34_WORDS_NEXTHOP	1
 #define L34_WORDS_NETIF		4
 #define L34_WORDS_EXTIP		3

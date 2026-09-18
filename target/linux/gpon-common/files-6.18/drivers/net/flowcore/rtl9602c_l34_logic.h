@@ -98,6 +98,24 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_NH_IFIDX_W		4
 #define L34_NH_NHIDX_LSP	8	/* -> L2 unicast entry holding the dst MAC */
 #define L34_NH_NHIDX_W		11
+/* The two fields the ETHER path leaves at zero. A PPPoE egress is TYPE = 1 plus
+ * an index into the PPPOE table; KEEPPPPOE says what happens to the session
+ * header. Positions are the die's own (vendor chipdef NEXT_HOP_TABLE: TYPE 0/1,
+ * IFIDX 1/4, PPPIDX 5/3, NXTHOPIDX 8/11, KEEPPPPOP 19/2 -- the first three of
+ * which this header already carried). */
+#define L34_NH_PPPIDX_LSP	5	/* -> PPPOE table entry holding the session id */
+#define L34_NH_PPPIDX_W		3
+#define L34_NH_KEEPPPP_LSP	19
+#define L34_NH_KEEPPPP_W	2
+#define L34_NH_TYPE_ETHER	0	/* the value L34_NH_TYPE already wrote */
+#define L34_NH_TYPE_PPPOE	1
+
+/* PPPOE table: 8 entries of ONE word, holding the negotiated session id. The
+ * session is a property of the EGRESS, not of a flow, so one entry serves every
+ * flow leaving through that next hop. */
+#define L34_PPPOE_SESID_LSP	0
+#define L34_PPPOE_SESID_W	16
+#define L34_PPPOE_SLOTS		8
 
 /* ARP_CAM (type 13, 2 words, 128 slots).  The die searches it by the packet's
  * DESTINATION address, so an entry is one destination -> the L2 entry holding
@@ -161,6 +179,9 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx);
 void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx);
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx);
 void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx);
+void l34_nexthop_pppoe_encode(u32 *w, u8 ifidx, unsigned int l2idx,
+			      unsigned int pppidx, unsigned int keep);
+void l34_pppoe_encode(u32 *w, u16 sid);
 void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx);
 void l34_arp_encode(u32 *w, u32 dst_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);

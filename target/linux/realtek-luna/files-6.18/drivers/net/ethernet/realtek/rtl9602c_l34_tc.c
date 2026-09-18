@@ -113,6 +113,14 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	ret = gpon_edge_read(ep->ndev, ep->wan_ndev, k->ip_da, &edge, &why);
 	if (ret)
 		return l34_refuse(&ep->l34, why);
+	/* ★ THE SESSION COMES FROM THE FLOW, NOT FROM THE NETDEVICE. `gpon_edge`
+	 * reads the live kernel, and the kernel offers no portable way to ask a
+	 * ppp device for its session id -- but the flowtable already parsed it
+	 * and handed it over as FLOW_ACTION_PPPOE_PUSH, which the core kept in
+	 * `a->pppoe_sid`. Putting it in the edge here is what makes a RE-DIALLED
+	 * session a different edge, so the interface tables are rewritten instead
+	 * of encapsulating with a session the far end has forgotten. */
+	edge.wan_pppoe_sid = a->pppoe_sid;
 
 	/* The rule's own next hop and NAT address must be the ones ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 8. */

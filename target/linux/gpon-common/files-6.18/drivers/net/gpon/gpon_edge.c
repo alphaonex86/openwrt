@@ -149,6 +149,7 @@ bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b)
 	return a->wan_ip == b->wan_ip && a->lan_ip == b->lan_ip &&
 	       a->lan_net == b->lan_net && a->wan_vlan == b->wan_vlan &&
 	       a->lan_vlan == b->lan_vlan && a->lan_prefix == b->lan_prefix &&
+	       a->wan_pppoe_sid == b->wan_pppoe_sid &&
 	       ether_addr_equal(a->wan_mac, b->wan_mac) &&
 	       ether_addr_equal(a->lan_mac, b->lan_mac);
 }

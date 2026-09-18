@@ -374,9 +374,16 @@ static int l2uc_add_static(struct rtl9602c_l34 *l, const u8 *mac, u8 port)
 
 int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 			   const u8 *wan_mac, u32 gw_ip, const u8 *gw_mac,
-			   u8 wan_port, u16 vlan)
+			   u8 wan_port, u16 vlan, u16 pppoe_sid)
 {
-	struct l34_prog_step step[7] = { { 0 } };
+	/* ★ THE PPPoE SLOT IS STEP 7, AND IT IS IN THE SAME ATOMIC PROGRAM AS
+	 * THE NEXT HOP THAT POINTS AT IT.  Writing them separately would leave a
+	 * window in which the next hop is typed PPPoE while its slot still holds
+	 * the PREVIOUS session -- an entry that installs, counts hits, and puts
+	 * the wrong session id on the wire.  `pppoe_sid == 0` keeps the ethernet
+	 * next hop and writes no slot, so an IPoE WAN is bit-for-bit unchanged. */
+	struct l34_prog_step step[8] = { { 0 } };
+	unsigned int nsteps = 7;
 	int l2idx, ret;
 
 	if (!l->ready)
@@ -421,7 +428,25 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[2].tbl = L34_TBL_NEXTHOP;
 	step[2].idx = idx;
 	step[2].words = L34_WORDS_NEXTHOP;
-	l34_nexthop_encode(step[2].w, idx, l2idx);
+	if (pppoe_sid) {
+		/* PPPOE[idx]: the session this interface negotiated. One slot per
+		 * WAN netif, so the index is the netif's own -- the table's 8
+		 * slots cover every interface this driver can provision. */
+		step[7].tbl = L34_TBL_PPPOE;
+		step[7].idx = idx;
+		step[7].words = L34_WORDS_PPPOE;
+		l34_pppoe_encode(step[7].w, pppoe_sid);
+		nsteps = 8;
+		/* KEEP_ORIGINAL_OR_ADD: an upstream frame arrives from the LAN
+		 * with no session header and must gain one; a frame that already
+		 * carries the session keeps it. REPLACE would rewrite a header
+		 * that is already correct, and KEEP alone would emit an
+		 * unencapsulated frame on a PPPoE WAN. */
+		l34_nexthop_pppoe_encode(step[2].w, idx, l2idx, idx,
+					 L34_NH_PPPOE_KEEP_OR_ADD);
+	} else {
+		l34_nexthop_encode(step[2].w, idx, l2idx);
+	}
 
 	/* EXTIP[idx]: the WAN source IP a NAPT rewrite applies, via NEXTHOP[idx] */
 	step[3].tbl = L34_TBL_EXTIP;
@@ -458,7 +483,7 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[6].words = L34_WORDS_L3ROUTE;
 	l34_rt_wan_net_encode(step[6].w, 0x80000000u, 1, idx);
 
-	ret = l34_prog_run(step, ARRAY_SIZE(step), l34_prog_wr, l);
+	ret = l34_prog_run(step, nsteps, l34_prog_wr, l);
 out:
 	mutex_unlock(&l->lock);
 	return ret;
@@ -522,7 +547,7 @@ int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
 	l->provisioned = false;
 	ret = rtl9602c_l34_wan_setup(l, L34_NETIF_WAN, e->wan_ip, e->wan_mac,
 				     e->gw_ip, e->gw_mac, GMAC_PON_PORT,
-				     e->wan_vlan);
+				     e->wan_vlan, e->wan_pppoe_sid);
 	if (ret)
 		return ret;
 	ret = rtl9602c_l34_lan_setup(l, L34_NETIF_LAN, e->lan_ip, e->lan_mac,
@@ -565,7 +590,7 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 			   &port, &vlan) != 16)
 			return -EINVAL;
 		ret = rtl9602c_l34_wan_setup(l, L34_NETIF_WAN, wip, wmac, gip, gmac,
-					     port, vlan);
+					     port, vlan, 0);
 		pr_info("rtl9602c_l34: wan_setup -> %d\n", ret);
 	} else if (buf[0] == 'l') {
 		unsigned int prefix, vlan;

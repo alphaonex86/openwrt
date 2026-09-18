@@ -53,6 +53,12 @@ struct gpon_edge {
  * dev/MEASURED-gpon_edge.h.md sec 1. */
 int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 		   u32 peer, struct gpon_edge *e, const char **why);
+/* The same read, told what the flowtable already resolved: @odev is the egress
+ * it picked and @dmac the L2 destination the flow carries. Either may be NULL,
+ * and gpon_edge_read() is this with both NULL. */
+int gpon_edge_read_via(struct net_device *lan, struct net_device *wan,
+		       u32 peer, struct net_device *odev, const u8 *dmac,
+		       struct gpon_edge *e, const char **why);
 
 /* Byte-equality, so a caller can tell "the edge moved" from "nothing changed"
  * without re-deriving what any individual field means. */

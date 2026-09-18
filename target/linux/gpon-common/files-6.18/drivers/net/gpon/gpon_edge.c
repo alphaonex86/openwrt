@@ -66,8 +66,28 @@ static bool gpon_edge_gw_mac(struct net_device *dev, __be32 gw, u8 *mac)
 	return is_valid_ether_addr(mac);
 }
 
-int gpon_edge_read(struct net_device *lan, struct net_device *wan,
-		   u32 peer, struct gpon_edge *e, const char **why)
+/* The edge, told what the FLOWTABLE already resolved.
+ *
+ * ★★★ WHY THE EXTRA ARGUMENTS EXIST. This function follows the ROUTE to learn
+ * the WAN address, the next hop and its MAC -- which is right, and is its job.
+ * What was wrong was requiring the ROUTED device to BE the port: on a PPPoE WAN
+ * the route egresses the `ppp` netdev, so 1056 flows were refused on the X111W
+ * (MEASURED 2026-09-18) for a path the infrastructure had already resolved onto
+ * our port. The netfilter flowtable "discovers the real netdevice behind VLAN
+ * and PPPoE netdevices" and hands the encapsulation over as an ACTION, so the
+ * caller knows the true egress and we should not re-derive it and then disagree
+ * with ourselves.
+ *
+ * @odev: the egress the flowtable resolved (FLOW_ACTION_REDIRECT), or NULL.
+ * @dmac: the L2 destination that flow carries, or NULL. On a PPPoE link there
+ *        is no ARP and no neighbour entry -- the frame goes to the access
+ *        concentrator, whose MAC only the session knows. The flow's own mangle
+ *        action carries it, so a caller that has it may supply it rather than
+ *        asking a neighbour table that will never answer.
+ */
+int gpon_edge_read_via(struct net_device *lan, struct net_device *wan,
+		       u32 peer, struct net_device *odev, const u8 *dmac,
+		       struct gpon_edge *e, const char **why)
 {
 	struct net_device *lan_l3, *wan_l3;
 	struct flowi4 fl4 = { .daddr = htonl(peer) };
@@ -107,7 +127,7 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 	wan_l3 = rt->dst.dev;
 	/* ⚠ AND IT MUST LEAVE THROUGH THE PORT THIS ENGINE OWNS. A ...
 	 * dev/MEASURED-gpon_edge.c.md sec 3. */
-	if (!gpon_edge_rides(wan_l3, wan)) {
+	if (!gpon_edge_rides(wan_l3, wan) && odev != wan) {
 		*why = "the WAN route leaves through a device this engine does not drive";
 		ret = -EOPNOTSUPP;
 		goto out_put;
@@ -117,12 +137,23 @@ int gpon_edge_read(struct net_device *lan, struct net_device *wan,
 		goto out_put;
 	}
 	e->wan_vlan = gpon_edge_vlan(wan_l3);
-	ether_addr_copy(e->wan_mac, wan_l3->dev_addr);
+	/* ⚠ A `ppp` netdev HAS NO ETHERNET ADDRESS, so taking the egress source
+	 * MAC from it would program the interface table with zeroes and put
+	 * frames on the wire from 00:00:00:00:00:00. A VLAN device inherits its
+	 * real device's address, so the two cases that RIDE the port keep using
+	 * the L3 device; anything else takes the port's own. */
+	ether_addr_copy(e->wan_mac, gpon_edge_rides(wan_l3, wan)
+				    ? wan_l3->dev_addr : wan->dev_addr);
 	next_hop = rt_nexthop(rt, fl4.daddr);
 	e->gw_ip = ntohl(next_hop);
 	if (!gpon_edge_gw_mac(wan_l3, next_hop, e->gw_mac)) {
-		*why = "the next hop's MAC is not resolved yet";
-		goto out_put;
+		if (dmac && is_valid_ether_addr(dmac)) {
+			/* the access concentrator, from the flow's own rewrite */
+			ether_addr_copy(e->gw_mac, dmac);
+		} else {
+			*why = "the next hop's MAC is not resolved yet";
+			goto out_put;
+		}
 	}
 
 	/* The LAN side IS reached through the master upper: an ordinary router
@@ -142,6 +173,14 @@ out_put:
 out:
 	rcu_read_unlock();
 	return ret;
+}
+
+/* The original spelling, for every caller that has neither: it asks exactly what
+ * it used to ask, so nothing that compiled before behaves differently now. */
+int gpon_edge_read(struct net_device *lan, struct net_device *wan,
+		   u32 peer, struct gpon_edge *e, const char **why)
+{
+	return gpon_edge_read_via(lan, wan, peer, NULL, NULL, e, why);
 }
 
 bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b)

@@ -242,6 +242,31 @@ void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx)
 	l34_field_set(w, L34_NH_NHIDX_LSP, L34_NH_NHIDX_W, l2idx);
 }
 
+/* The same next hop, leaving through a PPPoE session.  It REUSES the ethernet
+ * encoder rather than repeating its three fields: the L2 destination and the
+ * egress interface are identical -- what a PPPoE egress adds is the type, the
+ * PPPOE table index and the keep mode.
+ *
+ * ⚠ THE SESSION ID IS NOT HERE. It lives in the PPPOE table entry this index
+ * points at, so installing a flow without ALSO writing that entry would give
+ * the engine a next hop that encapsulates with whatever the slot last held --
+ * which reads healthy in every counter and is wrong on the wire.
+ */
+void l34_nexthop_pppoe_encode(u32 *w, u8 ifidx, unsigned int l2idx,
+			      unsigned int pppidx, unsigned int keep)
+{
+	l34_nexthop_encode(w, ifidx, l2idx);
+	l34_field_set(w, L34_NH_TYPE_LSP,    L34_NH_TYPE_W,    L34_NH_TYPE_PPPOE);
+	l34_field_set(w, L34_NH_PPPIDX_LSP,  L34_NH_PPPIDX_W,  pppidx);
+	l34_field_set(w, L34_NH_KEEPPPP_LSP, L34_NH_KEEPPPP_W, keep);
+}
+
+/* PPPOE table entry: the negotiated session id, host order. */
+void l34_pppoe_encode(u32 *w, u16 sid)
+{
+	l34_field_set(w, L34_PPPOE_SESID_LSP, L34_PPPOE_SESID_W, sid);
+}
+
 /* EXTIP slot: the WAN source IP a NAPT rewrite applies, via NEXTHOP[nhidx]. */
 void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx)
 {

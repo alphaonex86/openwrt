@@ -146,10 +146,39 @@ provision() {
 		# from the live stock firmware's own DHCP lease: hostname RTK_GW, MAC ..b1 =
 		# LAN ..ae + 3, client-id 01:..b1; the 2nd ONU agrees, base ..a2 -> WAN ..a5 = +3).
 		# MUST match the driver's wan_mac_offset (default 3). 48-bit add (bash, carries up).
-		local wanoff=3 lannum wannum wanhex
-		lannum=$(printf '%d' "0x$(echo "$mac" | tr 'A-F' 'a-f' | tr -d ':')" 2>/dev/null)
-		wannum=$((lannum + wanoff))
-		wanhex=$(printf '%012x' "$wannum")
+		# ★★★ AND THE OFFSET IS THE FALLBACK, NOT THE SOURCE (MEASURED 2026-09-18
+		# on the G24W / RTL9603CVD, where it is WRONG). That die's WAN MAC is
+		# LAN+5, not LAN+3: br-lan 5c:19:23:b3:ce:90, gpon0 ...:95, while this
+		# code computed ...:93 and advertised client-id 015c1923b3ce93. Stock
+		# sends 01 + its own WAN MAC (...95), dnsmasq keys leases on the
+		# CLIENT-ID, so the SAME board held TWO leases -- ours .215 and stock's
+		# .216 -- and every probe keyed on the declared address then reported
+		# "no WAN" about a board whose WAN was up. It cost eight stock benchmark
+		# cells: the PPPoE AC reads the ONU's WAN MAC from the neighbour entry
+		# for that address, found nothing, and refused to start.
+		# ⇒ ASK THE INTERFACE. Its address IS the value this needs; an offset is
+		# a guess about a die, and the offset that was CONFIRMED on the X111W
+		# family (+3, and correct there) was silently applied to a die that does
+		# not share it. The computation stays as the LAST resort, for the boot
+		# where the netdev is not up yet, and the log SAYS which one answered --
+		# a client-id nobody can attribute is how this went unnoticed for weeks.
+		local wanoff=3 lannum wannum wanhex wansrc wanif
+		wanif="${ifname:-gpon0}"
+		if [ -r "/sys/class/net/$wanif/address" ]; then
+			wanhex=$(tr -d ':' < "/sys/class/net/$wanif/address" | tr 'A-F' 'a-f')
+			wansrc="$wanif's own MAC"
+		fi
+		case "$wanhex" in
+		[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+		*)	wanhex="" ;;
+		esac
+		if [ -z "$wanhex" ]; then
+			lannum=$(printf '%d' "0x$(echo "$mac" | tr 'A-F' 'a-f' | tr -d ':')" 2>/dev/null)
+			wannum=$((lannum + wanoff))
+			wanhex=$(printf '%012x' "$wannum")
+			wansrc="LAN+$wanoff (COULD NOT READ $wanif -- a per-die guess)"
+		fi
+		logger -t gpon-provision "wan client-id 01$wanhex from $wansrc"
 		# Stable per-board WAN DHCP client-id (option 61 = 01:<WAN-MAC>), EXACTLY like stock
 		# (RTK_GW used 01:..b1). Stable across reboots + unique per board -> one lease, no
 		# pool exhaustion (this RAM-boot image otherwise emits a random DUID client-id/boot).

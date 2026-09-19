@@ -3735,8 +3735,18 @@ void rtl9602c_datapath_tables_init(void)
 							 * luna_eth_regs.h    */
 	pi_field(PI_PON_TB_CTRL, 7, 0, 0x6e);			/* PON_TB_CTRL tick      */
 	pi_field(PI_PON_TB_CTRL, 15, 8, 0x95);
-	sw_field(SW_METER_TB_CTRL, 7, 0, 43);			/* METER_TB_CTRL tick    */
-	sw_field(SW_METER_TB_CTRL, 15, 8, 189);
+	/* METER_TB_CTRL and PON_TB_CTRL have MIRRORED layouts, and this site had
+	 * copied the line above onto a register where the two fields swap places:
+	 * PON_TB_CTRL puts TICK_PERIOD at [7:0] and TKN at [15:8], METER_TB_CTRL
+	 * puts TKN at [7:0] and TICK_PERIOD at [15:8] (the chipdef's own layout,
+	 * structurally identical on 9607C/9601B/9603CVD).  So the bucket refilled
+	 * 43 tokens every 189 ticks where stock refills 189 every 43 -- 19x
+	 * slower, on a meter both firmwares leave ENABLED (METER_OP=1).
+	 * MEASURED on the X111W: live stock reads 0x00012bbd and this board read
+	 * 0x0001bd2b, the same nibbles transposed.  rtl9602c_eth.c already wrote
+	 * stock's word; this site ran later and overwrote it. */
+	sw_field(SW_METER_TB_CTRL, 7, 0, 189);			/* TKN         */
+	sw_field(SW_METER_TB_CTRL, 15, 8, 43);			/* TICK_PERIOD */
 	sw_field(SW_SCH_WFQ_TKN_CTRL, 0, 0, 1);		/* SCH_WFQ_TKN_CTRL      */
 	sw_field(SW_LINE_RATE_2500M, 18, 0, 0x3ffff);	/* LINE_RATE_2500M       */
 	sw_field(WRAP_GPHY_MISC, 0, 0, 1);			/* PATCH_PHY_DONE        */

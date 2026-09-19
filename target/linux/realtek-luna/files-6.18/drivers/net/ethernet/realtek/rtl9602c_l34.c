@@ -116,6 +116,17 @@ static void l34_engine_on(struct rtl9602c_l34 *l)
 	v &= ~(L34_SWTCR0_V4FLRT_EN | L34_SWTCR0_V6FLRT_EN);
 	l34_wr(l, L34_SWTCR0, v);
 
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+	/* ★ ASK THE DIE TO KEEP ITS OWN LOOKUP LOG. Purely diagnostic: it changes
+	 * no forwarding decision, it only makes HSB/HSA hold the last lookup
+	 * instead of zeroes. Behind the declared flag, so a shipped image without
+	 * the diagnostics costs nothing. Stock runs in this mode permanently. */
+	v = l34_rd(l, L34_HSBA_CTRL);
+	v &= ~(L34_HSBA_TST_LOG_MD_M << L34_HSBA_TST_LOG_MD_SH);
+	v |=  ((u32)L34_HSBA_MODE_FIRST_DROP << L34_HSBA_TST_LOG_MD_SH);
+	l34_wr(l, L34_HSBA_CTRL, v);
+#endif
+
 	l34_wr(l, L34_GLB_CFG, l34_rd(l, L34_GLB_CFG) | BIT(0));	/* master enable */
 
 	l->engine_on = true;
@@ -712,6 +723,27 @@ static void l34_proc_show_iface(struct seq_file *sf, struct rtl9602c_l34 *l)
 		   (v & L34_SWTCR0_V4FLRT_EN) ? 1 : 0,
 		   (v & L34_SWTCR0_V6FLRT_EN) ? 1 : 0,
 		   l34_rd(l, L34_GLB_CFG));
+	/* ★★★ THE DIE'S OWN LOOKUP LOG. HSB is the hash source block the engine
+	 * BUILT from the last frame it looked up; HSA is what it DECIDED. Printed
+	 * raw and whole: this is a POINTER for reading, not a verdict, and a field
+	 * split invented here would be a decode nobody measured.
+	 * ⚠ ALL-ZERO MEANS THE LOG IS OFF, NOT THAT NOTHING WAS LOOKED UP -- the
+	 * mode lives in HSBA_CTRL and is printed beside it so the two can never be
+	 * confused. ⚠ AND THE MODE MATTERS AS MUCH AS THE DATA: under LOG_ALL the
+	 * last lookup is the ssh packet that carried the reading command, so the
+	 * log answered with this host's own port 22 instead of the flow. FIRST_DROP
+	 * latches. That confusion is why this surface sat unread while two
+	 * register hypotheses were settled by rebuilding the image instead. */
+	v = l34_rd(l, L34_HSBA_CTRL);
+	seq_printf(sf, "hsba_ctrl %08x log_mode %u (1=off 2=all[SELF-CAPTURING] 3=first-drop)\n",
+		   v, (v >> L34_HSBA_TST_LOG_MD_SH) & L34_HSBA_TST_LOG_MD_M);
+	seq_puts(sf, "hsb");
+	for (i = 0; i < L34_HSB_WORDS; i++)
+		seq_printf(sf, " %08x", l34_rd(l, L34_HSB_DESC0 + i * 4));
+	seq_puts(sf, "\nhsa");
+	for (i = 0; i < L34_HSA_WORDS; i++)
+		seq_printf(sf, " %08x", l34_rd(l, L34_HSA_DESC0 + i * 4));
+	seq_putc(sf, '\n');
 	/* NETIF has 16 entries even though EXTIP can reference only eight.
 	 * Keep invalid entries visible: stale fields and a failed read are
 	 * different observations. All twelve fields come from this die's own

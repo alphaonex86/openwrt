@@ -51,6 +51,31 @@
  * on this board, both captures the same hour. With the BINDING table unwritten
  * nothing can ever match, so every unmatched combination takes the DROP action
  * and the accelerated path discards what the CPU then forwards. */
+/* ★★★ THE DIE'S OWN VIEW OF THE LOOKUP -- the instrument that replaces guessing.
+ * HSB is what the engine SAW (the hash source block it built from the frame) and
+ * HSA is what it DECIDED. Stock runs with the log mode at LOG_ALL and its HSB
+ * descriptors are populated; ours ran at NO_LOG, which is why every descriptor
+ * read zero and two register hypotheses had to be settled by rebuilding the
+ * image instead of by reading what the die already knows.
+ * Mode values are the vendor's own (rtk_l34_hsba_mode_t): 0 BOTH_LOG, 1 NO_LOG,
+ * 2 LOG_ALL, 3 LOG_FIRST_DROP, 4 LOG_FIRST_PASS, 5 LOG_FIRST_TO_CPU, 6 LOG. */
+#define L34_HSBA_CTRL		0x800200
+#define  L34_HSBA_TST_LOG_MD_SH	2		/* [4:2] */
+#define  L34_HSBA_TST_LOG_MD_M	0x7u
+#define  L34_HSBA_MODE_NO_LOG	1
+#define  L34_HSBA_MODE_LOG_ALL	2		/* what stock holds */
+/* ⚠⚠ LOG_ALL IS THE WRONG MODE FOR US, MEASURED 2026-09-19. It keeps the LAST
+ * lookup, and the last lookup is always the ssh packet carrying the command that
+ * reads the log: the first capture came back holding 192.168.1.2 -> 192.168.1.12
+ * port 22, this host talking to the board. The instrument was measuring itself.
+ * LOG_FIRST_DROP LATCHES the first dropped frame instead, so the event survives
+ * every later lookup including the read's own. */
+#define  L34_HSBA_MODE_FIRST_DROP 3
+#define L34_HSB_DESC0		0x800204	/* 14 words */
+#define L34_HSB_WORDS		14
+#define L34_HSA_DESC0		0x800280	/* 5 words */
+#define L34_HSA_WORDS		5
+
 #define L34_BD_CFG		0x80002c
 /* ⚠ NOT WRITTEN, and the refutation is why. Setting this to stock's value was
  * TESTED on 2026-09-18 -- one build, one boot, one 20 s transit of 204 896

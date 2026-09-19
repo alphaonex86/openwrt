@@ -3757,6 +3757,18 @@ void rtl9602c_datapath_tables_init(void)
 	/* 2) l2_init: per-port action defaults (FORWARD). NOTE: a ...
 	 * dev/MEASURED-luna_gpon.c.md sec 296. */
 	sw_field(SW_LUT_CFG, 22, 22, 1);			/* LUT LINKDOWN_AGEOUT   */
+	/* ★★★ THE BINARY CAM, WHICH WE WERE LEAVING DISABLED BY INHERITANCE.
+	 * sw_field() is a read-modify-write that names ONE bit, so every bit this
+	 * init never mentions keeps whatever reset or U-Boot left -- and BCAM_DIS
+	 * arrives SET. Stock clears it: a same-day differential on this board reads
+	 * LUT_CFG 14800bb8 on stock against 00600bb8 on ours, and bit 21 is
+	 * BCAM_DIS in this die's own chipdef.
+	 * ⚠ IT IS A LOOKUP-STAGE BIT, which is why it is tried now and not sooner:
+	 * with the die's log armed at LOG_FIRST_DROP a full transit latched NOTHING,
+	 * so the engine is not looking these frames up and discarding them -- it is
+	 * not looking them up at all, and a disabled search CAM is a mechanism for
+	 * exactly that. */
+	sw_field(SW_LUT_CFG, 21, 21, 0);			/* BCAM enabled, as stock */
 	for (port = 0; port <= 3; port++) {
 		sw_field(LUT_LEARN_OVER_CTRL, port * 2 + 1, port * 2, 0);
 		sw_field(SW_LUT_AGEOUT_CTRL, port, port, 1);

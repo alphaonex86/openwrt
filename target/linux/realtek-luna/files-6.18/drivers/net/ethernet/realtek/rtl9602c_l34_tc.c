@@ -110,7 +110,13 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 
 	/* ★ THE VALUES FIRST, THE FLOW SECOND. The interface tables ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 7. */
-	ret = gpon_edge_read(ep->ndev, ep->wan_ndev, k->ip_da, &edge, &why);
+	/* ★ TELL IT WHAT THE FLOWTABLE ALREADY RESOLVED. `ctx->odev` is the egress
+	 * the infrastructure picked (FLOW_ACTION_REDIRECT) after walking past any
+	 * VLAN or PPPoE device, and `a->gw_dmac` is the L2 destination this flow
+	 * rewrites to -- on a PPPoE link that is the access concentrator, which no
+	 * neighbour table can ever supply. */
+	ret = gpon_edge_read_via(ep->ndev, ep->wan_ndev, k->ip_da, ctx->odev,
+				 a->dmac_valid ? a->gw_dmac : NULL, &edge, &why);
 	if (ret)
 		return l34_refuse(&ep->l34, why);
 	/* ★ THE SESSION COMES FROM THE FLOW, NOT FROM THE NETDEVICE. `gpon_edge`

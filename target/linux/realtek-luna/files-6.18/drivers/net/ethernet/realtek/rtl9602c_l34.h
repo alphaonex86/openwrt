@@ -44,6 +44,22 @@
  * 2=MAC-base"; that reading is UNVERIFIED and is kept only as a lead -- what IS
  * measured is that stock holds 2 here and so do we. */
 #define  L34_SWTCR0_LIMDBC_SH	8
+/* WAN BINDING policy: what the die does with a frame whose WAN binding does NOT
+ * match, one field per L2/L3/L34 combination. ⚠ THE ACTION VALUE 0 IS *DROP*
+ * (the vendor's own `rtk_l34_bindAct_t`: L34_BIND_ACT_DROP = 0), and this
+ * register reads ALL ZERO on our image while stock holds 0xa2400000 -- measured
+ * on this board, both captures the same hour. With the BINDING table unwritten
+ * nothing can ever match, so every unmatched combination takes the DROP action
+ * and the accelerated path discards what the CPU then forwards. */
+#define L34_BD_CFG		0x80002c
+/* ⚠ NOT WRITTEN, and the refutation is why. Setting this to stock's value was
+ * TESTED on 2026-09-18 -- one build, one boot, one 20 s transit of 204 896
+ * frames -- and `hits_seen` moved from 0 to 1. One hit is not forwarding; it is
+ * the order of magnitude the liveness probe itself touches. A speculative write
+ * of a value only partly decoded, with no measured benefit, does not belong in
+ * the shipped path, so the ADDRESS and the DECODE stay here for the next
+ * attempt and the write does not. */
+#define  L34_BD_CFG_STOCK	0xa2400000	/* this board's own vendor value */
 #define L34_GLB_CFG		0x01106c	/* master L34 routing enable */
 #define L34_NAPT_HIT		0x800400	/* outbound NAPT hit/age bitmap (idx/32 words) */
 

@@ -99,6 +99,21 @@ static void l34_engine_on(struct rtl9602c_l34 *l)
 	v |=  (0x3u << L34_SWTCR0_NATMODE_SH);		/* L3 + L4 NAT enable */
 	v &= ~(0x3u << L34_SWTCR0_LIMDBC_SH);
 	v |=  (0x2u << L34_SWTCR0_LIMDBC_SH);		/* what stock also holds */
+	/* ★★★ THE FLOW-ROUTE PATH IS NOT OURS, AND WE WERE LEAVING IT ON.
+	 * This is a read-modify-write, so every bit we do not name keeps whatever
+	 * the reset/bootloader left -- and V4FLRT_EN/V6FLRT_EN arrive SET. Stock
+	 * clears them: a SAME-DAY differential on this board (swcore_diff, both
+	 * captures inside 15 minutes) reads SWTCR0 84801e10 on stock against
+	 * 64000e20 on ours, with V4FLRT_EN and V6FLRT_EN the inverted pair.
+	 * FLRT is the die's FLOW-ROUTE lookup and it has its own tables
+	 * (FLOW_ROUTING_TABLE_IPV4, access type 12) which this driver never
+	 * programs -- so with the bit set the engine consults a table we leave
+	 * empty instead of the NAPT/NAPTR pair we fill. That is exactly the
+	 * measured state: an entry installed, live, never removed and never hit
+	 * while 272 MB of matching traffic passed.
+	 * ⚠ The VALUE is not a datasheet reading: it is what the vendor's own
+	 * firmware holds on this very board, captured the same hour. */
+	v &= ~(L34_SWTCR0_V4FLRT_EN | L34_SWTCR0_V6FLRT_EN);
 	l34_wr(l, L34_SWTCR0, v);
 
 	l34_wr(l, L34_GLB_CFG, l34_rd(l, L34_GLB_CFG) | BIT(0));	/* master enable */

@@ -19,6 +19,7 @@
 #include <linux/clocksource.h>
 #include <linux/irqchip.h>
 #include <linux/of_clk.h>
+#include <linux/of.h>
 #include <linux/of_fdt.h>
 
 #include <asm/addrspace.h>
@@ -217,6 +218,22 @@ static const struct plat_smp_ops luna_up_smp_ops = {
 };
 #endif /* CONFIG_SMP */
 
+#ifdef CONFIG_MIPS_MT_SMP
+extern const struct plat_smp_ops vsmp_smp_ops;
+static struct plat_smp_ops luna_mt_smp_ops;
+
+static void luna_mt_init_secondary(void)
+{
+	/* The SoC timer owns IP7; an unused CP0 Compare must not assert it. */
+	if (!IS_ENABLED(CONFIG_CEVT_R4K)) {
+		set_c0_cause(CAUSEF_DC);
+		write_c0_compare(0);
+	}
+	change_c0_status(ST0_IM, STATUSF_IP0 | STATUSF_IP1 |
+			 STATUSF_IP3 | STATUSF_IP4 | STATUSF_IP7);
+}
+#endif
+
 void __init device_tree_init(void)
 {
 	unflatten_and_copy_device_tree();
@@ -249,6 +266,14 @@ void __init device_tree_init(void)
 	 * dev/MEASURED-setup.c.md sec 11. */
 	if (!register_cps_smp_ops())
 		return;
+#ifdef CONFIG_MIPS_MT_SMP
+	if (cpu_has_mipsmt && of_machine_is_compatible("realtek,rtl9603cvd")) {
+		luna_mt_smp_ops = vsmp_smp_ops;
+		luna_mt_smp_ops.init_secondary = luna_mt_init_secondary;
+		register_smp_ops(&luna_mt_smp_ops);
+		return;
+	}
+#endif
 	/* No CM, so CPS declined. `register_up_smp_ops()` is a no-op ...
 	 * dev/MEASURED-setup.c.md sec 15. */
 	if (register_up_smp_ops())

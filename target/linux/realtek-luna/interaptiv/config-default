@@ -22,7 +22,7 @@ CONFIG_CPU_R4K_FPU=y
 
 #
 # Coherent Processing System: GIC interrupt controller, Coherency Manager,
-# Cluster Power Controller. Single core, no CPU hotplug, no MT/multi-VPE SMP.
+# Cluster Power Controller where present; MIPS-MT for non-CPS interAptiv parts.
 #
 CONFIG_MIPS_CPS=y
 CONFIG_MIPS_GIC=y
@@ -33,10 +33,11 @@ CONFIG_CLKSRC_MIPS_GIC=y
 CONFIG_CLOCKSOURCE_WATCHDOG=y
 CONFIG_CLOCKSOURCE_WATCHDOG_MAX_SKEW_US=125
 CONFIG_SMP=y
-CONFIG_NR_CPUS=1
+CONFIG_NR_CPUS=2
 # CONFIG_FORCE_NR_CPUS is not set
 # CONFIG_HOTPLUG_CPU is not set
-# CONFIG_MIPS_MT_SMP is not set
+CONFIG_MIPS_MT_SMP=y
+# CONFIG_MIPS_MT_FPAFF is not set
 CONFIG_CPU_MIPSR2_IRQ_VI=y
 CONFIG_CPU_MIPSR2_IRQ_EI=y
 # Pin the SMP/CPS-gated symbols that only become visible once SMP is on, so
@@ -98,6 +99,7 @@ CONFIG_DYNAMIC_DEBUG=y
 #
 # CONFIG_RTL9602C_ETH is not set
 CONFIG_LUNA_GPON=y
+CONFIG_LUNA_FLOWOFFLOAD=y
 # The on-chip NIC + switch live under the Realtek vendor menu, so the kernel
 # only descends into drivers/net/ethernet/realtek/ when this umbrella is set.
 CONFIG_NET_VENDOR_REALTEK=y

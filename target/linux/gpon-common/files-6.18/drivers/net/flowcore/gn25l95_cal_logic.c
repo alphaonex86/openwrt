@@ -50,7 +50,9 @@ int gn25l95_cal_ops(const u8 *cal, u32 cal_len, const struct gn_variant *v,
 		{ 6, 0x380, 0x80, 0x80 },	/*                   258 */
 		{ 2, CAL_PAGE2_HIGH, 0x80, 0x80 },	/*           387 */
 	};
-	static const u8 LOW_SPARSE[] = { 0x6f, 0x72, 0x78, 0x79 };
+	static const u8 LOW_SPARSE[] = {
+		0x6f, 0x72, 0x78, 0x79 /* page 2 low-half calibration offsets */
+	};
 	u32 n = 0;
 	unsigned int i, k;
 
@@ -111,7 +113,9 @@ int gn25l95_cal_ops(const u8 *cal, u32 cal_len, const struct gn_variant *v,
 
 int gn25l95_probe_ops(struct gn_op *out, u32 out_max)
 {
-	static const u8 PASSWORD[] = { 0x7b, 0x7c, 0x7d, 0x7e };
+	static const u8 PASSWORD[] = {
+		0x7b, 0x7c, 0x7d, 0x7e /* password byte addresses, in wire order */
+	};
 	static const u8 FAMILY_ID[GN_PROBE_NOTES] = { 0x80, 0x85, 0x86 };
 	u32 n = 0;
 	unsigned int i;

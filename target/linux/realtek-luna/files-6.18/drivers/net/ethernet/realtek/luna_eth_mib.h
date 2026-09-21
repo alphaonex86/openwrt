@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Luna family: the switch and MAC statistics block, published ...
- * dev/MEASURED-luna_eth_mib.h.md sec 1. */
+/* Shared switch statistics; attach before registering the netdev. */
 #ifndef _LUNA_ETH_MIB_H
 #define _LUNA_ETH_MIB_H
 
@@ -9,8 +8,7 @@
 
 struct luna_sw_map;
 
-void luna_mib_attach(struct net_device *ndev, void __iomem *sw,
-		     void __iomem *mac, const struct luna_sw_map *map);
-void luna_mib_gmac_tick(void);
+int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
+		    const struct luna_sw_map *map);
 
 #endif /* _LUNA_ETH_MIB_H */

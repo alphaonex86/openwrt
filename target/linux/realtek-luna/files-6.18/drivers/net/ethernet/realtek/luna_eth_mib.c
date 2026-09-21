@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Luna family: switch and MAC statistics over `ethtool -S`. ★ ...
- * dev/MEASURED-luna_eth_mib.c.md sec 1. */
+/* Luna switch statistics over ethtool; no polling in the datapath. */
 
 #include <linux/ethtool.h>
 #include <linux/io.h>
-#include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/netdevice.h>
-#include <linux/spinlock.h>
 #include <linux/string.h>
 
 #include "luna_eth_regs.h"
@@ -75,42 +73,18 @@ static const struct luna_mib_field luna_mib_tx[] = {
 	{ "tx_broadcast",	0x64 },		/* ifOutBroadcastPkts		*/
 };
 
-/* ── the MAC-level MIB: fourteen SIXTEEN-bit counters, packed ...
- * dev/MEASURED-luna_eth_mib.c.md sec 4. */
-static const char * const luna_mac_mib[] = {
-	"mac_txok",	"mac_rxok",
-	"mac_txerr",	"mac_rxerr",
-	"mac_misspkt",	"mac_fae",
-	"mac_tx1col",	"mac_txmcol",
-	"mac_rxokphy",	"mac_rxokbrd",
-	"mac_rxokmul",	"mac_txabt",
-	"mac_txundrn",	"mac_rdumisspkt",
-};
-#define LUNA_MAC_MIB_N	ARRAY_SIZE(luna_mac_mib)
-static_assert(LUNA_MAC_MIB_N % 2 == 0,
-	      "the MAC MIB is read two counters per 32-bit word");
-
-/* THE ONE BOUND INSTANCE. Both shells are already ... -- dev/MEASURED-luna_eth_mib.c.md sec 6. */
+/* MAC counters are only 16-bit; no totals without a lossless sampling clock. */
 struct luna_mib_state {
+	struct net_device	*ndev;
+	const struct ethtool_ops *previous_ops;
 	void __iomem		*sw;
-	void __iomem		*mac;
 	const struct luna_sw_map *map;
-	spinlock_t		lock;		/* guards the accumulator	*/
-	unsigned long		tick_jiffies;
-	bool			tick_seen;
-	u16			last[LUNA_MAC_MIB_N];
-	u64			total[LUNA_MAC_MIB_N];
 };
-static struct luna_mib_state luna_mib = { .lock = __SPIN_LOCK_UNLOCKED(luna_mib.lock) };
+static struct luna_mib_state luna_mib;
 
 static bool luna_mib_has_rx(const struct luna_mib_state *s)
 {
 	return s->map && s->map->rx_mib && s->map->n_mib_ports;
-}
-
-static bool luna_mib_has_mac(const struct luna_mib_state *s)
-{
-	return s->mac && s->map && s->map->gmac_mib16;
 }
 
 static unsigned int luna_mib_ports(const struct luna_mib_state *s)
@@ -126,8 +100,7 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
-	return luna_mib_ports(s) * luna_mib_per_port(s) +
-	       (luna_mib_has_mac(s) ? (int)LUNA_MAC_MIB_N : 0);
+	return luna_mib_ports(s) * luna_mib_per_port(s);
 }
 
 /* One 32-bit or 64-bit counter out of a per-port window. The ...
@@ -148,39 +121,6 @@ static u64 luna_mib_read(void __iomem *sw, u32 base, unsigned int port,
 		hi = ioread32(sw + at + 4);
 	return ((u64)hi << 32) | lo2;
 }
-
-/* Fold the 16-bit MAC counters into 64-bit totals. Exact ...
- * dev/MEASURED-luna_eth_mib.c.md sec 5. */
-void luna_mib_gmac_tick(void)
-{
-	struct luna_mib_state *s = &luna_mib;
-	unsigned long flags, now = jiffies;
-	unsigned int w;
-
-	if (!luna_mib_has_mac(s) || s->tick_jiffies == now)
-		return;
-
-	spin_lock_irqsave(&s->lock, flags);
-	if (s->tick_jiffies != now) {
-		s->tick_jiffies = now;
-		for (w = 0; w < LUNA_MAC_MIB_N / 2; w++) {
-			u32 word = ioread32(s->mac + s->map->gmac_mib16 + w * 4);
-			u16 cur[2] = { (u16)(word >> 16), (u16)word };
-			unsigned int h;
-
-			for (h = 0; h < 2; h++) {
-				unsigned int i = w * 2 + h;
-
-				if (s->tick_seen)
-					s->total[i] += (u16)(cur[h] - s->last[i]);
-				s->last[i] = cur[h];
-			}
-		}
-		s->tick_seen = true;
-	}
-	spin_unlock_irqrestore(&s->lock, flags);
-}
-EXPORT_SYMBOL_GPL(luna_mib_gmac_tick);
 
 static int luna_mib_get_sset_count(struct net_device *ndev, int sset)
 {
@@ -206,9 +146,6 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 			ethtool_sprintf(&data, "p%u_%s", port,
 					luna_mib_tx[i].name);
 	}
-	if (luna_mib_has_mac(s))
-		for (i = 0; i < LUNA_MAC_MIB_N; i++)
-			ethtool_puts(&data, luna_mac_mib[i]);
 }
 
 static void luna_mib_get_stats(struct net_device *ndev,
@@ -216,7 +153,6 @@ static void luna_mib_get_stats(struct net_device *ndev,
 {
 	struct luna_mib_state *s = &luna_mib;
 	unsigned int port, i, n = luna_mib_ports(s);
-	unsigned long flags;
 
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
@@ -227,15 +163,6 @@ static void luna_mib_get_stats(struct net_device *ndev,
 			*data++ = luna_mib_read(s->sw, SW_STAT_PORT_TX_MIB,
 						port, &luna_mib_tx[i]);
 	}
-	if (!luna_mib_has_mac(s))
-		return;
-	/* Fold in whatever has happened since the last tick, so a read taken
-	 * between two ticks is not a stale total. */
-	luna_mib_gmac_tick();
-	spin_lock_irqsave(&s->lock, flags);
-	for (i = 0; i < LUNA_MAC_MIB_N; i++)
-		*data++ = s->total[i];
-	spin_unlock_irqrestore(&s->lock, flags);
 }
 
 static void luna_mib_get_drvinfo(struct net_device *ndev,
@@ -275,23 +202,42 @@ static void luna_mib_check_names(struct device *dev, unsigned int ports)
 	}
 }
 
-void luna_mib_attach(struct net_device *ndev, void __iomem *sw,
-		     void __iomem *mac, const struct luna_sw_map *map)
+static void luna_mib_detach(void *data)
+{
+	struct net_device *ndev = data;
+
+	ndev->ethtool_ops = luna_mib.previous_ops;
+	memset(&luna_mib, 0, sizeof(luna_mib));
+}
+
+int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
+		    const struct luna_sw_map *map)
 {
 	struct luna_mib_state *s = &luna_mib;
+	const struct ethtool_ops *previous_ops;
+	int ret;
 
-	if (WARN_ON(!ndev || !map))
-		return;
-	if (WARN_ON(s->map && (s->map != map || s->sw != sw)))
-		return;		/* a second, different switch core: refuse */
+	if (!ndev || !ndev->dev.parent || !sw || !map || !map->n_mib_ports)
+		return -EINVAL;
+	if (s->ndev || ndev->ethtool_ops == &luna_mib_ethtool_ops)
+		return -EBUSY;
+	previous_ops = ndev->ethtool_ops;
+	netdev_set_default_ethtool_ops(ndev, &luna_mib_ethtool_ops);
+	if (ndev->ethtool_ops != &luna_mib_ethtool_ops)
+		return -EBUSY;
 
+	s->ndev = ndev;
+	s->previous_ops = previous_ops;
 	s->sw = sw;
-	s->mac = mac;
 	s->map = map;
-	ndev->ethtool_ops = &luna_mib_ethtool_ops;
+	/* Attach before netdev registration: devres detaches after ndo_stop. */
+	ret = devm_add_action_or_reset(ndev->dev.parent, luna_mib_detach, ndev);
+	if (ret)
+		return ret;
 	luna_mib_check_names(ndev->dev.parent, luna_mib_ports(s));
-	netdev_info(ndev, "ethtool -S: %d counter(s)%s%s\n", luna_mib_count(s),
-		    luna_mib_has_rx(s) ? "" : " (no rx: this die's RX MIB base is not established)",
-		    luna_mib_has_mac(s) ? "" : " (no mac_*: this die's MAC MIB array is not established)");
+	netdev_info(ndev, "ethtool -S: %d switch counters%s\n", luna_mib_count(s),
+		    luna_mib_has_rx(s) ? "" : " (RX base unavailable)");
+	return 0;
 }
 EXPORT_SYMBOL_GPL(luna_mib_attach);
+MODULE_LICENSE("GPL");

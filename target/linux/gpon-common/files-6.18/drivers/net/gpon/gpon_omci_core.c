@@ -103,7 +103,7 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 	/* T-CONTs, PPTP Ethernet UNIs and UNI-Gs are all ...
 	 * dev/MEASURED-gpon_omci_core.c.md sec 7. */
 	if ((class_id == OMCI_ME_TCONT || class_id == OMCI_ME_PPTP_ETH_UNI ||
-	     class_id == OMCI_ME_UNI_G ||
+	     class_id == OMCI_ME_UNI_G || class_id == OMCI_ME_ANI_G ||
 	     class_id == OMCI_ME_MAC_BRIDGE_TABLE ||
 	     class_id == OMCI_ME_MAC_BRIDGE_FILTER ||
 	     class_id == OMCI_ME_PREASSIGN_FILTER) &&
@@ -325,6 +325,17 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		/* Alarm-entry count at contents[8..9], NO result byte — same ...
 		 * dev/MEASURED-gpon_omci_core.c.md sec 13. */
 		omci_put_be16(resp + 8, omci_alarm_count(o));
+		o->alarm_snapshot_class = omci_alarm_count(o) ? o->alarm_class : 0;
+		o->alarm_snapshot_inst = o->alarm_inst;
+		o->alarm_snapshot_bits = o->alarm_active;
+		o->alarm_seq = 0;
+		break;
+	case OMCI_MT_GET_ALL_ALRM_NX:
+		if (!msg[8] && !msg[9] && o->alarm_snapshot_class) {
+			omci_put_be16(resp + 8, o->alarm_snapshot_class);
+			omci_put_be16(resp + 10, o->alarm_snapshot_inst);
+			omci_put_be16(resp + 12, o->alarm_snapshot_bits);
+		}
 		break;
 	case OMCI_MT_MIB_UPLOAD_NX: {
 		/* Request seq at msg[8..9]; reply = class[8..9] + inst[10..11]
@@ -376,7 +387,6 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		 * the OLT's provisioning FSM completes */
 		resp[8] = OMCI_RC_OK;
 		break;
-	case OMCI_MT_GET_ALL_ALRM_NX:
 	case OMCI_MT_GET_NEXT:
 		/* Get Next walks a TABLE attribute. ⚠ THE MODEL NOW DEFINES ...
 		 * dev/MEASURED-gpon_omci_core.c.md sec 15. */
@@ -447,7 +457,7 @@ u16 omci_alarm_count(const struct omci_onu *o)
 	return (o && o->alarm_class && o->alarm_active) ? 1 : 0;
 }
 
-int omci_onu_emit_alarm(struct omci_onu *o, u8 *out)
+int omci_onu_alarm_prepare(const struct omci_onu *o, u8 *out)
 {
 	if (!o || !out)
 		return 0;
@@ -470,15 +480,31 @@ int omci_onu_emit_alarm(struct omci_onu *o, u8 *out)
 	out[8] = (u8)(o->alarm_active >> 8);
 	out[9] = (u8)(o->alarm_active & 0xff);
 
-	o->alarm_seq++;				/* wraps at 255 by construction */
-	if (!o->alarm_seq)
-		o->alarm_seq = 1;		/* 0 is reserved for "no sequence" */
-	out[39] = o->alarm_seq;
+	out[39] = o->alarm_seq == 255 ? 1 : o->alarm_seq + 1;
 
 	omci_finalize(out);
-	o->alarm_told = o->alarm_active;	/* the edge is consumed HERE */
-	o->alarm_emitted++;
 	return OMCI_LEN;
+}
+
+void omci_onu_alarm_sent(struct omci_onu *o, const u8 *sent)
+{
+	if (!o || !sent || sent[2] != OMCI_MT_ALARM || sent[3] != 0x0a ||
+	    (((u16)sent[4] << 8) | sent[5]) != o->alarm_class ||
+	    (((u16)sent[6] << 8) | sent[7]) != o->alarm_inst)
+		return;
+	o->alarm_told = ((u16)sent[8] << 8) | sent[9];
+	o->alarm_seq = sent[39];
+	o->alarm_emitted++;
+}
+
+/* Synchronous peers without a fallible transport. Drivers use prepare/sent. */
+int omci_onu_emit_alarm(struct omci_onu *o, u8 *out)
+{
+	int n = omci_onu_alarm_prepare(o, out);
+
+	if (n)
+		omci_onu_alarm_sent(o, out);
+	return n;
 }
 
 /* ONE baseline frame layout for everything this core BUILDS, notification and

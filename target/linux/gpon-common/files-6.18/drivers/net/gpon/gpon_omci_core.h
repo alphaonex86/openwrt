@@ -135,6 +135,10 @@ void omci_onu_set_alarms(struct omci_onu *o, u16 class_id, u16 inst,
  * dev/MEASURED-gpon_omci_core.h.md sec 3. */
 int omci_onu_emit_alarm(struct omci_onu *o, u8 *out);
 
+/* Serialized by the caller; commit only after successful TX submission. */
+int omci_onu_alarm_prepare(const struct omci_onu *o, u8 *out);
+void omci_onu_alarm_sent(struct omci_onu *o, const u8 *sent);
+
 /* How many alarm-bearing ME instances are asserting right now — what
  * Get-all-alarms must report.  It answered a constant 0 before. */
 u16 omci_alarm_count(const struct omci_onu *o);

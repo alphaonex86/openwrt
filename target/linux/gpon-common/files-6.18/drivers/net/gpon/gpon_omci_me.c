@@ -178,6 +178,7 @@ enum omci_attr_src {
 	 * it in the ATTRIBUTES-FAILED word -- G.988's own "could not ask".
 	 * A missing counter rendered as 0 is a measurement nobody took. */
 	OMCI_SRC_CNT,
+	OMCI_SRC_ANIG_THRESHOLD,
 };
 
 /* Where an OMCI_SRC_TBL write goes. */
@@ -464,24 +465,24 @@ static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 263 ANI-G (inst 0x8001) ---- */
 	A_C(263,  1, 1, 1),			/* #1  SR indication */
 	A_C(263,  2, 2, 12),			/* #2  Total T-CONTs */
-	A_C(263,  3, 2, 48),			/* #3  GEM block length */
-	A_C(263,  4, 1, 0),			/* #4  Piggyback DBA */
+	A_CW(263,  3, 2, 48),			/* #3  GEM block length */
+	A_CW(263,  4, 1, 0),			/* #4  Piggyback DBA */
 	A_C(263,  5, 1, 0),			/* #5  (deprecated) */
-	A_C(263,  6, 1, 5),			/* #6  SF threshold */
-	A_C(263,  7, 1, 9),			/* #7  SD threshold */
-	A_C(263,  8, 1, 0),			/* #8  ARC */
-	A_C(263,  9, 1, 0),			/* #9  ARC interval */
+	A_CW(263,  6, 1, 5),			/* #6  SF threshold */
+	A_CW(263,  7, 1, 9),			/* #7  SD threshold */
+	A_CW(263,  8, 1, 0),			/* #8  ARC */
+	A_CW(263,  9, 1, 0),			/* #9  ARC interval */
 	/* #10/#14 are the LIVE optical levels, sampled from the optic's
 	 * SFF-8472 A2h diagnostics by the shell (see omci_onu_set_optical);
 	 * until the first successful read — and after a failed one — they serve
 	 * OMCI_ANIG_{RX,TX}_FALLBACK, because the OLT must never get silence. */
 	A_D(263, 10, 2, OMCI_DYN_ANIG_RX),	/* #10 RX optical level */
-	A_C(263, 11, 1, 0xff),			/* #11 Lower optical thresh */
-	A_C(263, 12, 1, 0xff),			/* #12 Upper optical thresh */
+	{ 263, 0, 11, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
+	{ 263, 1, 12, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
 	A_C(263, 13, 2, 0x0000),		/* #13 ONU response time */
 	A_D(263, 14, 2, OMCI_DYN_ANIG_TX),	/* #14 TX optical level */
-	A_C(263, 15, 1, 0x81),			/* #15 Lower TX power thresh */
-	A_C(263, 16, 1, 0x81),			/* #16 Upper TX power thresh */
+	{ 263, 2, 15, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
+	{ 263, 3, 16, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
 
 	/* ---- ME 264 UNI-G (inst 0x0101) ---- */
 	A_C(264, 1, 2, 0x0000),			/* #1  Config-option status */
@@ -728,6 +729,7 @@ static void omci_uni_install(struct omci_uni_inv *inv, const u16 *inst, u8 n)
 bool omci_me_mutable(u16 class_id)
 {
 	switch (class_id) {
+	case OMCI_ME_ANI_G:
 	case OMCI_ME_GEM_CTP:
 	case OMCI_ME_PPTP_ETH_UNI:
 	case OMCI_ME_TCONT:
@@ -758,6 +760,37 @@ bool omci_me_mutable(u16 class_id)
 	}
 }
 
+static void omci_anig_alarms_refresh(struct omci_onu *o)
+{
+	const u8 *t = o->anig_threshold;
+	s32 rx = (s16)o->anig_rx_level, tx = (s16)o->anig_tx_level;
+	u16 bits = 0;
+
+	if (!o->anig_live)
+		return;
+	/* Threshold LSB = 0.5 dB; level LSB = 0.002 dB. No guessed vendor policy. */
+	if (t[0] != 0xff && rx < -(s32)t[0] * 250)
+		bits |= OMCI_ANIG_RX_LOW;
+	if (t[1] != 0xff && rx > -(s32)t[1] * 250)
+		bits |= OMCI_ANIG_RX_HIGH;
+	if (t[2] != 0x81 && tx < (s32)(s8)t[2] * 250)
+		bits |= OMCI_ANIG_TX_LOW;
+	if (t[3] != 0x81 && tx > (s32)(s8)t[3] * 250)
+		bits |= OMCI_ANIG_TX_HIGH;
+	o->alarm_class = OMCI_ME_ANI_G;
+	o->alarm_inst = 0x8001;
+	o->alarm_active = (o->alarm_active & ~(OMCI_ANIG_RX_LOW |
+		OMCI_ANIG_RX_HIGH | OMCI_ANIG_TX_LOW | OMCI_ANIG_TX_HIGH)) | bits;
+}
+
+void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level)
+{
+	o->anig_rx_level = rx_level;
+	o->anig_tx_level = tx_level;
+	o->anig_live = true;
+	omci_anig_alarms_refresh(o);
+}
+
 void omci_me_reset_values(struct omci_onu *o)
 {
 	u16 i;
@@ -772,6 +805,9 @@ void omci_me_reset_values(struct omci_onu *o)
 	o->tcont_alloc_written = 0;
 	for (i = 0; i < OMCI_TCONT_COUNT; i++)
 		o->tcont_alloc[i] = i ? 0x00ff : 0x0100;
+	o->anig_threshold[0] = o->anig_threshold[1] = 0xff;
+	o->anig_threshold[2] = o->anig_threshold[3] = 0x81;
+	omci_anig_alarms_refresh(o);
 }
 
 /* How many octets of DENSE attribute body @class_id's ...
@@ -851,6 +887,8 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		return;			/* validated equal to what we serve */
 	if (a->src == OMCI_SRC_STORE)
 		memcpy(e->body + a->v, v, a->size);
+	else if (a->src == OMCI_SRC_ANIG_THRESHOLD)
+		o->anig_threshold[a->v] = v[0];
 	else if (a->src == OMCI_SRC_TBL) {
 		/* TWO table writes this model HOLDS -- the subscriber VLAN and
 		 * the per-bridge-port MAC filter; the rest are accepted so the
@@ -940,6 +978,8 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 				   values + pos);
 		pos += a->size;
 	}
+	if (class_id == OMCI_ME_ANI_G)
+		omci_anig_alarms_refresh(o);
 	return OMCI_RC_OK;
 }
 
@@ -959,6 +999,8 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 	u32 val;
 
 	switch (a->src) {
+	case OMCI_SRC_ANIG_THRESHOLD:
+		return o->anig_threshold + a->v;
 	case OMCI_SRC_STORE: {
 		struct omci_me_inst *e = omci_store_find(o,
 						      a->class_id, inst);
@@ -1256,7 +1298,9 @@ bool omci_onu_declare_unis(struct omci_onu *o,
 
 /* The inventory every board on the bench has at minimum, and exactly what this
  * model carried before the inventory existed. */
-static const u16 omci_uni_default[] = { 0x0101 };
+static const u16 omci_uni_default[] = {
+	0x0101 /* default PPTP Ethernet UNI instance */
+};
 
 /* One declared 16-bit list: even byte count, at most OMCI_UNI_MAX entries,
  * decoded big-endian.  Empty is legal and means "this board has none". */

@@ -176,21 +176,22 @@ struct omci_onu {
 					 * countable */
 	u32	avc_count;		/* autonomous AVC frames emitted */
 	bool	avc_veip_up_sent;
-	/* ★★ THE ALARM STATE.  Our ONU saw LOS/LOF in silicon, printed it to
-	 * /proc and told every OLT that nothing was wrong.  The core owns the
-	 * MESSAGE, the EDGE and the ACCOUNTING; the family owns only which
-	 * silicon bit means what, handed in as (class, instance, bitmap). */
+	/* First 16 G.988 alarm bits, MSB first; one reporting ME. */
 	u16	alarm_class;	/* the ME the conditions belong to (0 = none) */
 	u16	alarm_inst;
 	u16	alarm_active;	/* what the SILICON asserts right now */
 	u16	alarm_told;	/* what the OLT has been told -- the EDGE */
 	u8	alarm_seq;	/* G.988 alarm sequence number, wraps at 255 */
 	u32	alarm_emitted;	/* spy counter: autonomous alarms sent */
+	u16	alarm_snapshot_class;
+	u16	alarm_snapshot_inst;
+	u16	alarm_snapshot_bits;
 	/* ME 263 ANI-G #10 RX / #14 TX optical level in the G.988 ...
 	 * dev/MEASURED-gpon_omci_me.h.md sec 7. */
 	u16	anig_rx_level;
 	u16	anig_tx_level;
 	bool	anig_live;
+	u8	anig_threshold[4];	/* RX low/high, TX low/high */
 };
 
 /* The static ANI-G optical levels served until (and after a failed) DDM read:
@@ -203,13 +204,13 @@ struct omci_onu {
 /* Publish a live optical measurement into ME 263 #10/#14.  The caller does the
  * SLEEPING i2c read outside whatever lock guards the responder and passes the
  * two already-converted wire values in. */
-static inline void omci_onu_set_optical(struct omci_onu *o, u16 rx_level,
-					u16 tx_level)
-{
-	o->anig_rx_level = rx_level;
-	o->anig_tx_level = tx_level;
-	o->anig_live = true;
-}
+void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level);
+
+/* G.988 9.2.1: SF/SD are BER alarms, not LOS/LOF. */
+#define OMCI_ANIG_RX_LOW		0x8000u
+#define OMCI_ANIG_RX_HIGH		0x4000u
+#define OMCI_ANIG_TX_LOW		0x0800u
+#define OMCI_ANIG_TX_HIGH		0x0400u
 
 /* Re-provision the G.984.3 ONU serial after init. ★ A SETTER ...
  * dev/MEASURED-gpon_omci_me.h.md sec 8. */

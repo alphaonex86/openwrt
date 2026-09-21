@@ -47,6 +47,22 @@ FILES_DIR_RE = re.compile(
     r'^FILES_DIR\s*\+=\s*"\$\(TOPDIR\)/target/linux/gpon-common/files-\$\(KERNEL_PATCHVER\)"\s*$')
 
 
+HUNK_FILE = re.compile(r'^\+\+\+\s+(?:[ab]|linux-[\d.]+)/(\S+)', re.M)
+
+
+def patch_sections(text, files):
+    """The per-file sections of a unified diff whose +++ names one of @files."""
+    lines = text.splitlines(True)
+    out, keep = [], False
+    for i, line in enumerate(lines):
+        if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            m = HUNK_FILE.match(lines[i + 1])
+            keep = bool(m and m.group(1) in files)
+        if keep:
+            out.append(line)
+    return "".join(out)
+
+
 class Guard:
     def __init__(self, root):
         self.root = root
@@ -183,35 +199,57 @@ class Guard:
                    "pending with no real reason given: " + ", ".join(thin))
 
     # -- W5 ---------------------------------------------------------------
-    def w5_no_patch_collides(self):
-        """No patch may target a file one of our overlays provides.
+    def w5_overlay_is_the_prepatch_base(self):
+        """Every patch touching an overlaid file must APPLY to the overlay copy,
+        in OpenWrt's order (generic backport/pending/hack, then the target's).
 
         files- overlays are copied in BEFORE patches (include/quilt.mk:93-107),
-        so a patch against an overlaid file applies to OUR copy.  This is the
-        B-BUILD-1 collision: patches-6.18/103-realtek-luna-gpon.patch carries
-        the very Kconfig/Makefile now overlaid, and must be deleted.
+        so an overlay holding POST-patch bytes makes the patch fail on a fresh
+        prepare.  MEASURED 2026-09-21: arch/mips/Kconfig overlaid with the
+        prepared tree's bytes; generic pending 300 then failed 1 hunk of 2.
+        The earlier form walked only the target's own patches and only a/b
+        hunk paths, so neither generic 300 nor linux-<ver>/ paths were seen.
         """
-        provided = set()
-        for base in [SHARED_FILES] + ["target/linux/%s/files-%s" % (t, VER) for t in TARGETS]:
-            b = self.p(base)
-            for dirpath, _, filenames in os.walk(b, followlinks=False):
-                for fn in filenames:
-                    provided.add(os.path.relpath(os.path.join(dirpath, fn), b))
-        hunk = re.compile(r'^(?:\+\+\+|---)\s+[ab]/(\S+)', re.M)
+        pdirs = ["target/linux/generic/%s-%s" % (k, VER)
+                 for k in ("backport", "pending", "hack")]
         for t in TARGETS:
-            pdir = self.p("target/linux/%s/patches-%s" % (t, VER))
-            if not os.path.isdir(pdir):
-                continue
-            for fn in sorted(os.listdir(pdir)):
-                if not fn.endswith(".patch"):
-                    continue
-                with open(os.path.join(pdir, fn), "r", encoding="utf-8",
-                          errors="replace") as f:
-                    hit = sorted({m for m in hunk.findall(f.read()) if m in provided})
-                self.check(not hit, "W5.collide/" + t,
-                           "%s patches a file an overlay provides: %s -- delete the "
-                           "patch (the overlay is the sanctioned mechanism)"
-                           % (fn, ", ".join(hit)))
+            provided = {}
+            for base in [SHARED_FILES, "target/linux/%s/files-%s" % (t, VER)]:
+                b = self.p(base)
+                for dirpath, _, filenames in os.walk(b, followlinks=False):
+                    for fn in filenames:
+                        path = os.path.join(dirpath, fn)
+                        provided[os.path.relpath(path, b)] = path
+            tmp = tempfile.mkdtemp(prefix="gpon-w5-")
+            try:
+                for pdir in pdirs + ["target/linux/%s/patches-%s" % (t, VER)]:
+                    d = self.p(pdir)
+                    for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+                        if not fn.endswith(".patch"):
+                            continue
+                        with open(os.path.join(d, fn), "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            text = f.read()
+                        files = sorted({m for m in HUNK_FILE.findall(text)
+                                        if m in provided})
+                        if not files:
+                            continue
+                        for rel in files:
+                            dst = os.path.join(tmp, rel)
+                            if not os.path.exists(dst):
+                                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                                shutil.copyfile(provided[rel], dst)
+                        p = subprocess.run(["patch", "-p1", "-s", "-f",
+                                            "--no-backup-if-mismatch"], cwd=tmp,
+                                           input=patch_sections(text, files),
+                                           capture_output=True, text=True)
+                        self.check(p.returncode == 0, "W5.prepatch/" + t,
+                                   "%s does not apply to the overlay copy of %s -- "
+                                   "the overlay must hold the PRE-patch bytes: %s"
+                                   % (fn, ", ".join(files),
+                                      (p.stdout + p.stderr).strip()[:200]))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
 
     # -- W6 ---------------------------------------------------------------
     def w6_no_scanned_makefile(self):
@@ -357,7 +395,7 @@ class Guard:
 
     def run(self):
         for fn in (self.w1_files_dir_line, self.w2_trees_disjoint, self.w3_o2,
-                   self.w4_objects_accounted, self.w5_no_patch_collides,
+                   self.w4_objects_accounted, self.w5_overlay_is_the_prepatch_base,
                    self.w6_no_scanned_makefile, self.w7_no_symlinks,
                    self.w8_parent_wiring, self.w9_someone_selects,
                    self.w10_shared_header_include_path):
@@ -397,6 +435,8 @@ MUTATIONS = [
     ("W4.pending_reason", SHARED_FILES + "/drivers/net/gpon/Makefile",
      lambda s: re.sub(r'^(# gpon-pending: gpon_ploam\.o --).*(?:\n#   .*)*$',
                       r'\1 later', s, flags=re.M)),
+    ("W5.prepatch", "target/linux/realtek-luna/files-%s/arch/mips/Kconfig" % VER,
+     lambda s: s.replace("config BOOT_RAW\n\tbool\n\n", "", 1)),
     ("W8.kconfig", SHARED_FILES + "/drivers/net/Kconfig",
      lambda s: s.replace('source "drivers/net/gpon/Kconfig"', '')),
     ("W8.makefile", SHARED_FILES + "/drivers/net/Makefile",
@@ -417,7 +457,9 @@ MUTATIONS = [
 def self_check(root):
     """Copy only what the guard reads, mutate one thing, require a FAIL."""
     subtrees = [SHARED, "include", "target/linux/realtek-luna",
-                "target/linux/realtek-elnath"]
+                "target/linux/realtek-elnath"] + \
+               ["target/linux/generic/%s-%s" % (k, VER)
+                for k in ("backport", "pending", "hack")]
     rc = 0
     for name, rel, mutate in MUTATIONS:
         tmp = tempfile.mkdtemp(prefix="gpon-wiring-")

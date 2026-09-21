@@ -950,7 +950,9 @@ void rtl92fe_tx_fill_cmddesc(struct ieee80211_hw *hw, u8 *pdesc8,
 		rtl_dbg(rtlpriv, COMP_SEND, DBG_TRACE, "DMA mapping error\n");
 		return;
 	}
-	clear_pci_tx_desc_content(pdesc, txdesc_len);
+	rtl92fe_pre_fill_tx_bd_desc(hw,
+				    (u8 *)rtlpci->tx_ring[BEACON_QUEUE].buffer_desc,
+				    pdesc8, BEACON_QUEUE, skb, mapping);
 
 	set_tx_desc_offset(pdesc, txdesc_len);
 

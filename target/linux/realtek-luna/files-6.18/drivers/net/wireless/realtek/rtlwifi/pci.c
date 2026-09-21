@@ -43,6 +43,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	unsigned int rows[RTL_PCI_MAX_TX_QUEUE_COUNT][6];
 	u64 addresses[RTL_PCI_MAX_TX_QUEUE_COUNT];
+	u32 bcn_irq, bcn_tasklet;
 	unsigned long flags;
 	int q;
 
@@ -63,6 +64,8 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 		addresses[q] = rtlpriv->cfg->ops->get_desc(hw, entry, true,
 							HW_DESC_TXBUFF_ADDR);
 	}
+	bcn_irq = rtlpci->bcn_irq;
+	bcn_tasklet = rtlpci->bcn_tasklet;
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
 
 	seq_puts(m, "queue entries queued head write cached_read own dma\n");
@@ -70,6 +73,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 		seq_printf(m, "%d %u %u %u %u %u %u %016llx\n", q, rows[q][0],
 			   rows[q][1], rows[q][2], rows[q][3], rows[q][4],
 			   rows[q][5], addresses[q]);
+	seq_printf(m, "bcn_irq %u bcn_tasklet %u\n", bcn_irq, bcn_tasklet);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rtl_pci_tx_queues);
@@ -989,6 +993,7 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_BCNINT]) {
 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE,
 			"prepare beacon for interrupt!\n");
+		rtlpci->bcn_irq++;
 		tasklet_schedule(&rtlpriv->works.irq_prepare_bcn_tasklet);
 	}
 
@@ -1131,7 +1136,8 @@ static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 	struct rtl_tcb_desc tcb_desc = {};
 	struct sk_buff *skb;
 
-	/*NB: the beacon data buffer must be 32-bit aligned. */
+	/* The only steady-state beacon writer: inside the beacon-early window. */
+	rtl_pcidev(rtl_pcipriv(hw))->bcn_tasklet++;
 	skb = ieee80211_beacon_get(hw, mac->vif, 0);
 	if (skb)
 		rtl_pci_tx(hw, NULL, skb, &tcb_desc);
@@ -1635,7 +1641,8 @@ static int rtl_pci_tx(struct ieee80211_hw *hw,
 	struct rtl_tx_buffer_desc *ptx_bd_desc = NULL;
 	u8 *entry;
 	u16 idx;
-	u8 hw_queue = _rtl_mac_to_hwqueue(hw, skb);
+	u8 hw_queue = ptcb_desc->cmd_or_init ? BEACON_QUEUE :
+		      _rtl_mac_to_hwqueue(hw, skb);
 	unsigned long flags;
 	struct ieee80211_hdr *hdr = rtl_get_hdr(skb);
 	__le16 fc = rtl_get_fc(skb);
@@ -1725,8 +1732,23 @@ static int rtl_pci_tx(struct ieee80211_hw *hw,
 	if (ieee80211_is_data(fc))
 		rtlpriv->cfg->ops->led_control(hw, LED_CTL_TX);
 
-	rtlpriv->cfg->ops->fill_tx_desc(hw, hdr, (u8 *)pdesc,
+	memset(entry, 0, rtlpriv->use_new_trx_flow ? sizeof(*ptx_bd_desc) :
+	       sizeof(*pdesc));
+	if (!rtlpriv->use_new_trx_flow) {
+		u32 next = (u32)ring->dma +
+			   ((idx + 1) % ring->entries) * sizeof(*pdesc);
+
+		rtlpriv->cfg->ops->set_desc(hw, (u8 *)pdesc, true,
+					    HW_DESC_TX_NEXTDESC_ADDR, (u8 *)&next);
+	}
+	if (ptcb_desc->cmd_or_init)
+		rtlpriv->cfg->ops->fill_tx_cmddesc(hw, (u8 *)pdesc, skb);
+	else
+		rtlpriv->cfg->ops->fill_tx_desc(hw, hdr, (u8 *)pdesc,
 			(u8 *)ptx_bd_desc, info, sta, skb, hw_queue, ptcb_desc);
+	/* A descriptor the chip layer did not fill is never published. */
+	if (!rtlpriv->cfg->ops->get_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR))
+		goto drop;
 
 	__skb_queue_tail(&ring->queue, skb);
 

@@ -1895,6 +1895,11 @@ void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)
 	rtl_write_word(rtlpriv, REG_ATIMWND, atim_window);
 	rtl_write_word(rtlpriv, REG_BCN_INTERVAL, bcn_interval);
 	rtl_write_word(rtlpriv, REG_BCNTCFG, 0x660f);
+	/* Vendor: early interrupt 10 TU before TBTT, beacon DMA 1 TU before;
+	 * the chip's own 2/2 leaves the tasklet no window at all (measured).
+	 */
+	rtl_write_byte(rtlpriv, REG_DRVERLYINT, 10);
+	rtl_write_byte(rtlpriv, REG_BCNDMATIM, 1);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_CCK, 0x18);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM, 0x18);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM - 2, 0x30);

@@ -61,6 +61,7 @@ ccflags-y += -I$(srctree)/drivers/net/flowcore
 obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_eth.o
 obj-$(CONFIG_LUNA_GPON) += luna_gpon.o luna_ponmac.o
 obj-$(CONFIG_LUNA_ETH) += luna_eth.o
+obj-$(CONFIG_LUNA_ETH_MIB) += luna_eth_mib.o
 # The datapath hot path keeps -O2 even under the size-optimized (-Os) kernel:
 # the NIC RX/TX + GEM/PON-MAC forwarding must not lose per-packet performance.
 CFLAGS_rtl9602c_eth.o += -O2

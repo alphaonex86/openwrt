@@ -65,10 +65,6 @@ void rtl9602c_eth_omci_selftest(void);
  * engine re-latches against the freshly-reset GMAC (stock order: GMAC reset -> NIC). */
 void gpon_pbo_init(void);
 
-/* Live ANI-G (ME 263) optical levels for the OMCI responder, ...
- * dev/MEASURED-luna_gpon_nic.h.md sec 9. */
-void gpon_anig_optical_omci(s16 *rx_level, s16 *tx_level);
-
 /* Faithful port of the stock SDK rtk_all_module_init() GPON datapath bring-up,
  * run on the quiescent switch in the eth reset path (after the GMAC reset + swcore
  * resync, before the GMAC is programmed/armed). Defined in luna_gpon.c. */
@@ -86,14 +82,8 @@ void rtl9602c_datapath_tables_init(void);
 #define GPON_MCAST_FLOW	2
 #define GPON_MCAST_GEM	0xfffu
 
-/* Timer-owned data installation consumes the accepted common OMCI binding.
- * The compatibility hint has no authorization or programming effect. */
+/* Timer-owned data installation consumes the accepted common OMCI binding. */
 int gpon_install_data_gem(void);
-void gpon_omci_note_gem_create(u16 port_id);
-
-/* The OMCC GEM Port-ID currently installed (0 = none yet).  An INPUT to the
- * core's data-GEM decision: the geometry is the shell's, the decision is not. */
-u16 gpon_omcc_gem(void);
 
 /* Publish the cached live DDM optical levels into ME 263 ...
  * dev/MEASURED-luna_gpon_nic.h.md sec 7. */
@@ -111,9 +101,5 @@ static inline void rtl9602c_eth_omci_set_optical(s16 rx_level, s16 tx_level)
  * few seconds after O5 (config-apply done). */
 void rtl9602c_eth_omci_report_oper_up(void);
 
-
-/* The ONU serial number, owned by the PLOAM layer that ...
- * dev/MEASURED-luna_gpon_nic.h.md sec 8. */
-void gpon_onu_sn(u8 out[8]);
 
 #endif /* _LUNA_GPON_NIC_H */

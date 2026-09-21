@@ -37,9 +37,13 @@ config NET_VENDOR_REALTEK
 	  the questions about Realtek devices. If you say Y, you will be asked for
 	  your specific card in the following questions.
 
+config LUNA_ETH_MIB
+	tristate
+
 config RTL9602C_ETH
 	tristate "Realtek RTL9602C (Luna) GMAC + switch"
 	depends on REALTEK_LUNA
+	select LUNA_ETH_MIB
 	default y
 	help
 	  Clean-room driver for the RTL9602C GMAC + on-chip switch core.
@@ -77,6 +81,7 @@ config LUNA_GPON
 config LUNA_ETH
 	tristate "Realtek Luna (interAptiv) GMAC + switch"
 	depends on REALTEK_LUNA
+	select LUNA_ETH_MIB
 	default y
 	help
 	  Clean-room driver for the Luna GMAC0 CPU port plus the on-chip switch
@@ -85,6 +90,15 @@ config LUNA_ETH
 	  (6 ports, 1 CPU GMAC, no SerDes). The MAC engine is identical on both;
 	  508 of 1361 switch registers move, which is why the table exists and
 	  why neither chip may borrow the other's offsets.
+
+config LUNA_FLOWOFFLOAD
+	bool "Realtek Luna FLOWBASED hardware flow offload"
+	depends on LUNA_ETH
+	select GPON_FLOW_OFFLOAD
+	default y
+	help
+	  SRAM IPv4 NAT backend for supported FLOWBASED switch layouts.
+	  Unsupported dies and flow shapes keep software forwarding.
 
 if NET_VENDOR_REALTEK
 

@@ -17,6 +17,7 @@ struct gpon_flow_entry {
 	unsigned long		cookie;
 	u32			idx;		/* the engine's, opaque */
 	bool			ds;
+	bool			installing, failed, removed;
 	/* ops->priv_size bytes of family state follow */
 };
 
@@ -65,8 +66,17 @@ static void gpon_flow_entry_drop(void *ptr, void *arg)
 {
 	struct gpon_flow_offload *fo = arg;
 	struct gpon_flow_entry *e = ptr;
+	int err = 0;
 
-	fo->ops->remove(fo->sh, e->idx, entry_priv(e));
+	if (e->removed)
+		err = 0;
+	else if (!e->failed)
+		err = fo->ops->remove(fo->sh, e->idx, entry_priv(e));
+	else if (fo->ops->abort_install)
+		err = fo->ops->abort_install(fo->sh, e->idx, entry_priv(e));
+	if (err)
+		pr_err("gpon-flow: teardown of cookie %lx failed (%d); the family must quiesce hardware before freeing the lifecycle\n",
+		       e->cookie, err);
 	kfree(e);
 }
 
@@ -190,9 +200,66 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 	return 0;
 }
 
-/*
- * ── the three TC verbs ───────────────────────────────────────────────────
- */
+static int gpon_flow_entry_retire(struct gpon_flow_offload *fo,
+				  struct gpon_flow_entry *entry)
+{
+	int err = 0;
+
+	if (entry->installing)
+		return -EBUSY;
+	if (entry->removed)
+		err = 0;
+	else if (!entry->failed)
+		err = fo->ops->remove(fo->sh, entry->idx, entry_priv(entry));
+	else if (fo->ops->abort_install)
+		err = fo->ops->abort_install(fo->sh, entry->idx, entry_priv(entry));
+	if (err)
+		return err;
+	entry->removed = true;
+	err = rhashtable_remove_fast(&fo->table, &entry->node, gpon_flow_ht_params);
+	if (!err)
+		kfree(entry);
+	return err;
+}
+
+static int gpon_flow_install_entry(struct gpon_flow_offload *fo,
+				   const struct gpon_flow_key *key,
+				   const struct gpon_flow_act *act,
+				   const struct gpon_flow_ctx *ctx,
+				   unsigned long cookie,
+				   enum gpon_flow_refusal *why)
+{
+	struct gpon_flow_entry *entry;
+	int err, cleanup;
+
+	entry = kzalloc(sizeof(*entry) + fo->ops->priv_size, GFP_KERNEL);
+	if (!entry) {
+		*why = GPON_FLOW_REF_NOMEM;
+		return -ENOMEM;
+	}
+	entry->cookie = cookie;
+	entry->ds = ctx->ds_leg;
+	entry->installing = true;
+	/* Claim the cookie before hardware; an install may flush the old edge. */
+	err = rhashtable_insert_fast(&fo->table, &entry->node, gpon_flow_ht_params);
+	if (err) {
+		*why = GPON_FLOW_REF_TABLE_INSERT;
+		kfree(entry);
+		return err;
+	}
+	err = fo->ops->install(fo->sh, key, act, ctx, entry_priv(entry), &entry->idx);
+	entry->installing = false;
+	if (!err)
+		return 0;
+	entry->failed = true;
+	*why = gpon_flow_install_cause(err);
+	cleanup = gpon_flow_entry_retire(fo, entry);
+	if (cleanup)
+		pr_err_ratelimited("gpon-flow: cookie %lx rollback failed (%d); retaining its owner\n",
+				   cookie, cleanup);
+	return err > 0 ? -EOPNOTSUPP : err;
+}
+
 int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f,
 			      struct net_device *blockdev)
@@ -216,9 +283,15 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	 * direction's own tuple, so the two legs never share one. A dup-cookie is
 	 * the SAME cookie delivered again -- most plausibly by the block-cb
 	 * fan-out. Refusing ... dev/MEASURED-gpon_flow_offload.c.md sec 7. */
-	if (rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params)) {
-		GPON_FLOW_NOTE(fo, GPON_FLOW_REF_DUP_COOKIE);
-		return -EEXIST;
+	entry = rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params);
+	if (entry) {
+		if (!entry->failed) {
+			GPON_FLOW_NOTE(fo, GPON_FLOW_REF_DUP_COOKIE);
+			return -EEXIST;
+		}
+		err = gpon_flow_entry_retire(fo, entry);
+		if (err)
+			return err;
 	}
 
 	err = gpon_flow_key_from_tc(rule, &key, &why);
@@ -243,45 +316,15 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	if (err)
 		goto out_put;
 
-	entry = kzalloc(sizeof(*entry) + fo->ops->priv_size, GFP_KERNEL);
-	if (!entry) {
-		why = GPON_FLOW_REF_NOMEM;
-		err = -ENOMEM;
+	err = gpon_flow_install_entry(fo, &key, &act, &ctx, f->cookie, &why);
+	if (err)
 		goto out_put;
-	}
-	entry->cookie = f->cookie;
-	entry->ds = ctx.ds_leg;
-
-	/* Every decision that needs silicon, and the install, in ONE ...
-	 * dev/MEASURED-gpon_flow_offload.c.md sec 11. */
-	err = fo->ops->install(fo->sh, &key, &act, &ctx, entry_priv(entry),
-			       &entry->idx);
-	if (err) {
-		/* A DECLINE IS NOT A FAILURE. TC still hears -EOPNOTSUPP so it
-		 * stops offering this leg, but the ledger says which it was. */
-		why = gpon_flow_install_cause(err);
-		if (err > 0)
-			err = -EOPNOTSUPP;
-		goto out_free;
-	}
-
-	err = rhashtable_insert_fast(&fo->table, &entry->node,
-				     gpon_flow_ht_params);
-	if (err) {
-		/* the ONE unwind path: the flow is in hardware and would
-		 * otherwise be unreachable by cookie, i.e. leaked for good */
-		fo->ops->remove(fo->sh, entry->idx, entry_priv(entry));
-		why = GPON_FLOW_REF_TABLE_INSERT;
-		goto out_free;
-	}
 
 	GPON_FLOW_NOTE(fo, GPON_FLOW_OK);
 	if (ctx.idev)
 		dev_put(ctx.idev);
 	return 0;
 
-out_free:
-	kfree(entry);
 out_put:
 	GPON_FLOW_NOTE(fo, why);
 	if (ctx.idev)
@@ -326,7 +369,7 @@ int gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 			int err;
 
 			rhashtable_walk_stop(&it);
-			err = fo->ops->remove(fo->sh, e->idx, entry_priv(e));
+			err = e->installing ? 0 : gpon_flow_entry_retire(fo, e);
 			/* An entry the engine would NOT retire keeps its
 			 * software owner: freeing it here drops the only handle
 			 * that could ever retire it, so the hardware entry goes
@@ -334,10 +377,6 @@ int gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 			if (err) {
 				if (!ret)
 					ret = err;
-			} else {
-				rhashtable_remove_fast(&fo->table, &e->node,
-						       gpon_flow_ht_params);
-				kfree(e);
 			}
 			rhashtable_walk_start(&it);
 			e = rhashtable_walk_next(&it);
@@ -345,6 +384,8 @@ int gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 		rhashtable_walk_stop(&it);
 	} while (e == ERR_PTR(-EAGAIN));
 	rhashtable_walk_exit(&it);
+	if (!ret && IS_ERR(e))
+		ret = PTR_ERR(e);
 	return ret;
 }
 
@@ -352,7 +393,6 @@ int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f)
 {
 	struct gpon_flow_entry *entry;
-	int err;
 
 	if (!fo || !fo->table_ready)
 		return -EOPNOTSUPP;
@@ -362,17 +402,7 @@ int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 	if (!entry)
 		return -ENOENT;
 
-	err = fo->ops->remove(fo->sh, entry->idx, entry_priv(entry));
-	/* THE SAME RULE AS THE FLUSH, one function over: an entry the engine
-	 * would not retire KEEPS its software owner, so the cookie still
-	 * resolves and the kernel's next destroy retries it.  Freeing it here
-	 * reports success, drops the only handle that could retire the hardware
-	 * entry, and leaves it forwarding for the life of the board. */
-	if (err)
-		return err;
-	rhashtable_remove_fast(&fo->table, &entry->node, gpon_flow_ht_params);
-	kfree(entry);
-	return 0;
+	return gpon_flow_entry_retire(fo, entry);
 }
 
 int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
@@ -389,6 +419,8 @@ int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 				       gpon_flow_ht_params);
 	if (!entry)
 		return -ENOENT;
+	if (entry->installing || entry->failed || entry->removed)
+		return -EBUSY;
 
 	if (!fo->ops->stats)
 		return -EOPNOTSUPP;

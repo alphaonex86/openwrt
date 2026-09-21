@@ -4,6 +4,7 @@
 
 #include <net/flow_offload.h>	/* struct flow_cls_offload, the block cb type */
 #include <net/pkt_cls.h>	/* FLOW_CLS_*, FLOW_BLOCK_*, flow_block_cb_*   */
+#include "gpon_flow_block.h"
 
 /* ★ THE INSTALL REFUSED UNCONDITIONALLY UNTIL 2026-09-11, AND ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 2. */
@@ -34,8 +35,7 @@ static bool rtl9602c_l34_is_lan_side(void *sh, struct net_device *dev)
 	return dev && dev->netdev_ops != &rtl9602c_eth_wan_ops;
 }
 
-/* ⚠ ONE HARDWARE ENTRY PER CONNECTION, AND IT IS THE UPSTREAM ...
- * dev/MEASURED-rtl9602c_l34_tc.c.md sec 5. */
+/* The upstream leg owns NAPT; the downstream leg owns its LAN neighbour. */
 static int l34_refuse(struct rtl9602c_l34 *l, const char *why)
 {
 	unsigned int i;
@@ -101,11 +101,17 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		o->proto = k->ip_protocol;
 		ep->l34.offer_n++;
 	}
-	/* ⚠ THE REPLY LEG IS NOT A REFUSAL AND MAY NOT BE COUNTED AS ...
-	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 6. */
 	if (ctx->ds_leg || a->nat_is_da) {
 		ep->l34.ds_legs++;
-		return GPON_FLOW_DECLINED;
+		if (!a->dmac_valid || !ctx->odev ||
+		    !rtl9602c_l34_is_lan_side(sh, ctx->odev))
+			return -EOPNOTSUPP;
+		ret = l34_neigh_add(&ep->l34, f, a->nat_addr, a->gw_dmac);
+		if (!ret) {
+			*idx_out = f->hw_index;
+			p->last_hit = jiffies;
+		}
+		return ret;
 	}
 
 	/* ★ THE VALUES FIRST, THE FLOW SECOND. The interface tables ...
@@ -234,7 +240,7 @@ static int rtl9602c_l34_op_remove(void *sh, u32 idx, void *priv)
 	 * which belongs to somebody else.  The flow's own retained indices are
 	 * the only ones that name what it actually claimed. */
 	(void)idx;
-	if (!p->f.out_owned && !p->f.in_owned)
+	if (!p->f.out_owned && !p->f.in_owned && !p->f.neigh_owned)
 		return 0;	/* nothing claimed: cleanup succeeds, engine or not */
 	if (!ep || !ep->l34.ready)
 		return -ENODEV;
@@ -250,6 +256,10 @@ static int rtl9602c_l34_op_stats(void *sh, u32 idx, void *priv,
 
 	if (!ep || !ep->l34.ready)
 		return -ENODEV;
+	if (p->f.neigh_owned) {
+		*lastused = p->last_hit;
+		return 0;
+	}
 	/* The engine reports LIVENESS, not counters -- the same shape ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 11. */
 	if (!rtl9602c_l34_flow_hit(&ep->l34, (u16)idx, &active) && active)
@@ -285,6 +295,7 @@ static const struct gpon_flow_ops rtl9602c_l34_flow_ops = {
 	.note_vlan_action = rtl9602c_l34_op_note_vlan,
 	.install	= rtl9602c_l34_op_install,
 	.remove		= rtl9602c_l34_op_remove,
+	.abort_install	= rtl9602c_l34_op_remove,
 	.stats		= rtl9602c_l34_op_stats,
 	.priv_size	= sizeof(struct rtl9602c_l34_priv),
 };
@@ -337,49 +348,15 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 static int rtl9602c_l34_setup_block(struct net_device *dev,
 				    struct flow_block_offload *f)
 {
-	flow_setup_cb_t *cb = rtl9602c_l34_block_cb;
 	struct rtl9602c_eth *ep = rtl9602c_eth_of(dev);
-	struct flow_block_cb *block_cb;
 
 	/* ★ DO NOT CLAIM A BLOCK WE CANNOT HONOUR. `hw_nat` defaults ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 16. */
 	if (!ep || !ep->fo)
 		return -EOPNOTSUPP;
 
-	/* ★★ THIS CHECK IS NOT THE THROUGHPUT BLOCKER, AND IT WAS ...
-	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 17. */
-	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
-		return -EOPNOTSUPP;
-	f->driver_block_list = &rtl9602c_l34_block_cb_list;
-
-	switch (f->command) {
-	case FLOW_BLOCK_BIND:
-		block_cb = flow_block_cb_lookup(f->block, cb, dev);
-		if (block_cb) {
-			flow_block_cb_incref(block_cb);
-			return 0;
-		}
-		block_cb = flow_block_cb_alloc(cb, dev, dev, NULL);
-		if (IS_ERR(block_cb))
-			return PTR_ERR(block_cb);
-		ep->l34.binds++;
-		flow_block_cb_incref(block_cb);
-		flow_block_cb_add(block_cb, f);
-		list_add_tail(&block_cb->driver_list,
-			      &rtl9602c_l34_block_cb_list);
-		return 0;
-	case FLOW_BLOCK_UNBIND:
-		block_cb = flow_block_cb_lookup(f->block, cb, dev);
-		if (!block_cb)
-			return -ENOENT;
-		if (!flow_block_cb_decref(block_cb)) {
-			flow_block_cb_remove(block_cb, f);
-			list_del(&block_cb->driver_list);
-		}
-		return 0;
-	default:
-		return -EOPNOTSUPP;
-	}
+	return gpon_flow_block_setup(dev, f, &rtl9602c_l34_block_cb_list,
+				     rtl9602c_l34_block_cb, &ep->l34.binds);
 }
 
 static int rtl9602c_l34_setup_tc(struct net_device *dev,

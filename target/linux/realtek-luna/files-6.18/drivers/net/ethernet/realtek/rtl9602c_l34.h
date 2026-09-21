@@ -34,6 +34,8 @@
 #define L34_RDATA		0x800108	/* read-data bank base  (word0..) */
 #define L34_WDATA		0x80011c	/* write-data bank base (word0..) */
 #define L34_SWTCR0		0x800010	/* engine control (NAT mode / flow route) */
+#define  L34_SWTCR0_TTL_MINUS	BIT(12)
+#define  L34_SWTCR0_FRAG2CPU	BIT(23)
 /* ⚠⚠ THESE BIT NAMES WERE WRONG UNTIL 2026-09-12, AND THE ...
  * dev/MEASURED-rtl9602c_l34.h.md sec 1. */
 #define  L34_SWTCR0_V6FLRT_EN	BIT(29)		/* IPv6 flow routing	*/
@@ -152,6 +154,16 @@ enum l34_tbl {
 #define L2_RDATA		0x1201c	/* word0..2 @ +4 */
 #define L34_WORDS_L2UC		3
 #define L2_METHOD_MAC		0
+#define L2_METHOD_ADDR		1
+#define L2_CMD_ADDR_SH		9
+#define L2_CF_MATCH_TYPE		4
+#define L2_CF_ACTION_TYPE		5
+#define L2_CF_RULE_BASE		256
+#define L34_CF_CFG		0x1600c
+#define L34_CF_P1_COUNT_SH	5
+#define L34_CF_L2_WAN_SH		17
+#define L34_CF_ACTION_CTRL	0x16038
+#define L34_CF_SID_ENABLE	BIT(5)
 
 /* Per-flow programming request, filled by the flow-offload glue (endian-safe:
  * addresses/ports are kept in host order here and packed with explicit math). */
@@ -176,6 +188,14 @@ struct l34_flow {
 	u16	naptr_index;		/* retained after the outbound slot is cleared */
 	bool	out_owned, in_owned;	/* index zero is valid; writes may time out */
 	bool	installed;		/* this flow's contribution to `installs` */
+	bool	neigh_owned;		/* downstream ARP reference at hw_index */
+};
+
+struct l34_neigh {
+	u32 ip;
+	u16 l2idx, users;
+	u8 mac[6];
+	bool ready, arp_live, l2_pinned, arp_was_used;
 };
 
 struct rtl9602c_l34 {
@@ -192,6 +212,7 @@ struct rtl9602c_l34 {
 	 * knows the difference. */
 	DECLARE_BITMAP(out_reserved, L34_NAPT_ENTRIES);
 	DECLARE_BITMAP(in_reserved, L34_NAPT_ENTRIES);
+	struct l34_neigh lan_neigh[L34_ARP_WAN_BASE];
 	u32		installs;	/* flows programmed into the engine	*/
 	u32		removals;
 	u32		hits_seen;	/* set hit bits observed -- see the node */
@@ -208,7 +229,7 @@ struct rtl9602c_l34 {
 	unsigned long	hit_swept;	/* jiffies of the last sweep */
 #define L34_REFUSE_REASONS 8	/* distinct refusal sites; a 9th is COUNTED as other */
 	u32		refusals;	/* flows left on the software path	*/
-	u32		ds_legs;	/* reply legs declined -- an EXPECTED non-event */
+	u32		ds_legs;	/* downstream neighbour requests */
 	/* The last few NAPT indexes this driver INSTALLED, so the dump can read
 	 * the entries BACK.  /proc/flowdump rendered the hit BITMAP and the
 	 * interface tables and never the entries, so *does the installed key

@@ -24,6 +24,7 @@
 #include "gpon_omci_diag.h"
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
 #include "luna_gpon_nic.h"
+#include "luna_eth_mib.h"
 #include "luna_gmac_logic.h"	/* family GMAC ring packings (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
 
@@ -1872,7 +1873,9 @@ static int rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 134. */
 	iowrite32(0xa0000000, ep->sw + SW_CHIP_INFO);
 	if ((ioread32(ep->sw + SW_CHIP_INFO) & 0xffff) == 0x6485) {
-		static const u32 patch_cmd[] = { 0x0061b844, 0x0021b906, 0x0021b906 };
+		static const u32 patch_cmd[] = {
+			0x0061b844, 0x0021b906, 0x0021b906 /* indirect write, read, read */
+		};
 		unsigned int i;
 
 		mutex_lock(&rtl9602c_gphy_lock);
@@ -2745,18 +2748,10 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &rtl9602c_eth_netdev_ops;
-	/* ★★★ ADVERTISE THE TC-OFFLOAD CAPABILITY, OR THE HOOK ABOVE IS NEVER
-	 * CALLED.  MEASURED 2026-09-15 on the X111W: this driver installed
-	 * `.ndo_setup_tc` and set NO features at all, so `ethtool -k` reported
-	 * `hw-tc-offload: off [fixed]`, fw4's `nft_try_hw_offload()` check failed,
-	 * fw4 fell back to a SOFTWARE flowtable without telling anyone, and
-	 * /proc/flowdump read `offered=0 refused=0 why{}` -- nothing was ever
-	 * offered to an accelerator that is present and programmed.  The kernel's
-	 * offload paths key on this BIT, never on the presence of the hook.
-	 *
-	 * ⚠ It is `hw_features` too, so `ethtool -K` can turn it off: a capability
-	 *   nobody can disable is one nobody can A/B.
-	 */
+	ret = luna_mib_attach(ndev, ep->sw, ep->swm);
+	if (ret)
+		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
+	/* TC feature bit; nftables TC_SETUP_FT registration does not consult it. */
 	ndev->hw_features |= NETIF_F_HW_TC;
 	ndev->features |= NETIF_F_HW_TC;
 	/* Permit a LIVE MAC change (no iface down/up): the per-board ...
@@ -2800,11 +2795,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			SET_NETDEV_DEV(wan, dev);
 			strscpy(wan->name, "gpon0", IFNAMSIZ);
 			wan->netdev_ops = &rtl9602c_eth_wan_ops;
-			/* The WAN netdev is a member of the same fw4 flowtable, and the
-			 * hardware-offload probe is ALL-OR-NOTHING: `nft_try_hw_offload()`
-			 * builds ONE test flowtable holding EVERY device and rejects the
-			 * lot if any one of them cannot take `flags offload`.  gpon0 must
-			 * therefore advertise exactly what eth0 does. */
+			/* Keep the LAN and WAN feature declarations consistent. */
 			wan->hw_features |= NETIF_F_HW_TC;
 			wan->features |= NETIF_F_HW_TC;
 			/* Initial WAN MAC = board MAC + offset; re-derived at open + on eth0 MAC

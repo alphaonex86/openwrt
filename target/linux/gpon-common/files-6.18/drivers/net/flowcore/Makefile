@@ -41,6 +41,7 @@ obj-$(CONFIG_RTL9602C_ETH) += rtl9602c_l34_logic.o
 # other -- the measured crossconfig_call_guard defect.
 obj-$(CONFIG_RTL9602C_ETH) += luna_gmac_logic.o
 obj-$(CONFIG_LUNA_ETH) += luna_gmac_logic.o
+obj-$(CONFIG_LUNA_ETH) += luna_flow_logic.o
 
 # The GN25L95 BOSA calibration: the ORDERED sequence and a fail-first executor,
 # both HW-decoupled.  Under BOTH GPON gates for the luna_gmac_logic.o reason --

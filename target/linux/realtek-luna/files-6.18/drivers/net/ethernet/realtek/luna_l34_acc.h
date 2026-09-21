@@ -1,46 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * luna_l34_acc.h - the Luna L3/L4 engines' INDIRECT TABLE ACCESS, at family tier
- *
- * ★★★ WHY THIS IS FAMILY AND NOT CHIP.  This family carries TWO L3/L4 engines --
- * the NAPT model (RTL9602C, RTL9602BVB) and the FLOWBASED model (RTL9603CVD,
- * RTL9603D, RTL9607C) -- and this tree's own measurement of them says they
- * "share the indirect table-access mechanism and NOTHING else".  The mechanism
- * was written once, as `static` functions inside the RTL9602C's own driver, so
- * the ONE thing the two models have in common lived in the file belonging to
- * exactly one of them.  A second die could only get it by copying it.
- *
- * The primitive itself is four registers and a poll: put the words in the
- * write-data bank, write the command (EXE | table type | entry index), wait for
- * the engine to clear EXE, read the read-data bank.  Only the four ADDRESSES and
- * the command word's own field positions differ between dies -- so a new die
- * owes a TABLE here, never a driver, which is this port's whole strategy.
- *
- * ★★★ AND FOR *FLOW ENTRIES* THIS IS THE WRONG MECHANISM ENTIRELY -- MEASURED
- * 2026-09-16 from that board's own kernel (_rtk_rg_flowEntryWriteToDDR, a
- * STATIC symbol recovered via kallsyms, so __ksymtab could never have named
- * it).  The FLOWBASED die does NOT publish a flow entry through this indirect
- * command path.  It keeps a DRAM SHADOW: memcpy a 32-byte entry at idx*32,
- * then a cache WRITEBACK+INVALIDATE, and a separate ccInvalidFlow COMMAND to
- * retire one -- because clearing a bit in DRAM does not tell an engine that may
- * already hold the row.  VALID is bit 0 of word 0.  The 32 bytes agree with the
- * layout derived independently from the writer's own ins stream (8 words).
- * ⇒ a die of the FLOWBASED model owes an ALLOCATOR, a 32-byte PACKER, a
- * COHERENT PUBLISH and an INVALIDATE command.  It does not owe a row here, and
- * filling one in would be answering a question this table cannot ask.
- * See dev/FINDING-flowbased-entries-live-in-dram-2026-09-16.md.
- *
- * ⚠⚠ AND WHAT IS NOT ESTABLISHED REFUSES RATHER THAN GUESSING.  For the
- * RTL9603CVD the four addresses ARE established (its own chipdef, corroborated by
- * that board's stock capture: 43 non-zero words at the FLOWBASED page while the
- * vendor engine forwards).  Its COMMAND WORD LAYOUT is not established on any
- * tier -- nobody has measured which bits are EXE, where the table type sits, or
- * how wide the index is.  Filling those in from the RTL9602C because the
- * addresses look alike is exactly the defect `reg_table_registered_guard` exists
- * to stop: a value the author supplied where a human had to register one.  So a
- * die with no measured layout carries a NULL `cmd_layout`, every call REFUSES
- * with -ENXIO, and nothing is written to silicon on a guess.
- */
+/* Luna indirect table access: NAPT tables and FLOWBASED SRAM/interface tables. */
 #ifndef _LUNA_L34_ACC_H
 #define _LUNA_L34_ACC_H
 
@@ -110,42 +69,7 @@ static const struct luna_l34_acc luna_l34_acc_rtl9602c = {
 	.cmd_layout	= &luna_l34_cmd_rtl9602c,
 };
 
-/*
- * RTL9603CVD -- the FLOWBASED model.
- *
- * ADDRESSES: established.  Its own chipdef names NAT_TBL_ACCESS_CTRL 0x801100,
- * _CLR 0x801104, _RDDATA 0x801110, _WRDATA 0x801180, and that board's stock
- * capture finds the page live (43 non-zero words at 0x801000 with the vendor
- * engine forwarding) while the NAPT model's page answers 1024 words of zero on
- * this die -- two independent tiers agreeing on where the engine is.
- *
- * LAYOUT: ESTABLISHED 2026-09-16, and this paragraph said the opposite for a
- * day after it stopped being true -- it still read "deliberately NULL ... every
- * access here still refuses" while the table below carried a measured layout
- * and the accesses went through.  A comment that describes the code's previous
- * state is what a reader checks the silicon against.
- *
- * The addresses being one page apart says nothing about the bits inside the
- * command word, and this family already has a measured case of a block MOVING
- * between these two revisions -- so the layout was READ rather than assumed:
- * the image's kallsyms table decodes (53512 symbols), all three path setters
- * are in it, and their ins/ext streams give it.  See
- * FINDING-flowbased-entry-layout-recovered-2026-09-16.md.
- *
- * ⚠ WHAT IS STILL OWED IS THE *MEANING* OF EACH ENTRY FIELD and our own mapping
- * onto it -- a bit position is not a field's meaning, and this table describes
- * the COMMAND WORD, not the 32-byte flow entry, which this die does not publish
- * through this path at all (see the note above).
- */
-/*
- * MEASURED 2026-09-16 from this die's OWN register list in the board's stock
- * kernel: NAT_TBL_ACCESS_CTRL (0x801100) carries six fields, and the layout is
- * bit-identical on the RTL9607C, which is the cross-check.  [24] and [19:16]
- * are PROVEN roles -- rg_asic_table_write sets exactly those two -- and [15:0]
- * is the index field the 9603CVD path uses; [25] is read-execute by
- * elimination and agrees with what this driver already ships for the 9602C.
- * dev/re-tools/FINDING-flowbased-entry-layout-recovered-2026-09-16.md
- */
+/* RTL9603CVD layout verified against stock and the RTL9607C register list. */
 static const struct luna_l34_cmd_layout luna_l34_cmd_rtl9603cvd = {
 	.rd_exe		= BIT(25),
 	.wr_exe		= BIT(24),
@@ -188,9 +112,10 @@ static inline int luna_l34_tbl_op(void __iomem *sw,
 
 	if (!sw || !a || !a->cmd_layout)
 		return -ENXIO;
-	if (n > LUNA_L34_WORDS_MAX)
-		return -EINVAL;
 	L = a->cmd_layout;
+	if (!w || !n || n > LUNA_L34_WORDS_MAX ||
+	    ((u32)type & ~L->type_mask) || ((u32)idx & ~L->idx_mask))
+		return -EINVAL;
 	exe = write ? L->wr_exe : L->rd_exe;
 
 	/* ★★ A COMMAND THAT TIMED OUT CAN STILL OWN THE SHARED DATA BANK.  The

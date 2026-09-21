@@ -51,6 +51,8 @@ struct gpon_flow_ops {
 		       const struct gpon_flow_ctx *ctx, void *priv,
 		       u32 *idx_out);
 	int (*remove)(void *sh, u32 idx, void *priv);
+	/* Optional rollback when a failed install can retain hardware resources. */
+	int (*abort_install)(void *sh, u32 idx, void *priv);
 
 	/* Fill `*lastused` (jiffies).  A family with no per-flow counters
 	 * reports LIVENESS only, which is what TC actually asks for. */

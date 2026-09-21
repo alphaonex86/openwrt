@@ -44,12 +44,7 @@
 		reg = <0x00 0x00 0x00 0x20000000>;
 	};
 
-	/*
-	 * The Cortina NI packet engine's two DMA pools live inside our DRAM and
-	 * must be carved out: a small coherent descriptor buffer and the large
-	 * non-cached packet-buffer pool. Both are below the TFTP load addr
-	 * (0x05000000) region we boot from, so no collision.
-	 */
+	/* NI DMA pools and persistent crash records. */
 	reserved-memory {
 		#address-cells = <0x02>;
 		#size-cells = <0x02>;

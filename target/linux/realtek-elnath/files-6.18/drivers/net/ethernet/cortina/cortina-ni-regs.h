@@ -2450,42 +2450,11 @@ enum cortina_ni_win {
 #define  CA_NI_L3FE_MY_MAC_VALID	BIT(16)	/* 0x3210 bit16 = my-MAC entry valid (tier-1 stock diff 2026-07-12) */
 #define CA_NI_L3FE_MY_MAC_HI		0x3214	/* HI = mac[2]<<24|mac[3]<<16|mac[4]<<8|mac[5] */
 #define CA_NI_L3FE_SPCL_PKT_DET_CFG	0x3218	/* stock 0x0739DC24 (detection pipeline; matches, leave) */
-/* ★★ L3FE ingress-loopback port-validity table (ca8277b/Elnath L3FE_GLB_ILPB_LDPID @0xf43030d8;
- * vendor aal_l3fe_l2lookup_init).  Our driver MISSED it -> a frame forwarded to the L3_LAN
- * loopback ingress (ldpid 0x19) had NO valid L3FE ingress, so it never entered the classifier ->
- * l3fe_rx(0xa9bc)=0 -> cls_hit=0.  Layout: valid0[0],ldpid0[6:1],valid1[8],ldpid1[14:9],
- * valid2[16],ldpid2[22:17],valid3[23].  We mark ldpid0=L3_LAN(0x19), ldpid1=L3_WAN(0x18), and
- * entry3 valid (ldpid3=0=NI port0) as valid L3 ingress (valid2/ETH_WAN left off - confirm vs stock). */
-#define CA_NI_L3FE_GLB_ILPB_LDPID	0x30d8	/* stock Elnath=0 (SDK's non-zero value does NOT apply here) - leave 0 */
-/* ★★ THE missing L3FE_GLB config block (ca8277b/Elnath).  Our driver NEVER ran the vendor
- * L3FE global init (aal_l3fe_l2lookup_init aal_l3fe.c:269-310 + the glb ELPB setters
- * :215-267, called from aal_l3fe_init :1030) -> the whole 0x30ac-0x30f8 block sat at 0 ->
- * the L3FE stage was uninitialized -> it never ingested frames -> l3fe_rx(0xa9bc)=0 ->
- * cls_hit=0 -> no CPU RX.  Values below = tier-1 live stock (captured under broadcast). */
-/* ★ build95: the remaining L3FE_GLB config our driver still left at 0 (tier-1 stock
- * diff).  All CONFIG, not ring/DMA pointers.
- *
- * ★★ THE NAMES IN THIS SLICE ARE SHIFTED BY ONE SLOT, and the evidence is the
- * VALUE, not an opinion (2026-09-04).  The vendor NAME->ADDRESS table puts
- * L3FE_GLB_LF_CFG - the ingress-FIFO thresholds - at 0x30a8, which is what we
- * call FWD_CTRL_2; and the default this header documented FOR "LF_CFG",
- * 0x004641f4, is exactly the value written to 0x30a8.  So the LF_CFG semantics
- * and its reset default were RE'd correctly and then attached to the wrong
- * address: the write lands on the right register under a wrong name, which is
- * why nothing ever looked broken.  0x30b4 and 0x30bc are NOT config at all (see
- * the resolved-conflict note further down) and their writes are inert.
- *
- * The other names here hold ONE tier and are recorded, not renamed -- the
- * CONTRADICTED ratchet in dev/rtl9607c-test/stock_regname_guard.py lists them,
- * and each needs a live read that no board can give while the bench relay is
- * dead.  Do not build a mechanism claim on any name in this slice. */
-#define CA_NI_L3FE_GLB_FWD_CTRL_1	0x30a4
-#define  CA_NI_L3FE_GLB_FWD_CTRL_1_VAL	0x8001B000u
-/* vendor: L3FE_GLB_LF_CFG -- the ingress-FIFO hi/low/wr_fifo thresholds.  The
- * VALUE below is that register's documented default, so this write is correct
- * however wrong the name is.  Renaming waits on a live read. */
-#define CA_NI_L3FE_GLB_FWD_CTRL_2	0x30a8
-#define  CA_NI_L3FE_GLB_FWD_CTRL_2_VAL	0x004641F4u
+/* Elnath offsets and defaults confirmed by stock accessors and live readback. */
+#define CA_NI_L3FE_GLB_CFG		0x30a4
+#define  CA_NI_L3FE_GLB_CFG_VAL		0x8001B000u
+#define CA_NI_L3FE_GLB_LF_CFG		0x30a8
+#define  CA_NI_L3FE_GLB_LF_CFG_VAL	0x004641F4u
 /* vendor: L3FE_GLB_CLS_STG_MONITOR_RETURN -- the read-data half of the CLS stage
  * monitor whose CTRL is 0x30b0.  A READ port: the write below is INERT and is
  * kept only because it is on the shipping-proven boot path. */
@@ -2495,24 +2464,25 @@ enum cortina_ni_win {
  * 0x30b8.  A READ port: the write below is INERT, kept for the same reason. */
 #define CA_NI_L3FE_GLB_DBG_DAT		0x30bc
 #define  CA_NI_L3FE_GLB_DBG_DAT_VAL	0x4856CF7Cu
-#define CA_NI_L3FE_GLB_FWD_CTRL_3	0x30ac
-#define  CA_NI_L3FE_GLB_FWD_CTRL_3_VAL	0x00000300u
-#define CA_NI_L3FE_GLB_CFG_30CC		0x30cc	/* unnamed in ca8277b but stock-mapped (reads 0xE21) - match stock */
-#define  CA_NI_L3FE_GLB_CFG_30CC_VAL	0x00000E21u
-#define CA_NI_L3FE_GLB_ELPB0		0x30e0	/* egress-loopback entry0 (port map, aal_l3fe_glb_elpb_set) */
-#define  CA_NI_L3FE_GLB_ELPB0_VAL	0x00007F03u
-#define CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD1	0x30e4	/* deep-queue valid vec hi (aal_l3fe_glb_elpb_deepq_vld_set) */
-#define  CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD1_VAL 0x00C00000u
-#define CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD0	0x30e8	/* deep-queue valid vec lo */
-#define  CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD0_VAL 0x00400000u
-#define CA_NI_L3FE_GLB_ELPB_DEEPQ1	0x30ec	/* deep-queue vec hi (aal_l3fe_glb_elpb_deepq_set) */
-#define  CA_NI_L3FE_GLB_ELPB_DEEPQ1_VAL	0x00F00000u
-#define CA_NI_L3FE_GLB_ELPB_DEEPQ0	0x30f0	/* deep-queue vec lo */
-#define  CA_NI_L3FE_GLB_ELPB_DEEPQ0_VAL	0x00F00000u
-#define CA_NI_L3FE_GLB_L3FE_L2FE_LDPID	0x30f4	/* the L3FE<->L2FE loopback ldpid binding */
-#define  CA_NI_L3FE_GLB_L3FE_L2FE_LDPID_VAL 0x000C0000u
-#define CA_NI_L3FE_GLB_VE		0x30f8	/* vlan-edit tpid enc (aal_l3fe_l2lookup_init) */
-#define  CA_NI_L3FE_GLB_VE_VAL		0x00040000u
+#define CA_NI_L3FE_GLB_TE_OPTION		0x30ac
+#define  CA_NI_L3FE_GLB_TE_OPTION_VAL	0x00000300u
+#define CA_NI_L3FE_GLB_RES_CTRL		0x30cc
+#define  CA_NI_L3FE_GLB_RES_CTRL_VAL	0x00000E21u
+#define CA_NI_L3FE_GLB_TCP_COS_MOD_2	0x30d8
+#define CA_NI_L3FE_GLB_LDPID_REMAP_CTRL	0x30e0
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_CTRL_VAL	0x00007F03u
+#define CA_NI_L3FE_GLB_LDPID_REMAP_SMAC_PRO	0x30e4
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_SMAC_PRO_VAL	0x00C00000u
+#define CA_NI_L3FE_GLB_LDPID_REMAP_DMAC_PRO	0x30e8
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_DMAC_PRO_VAL	0x00400000u
+#define CA_NI_L3FE_GLB_LDPID_REMAP_SIP_PRO	0x30ec
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_SIP_PRO_VAL	0x00F00000u
+#define CA_NI_L3FE_GLB_LDPID_REMAP_DIP_PRO	0x30f0
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_DIP_PRO_VAL	0x00F00000u
+#define CA_NI_L3FE_GLB_LDPID_REMAP_SPORT_PRO	0x30f4
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_SPORT_PRO_VAL	0x000C0000u
+#define CA_NI_L3FE_GLB_LDPID_REMAP_DPORT_PRO	0x30f8
+#define  CA_NI_L3FE_GLB_LDPID_REMAP_DPORT_PRO_VAL	0x00040000u
 /* build74: L3FE global CLS-stage monitor (read cls_hit_0..3).  aal_l3fe_glb_cls_stg
  * _monitor_get: for i, write CTRL={enable bit0=1, bus_sel=(MONITOR_CLS_RESULT=3)<<5 | i},
  * read RETURN.  cls_hit[i]==0 across all while frames flow = the CLS lookup is NOT
@@ -2618,6 +2588,9 @@ enum cortina_ni_win {
 #define CA_NI_L2FE_PP_HEADER_A_HI	0x11cc
 #define CA_NI_L2FE_DOS_FLOOD_CNT	0x1234	/* DoS/flood drop            */
 #define CA_NI_L2FE_PE_TM_PKT_CNT	0x1760	/* frames L2FE->TM (forwarded)*/
+#define CA_NI_L2FE_PE_DROP_STTS_ACCESS	0x1780
+#define CA_NI_L2FE_PE_DROP_STTS_DATA	0x1784
+#define CA_NI_L2FE_DROP_REASON_COUNT	32
 #define CA_NI_QM_RX_EOP_DROP_CNTR	0x6948	/* ELNATH (rtl 0x6820) */
 #define CA_NI_QM_RX_LEN_ERR_CNTR	0x694c	/* ELNATH (rtl 0x6824) */
 #define CA_NI_QM_RX_L2TE_DROP_CNTR	0x6950	/* ELNATH (rtl 0x6828) */

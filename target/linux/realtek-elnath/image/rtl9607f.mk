@@ -8,6 +8,7 @@ define Device/realtek_rtl9607f_x400axf
   DEVICE_DTS := rtl9607f_x400axf
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-elnath
   SOC := rtl9607f
+  KERNEL_LOADADDR := 0x0c000000
   # IPv4 HGU router layer (same pattern as realtek-luna/hsgq_x111w):
   #   dnsmasq   - LAN DHCPv4 pool + DNS forwarder (default variant = no DHCPv6;
   #               prod is IPv4-only). Ships the standard /etc/config/dhcp

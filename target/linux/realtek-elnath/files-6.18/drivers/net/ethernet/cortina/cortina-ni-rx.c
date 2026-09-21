@@ -98,32 +98,32 @@ MODULE_PARM_DESC(rx_ring_hi, "NAPI reads the HIGH (PADDR_HI 0x0bc4a000) CPU-EPP 
 /* ★ FBM pool ENABLE/FILL/PRELOAD gate - DEFAULT OFF because ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 7. */
 static bool fbm_enable;
-module_param(fbm_enable, bool, 0644);
-MODULE_PARM_DESC(fbm_enable, "enable+fill+preload the FBM pool (DANGER: crashes until reserved-mem+feed fixed)");
+module_param(fbm_enable, bool, 0444);
+MODULE_PARM_DESC(fbm_enable, "Boot-only: enable+fill+preload the FBM pool (DANGER: crashes until reserved-mem+feed fixed)");
 
 /* (build27's qm_reset dropped: 0x6988 bit30=1 proved the QM ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 8. */
 static u8 redir_cpu_ldpid;	/* 0 = stock (no redir; DFT_FWD->L3_LAN->L3FE->CLS trap delivers the CPU copy) */
-module_param(redir_cpu_ldpid, byte, 0644);
-MODULE_PARM_DESC(redir_cpu_ldpid, "REDIR_LDPID[0x19]->this ldpid (0=stock: no redir, L3FE/CLS trap path; 0x10=A/B unicast-redir workaround)");
+module_param(redir_cpu_ldpid, byte, 0444);
+MODULE_PARM_DESC(redir_cpu_ldpid, "Boot-only: REDIR_LDPID[0x19] destination (0=stock; 0x10=CPU unicast redirect)");
 
 /* ★★ ARB_CTRL.dbuf_dpid = the deep_q TRIGGER (bits[7:4]; a ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 9. */
 static u8 arb_dbuf_dpid = 0x08;	/* build68 STOCK: ARB_CTRL 0x89c71c82 (bits[7:4]=8); 0xf gave 0x89c71cf2 */
-module_param(arb_dbuf_dpid, byte, 0644);
-MODULE_PARM_DESC(arb_dbuf_dpid, "ARB_CTRL deep_q trigger pdpid (0xf=disable deep-queue/use normal path, 8=stock deep_q)");
+module_param(arb_dbuf_dpid, byte, 0444);
+MODULE_PARM_DESC(arb_dbuf_dpid, "Boot-only: ARB_CTRL deep_q trigger pdpid (0xf=normal path, 8=stock deep_q)");
 
 /* ★ build101 EXPERIMENT (prior-session never-tested fix): ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 161. */
 static u8 pdpid_l3lan = 0x0d;	/* ★ STOCK L3_LAN->L3FE (entry fix); paired with the unconditional pool seed (drain fix) so frames enter L3FE AND RMU0 has buffers to admit them. */
-module_param(pdpid_l3lan, byte, 0644);
-MODULE_PARM_DESC(pdpid_l3lan, "PDPID_MAP[0x19] L3_LAN route: 0x00=CPU-port0 (prior-session test), 0x09=CPU(L2FE), 0x0d=stock L3_LAN");
+module_param(pdpid_l3lan, byte, 0444);
+MODULE_PARM_DESC(pdpid_l3lan, "Boot-only: PDPID_MAP[0x19] route (0=CPU-port0, 9=CPU/L2FE, 0xd=stock L3_LAN)");
 
 /* ★★ The CPU-EPP descriptor-ring AXI attr. The coherent ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 10. */
 static bool ring_noncoh = true;
-module_param(ring_noncoh, bool, 0644);
-MODULE_PARM_DESC(ring_noncoh, "CPU-EPP ring AXI attr (1=non-coherent DDR_POOL 0x04000010; 0=coherent CPU_EPP 0x12008060)");
+module_param(ring_noncoh, bool, 0444);
+MODULE_PARM_DESC(ring_noncoh, "Boot-only: CPU-EPP ring AXI attributes (1=non-coherent DDR_POOL, 0=coherent CPU_EPP)");
 
 /* ★★★ RX-buffer OWNERSHIP. CFG2.cpu_eq (bit3) selects which ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 11. */
@@ -1669,12 +1669,10 @@ static void __maybe_unused cortina_ni_rx_mc_flood_init(struct cortina_ni *ni)
 					  CA_NI_NI_MCE_INDX_DATA0));
 }
 
-/* ★ THE guaranteed L3FE-free CPU trap. Our DFT_FWD redirects ...
- * dev/MEASURED-cortina-ni-rx.c.md sec 58. */
+/* Initialize forwarding tables; register values do not prove CPU delivery. */
 static void cortina_ni_rx_mc_group_init(struct cortina_ni *ni)
 {
-	/* ★★ MCE[0x19] must be EMPTY (stock devmem ground-truth) so a ...
-	 * dev/MEASURED-cortina-ni-rx.c.md sec 59. */
+	/* Clear the default multicast vector as observed in stock. */
 	writel(0, ni_base(ni) + CA_NI_NI_MCE_INDX_DATA1);
 	writel(0, ni_base(ni) + CA_NI_NI_MCE_INDX_DATA0);
 	cortina_ni_rx_settle();
@@ -1717,20 +1715,15 @@ static void cortina_ni_rx_mc_group_init(struct cortina_ni *ni)
 						 CA_NI_L2FE_NKPOL_MAP_DATA));
 	}
 
-	/* readback via the INDIRECT read protocol (ACCESS=idx|GO, poll, then the entry
-	 * latches into DATA) - want 0/0 = empty so the DFT_FWD 0x1832 frame falls
-	 * through to raw ldpid 0x32. */
+	/* Readback proves the vector contents, not the packet's destination. */
 	cortina_ni_rx_ind_read(ni, CA_NI_NI_MCE_INDX_ACCESS, CA_NI_RX_DFT_FWD_MCGID);
 	dev_info(ni->dev,
-		 "mc-group[0x%x]: EMPTIED mc_vec hi(0xaaf8)=0x%08x lo(0xaafc)=0x%08x (want 0/0 -> DFT_FWD 0x1832 falls through to raw ldpid 0x%x)\n",
+		 "mc-group[0x%x]: mc_vec hi(0xaaf8)=0x%08x lo(0xaafc)=0x%08x (expected 0/0; CPU delivery unverified)\n",
 		 CA_NI_RX_DFT_FWD_MCGID,
 		 readl(ni_base(ni) + CA_NI_NI_MCE_INDX_DATA1),
-		 readl(ni_base(ni) + CA_NI_NI_MCE_INDX_DATA0),
-		 CA_NI_RX_MC_CPU_LDPID);
+		 readl(ni_base(ni) + CA_NI_NI_MCE_INDX_DATA0));
 
-	/* build33 rebuild-free fallback: if the empty-group fallthrough still lands on
-	 * ldpid 0x19 on this silicon, redir_cpu_ldpid=0x32 forces REDIR_LDPID[0x19]->
-	 * 0x32 (the mcgid 0x19 is intercepted BEFORE MC replication, per build14). */
+	/* Optional boot-time redirect; validate delivery externally. */
 	if (redir_cpu_ldpid) {
 		cortina_ni_rx_redir_ldpid_set(ni, CA_NI_RX_DFT_FWD_MCGID,
 					      redir_cpu_ldpid);
@@ -1928,15 +1921,12 @@ static void cortina_ni_rx_mymac_trap(struct cortina_ni *ni)
 	writel(((u32)mac[2] << 24) | ((u32)mac[3] << 16) | ((u32)mac[4] << 8) | mac[5],
 	       ni_base(ni) + CA_NI_L3FE_MY_MAC_HI);
 
-	/* ★ ILPB_LDPID (0x30d8) write DROPPED: tier-1 live shows ...
-	 * dev/MEASURED-cortina-ni-rx.c.md sec 171. */
 	dev_info(ni->dev,
-		 "l3fe-loopback: ilpb(0x30d8)=0x%08x(stock 0) elpb0(0x30e0)=0x%08x dqvld1(0x30e4)=0x%08x dqvld0(0x30e8)=0x%08x my_mac lo(0x3210)=0x%08x hi=0x%08x\n",
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ILPB_LDPID),
-		 /* ⚠ 0x30e0/0x30e4/0x30e8 DO have names in cortina-ni-regs.h ...
-		  * dev/MEASURED-cortina-ni-rx.c.md sec 172. */
-		 readl(ni_base(ni) + 0x30e0), readl(ni_base(ni) + 0x30e4),
-		 readl(ni_base(ni) + 0x30e8),
+		 "l3fe-mymac: tcp_cos2=0x%08x remap_ctrl=0x%08x hash_smac/dmac=0x%08x/0x%08x my_mac lo=0x%08x hi=0x%08x\n",
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_TCP_COS_MOD_2),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_CTRL),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SMAC_PRO),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DMAC_PRO),
 		 readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_LO),
 		 readl(ni_base(ni) + CA_NI_L3FE_MY_MAC_HI));
 
@@ -2046,8 +2036,8 @@ static void cortina_ni_rx_l2fe_forwarding(struct cortina_ni *ni)
 /* RX steer = the FULL FORWARDING-ENGINE path, matching ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 69. */
 static unsigned int dq_tmport_map = 0x76543210u;	/* build68 STOCK identity: DQ N -> TM port N.  0x88888888 (build39) forced ALL DQs to ES port 8 = L3LAN dead-end -> frame never reached ES7/L3QM -> rmu_rx=0.  THE routing bug. */
-module_param(dq_tmport_map, uint, 0644);
-MODULE_PARM_DESC(dq_tmport_map, "physical DQ->TM-port map @0x212c (0x88888888=all->ES8/L3QM, 0x76543210=stock identity)");
+module_param(dq_tmport_map, uint, 0444);
+MODULE_PARM_DESC(dq_tmport_map, "Boot-only: DQ-to-TM-port map (0x76543210=stock identity)");
 
 static void cortina_ni_rx_flow_ctrl_init(struct cortina_ni *ni)
 {
@@ -2560,8 +2550,8 @@ static void cortina_ni_rx_enable_internal_ports(struct cortina_ni *ni)
 /* ★★★ The L3-CLS special-packet TRAP - VERBATIM replication ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 81. */
 static bool cls_trap_enable = true;
-module_param(cls_trap_enable, bool, 0644);
-MODULE_PARM_DESC(cls_trap_enable, "install the stock L3-CLS ->CPU_0 trap rows (ARP-to-CPU)");
+module_param(cls_trap_enable, bool, 0444);
+MODULE_PARM_DESC(cls_trap_enable, "Boot-only: install stock L3-CLS CPU_0 trap rows (ARP-to-CPU)");
 
 /* stock KEY rows, struct word0..word10 (verbatim, reversed ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 176. */
@@ -2598,51 +2588,46 @@ static const struct { u16 idx; u32 w[CA_NI_L3FE_CLS_FIB_WORDS]; } cls_fib_golden
 	{ 264, { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000600 } },
 };
 
-/* ★★ Replicate the vendor L3FE GLOBAL init our driver never ...
- * dev/MEASURED-cortina-ni-rx.c.md sec 82. */
 static void cortina_ni_rx_l3fe_glb_init(struct cortina_ni *ni)
 {
-	/* forwarding control 1/2/3 + the (unnamed-in-SDK but ...
-	 * dev/MEASURED-cortina-ni-rx.c.md sec 83. */
-	writel(CA_NI_L3FE_GLB_FWD_CTRL_1_VAL, ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_1);
-	writel(CA_NI_L3FE_GLB_FWD_CTRL_2_VAL, ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_2);
-	writel(CA_NI_L3FE_GLB_FWD_CTRL_3_VAL, ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_3);
+	writel(CA_NI_L3FE_GLB_CFG_VAL, ni_base(ni) + CA_NI_L3FE_GLB_CFG);
+	writel(CA_NI_L3FE_GLB_LF_CFG_VAL, ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG);
+	writel(CA_NI_L3FE_GLB_TE_OPTION_VAL, ni_base(ni) + CA_NI_L3FE_GLB_TE_OPTION);
 	writel(CA_NI_L3FE_CLS_MON_RETURN_VAL, ni_base(ni) + CA_NI_L3FE_CLS_MON_RETURN);
 	writel(CA_NI_L3FE_GLB_DBG_DAT_VAL, ni_base(ni) + CA_NI_L3FE_GLB_DBG_DAT);
-	writel(CA_NI_L3FE_GLB_CFG_30CC_VAL, ni_base(ni) + CA_NI_L3FE_GLB_CFG_30CC);
+	writel(CA_NI_L3FE_GLB_RES_CTRL_VAL, ni_base(ni) + CA_NI_L3FE_GLB_RES_CTRL);
 
-	/* egress-loopback entry + deep-queue valid-vec + deep-queue vec (the ELPB block
-	 * that lets an L2FE frame loop into the L3FE ingress) */
-	writel(CA_NI_L3FE_GLB_ELPB0_VAL, ni_base(ni) + CA_NI_L3FE_GLB_ELPB0);
-	writel(CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD1_VAL,
-	       ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD1);
-	writel(CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD0_VAL,
-	       ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD0);
-	writel(CA_NI_L3FE_GLB_ELPB_DEEPQ1_VAL,
-	       ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ1);
-	writel(CA_NI_L3FE_GLB_ELPB_DEEPQ0_VAL,
-	       ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ0);
-
-	/* the L3FE<->L2FE loopback ldpid binding + the VLAN-edit tpid config */
-	writel(CA_NI_L3FE_GLB_L3FE_L2FE_LDPID_VAL,
-	       ni_base(ni) + CA_NI_L3FE_GLB_L3FE_L2FE_LDPID);
-	writel(CA_NI_L3FE_GLB_VE_VAL, ni_base(ni) + CA_NI_L3FE_GLB_VE);
+	/* CPU destination remapping and hash preprocessing. */
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_CTRL_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_CTRL);
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_SMAC_PRO_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SMAC_PRO);
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_DMAC_PRO_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DMAC_PRO);
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_SIP_PRO_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SIP_PRO);
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_DIP_PRO_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DIP_PRO);
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_SPORT_PRO_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SPORT_PRO);
+	writel(CA_NI_L3FE_GLB_LDPID_REMAP_DPORT_PRO_VAL,
+	       ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DPORT_PRO);
 
 	dev_info(ni->dev,
-		 "l3fe-glb-init: fwd1(0x30a4)=0x%08x fwd2(0x30a8)=0x%08x lf_cfg(0x30b4)=0x%08x ilpb00(0x30bc)=0x%08x fwd3(0x30ac)=0x%08x 30cc=0x%08x elpb0(0x30e0)=0x%08x dqvld=0x%08x/0x%08x dq=0x%08x/0x%08x l2fe_ldpid(0x30f4)=0x%08x ve(0x30f8)=0x%08x\n",
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_1),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_2),
+		 "l3fe-glb-init: cfg=0x%08x lf_cfg=0x%08x cls_mon_return=0x%08x dbg_dat=0x%08x te_option=0x%08x res_ctrl=0x%08x remap_ctrl=0x%08x hash_smac/dmac=0x%08x/0x%08x hash_sip/dip=0x%08x/0x%08x hash_sport/dport=0x%08x/0x%08x\n",
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_CFG),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LF_CFG),
 		 readl(ni_base(ni) + CA_NI_L3FE_CLS_MON_RETURN),
 		 readl(ni_base(ni) + CA_NI_L3FE_GLB_DBG_DAT),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_FWD_CTRL_3),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_CFG_30CC),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ELPB0),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD1),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ_VLD0),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ1),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_ELPB_DEEPQ0),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_L3FE_L2FE_LDPID),
-		 readl(ni_base(ni) + CA_NI_L3FE_GLB_VE));
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_TE_OPTION),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_RES_CTRL),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_CTRL),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SMAC_PRO),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DMAC_PRO),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SIP_PRO),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DIP_PRO),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_SPORT_PRO),
+		 readl(ni_base(ni) + CA_NI_L3FE_GLB_LDPID_REMAP_DPORT_PRO));
 }
 
 /* ★★ The L3FE AXI read-reorder channel init (vendor ...

@@ -51,7 +51,7 @@ struct ca_ni_lport_profile {
 	u32 ilpb_d4;		/* WAN flag (GEM range) */
 	u32 ilpb_d3;
 	u32 ilpb_d2;		/* class: MC vs physical-port vs GEM */
-	u32 ilpb_d1;		/* + STAMOVE on eth NI0-6 and CPU_0-7 */
+	u32 ilpb_d1;		/* source-movement policy */
 	u32 ilpb_d0;
 	u32 mmshp_d1;		/* all-but-self isolation bitmap, hi word */
 	u32 mmshp_d0;		/* lo word */

@@ -45,6 +45,18 @@ config KERNEL_MIPS_FP_SUPPORT
 	bool
 	default y if TARGET_pistachio
 
+config KERNEL_MAC80211_DEBUGFS
+	bool "Wireless queue diagnostics in debugfs"
+	select KERNEL_DEBUG_FS
+	select KERNEL_CFG80211_DEBUGFS
+	default n
+	help
+	  Expose wireless queues and counters when mac80211 is built.
+
+config KERNEL_CFG80211_DEBUGFS
+	bool
+	default n
+
 config KERNEL_ARM_PMU
 	bool
 	default y if TARGET_armsr_armv8
@@ -824,6 +836,24 @@ config KERNEL_DEBUG_VM
 config KERNEL_PRINTK_TIME
 	bool "Enable printk timestamps"
 	default y
+
+config KERNEL_MEM_ALLOC_PROFILING
+	bool "Track kernel allocation sites in /proc/allocinfo"
+	select KERNEL_DEBUG_KERNEL
+	default n
+	help
+	  Attribute live allocations to source locations when diagnosing leaks.
+	  Keep disabled in normal images to avoid profiling overhead.
+
+config KERNEL_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT
+	bool
+	depends on KERNEL_MEM_ALLOC_PROFILING
+	default y
+
+config KERNEL_MEM_ALLOC_PROFILING_DEBUG
+	bool "Check allocation profiler accounting"
+	depends on KERNEL_MEM_ALLOC_PROFILING
+	default n
 
 config KERNEL_SLUB_DEBUG
 	bool "Enable SLUB debugging support"

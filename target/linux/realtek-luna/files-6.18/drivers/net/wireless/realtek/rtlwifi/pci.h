@@ -196,6 +196,8 @@ struct rtl_pci {
 
 	/*Bcn control register setting */
 	u32 reg_bcn_ctrl_val;
+	u32 bcn_irq;
+	u32 bcn_tasklet;
 
 	 /*ASPM*/ u8 const_pci_aspm;
 	u8 const_hwsw_rfoff_d3;

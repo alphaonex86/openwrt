@@ -1029,6 +1029,45 @@ void rtl_update_beacon_work_callback(struct work_struct *work)
 }
 EXPORT_SYMBOL_GPL(rtl_update_beacon_work_callback);
 
+/* Vendor-faithful (8192cd bcnInt): a content change is picked up by the next
+ * beacon-early tasklet inside the download window; only bring-up pushes.
+ */
+static void rtl_ap_beacon_changed(struct ieee80211_hw *hw,
+				  struct ieee80211_vif *vif,
+				  struct ieee80211_bss_conf *bss_conf,
+				  u64 changed)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_mac *mac = rtl_mac(rtlpriv);
+	bool enable = changed & BSS_CHANGED_BEACON_ENABLED &&
+		      bss_conf->enable_beacon;
+
+	if (enable || (changed & BSS_CHANGED_BEACON && !mac->beacon_enabled)) {
+		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
+			"BSS_CHANGED_BEACON_ENABLED\n");
+		mac->beacon_enabled = 1;
+		rtlpriv->cfg->ops->update_interrupt_mask(hw,
+				rtlpriv->cfg->maps[RTL_IBSS_INT_MASKS], 0);
+		if (rtlpriv->cfg->ops->linked_set_reg)
+			rtlpriv->cfg->ops->linked_set_reg(hw);
+		send_beacon_frame(hw, vif);
+	}
+	if (changed & BSS_CHANGED_BEACON_ENABLED && !bss_conf->enable_beacon &&
+	    mac->beacon_enabled) {
+		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
+			"ADHOC DISABLE BEACON\n");
+		mac->beacon_enabled = 0;
+		rtlpriv->cfg->ops->update_interrupt_mask(hw, 0,
+				rtlpriv->cfg->maps[RTL_IBSS_INT_MASKS]);
+	}
+	if (changed & BSS_CHANGED_BEACON_INT) {
+		rtl_dbg(rtlpriv, COMP_BEACON, DBG_TRACE,
+			"BSS_CHANGED_BEACON_INT\n");
+		mac->beacon_interval = bss_conf->beacon_int;
+		rtlpriv->cfg->ops->set_bcn_intv(hw);
+	}
+}
+
 static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
 				    struct ieee80211_bss_conf *bss_conf,
@@ -1042,58 +1081,8 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 	mutex_lock(&rtlpriv->locks.conf_mutex);
 	if (vif->type == NL80211_IFTYPE_ADHOC ||
 	    vif->type == NL80211_IFTYPE_AP ||
-	    vif->type == NL80211_IFTYPE_MESH_POINT) {
-		if (changed & BSS_CHANGED_BEACON ||
-		    (changed & BSS_CHANGED_BEACON_ENABLED &&
-		     bss_conf->enable_beacon)) {
-			/* The bring-up is idempotent on every BEACON_ENABLED, not
-			 * only the 0->1 edge: a HW beacon that stalled while
-			 * mac->beacon_enabled was already 1 was never restarted.
-			 * ⚠ A CONTENT change (BSS_CHANGED_BEACON alone -- a new SSID,
-			 * a new TIM) used to fall through this same gate and reach
-			 * nothing, so the hardware kept re-sending the frame from the
-			 * first bring-up: measured 2026-09-11 on the G24W, four SSID
-			 * changes accepted by the device and none of them on air.
-			 * The new frame is what a content change needs; the bring-up
-			 * is not, so they are separated rather than the gate widened.
-			 */
-			bool bringup = (mac->beacon_enabled == 0 ||
-					(changed & BSS_CHANGED_BEACON_ENABLED &&
-					 bss_conf->enable_beacon));
-
-			if (bringup) {
-				rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
-					"BSS_CHANGED_BEACON_ENABLED\n");
-
-				mac->beacon_enabled = 1;
-				rtlpriv->cfg->ops->update_interrupt_mask(hw,
-						rtlpriv->cfg->maps
-						[RTL_IBSS_INT_MASKS], 0);
-
-				if (rtlpriv->cfg->ops->linked_set_reg)
-					rtlpriv->cfg->ops->linked_set_reg(hw);
-			}
-			send_beacon_frame(hw, vif);
-		}
-		if ((changed & BSS_CHANGED_BEACON_ENABLED &&
-		    !bss_conf->enable_beacon)) {
-			if (mac->beacon_enabled == 1) {
-				rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
-					"ADHOC DISABLE BEACON\n");
-
-				mac->beacon_enabled = 0;
-				rtlpriv->cfg->ops->update_interrupt_mask(hw, 0,
-						rtlpriv->cfg->maps
-						[RTL_IBSS_INT_MASKS]);
-			}
-		}
-		if (changed & BSS_CHANGED_BEACON_INT) {
-			rtl_dbg(rtlpriv, COMP_BEACON, DBG_TRACE,
-				"BSS_CHANGED_BEACON_INT\n");
-			mac->beacon_interval = bss_conf->beacon_int;
-			rtlpriv->cfg->ops->set_bcn_intv(hw);
-		}
-	}
+	    vif->type == NL80211_IFTYPE_MESH_POINT)
+		rtl_ap_beacon_changed(hw, vif, bss_conf, changed);
 
 	/*TODO: reference to enum ieee80211_bss_change */
 	if (changed & BSS_CHANGED_ASSOC) {
@@ -1927,31 +1916,9 @@ EXPORT_SYMBOL(rtl_hal_pwrseqcmdparsing);
 
 bool rtl_cmd_send_packet(struct ieee80211_hw *hw, struct sk_buff *skb)
 {
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-	struct rtl8192_tx_ring *ring;
-	struct rtl_tx_desc *pdesc;
-	unsigned long flags;
-	struct sk_buff *pskb = NULL;
+	struct rtl_tcb_desc tcb_desc = { .cmd_or_init = 1 };
 
-	ring = &rtlpci->tx_ring[BEACON_QUEUE];
-
-	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
-	pskb = __skb_dequeue(&ring->queue);
-	if (pskb)
-		dev_kfree_skb_irq(pskb);
-
-	/*this is wrong, fill_tx_cmddesc needs update*/
-	pdesc = &ring->desc[0];
-
-	rtlpriv->cfg->ops->fill_tx_cmddesc(hw, (u8 *)pdesc, skb);
-
-	__skb_queue_tail(&ring->queue, skb);
-
-	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
-
-	rtlpriv->cfg->ops->tx_polling(hw, BEACON_QUEUE);
-
+	rtl_priv(hw)->intf_ops->adapter_tx(hw, NULL, skb, &tcb_desc);
 	return true;
 }
 EXPORT_SYMBOL(rtl_cmd_send_packet);

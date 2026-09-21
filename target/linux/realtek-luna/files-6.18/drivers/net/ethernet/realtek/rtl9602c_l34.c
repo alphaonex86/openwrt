@@ -16,7 +16,6 @@
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
 #include <linux/bitops.h>
-#include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include "rtl9602c_l34_logic.h"	/* hoisted logic */
@@ -27,10 +26,13 @@
 #include <linux/uaccess.h>
 
 #include "luna_l34_acc.h"
+#include "luna_gpon_nic.h"
 #include "rtl9602c_l34.h"
 #include "gpon_flow_offload.h"
 
 #define L34_EXE_POLL_US		2000	/* engine clears EXE well under this */
+
+static int l34_neigh_del(struct rtl9602c_l34 *l, struct l34_flow *f);
 
 static inline u32 l34_rd(struct rtl9602c_l34 *l, u32 off)
 {
@@ -114,6 +116,7 @@ static void l34_engine_on(struct rtl9602c_l34 *l)
 	 * ⚠ The VALUE is not a datasheet reading: it is what the vendor's own
 	 * firmware holds on this very board, captured the same hour. */
 	v &= ~(L34_SWTCR0_V4FLRT_EN | L34_SWTCR0_V6FLRT_EN);
+	v |= L34_SWTCR0_TTL_MINUS | L34_SWTCR0_FRAG2CPU;
 	l34_wr(l, L34_SWTCR0, v);
 
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
@@ -168,6 +171,11 @@ int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw)
 /* Caller holds the table mutex; cumulative counters are not ownership. */
 static bool l34_has_owners(struct rtl9602c_l34 *l)
 {
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++)
+		if (l->lan_neigh[i].users)
+			return true;
 	return !bitmap_empty(l->out_reserved, L34_NAPT_ENTRIES) ||
 	       !bitmap_empty(l->in_reserved, L34_NAPT_ENTRIES);
 }
@@ -220,7 +228,7 @@ int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 
 	if (!l->ready)
 		return -ENODEV;
-	if (f->out_owned || f->in_owned)
+	if (f->out_owned || f->in_owned || f->neigh_owned)
 		return -EBUSY;	/* installing over a live owner loses its indices */
 	if (f->l4proto != IPPROTO_TCP && f->l4proto != IPPROTO_UDP)
 		return -EOPNOTSUPP;
@@ -279,11 +287,15 @@ int rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f)
 	u32 zero[L34_WORDS_NAPTR_IN] = { 0 };
 	int ret = 0;
 
-	if (!f->out_owned && !f->in_owned)
+	if (!f->out_owned && !f->in_owned && !f->neigh_owned)
 		return 0;	/* nothing was ever claimed for this flow */
 	if (!l->ready)
 		return -ENODEV;
 	mutex_lock(&l->lock);
+	if (f->neigh_owned) {
+		ret = l34_neigh_del(l, f);
+		goto out;
+	}
 	/* ★ THE ORDER IS THE SAFETY PROPERTY.  The outbound slot is what the
 	 * lookup matches, so clearing it FIRST stops the flow; the rewrite entry
 	 * it points at is then unreachable and harmless.  The reverse order
@@ -384,6 +396,7 @@ static int l2uc_add_static(struct rtl9602c_l34 *l, const u8 *mac, u8 port)
 	ret = l2_busy_wait(l);
 	if (ret)
 		return ret;
+	/* Hardware words are LSW-first; stock reverses its MSW-first table buffer. */
 	l34_wr(l, L2_WDATA + 0, w[0]);
 	l34_wr(l, L2_WDATA + 4, w[1]);
 	l34_wr(l, L2_WDATA + 8, w[2]);
@@ -396,6 +409,239 @@ static int l2uc_add_static(struct rtl9602c_l34 *l, const u8 *mac, u8 port)
 	 * errno stays here -- flowcore includes no errno.h */
 	ret = l34_l2uc_sts_index(l34_rd(l, L2_STS));
 	return ret < 0 ? -ENOSPC : ret;
+}
+
+static int l2uc_access(struct rtl9602c_l34 *l, u16 idx, u32 *w,
+		       bool by_mac, bool write)
+{
+	/* Address mode is read-only; updates retain the complete MAC/VLAN key. */
+	u32 cmd = (by_mac || write) ? 0 : (L2_METHOD_ADDR << L2_CMD_METHOD_SH) |
+				     ((u32)idx << L2_CMD_ADDR_SH);
+	int ret;
+	unsigned int i;
+
+	ret = l2_busy_wait(l);
+	if (ret)
+		return ret;
+	if (by_mac || write)
+		for (i = 0; i < L34_WORDS_L2UC; i++)
+			l34_wr(l, L2_WDATA + 4 * i, w[i]);
+	l34_wr(l, L2_CMD, cmd | (write ? L2_CMD_WR : 0));
+	ret = l2_busy_wait(l);
+	if (ret)
+		return ret;
+	ret = l34_l2uc_sts_index(l34_rd(l, L2_STS));
+	if (ret < 0)
+		return -ENOENT;
+	if (!write)
+		for (i = 0; i < L34_WORDS_L2UC; i++)
+			w[i] = l34_rd(l, L2_RDATA + 4 * i);
+	return ret;
+}
+
+static bool l2uc_matches(const u32 *w, const u8 *mac)
+{
+	u32 key[L34_WORDS_L2UC] = {};
+
+	l34_mac48_set(key, L2UC_MAC_LSP, mac);
+	return l34_field_get(w, L2UC_VALID_LSP, L2UC_VALID_W) &&
+	       w[0] == key[0] && (w[1] & 0xffff) == key[1];
+}
+
+/* Caller holds the table lock; failed clears retain their resource owner. */
+static int l34_neigh_clear(struct rtl9602c_l34 *l, unsigned int slot)
+{
+	struct l34_neigh *n = &l->lan_neigh[slot];
+	u32 w[L34_WORDS_L2UC] = {};
+	unsigned int i;
+	int ret;
+
+	n->ready = false;
+	if (n->arp_live) {
+		ret = l34_tbl_write(l, L34_TBL_ARP, slot, w, L34_WORDS_ARP);
+		if (ret)
+			return ret;
+		n->arp_live = false;
+	}
+	if (n->l2_pinned && !n->arp_was_used) {
+		for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++)
+			if (&l->lan_neigh[i] != n && l->lan_neigh[i].l2_pinned &&
+			    l->lan_neigh[i].l2idx == n->l2idx)
+				goto released;
+		ret = l2uc_access(l, n->l2idx, w, false, false);
+		if (ret < 0 && ret != -ENOENT)
+			return ret;
+		if (ret >= 0 && l2uc_matches(w, n->mac)) {
+			l34_field_set(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W, 0);
+			ret = l2uc_access(l, n->l2idx, w, false, true);
+			if (ret < 0)
+				return ret;
+		} else {
+			pr_warn_ratelimited("rtl9602c-l34: neighbour L2 slot %u changed before unpin\n",
+					    n->l2idx);
+		}
+	}
+released:
+	n->l2_pinned = false;
+	return 0;
+}
+
+static int l34_neigh_del(struct rtl9602c_l34 *l, struct l34_flow *f)
+{
+	struct l34_neigh *n = &l->lan_neigh[f->hw_index];
+	int ret;
+
+	if (n->users > 1) {
+		n->users--;
+		f->neigh_owned = false;
+		return 0;
+	}
+	ret = l34_neigh_clear(l, f->hw_index);
+	if (ret)
+		return ret;
+	memset(n, 0, sizeof(*n));
+	f->neigh_owned = false;
+	return 0;
+}
+
+static int l34_neigh_add(struct rtl9602c_l34 *l, struct l34_flow *f,
+			 u32 ip, const u8 *mac)
+{
+	u32 w[L34_WORDS_L2UC] = {}, arp[L34_WORDS_ARP] = {};
+	struct l34_neigh *n;
+	unsigned int i, slot;
+	bool moving = false;
+	int l2idx, ret;
+
+	if (!l->ready || !l->provisioned)
+		return -ENODEV;
+	if (f->out_owned || f->in_owned || f->neigh_owned)
+		return -EBUSY;
+	mutex_lock(&l->lock);
+	for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++) {
+		n = &l->lan_neigh[i];
+		if (!n->users || n->ip != ip)
+			continue;
+		ret = -EBUSY;
+		if (!n->ready)
+			goto out;
+		ret = -ENOSPC;
+		if (n->users == 0xffff)
+			goto out;
+		if (memcmp(n->mac, mac, 6)) {
+			slot = i;
+			moving = true;
+			goto resolve;
+		}
+		n->users++;
+		f->hw_index = i;
+		f->neigh_owned = true;
+		ret = 0;
+		goto out;
+	}
+	for (slot = 0; slot < ARRAY_SIZE(l->lan_neigh); slot++) {
+		if (l->lan_neigh[slot].users)
+			continue;
+		ret = l34_tbl_read(l, L34_TBL_ARP, slot, arp, L34_WORDS_ARP);
+		if (ret)
+			goto out;
+		if (!l34_field_get(arp, L34_ARP_VALID_LSP, L34_ARP_VALID_W))
+			break;
+	}
+	ret = -ENOSPC;
+	if (slot == ARRAY_SIZE(l->lan_neigh))
+		goto out;
+resolve:
+	l34_mac48_set(w, L2UC_MAC_LSP, mac);
+	l2idx = l2uc_access(l, 0, w, true, false);
+	ret = l2idx;
+	if (ret < 0)
+		goto out;
+	ret = -EOPNOTSUPP;
+	if (!l2uc_matches(w, mac) ||
+	    l34_field_get(w, L2UC_SPA_LSP, L2UC_SPA_W) >= GMAC_PON_PORT)
+		goto out;
+	n = &l->lan_neigh[slot];
+	if (moving) {
+		/* Existing flows retain ownership throughout the MAC move. */
+		ret = l34_neigh_clear(l, slot);
+		if (ret)
+			goto out;
+	}
+	n->ip = ip;
+	n->l2idx = l2idx;
+	if (!moving) {
+		n->users = 1;
+		f->hw_index = slot;
+		f->neigh_owned = true;
+	}
+	memcpy(n->mac, mac, 6);
+	n->arp_was_used = l34_field_get(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W);
+	for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++)
+		if (l->lan_neigh[i].l2_pinned && l->lan_neigh[i].l2idx == l2idx)
+			n->arp_was_used = l->lan_neigh[i].arp_was_used;
+	n->l2_pinned = true;
+	l34_field_set(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W, 1);
+	ret = l2uc_access(l, l2idx, w, false, true);
+	if (ret < 0)
+		goto out;
+	memset(arp, 0, sizeof(arp));
+	l34_arp_encode(arp, ip, l2idx);
+	n->arp_live = true;
+	ret = l34_tbl_write(l, L34_TBL_ARP, slot, arp, L34_WORDS_ARP);
+	if (!ret) {
+		n->ready = true;
+		if (moving) {
+			n->users++;
+			f->hw_index = slot;
+			f->neigh_owned = true;
+		}
+	}
+out:
+	mutex_unlock(&l->lock);
+	return ret;
+}
+
+/* Caller holds the L2/L34 table lock. */
+static int l34_cf_write(struct rtl9602c_l34 *l, u8 type, u16 addr,
+			const u32 *w, unsigned int n)
+{
+	unsigned int i;
+	int ret = l2_busy_wait(l);
+
+	if (ret)
+		return ret;
+	for (i = 0; i < n; i++)
+		l34_wr(l, L2_WDATA + 4 * i, w[i]);
+	l34_wr(l, L2_CMD, (addr << L2_CMD_ADDR_SH) | L2_CMD_WR |
+		(L2_METHOD_ADDR << L2_CMD_METHOD_SH) | type);
+	return l2_busy_wait(l);
+}
+
+static int l34_cf_wan_setup(struct rtl9602c_l34 *l, u8 idx)
+{
+	u32 rule[2], mask[2], action[3], zero[2] = { 0 };
+	u32 cfg = l34_rd(l, L34_CF_CFG);
+	int ret;
+
+	if (idx >= L2_CF_RULE_BASE - ((cfg >> L34_CF_P1_COUNT_SH) & 255))
+		return -ENOSPC;
+	l34_cf_wan_encode(rule, mask, action, idx, GPON_DATA_FLOW);
+	/* Publish validity last; a failed write cannot expose a partial action. */
+	ret = l34_cf_write(l, L2_CF_MATCH_TYPE, L2_CF_RULE_BASE + idx, zero, 2);
+	if (ret)
+		return ret;
+	ret = l34_cf_write(l, L2_CF_MATCH_TYPE, idx, mask, 2);
+	if (ret)
+		return ret;
+	ret = l34_cf_write(l, L2_CF_ACTION_TYPE, idx, action, 3);
+	if (ret)
+		return ret;
+	l34_wr(l, L34_CF_ACTION_CTRL + 4 * idx, L34_CF_SID_ENABLE);
+	/* Unrouted L2 traffic must not inherit WAN netif 0. Slot 15 is unused. */
+	cfg |= 15u << L34_CF_L2_WAN_SH;
+	l34_wr(l, L34_CF_CFG, cfg);
+	return l34_cf_write(l, L2_CF_MATCH_TYPE, L2_CF_RULE_BASE + idx, rule, 2);
 }
 
 int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
@@ -424,6 +670,13 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 		ret = -EBUSY;
 		goto out;
 	}
+	if (wan_port == GMAC_PON_PORT) {
+		ret = l34_cf_wan_setup(l, idx);
+		if (ret) {
+			pr_err("rtl9602c-l34: WAN classifier setup failed (%d)\n", ret);
+			goto out;
+		}
+	}
 	if (!l->engine_on)
 		l34_engine_on(l);
 
@@ -441,10 +694,11 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[0].tbl = L34_TBL_NETIF;
 	step[0].idx = idx;
 	step[0].words = L34_WORDS_NETIF;
-	l34_netif_encode(step[0].w, wan_mac, wan_ip, vlan);
+	/* Untagged frames still carry the switch's internal PVID. */
+	l34_netif_encode(step[0].w, wan_mac, wan_ip,
+			 vlan ? vlan : SW_DEFAULT_VID);
 
-	/* LOCAL ROUTE[idx]: the why (vendor leaves valid=0, offload silently
-	 * fails) is at l34_rt_wan_encode() in flowcore */
+	/* Lower-half WAN route via NEXTHOP[idx]. */
 	step[1].tbl = L34_TBL_L3ROUTE;
 	step[1].idx = idx;
 	step[1].words = L34_WORDS_L3ROUTE;
@@ -498,12 +752,7 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[5].words = L34_WORDS_L3ROUTE;
 	l34_rt_cpu_encode(step[5].w, wan_ip, idx);
 
-	/* The UPPER half of the default route.  MASK is a prefix CODE (0 => /1),
-	 * so /0 cannot be expressed and the local route above covers 0.0.0.0/1
-	 * ONLY -- every destination at or above 128.0.0.0 had no LPM match, and
-	 * an offloaded flow to one is dropped while software forwards it fine.
-	 * Two /1 entries express what /0 cannot.  RE: stock writes one routing
-	 * entry per route (rtk_l34_routingTable_set); this is the same table. */
+	/* Upper-half WAN route via the same nexthop. */
 	step[6].tbl = L34_TBL_L3ROUTE;
 	step[6].idx = L34_RT_POOL_BASE + idx;
 	step[6].words = L34_WORDS_L3ROUTE;
@@ -533,7 +782,8 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	step[0].tbl = L34_TBL_NETIF;
 	step[0].idx = idx;
 	step[0].words = L34_WORDS_NETIF;
-	l34_netif_encode(step[0].w, lan_mac, lan_ip, vlan);
+	l34_netif_encode(step[0].w, lan_mac, lan_ip,
+			 vlan ? vlan : SW_DEFAULT_VID);
 
 	/* LAN subnet route (mask = prefix code: the off-by-one fact is pinned
 	 * at l34_rt_lan_encode() in flowcore) */

@@ -55,6 +55,8 @@
 #include "luna_gmac_logic.h"	/* family GMAC ring packings + this shell's hoisted RX verdicts (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
 #include "luna_gpon_nic.h"	/* the GPON<->NIC glue -- this shell now IMPLEMENTS it */
+#include "luna_eth_mib.h"
+#include "luna_flow.h"
 #include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN.
 				 * NOT the OMCI_MT_* codes any more: this shell
 				 * stopped decoding message types on 2026-09-10 */
@@ -219,6 +221,7 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
  * SKIP the write -- offset 0 is the PHY indirect-access data register. */
 struct luna_eth_chip {
 	const char *name;
+	const struct luna_flow_layout *flow;
 
 	/* The switch-core map for THIS chip, and the ONLY home of its port
 	 * numbers: a pointer into luna_eth_regs.h so the sibling driver and this
@@ -269,6 +272,7 @@ struct luna_eth_chip {
 static const struct luna_eth_chip luna_chip_rtl9607c = {
 	.sw_map		= &rtl9607c_sw_map,
 	.name		= "RTL9607C",
+	.flow		= NULL,	/* Flow layout not established on this die. */
 	/* 0 DELIBERATELY, a scope statement and not a finding: nobody has diffed
 	 * SWCORE 0x1cc/0x238 stock-vs-ours on the RTL9607C board, and this chip
 	 * reaches its PON/PBO abilities through the force_ablty_x trio below. */
@@ -304,6 +308,7 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.sw_map		= &rtl9603cvd_sw_map,
 	.name		= "RTL9603CVD",
+	.flow = &luna_flow_rtl9603cvd,
 	/* MEASURED 2026-08-27, stock vs ours, SWCORE 0x180..0x1fc: ...
 	 * dev/MEASURED-luna_eth.c.md sec 9. */
 	.force_pon_ablty = 1,
@@ -436,6 +441,7 @@ struct luna_eth {
 
 	/* ---- WAN (gpon0), the data GEM's netdev ------------------------- */
 	struct net_device	*wan_ndev;
+	struct luna_flow_engine *flow;
 
 	/* The same ledger idea applied to opts3[19:16], and it is the ...
 	 * dev/MEASURED-luna_eth.c.md sec 15. */
@@ -459,6 +465,8 @@ static inline void ep_wr(struct luna_eth *ep, u32 r, u32 v) { iowrite32(v, ep->b
 static inline u32 sw_rd(struct luna_eth *ep, u32 r) { return ioread32(ep->sw + r); }
 static inline void sw_wr(struct luna_eth *ep, u32 r, u32 v) { iowrite32(v, ep->sw + r); }
 static inline void sw_or(struct luna_eth *ep, u32 r, u32 v) { sw_wr(ep, r, sw_rd(ep, r) | v); }
+
+#include "luna_flow.c"
 
 static inline unsigned int tx_slot(unsigned int counter) { return counter % TX_RING_SIZE; }
 
@@ -1493,7 +1501,7 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		dma_unmap_single(ep->dev, ep->rx_buf_dma[i], RX_BUF_SIZE,
 				 DMA_FROM_DEVICE);
 
-		if (ep->rx_dumped < rx_dump && len) {
+		if (rx_dump > 0 && ep->rx_dumped < rx_dump && len) {
 			ep->rx_dumped++;
 			/* The descriptor, beside the bytes. opts3[19:16] is the ...
 			 * dev/MEASURED-luna_eth.c.md sec 43. */
@@ -1586,10 +1594,6 @@ static int eth_rx(struct luna_eth *ep, int budget)
 			 * a decision. */
 			if (luna_gmac_rx_cpu_tag_present(skb->data, skb->len,
 							 RTL_CPU_TAG_LEN)) {
-				if (ep->rx_dumped <= rx_dump)
-					dev_info(ep->dev, "rx tag: %*ph\n",
-						 RTL_CPU_TAG_LEN,
-						 skb->data + 2 * ETH_ALEN);
 				memmove(skb->data + RTL_CPU_TAG_LEN, skb->data,
 					2 * ETH_ALEN);
 				skb_pull(skb, RTL_CPU_TAG_LEN);
@@ -1929,6 +1933,7 @@ static int eth_stop(struct net_device *ndev)
 
 	netif_stop_queue(ndev);
 	netif_carrier_off(ndev);
+	luna_flow_stop(ep);
 	/* Close the door on the OMCI injector BEFORE anything is torn ...
 	 * dev/MEASURED-luna_eth.c.md sec 67. */
 	spin_lock_irqsave(&ep->tx_lock, flags);
@@ -1958,6 +1963,9 @@ static const struct net_device_ops luna_eth_netdev_ops = {
 	.ndo_set_rx_mode	= eth_set_rx_mode,
 	.ndo_set_mac_address	= eth_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
+#if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)
+	.ndo_setup_tc		= luna_flow_setup_tc,
+#endif
 };
 
 /* ===== gpon0: the WAN data-GEM netdev ... -- dev/MEASURED-luna_eth.c.md sec 49. */
@@ -1999,8 +2007,11 @@ static int luna_eth_wan_open(struct net_device *ndev)
 
 static int luna_eth_wan_stop(struct net_device *ndev)
 {
+	struct luna_eth *ep = *(struct luna_eth **)netdev_priv(ndev);
+
 	netif_stop_queue(ndev);
 	netif_carrier_off(ndev);
+	luna_flow_stop(ep);
 	return 0;
 }
 
@@ -2010,6 +2021,9 @@ static const struct net_device_ops luna_eth_wan_ops = {
 	.ndo_start_xmit		= luna_eth_wan_xmit,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
+#if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)
+	.ndo_setup_tc		= luna_flow_setup_tc,
+#endif
 };
 
 /* Create gpon0 beside eth0.  A failure is reported and LEFT non-fatal: eth0 and
@@ -2029,6 +2043,10 @@ static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
 	SET_NETDEV_DEV(wan, dev);
 	strscpy(wan->name, "gpon0", IFNAMSIZ);
 	wan->netdev_ops = &luna_eth_wan_ops;
+	if (ep->flow) {
+		wan->hw_features |= NETIF_F_HW_TC;
+		wan->features |= NETIF_F_HW_TC;
+	}
 	luna_eth_wan_hwaddr(ep, wmac);
 	eth_hw_addr_set(wan, wmac);
 	netif_carrier_off(wan);
@@ -2128,6 +2146,9 @@ static int luna_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &luna_eth_netdev_ops;
+	ret = luna_mib_attach(ndev, ep->sw, ep->c->sw_map);
+	if (ret)
+		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
 	netif_carrier_off(ndev);
 	netif_napi_add(ndev, &ep->napi, eth_napi_poll);
 
@@ -2153,6 +2174,13 @@ static int luna_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	WRITE_ONCE(g_ep, ep);
+	ret = luna_flow_probe(ep);
+	if (ret)
+		dev_warn(dev, "hardware flow offload unavailable: %d\n", ret);
+	if (ep->flow) {
+		ndev->hw_features |= NETIF_F_HW_TC;
+		ndev->features |= NETIF_F_HW_TC;
+	}
 	ret = devm_register_netdev(dev, ndev);
 	if (ret)
 		return ret;

@@ -125,14 +125,11 @@ void l34_netif_encode(u32 *w, const u8 *mac, u32 ip, u16 vlan)
 	l34_field_set(w, L34_NETIF_IP_LSP,      L34_NETIF_IP_W,      ip);
 }
 
-/* WAN local route: classify L34-domain ingress on this WAN netif and set the
- * US/DS direction the NAPT path keys on (the vendor leaves valid=0 here,
- * which is why offload silently fails -- we set valid=1).  IP/MASK/INT left
- * 0 (WAN). */
-void l34_rt_wan_encode(u32 *w, u8 netif_idx)
+/* Lower-half WAN route via NEXTHOP; ARP would resolve the destination, not the gateway. */
+void l34_rt_wan_encode(u32 *w, u8 nh_idx)
 {
-	l34_field_set(w, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_ARP);
-	l34_field_set(w, L34_RT_DENTIF_LSP,    L34_RT_DENTIF_W,    netif_idx);
+	l34_field_set(w, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_NH);
+	l34_field_set(w, L34_RT_NHIDX_LSP,     L34_RT_NHIDX_W,     nh_idx);
 	l34_field_set(w, L34_RT_RT2WANINF_LSP, L34_RT_RT2WANINF_W, 1);
 	l34_field_set(w, L34_RT_VALID_LSP,     L34_RT_VALID_W,     1);
 }
@@ -150,22 +147,14 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
 }
 
-/* A WAN-side network route: process=ARP, INT=0 (external), pointing at the WAN
- * netif so the packet leaves through its nexthop.
- *
- * The prefix is a CODE (mask = prefix - 1), so /0 CANNOT BE EXPRESSED at all --
- * 0 already means /1.  A default route therefore needs TWO entries, 0.0.0.0/1
- * and 128.0.0.0/1, and writing only the first (which is what IP/MASK left at 0
- * gives) covers barely half the address space: every destination at or above
- * 128.0.0.0 has no LPM match and an offloaded flow to it is dropped.
- */
-void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx)
+/* WAN prefix via NEXTHOP; the caller uses two /1 entries for full IPv4 coverage. */
+void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 nh_idx)
 {
 	l34_field_set(w, L34_RT_IP_LSP,        L34_RT_IP_W,        net);
 	l34_field_set(w, L34_RT_MASK_LSP,      L34_RT_MASK_W,      prefix - 1);
-	l34_field_set(w, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_ARP);
+	l34_field_set(w, L34_RT_PROCESS_LSP,   L34_RT_PROCESS_W,   L34_RT_PROCESS_NH);
 	l34_field_set(w, L34_RT_INT_LSP,       L34_RT_INT_W,       0);	/* WAN */
-	l34_field_set(w, L34_RT_DENTIF_LSP,    L34_RT_DENTIF_W,    netif_idx);
+	l34_field_set(w, L34_RT_NHIDX_LSP,     L34_RT_NHIDX_W,     nh_idx);
 	l34_field_set(w, L34_RT_RT2WANINF_LSP, L34_RT_RT2WANINF_W, 1);
 	l34_field_set(w, L34_RT_VALID_LSP,     L34_RT_VALID_W,     1);
 }
@@ -391,6 +380,19 @@ bool rtl9602c_omci_doorbell(unsigned int omci_tx_ring,
 
 /* rtl9602c_rxdesnum_pack / rtl9602c_rxcdo_pack MOVED to ...
  * dev/MEASURED-rtl9602c_l34_logic.c.md sec 10. */
+/* Pattern 0: upstream unicast IPv4 on the routed WAN -> data GEM SID. */
+void l34_cf_wan_encode(u32 rule[2], u32 mask[2], u32 action[3],
+		       u8 netif, u8 sid)
+{
+	rule[0] = 0;
+	rule[1] = (1u << 16) | ((u32)(netif & 15) << 12) | (1u << 10);
+	mask[0] = 1u << 31;
+	mask[1] = ((u32)(~netif & 15) << 12) | (1u << 8);
+	action[0] = ((u32)(sid & 127) << 24) | (1u << 23);
+	action[1] = 0;
+	action[2] = 0;
+}
+
 u32 rtl9602c_omci_txd_word2(u32 ovr)
 {
 	return ovr ? ovr : (TXD2_OMCI_CPUTAG | TXD2_OMCI_EFID);

@@ -79,6 +79,19 @@ static const struct luna_l34_cc luna_l34_cc_flowbased = {
 	.sflw_words	= 8,
 };
 
+static inline int luna_l34_cc_wait(void __iomem *sw,
+				 const struct luna_l34_cc *c)
+{
+	unsigned int t;
+
+	for (t = 0; t < LUNA_CC_POLL_TRIES; t++) {
+		if (!(readl(sw + c->cmd) & LUNA_CC_GO))
+			return 0;
+		udelay(1);
+	}
+	return -ETIMEDOUT;
+}
+
 /**
  * luna_l34_cc_base_set() - point the engine at the DRAM flow table.
  * @sw:		the switch-core MMIO base
@@ -96,11 +109,15 @@ static inline int luna_l34_cc_base_set(void __iomem *sw,
 				       const struct luna_l34_cc *c, u32 phys)
 {
 	u32 v;
+	int err;
 
 	if (!sw || !c)
 		return -ENXIO;
 	if (phys % LUNA_CC_BASE_ALIGN)
 		return -EINVAL;
+	err = luna_l34_cc_wait(sw, c);
+	if (err)
+		return err;
 
 	v = readl(sw + c->bab) & (LUNA_CC_BASE_ALIGN - 1);
 	writel(v | (phys & ~(u32)(LUNA_CC_BASE_ALIGN - 1)), sw + c->bab);
@@ -122,23 +139,22 @@ static inline int luna_l34_cc_run(void __iomem *sw, const struct luna_l34_cc *c,
 				  u8 op, u16 idx, u32 opts)
 {
 	u32 word;
-	unsigned int t;
+	int err;
 
 	if (!sw || !c)
 		return -ENXIO;
-	if (idx > 0x7fff || op > 0x7f)
+	if (idx > 0x7fff || op > 0x7f || (opts & ~0x1f0000U))
 		return -EINVAL;
+	/* A timed-out command still owns the register until GO clears. */
+	err = luna_l34_cc_wait(sw, c);
+	if (err)
+		return err;
 
 	word = ((u32)op << 24) | (opts & 0x1f0000) | idx;
 	writel(word, sw + c->cmd);
 	writel(word | LUNA_CC_GO, sw + c->cmd);
 
-	for (t = 0; t < LUNA_CC_POLL_TRIES; t++) {
-		if (!(readl(sw + c->cmd) & LUNA_CC_GO))
-			return 0;
-		udelay(1);
-	}
-	return -ETIMEDOUT;
+	return luna_l34_cc_wait(sw, c);
 }
 
 /**

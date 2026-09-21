@@ -8,6 +8,9 @@
 
 struct luna_rx_layout;
 
+void l34_cf_wan_encode(u32 rule[2], u32 mask[2], u32 action[3],
+		       u8 netif, u8 sid);
+
 void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val);
 u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width);
 u16 l34_hash_out(bool is_tcp, u32 sip, u16 sport, u32 dip, u16 dport);
@@ -149,10 +152,13 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_RT_INT_W		1
 #define L34_RT_DENTIF_LSP	41	/* netif index (local-route view of [44:41]) */
 #define L34_RT_DENTIF_W		4
+#define L34_RT_NHIDX_LSP	L34_RT_DENTIF_LSP /* global-route view */
+#define L34_RT_NHIDX_W		L34_RT_DENTIF_W
 #define L34_RT_RT2WANINF_LSP	45	/* route to WAN interface */
 #define L34_RT_RT2WANINF_W	1
 #define L34_RT_PROCESS_CPU	0	/* terminate locally (to the CPU) */
 #define L34_RT_PROCESS_ARP	2
+#define L34_RT_PROCESS_NH	3
 
 /* L2_UC entry (3 words). The 48-bit MAC is packed octet[0] at the field MSB. */
 #define L2UC_MAC_LSP		0
@@ -180,9 +186,9 @@ void l34_naptr_encode(u32 *w, u32 int_ip, u16 int_port, u8 extip_idx,
 		      u16 ext_port, bool is_tcp);
 void l34_napt_encode(u32 *w, u16 naptr_idx);
 void l34_netif_encode(u32 *w, const u8 *mac, u32 ip, u16 vlan);
-void l34_rt_wan_encode(u32 *w, u8 netif_idx);
+void l34_rt_wan_encode(u32 *w, u8 nh_idx);
 void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx);
-void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx);
+void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 nh_idx);
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx);
 void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx);
 void l34_nexthop_pppoe_encode(u32 *w, u8 ifidx, unsigned int l2idx,

@@ -81,10 +81,8 @@ config GPON_FLOW_OFFLOAD
 	  with no accelerator carries none of these bytes, and this tree ships
 	  to parts with <= 64 MB of RAM and a small NAND.
 
-	  ⚠ AND IT CANNOT BE `default y`: the Luna targets have no
-	  net/flow_offload.h at all, so building it there is a fatal error and
-	  not a wasted object.  That is how this gate came to exist -- an
-	  unconditional obj-y broke both Luna boards on 2026-08-28.
+	  Selected by each family's accelerator backend. Targets without an
+	  accelerator must not select this shared lifecycle.
 
 config GPON_FLOW_DIAG
 	bool "GPON accelerator diagnostics (why a flow was NOT offloaded)"
@@ -111,8 +109,8 @@ config GPON_FLOW_DIAG
 	  name one of the eleven.
 
 	  ★ IT DOES NOT TURN THE ACCELERATOR ON OR OFF.  That is
-	  RTL9602C_FLOWOFFLOAD / CORTINA_NI_FLOWOFFLOAD, both default y and
-	  unchanged.  This symbol decides only whether the REPORTING is compiled
+	  RTL9602C_FLOWOFFLOAD / LUNA_FLOWOFFLOAD / CORTINA_NI_FLOWOFFLOAD,
+	  all default y. This symbol decides only whether the REPORTING is compiled
 	  in -- and with it off the facility is ABSENT and says so, rather than
 	  printing counters nobody measured.
 
@@ -125,6 +123,8 @@ config GPON_FLOW_DIAG
 
 	  A board with no accelerator does not select GPON_FLOW_OFFLOAD and so
 	  cannot reach this symbol at all: it carries zero bytes of it.
+	  Table bind/unbind results also appear in dmesg as "flow-block", with
+	  the netdev, command, binder and errno (rc=0 means accepted).
 
 config GPON_GEM_DIAG
 	bool "GPON data-path diagnostics (what the WAN path is waiting for)"
@@ -247,4 +247,3 @@ config GPON_PLOAM_DIAG
 	  -Os): see the size line recorded beside this symbol's introduction in
 	  dev/ (the formatter object plus the Luna call sites).  The default is
 	  the operator's to flip.
-

@@ -1814,24 +1814,17 @@ static s16 anig_tx_level = (s16)0x04d7;		/* #14 Transmit optical level (TX)  */
 /* Sample the calibrated DDM optical words and refresh the ANI-G level cache.
  * Called from process work at a slow cadence (never from the GET path);
  * a "not available" word keeps the previous cached value. */
-static void gpon_optical_cache_poll(void)
+static bool gpon_optical_cache_poll(void)
 {
-	s32 v;
+	s32 rx, tx;
 
-	v = ddm_word_to_level(bosa_read16_median(0x168));	/* RX @0x68/0x69 */
-	if (v != INT_MIN)
-		anig_rx_level = (s16)v;
-	v = ddm_word_to_level(bosa_read16_median(0x166));	/* TX @0x66/0x67 */
-	if (v != INT_MIN)
-		anig_tx_level = (s16)v;
-}
-
-/* Exported to the OMCI responder (rtl9602c_eth.c) for the ANI-G GET: returns the
- * cached live optical levels. No I2C here, so it is safe to call from softirq. */
-void gpon_anig_optical_omci(s16 *rx_level, s16 *tx_level)
-{
-	*rx_level = anig_rx_level;
-	*tx_level = anig_tx_level;
+	rx = ddm_word_to_level(bosa_read16_median(0x168));	/* RX */
+	tx = ddm_word_to_level(bosa_read16_median(0x166));	/* TX */
+	if (rx == INT_MIN || tx == INT_MIN)
+		return false;
+	anig_rx_level = (s16)rx;
+	anig_tx_level = (s16)tx;
+	return true;
 }
 
 /* One process worker owns the 50 ms RTL servo and separate 3 s DDM. */
@@ -3887,59 +3880,62 @@ EXPORT_SYMBOL(rtl9602c_datapath_tables_init);
  * dev/MEASURED-luna_gpon.c.md sec 142. */
 void gpon_pbo_init(void)
 {
+	bool keep_pool = READ_ONCE(luna_activation_ready) &&
+		luna_ploam.state == GPON_O5_OPERATION;
+
 	luna_data_suspend();
-	/* 1. Halt GMII and disable both packet buffers while ...
-	 * dev/MEASURED-luna_gpon.c.md sec 143. */
-	pi_wr(PI_IO_CMD_0_US, 0x90101050);	/* GMII OFF; pool configured below, GMII enabled LAST */
-	/* DS IO_CMD (the DMA/FIFO drain enable, 0x90081070) is written LAST, after the
-	 * backpressure thresholds + PBUF_EN, so the DS engine drains out of a properly
-	 * bounded buffer (see end of this function). */
-	pi_field(PI_PONIP_CTL_US, 0, 0, 0);		/* CFG_PBUF_EN = 0        */
-	pi_field(PI_PONIP_CTL_DS, 0, 0, 0);
+	/* O5 GEM requests still consume these pools while the GMAC is reset. */
+	if (!keep_pool) {
+		/* Stop both GMII directions before changing either pool. */
+		pi_field(PI_IO_CMD_0_US, 5, 4, 0);
+		pi_field(PI_IO_CMD_0_DS, 5, 4, 0);
+		pi_field(PI_PONIP_CTL_US, 0, 0, 0);		/* CFG_PBUF_EN = 0        */
+		pi_field(PI_PONIP_CTL_DS, 0, 0, 0);
 
-	/* 2. Descriptor accounting (128B pages). US uses a DRAM ...
-	 * dev/MEASURED-luna_gpon.c.md sec 144. */
-	{
-		static unsigned long us_pool;
+		/* 2. Descriptor accounting (128B pages). US uses a DRAM ...
+		 * dev/MEASURED-luna_gpon.c.md sec 144. */
+		{
+			static unsigned long us_pool;
 
-		if (!us_pool)
-			us_pool = __get_free_pages(GFP_KERNEL, PI_US_DRAM_ORDER);
-		if (us_pool)
-			pi_wr(PI_IP_MSTBASE_US,
-			      (u32)virt_to_phys((void *)us_pool));
-		else
-			pr_warn("luna-gpon: US PBO DRAM pool alloc failed; US-NIC RX may not work\n");
-	}
-	pi_field(PI_PON_DSC_CFG_US, 12, 0, PI_US_SRAM_NO);
-	pi_field(PI_PON_DSC_CFG_US, 28, 16, PI_US_DRAM_PAGES);	/* RAM_NO = SRAM+DRAM (0x1fff) */
-	pi_field(PI_DSCRUNOUT_US, 12, 0, PI_US_SRAM_RUNOUT);
-	pi_field(PI_DSCRUNOUT_US, 28, 16, PI_US_DRAM_RUNOUT);	/* DRAM runout (0x1f58) */
-	/* The DS twin. A chip that declares no DS pool keeps the SRAM-only words
-	 * this driver has always written -- same fields, same values, same order. */
-	if (!swc->ds_dram_order) {
-		pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
-		pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
-		pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
-		pi_field(PI_DSCRUNOUT_DS, 28, 16, 0);
-	} else {
-		static unsigned long ds_pool;
-
-		if (!ds_pool)
-			ds_pool = __get_free_pages(GFP_KERNEL, swc->ds_dram_order);
-		if (ds_pool) {
-			pi_wr(PI_IP_MSTBASE_DS,
-			      (u32)virt_to_phys((void *)ds_pool));
-			pi_wr(PI_PON_DSC_CFG_DS, swc->ds_dsc_cfg);
-			pi_wr(PI_DSCRUNOUT_DS, swc->ds_dscrunout);
-		} else {
-			/* ★ NO POOL ⇒ KEEP THE SMALL SRAM GEOMETRY. Writing the
-			 * DRAM-scale page counts with no pool behind them would
-			 * point the PBO at physical address 0. */
-			pr_warn("luna-gpon: DS PBO DRAM pool alloc failed; DS stays SRAM-only and DS OMCI may be dropped\n");
+			if (!us_pool)
+				us_pool = __get_free_pages(GFP_KERNEL, PI_US_DRAM_ORDER);
+			if (us_pool)
+				pi_wr(PI_IP_MSTBASE_US,
+				      (u32)virt_to_phys((void *)us_pool));
+			else
+				pr_warn("luna-gpon: US PBO DRAM pool alloc failed; US-NIC RX may not work\n");
+		}
+		pi_field(PI_PON_DSC_CFG_US, 12, 0, PI_US_SRAM_NO);
+		pi_field(PI_PON_DSC_CFG_US, 28, 16, PI_US_DRAM_PAGES);	/* RAM_NO = SRAM+DRAM (0x1fff) */
+		pi_field(PI_DSCRUNOUT_US, 12, 0, PI_US_SRAM_RUNOUT);
+		pi_field(PI_DSCRUNOUT_US, 28, 16, PI_US_DRAM_RUNOUT);	/* DRAM runout (0x1f58) */
+		/* The DS twin. A chip that declares no DS pool keeps the SRAM-only words
+		 * this driver has always written -- same fields, same values, same order. */
+		if (!swc->ds_dram_order) {
 			pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
 			pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
 			pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
 			pi_field(PI_DSCRUNOUT_DS, 28, 16, 0);
+		} else {
+			static unsigned long ds_pool;
+
+			if (!ds_pool)
+				ds_pool = __get_free_pages(GFP_KERNEL, swc->ds_dram_order);
+			if (ds_pool) {
+				pi_wr(PI_IP_MSTBASE_DS,
+				      (u32)virt_to_phys((void *)ds_pool));
+				pi_wr(PI_PON_DSC_CFG_DS, swc->ds_dsc_cfg);
+				pi_wr(PI_DSCRUNOUT_DS, swc->ds_dscrunout);
+			} else {
+				/* ★ NO POOL ⇒ KEEP THE SMALL SRAM GEOMETRY. Writing the
+				 * DRAM-scale page counts with no pool behind them would
+				 * point the PBO at physical address 0. */
+				pr_warn("luna-gpon: DS PBO DRAM pool alloc failed; DS stays SRAM-only and DS OMCI may be dropped\n");
+				pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
+				pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
+				pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
+				pi_field(PI_DSCRUNOUT_DS, 28, 16, 0);
+			}
 		}
 	}
 
@@ -3980,8 +3976,10 @@ void gpon_pbo_init(void)
 	pi_field(PI_PON_US_FIFO_CTL, 3, 0, 3);		/* USFIFO_START = 3       */
 
 	/* 4. 128-byte page size everywhere (PON-IP descriptors + PONNIC pages). */
-	pi_field(PI_PON_DSC_CFG_US, 14, 13, 0);
-	pi_field(PI_PON_DSC_CFG_DS, 14, 13, 0);
+	if (!keep_pool) {
+		pi_field(PI_PON_DSC_CFG_US, 14, 13, 0);
+		pi_field(PI_PON_DSC_CFG_DS, 14, 13, 0);
+	}
 	pi_field(PI_IO_CMD_1_US, 5, 4, 0);		/* RPAGE_SIZE = 128B      */
 	pi_field(PI_IO_CMD_1_US, 1, 0, 0);		/* TPAGE_SIZE = 128B      */
 	pi_field(PI_IO_CMD_1_DS, 5, 4, 0);
@@ -4020,8 +4018,10 @@ void gpon_pbo_init(void)
 
 	/* 7. Enable upstream and downstream packet buffers. (The O5 ...
 	 * dev/MEASURED-luna_gpon.c.md sec 148. */
-	pi_field(PI_PONIP_CTL_US, 0, 0, READ_ONCE(luna_activation_ready));
-	pi_field(PI_PONIP_CTL_DS, 0, 0, 1);
+	if (!keep_pool) {
+		pi_field(PI_PONIP_CTL_US, 0, 0, READ_ONCE(luna_activation_ready));
+		pi_field(PI_PONIP_CTL_DS, 0, 0, 1);
+	}
 	pi_field(PI_PONIP_CTL_DS, 7, 7, 1);		/* CFG_TX_PAUSE low bit -> O5 value 0x81 (DS buffer release; safe now thresholds bound the buffer) */
 
 	/* 8. Enable the full downstream PONNIC DMA drain (LAST — ...
@@ -4089,8 +4089,10 @@ void gpon_pbo_init(void)
 		pi_wr(PI_MOCIR_TH_L, 0x00001000u);	/* MOCIR_TH_L                                       */
 		pi_wr(PI_PON_OLT_BW_MTR_FULL, 0x0003ffffu);	/* PON_OLT_BW_MTR_FULL (maxFlow)                    */
 		pi_wr(PI_PON_TB_CTRL, 0x0000956eu);	/* PON_TB_CTRL (token bucket)                       */
-		pi_wr(PI_PON_SCH_QMAP, 0x0000000fu);	/* PON_SCH_QMAP                                     */
-		pi_wr(PI_PON_TCONT_EN, 0x00010001u);	/* PON US T-CONT enable                             */
+		if (!keep_pool) {
+			pi_wr(PI_PON_SCH_QMAP, 0x0000000fu);
+			pi_wr(PI_PON_TCONT_EN, 0x00010001u);
+		}
 	}
 
 	/* GMAC0<->US-NIC internal link force, from the stock PON-MAC GPON mode-set.
@@ -5395,18 +5397,6 @@ static void gpon_parse_sn(const char *s)
 	gpon_parse_sn_into(gpon_sn_bytes, s);
 }
 
-/* The ONU-SN, for the OMCI shell. It lives here because PLOAM ...
- * dev/MEASURED-luna_gpon.c.md sec 313. */
-void gpon_onu_sn(u8 out[8])
-{
-	int i;
-
-	for (i = 0; i < 8; i++)
-		out[i] = gpon_sn_bytes[i];
-}
-EXPORT_SYMBOL(gpon_onu_sn);
-
-
 /* True when `s` decodes to a DIFFERENT ONU-SN than the one in force.  The
  * caller uses this to decide whether a write is an identity change (re-range)
  * or a rewrite of the same serial (do nothing). */
@@ -5610,11 +5600,6 @@ static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
  * point user traffic at the OMCC. */
 static u16 gpon_omcc_gem_port;
 
-u16 gpon_omcc_gem(void)
-{
-	return gpon_omcc_gem_port;
-}
-
 static int gpon_install_omcc(u16 gem)
 {
 	int rc;
@@ -5746,6 +5731,7 @@ static int gpon_install_omcc(u16 gem)
  * dev/MEASURED-luna_gpon.c.md sec 202. */
 #define LUNA_OMCI_QUEUE_LEN 64u
 #define LUNA_OMCI_POLL_BUDGET 8u
+#define LUNA_OMCI_ALARM_TICKS 300u
 struct luna_omci_frame {
 	u8 msg[OMCI_LEN];
 	u16 len;
@@ -6162,6 +6148,28 @@ void luna_omci_set_optical(u16 rx, u16 tx)
 }
 EXPORT_SYMBOL(luna_omci_set_optical);
 
+/* Timer consumer serializes alarm TX with Get All Alarms resynchronization. */
+static void luna_omci_report_alarm(void)
+{
+	u8 msg[OMCI_LEN];
+	unsigned long flags;
+	int n = 0, ret;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (luna_omci.onu && READ_ONCE(luna_ploam.omcc_installed))
+		n = omci_onu_alarm_prepare(luna_omci.onu, msg);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	if (!n)
+		return;
+	ret = luna_omci.tx(luna_omci.cookie, msg, n);
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (ret)
+		luna_omci.tx_errors++;
+	else
+		omci_onu_alarm_sent(luna_omci.onu, msg);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+}
+
 void luna_omci_rx_errors(u32 *bad_mic, u32 *runt)
 {
 	unsigned long flags;
@@ -6350,13 +6358,6 @@ static void luna_omci_poll(void)
 			break;
 		}
 	}
-}
-
-/* Legacy shell entry point remains a hint only. Accepted common model state
- * is the sole source of a WAN binding; a raw Create observation cannot arm it. */
-void gpon_omci_note_gem_create(u16 port_id)
-{
-	(void)port_id;
 }
 
 int gpon_install_data_gem(void)
@@ -6727,7 +6728,9 @@ static void luna_data_reconcile(void)
 	}
 	luna_data.armed.alloc = want.alloc;
 	luna_data.armed.gem = want.gem;
-	luna_data.armed.rides_omcc = want.alloc == want.omcc_alloc;
+	luna_data.armed.rides_omcc =
+		gpon_gem_us_tcont_decide(want.alloc, want.omcc_alloc, false) ==
+		GPON_GEM_US_BIND_IS_OMCC;
 	luna_data_qid = luna_data.armed.rides_omcc ? GPON_OMCC_PHYS_QID :
 		luna_tcont_phys_qid(GPON_DATA_TCONT);
 	if (!luna_data.armed.rides_omcc) {
@@ -6759,6 +6762,8 @@ static void luna_omci_service(void)
 {
 	luna_omci_poll();
 	luna_data_reconcile();
+	if (!(luna_ploam.ticks % LUNA_OMCI_ALARM_TICKS))
+		luna_omci_report_alarm();
 }
 
 /* ★★★ THE OLT'S VLAN SERVICE MODEL REACHES THIS FAMILY -- and what it can do
@@ -7853,8 +7858,8 @@ static void gpon_optical_work_fn(struct work_struct *w)
 		}
 		if (optical_poll && (bosa_regs_live() || bosa_cal_ready) &&
 		    time_after_eq(jiffies, optical_next)) {
-			gpon_optical_cache_poll();
-			rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);
+			if (gpon_optical_cache_poll())
+				rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);
 			optical_next = jiffies + msecs_to_jiffies(3000);
 		}
 	}

@@ -1648,6 +1648,7 @@ static int rtl_pci_tx(struct ieee80211_hw *hw,
 	__le16 fc = rtl_get_fc(skb);
 	u8 *pda_addr = hdr->addr1;
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	u64 before, after;
 	u8 own;
 	u8 temp_one = 1;
 
@@ -1732,9 +1733,18 @@ static int rtl_pci_tx(struct ieee80211_hw *hw,
 	if (ieee80211_is_data(fc))
 		rtlpriv->cfg->ops->led_control(hw, LED_CTL_TX);
 
-	memset(entry, 0, rtlpriv->use_new_trx_flow ? sizeof(*ptx_bd_desc) :
-	       sizeof(*pdesc));
-	if (!rtlpriv->use_new_trx_flow) {
+	/* The beacon slot is read by the chip on its own clock, so it keeps
+	 * its last valid contents; a host-indexed slot is read only after
+	 * the index write and starts from zero.
+	 */
+	before = rtlpriv->cfg->ops->get_desc(hw, entry, true,
+					     HW_DESC_TXBUFF_ADDR);
+	if (hw_queue != BEACON_QUEUE) {
+		memset(entry, 0, rtlpriv->use_new_trx_flow ?
+		       sizeof(*ptx_bd_desc) : sizeof(*pdesc));
+		before = 0;
+	}
+	if (!rtlpriv->use_new_trx_flow && hw_queue != BEACON_QUEUE) {
 		u32 next = (u32)ring->dma +
 			   ((idx + 1) % ring->entries) * sizeof(*pdesc);
 
@@ -1747,7 +1757,8 @@ static int rtl_pci_tx(struct ieee80211_hw *hw,
 		rtlpriv->cfg->ops->fill_tx_desc(hw, hdr, (u8 *)pdesc,
 			(u8 *)ptx_bd_desc, info, sta, skb, hw_queue, ptcb_desc);
 	/* A descriptor the chip layer did not fill is never published. */
-	if (!rtlpriv->cfg->ops->get_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR))
+	after = rtlpriv->cfg->ops->get_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR);
+	if (!after || after == before)
 		goto drop;
 
 	__skb_queue_tail(&ring->queue, skb);

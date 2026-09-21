@@ -7,19 +7,46 @@
 #include <linux/ethtool.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/mutex.h>
 #include <linux/netdevice.h>
 #include <linux/phy.h>
+#include <linux/ratelimit.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 
 #include "cortina-ni.h"
 #include "cortina-ni-regs.h"
+#include "cortina-access.h"
 
 static inline void __iomem *ni_base(struct cortina_ni *ni)
 {
 	return ni->win[CA_NI_WIN_NI];
 }
+
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+static DEFINE_MUTEX(cortina_l2_drop_lock);
+
+static u64 cortina_ni_l2_drop_read(struct cortina_ni *ni, unsigned int reason)
+{
+	void __iomem *base = ni_base(ni);
+	u64 value = ~0ULL;
+	int ret;
+
+	if (!base || reason >= CA_NI_L2FE_DROP_REASON_COUNT)
+		return value;
+	mutex_lock(&cortina_l2_drop_lock);
+	ret = ca_ni_access_go(base + CA_NI_L2FE_PE_DROP_STTS_ACCESS,
+			      CA_NI_IND_ACCESS_GO | reason, NULL);
+	if (ret)
+		dev_warn_ratelimited(ni->dev, "L2 drop counter %u: %d\n",
+				     reason, ret);
+	else
+		value = readl(base + CA_NI_L2FE_PE_DROP_STTS_DATA);
+	mutex_unlock(&cortina_l2_drop_lock);
+	return value;
+}
+#endif
 
 /* the NI_HV read-and-clear counters: ONE reader, driver-side ...
  * dev/MEASURED-cortina-ni-ethtool.c.md sec 2. */
@@ -69,6 +96,7 @@ enum ca_ni_stat_src {
 	CA_ST_CB_OCC,		/* central-buffer occupancy aggregate, @arg    */
 	CA_ST_CB_PORT_FREE,	/* CB per-port free-count word, @arg = port    */
 	CA_ST_PHY_LINK,		/* per-GPHY-port PHY link, i = port            */
+	CA_ST_L2_DROP,
 };
 
 /* CA_ST_CB_OCC selectors */
@@ -174,6 +202,40 @@ static const struct ca_ni_stat_grp cortina_ni_stat_grps[] = {
 	  CA_NI_L2FE_NI_INTF_DROP_CNT },
 	{ "l2fe_dos_flood_drops",	1, CA_ST_NI_REG,
 	  CA_NI_L2FE_DOS_FLOOD_CNT },
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+	{ "l2fe_drop_reason_0", 1, CA_ST_L2_DROP, 0 },
+	{ "l2fe_drop_ipv4_checksum", 1, CA_ST_L2_DROP, 1 },
+	{ "l2fe_drop_dpid_blackhole", 1, CA_ST_L2_DROP, 2 },
+	{ "l2fe_drop_ingress_stp", 1, CA_ST_L2_DROP, 3 },
+	{ "l2fe_drop_reason_4", 1, CA_ST_L2_DROP, 4 },
+	{ "l2fe_drop_vlan_type", 1, CA_ST_L2_DROP, 5 },
+	{ "l2fe_drop_ingress_rule", 1, CA_ST_L2_DROP, 6 },
+	{ "l2fe_drop_vid4095", 1, CA_ST_L2_DROP, 7 },
+	{ "l2fe_drop_unknown_vlan", 1, CA_ST_L2_DROP, 8 },
+	{ "l2fe_drop_unicast_mc_vlan", 1, CA_ST_L2_DROP, 9 },
+	{ "l2fe_drop_destination_deny", 1, CA_ST_L2_DROP, 10 },
+	{ "l2fe_drop_invalid_source", 1, CA_ST_L2_DROP, 11 },
+	{ "l2fe_drop_learning_error", 1, CA_ST_L2_DROP, 12 },
+	{ "l2fe_drop_source_deny", 1, CA_ST_L2_DROP, 13 },
+	{ "l2fe_drop_source_learning", 1, CA_ST_L2_DROP, 14 },
+	{ "l2fe_drop_unknown_type", 1, CA_ST_L2_DROP, 15 },
+	{ "l2fe_drop_ingress_vlan", 1, CA_ST_L2_DROP, 16 },
+	{ "l2fe_drop_port_membership", 1, CA_ST_L2_DROP, 17 },
+	{ "l2fe_drop_egress_vlan", 1, CA_ST_L2_DROP, 18 },
+	{ "l2fe_drop_reason_19", 1, CA_ST_L2_DROP, 19 },
+	{ "l2fe_drop_rule", 1, CA_ST_L2_DROP, 20 },
+	{ "l2fe_drop_loopback", 1, CA_ST_L2_DROP, 21 },
+	{ "l2fe_drop_egress_stp", 1, CA_ST_L2_DROP, 22 },
+	{ "l2fe_drop_reason_23", 1, CA_ST_L2_DROP, 23 },
+	{ "l2fe_drop_reason_24", 1, CA_ST_L2_DROP, 24 },
+	{ "l2fe_drop_reason_25", 1, CA_ST_L2_DROP, 25 },
+	{ "l2fe_drop_blackhole", 1, CA_ST_L2_DROP, 26 },
+	{ "l2fe_drop_loopback_filter", 1, CA_ST_L2_DROP, 27 },
+	{ "l2fe_drop_ttl_zero", 1, CA_ST_L2_DROP, 28 },
+	{ "l2fe_drop_dos", 1, CA_ST_L2_DROP, 29 },
+	{ "l2fe_drop_reason_30", 1, CA_ST_L2_DROP, 30 },
+	{ "l2fe_drop_reason_31", 1, CA_ST_L2_DROP, 31 },
+#endif
 	{ "l2tm_bm_rx_packets",		1, CA_ST_NI_REG, CA_NI_L2TM_BM_RX_PCNT },
 	{ "l2tm_bm_tx_packets",		1, CA_ST_NI_REG, CA_NI_L2TM_BM_TX_PCNT },
 	{ "l2tm_bm_drop_shared_buffer",	1, CA_ST_NI_REG, CA_NI_L2TM_BM_SB_DPCNT },
@@ -285,6 +347,10 @@ static u64 ca_ni_stat_value(struct cortina_ni *ni,
 		return readl(ni_base(ni) + g->arg + (size_t)i * g->step);
 	case CA_ST_NIHV:
 		return ctx->nihv[g->arg + i];
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+	case CA_ST_L2_DROP:
+		return cortina_ni_l2_drop_read(ni, g->arg + i);
+#endif
 	case CA_ST_PORT_MIB:
 		if (!ni_base(ni))
 			return 0;

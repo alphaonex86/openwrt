@@ -529,7 +529,6 @@ struct cortina_gpon {
 	 * dev/MEASURED-cortina-gpon.c.md sec 28. */
 	u16 hw_data_alloc;		/* alloc-id armed -> hw T-CONT 1 (0 = none) */
 	u16 hw_data_gem;		/* GEM port-id armed in DS-GEM CAM + US_PORT (0 = none) */
-	u32 omci_cfg_log;		/* config-ME body log budget used */
 	struct net_device *wan_ndev;	/* gpon0 */
 
 	/* The per-board PON identity, single source of truth for BOTH ...
@@ -719,11 +718,9 @@ static bool cg_coldstart_wd = true;
 module_param_named(coldstart_wd, cg_coldstart_wd, bool, 0644);
 MODULE_PARM_DESC(coldstart_wd, "stuck-O1 recovery watchdog: re-roll the SerDes/laser bring-up while the FSM sits at O1 (default on; 0 = observe-only A/B baseline — flip live via /sys/module to recover a wedged boot in place)");
 
-/* ★★★ DS-into-L3FE routing under hw_l3_fwd. DEFAULT OFF since ...
- * dev/MEASURED-cortina-gpon.c.md sec 39. */
-static bool cg_hw_l3_ds = false;
-module_param_named(hw_l3_ds, cg_hw_l3_ds, bool, 0644);
-MODULE_PARM_DESC(hw_l3_ds, "route the DS data GEM into the L3FE under hw_l3_fwd (default OFF = CPU_0 + FE_BYPASS, the route measured to deliver; =1 black-holes ALL downstream while ds_flows=0). ★ REQUIRED for cortina_ni.hw_ds_offload to do anything: with it off, DS frames bypass both forwarding engines and no DS hash entry is reachable. Watch the wired LAN when enabling (the DS punt window once broke it)");
+static bool cg_hw_l3_ds = true;
+module_param_named(hw_l3_ds, cg_hw_l3_ds, bool, 0444);
+MODULE_PARM_DESC(hw_l3_ds, "Route downstream data GEMs through L3FE at bind time (boot-only, default ON). Requires cortina_ni.hw_l3_fwd; 0 selects CPU bypass.");
 
 /* Enable the upstream laser. ★ Proven by the ours-vs-stock ...
  * dev/MEASURED-cortina-gpon.c.md sec 40. */
@@ -1390,6 +1387,7 @@ static void cg_mac_intr_arm(struct cortina_gpon *cg)
 /* Post-O5 SUPERVISOR cadence. Once the FSM reaches Operation ...
  * dev/MEASURED-cortina-gpon.c.md sec 73. */
 #define CG_O5_SUPERVISOR_SECS	30
+static void cg_optic_poll(struct cortina_gpon *cg);
 static void cg_coldstart_work(struct work_struct *work)
 {
 	struct cortina_gpon *cg = container_of(to_delayed_work(work),
@@ -1437,6 +1435,7 @@ static void cg_coldstart_work(struct work_struct *work)
 			if (!cg->puc_ready)
 				cg_puc_init(cg);
 		}
+		cg_optic_poll(cg);
 		cg_sched_now(cg, &cg->isr_work);
 		cg_sched(cg, &cg->coldstart_work,
 				      CG_O5_SUPERVISOR_SECS * HZ);
@@ -1967,28 +1966,24 @@ static void cg_data_try_install(struct cortina_gpon *cg,
 	 * dev/MEASURED-cortina-gpon.c.md sec 90. */
 	for (i = 0; i < 2; i++) {
 		u32 idx = CG_DATA_GEM_IDX + i;
-		u32 d0 = CG_PDC_D0_COS(0) |
-			 CG_PDC_D0_LDPID(CG_LPORT_CPU_0) |
-			 CG_PDC_D0_LSPID(CG_LPORT_PON) |
-			 CG_PDC_D0_FE_BYPASS | CG_PDC_D0_NO_DROP;
+		u32 d0, d1;
 
+		cg_pdc_map_entry(idx, CG_OMCC_US_GEM_IDX_NUM, &d0, &d1);
 		if (i == 0 && cortina_ni_hw_l3_fwd_active() && cg_hw_l3_ds) {
-			d0 = CG_PDC_D0_LDPID(CG_LPORT_L3_WAN) |
-			     CG_PDC_D0_LSPID(CG_LPORT_PON);
 			dev_info(cg->dev,
 				 "PDC: data GEM idx %u -> L3_WAN (HW L3-forward DS armed)\n",
 				 idx);
-		} else if (i == 0) {
-			/* ★ Say it PLAINLY: this is the DS-offload precondition and
-			 * its absence is invisible from the L3FE side.  With FE_BYPASS
-			 * the DS data GEM skips BOTH forwarding engines, so no DS
-			 * main-hash entry can be hit however correct it is. */
-			dev_info(cg->dev,
-				 "PDC: data GEM idx %u -> CPU_0 + FE_BYPASS (hw_l3_fwd=%d hw_l3_ds=%d) - DS frames BYPASS the L3FE, so no DS HW-flow entry can be hit; set cortina_gpon.hw_l3_ds=1 to route DS into the L3FE\n",
-				 idx, cortina_ni_hw_l3_fwd_active(),
-				 cg_hw_l3_ds);
+		} else {
+			d0 = CG_PDC_D0_LDPID(CG_LPORT_CPU_0) |
+			     CG_PDC_D0_LSPID(CG_LPORT_PON) |
+			     CG_PDC_D0_FE_BYPASS | CG_PDC_D0_NO_DROP;
+			if (i == 0)
+				dev_info(cg->dev,
+					 "PDC: data GEM idx %u -> CPU_0 + FE_BYPASS (hw_l3_fwd=%d hw_l3_ds=%d) - DS frames BYPASS the L3FE, so no DS HW-flow entry can be hit; set cortina_gpon.hw_l3_ds=1 to route DS into the L3FE\n",
+					 idx, cortina_ni_hw_l3_fwd_active(),
+					 cg_hw_l3_ds);
 		}
-		if (cg_pdc_map_write(cg, idx, d0, CG_PDC_D1_POL_ID(idx)))
+		if (cg_pdc_map_write(cg, idx, d0, d1))
 			return;
 		if (i == 0)
 			cortina_ni_gpon_ds_route_set(!(d0 & CG_PDC_D0_FE_BYPASS));
@@ -2274,6 +2269,24 @@ static void cg_optic_sample(struct cortina_gpon *cg, struct seq_file *m)
 			seq_printf(m, " %02x", d.raw[i]);
 		seq_putc(m, '\n');
 		cg_optic_anig_show(cg, m);
+	}
+}
+
+/* O5 supervisor holds sn_lock; failed TX remains pending for its next tick. */
+static void cg_optic_poll(struct cortina_gpon *cg)
+{
+	u8 frame[OMCI_LEN];
+	int n = 0;
+
+	cg_optic_sample(cg, NULL);
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci_active && cg->omcc_up)
+		n = omci_onu_alarm_prepare(cg->omci, frame);
+	spin_unlock_bh(&cg->omci_lock);
+	if (n && !cg_omci_tx(cg, frame)) {
+		spin_lock_bh(&cg->omci_lock);
+		omci_onu_alarm_sent(cg->omci, frame);
+		spin_unlock_bh(&cg->omci_lock);
 	}
 }
 

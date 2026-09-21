@@ -28,7 +28,7 @@
 #include <net/netfilter/nf_flow_table.h>
 
 #include "gpon_flow.h"	/* the core's TC->5-tuple decode */
-#include "gpon_flow_offload.h"	/* ...and the lifecycle's own diag line */
+#include "gpon_flow_block.h"
 #include "gpon_flow_offload.h"	/* the core TC-offload lifecycle */
 #include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
@@ -556,10 +556,10 @@ static bool cn_l3e_install_ok;
 
 /* ★ Divergence B gate. When set, cn_l3e_init also programs ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 15. */
-static bool hw_l3_fwd = true;	/* ⚠ TEST-ONLY, see the OWED WORK note above */
-module_param(hw_l3_fwd, bool, 0644);
+static bool hw_l3_fwd = true;
+module_param(hw_l3_fwd, bool, 0444);
 MODULE_PARM_DESC(hw_l3_fwd,
-	"enable HW L3-forwarding (default OFF - routed frame dies at the L2FE->L3FE handoff before the L3FE)");
+	"initialize HW L3 forwarding at probe (default ON; boot-time only)");
 
 /* ★ STATUS. Both legs are HW-forwarded today. The 2026-07-20 ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 16. */
@@ -574,14 +574,14 @@ static const struct kernel_param_ops hw_pppoe_ops = {
 };
 module_param_cb(hw_pppoe, &hw_pppoe_ops, &hw_pppoe, 0644);
 MODULE_PARM_DESC(hw_pppoe,
-	"install HW hash entries for PPPoE-WAN flows - BOTH legs: US with the 8-byte session-header push, DS with the pop the LAN egress L3-IF entry performs (default ON since 2026-08-03: board-measured 916.9/923.9 Mbps tcp both ways and 947.4 Mbps udp US, vs 3.3 Mbps US-tcp on the SW fastpath; set 0 to fall back). Needs cortina_ni.hw_l3_fwd=1 from boot, and the DS half also needs hw_ds_offload=1 + cortina_gpon.hw_l3_ds=1; only flows offered AFTER a runtime flip are affected, and flipping to 0 clears the armed session");
+	"Enable PPPoE hardware flows (default ON). Requires hw_l3_fwd at boot; downstream also requires hw_ds_offload and cortina_gpon.hw_l3_ds. Disabling retires flows and clears the session before publishing the new value; errors leave the gate enabled for retry. Enabling affects new flows.");
 
 /* ★ DS (WAN->LAN) offload leg. Default ON since 2026-07-25, ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 17. */
 static bool hw_ds_offload = true;
 module_param(hw_ds_offload, bool, 0644);
 MODULE_PARM_DESC(hw_ds_offload,
-	"install HW hash entries for the DS (WAN->LAN) reply leg of a routed IPoE NAT flow (default OFF: DS rides the CPU punt path). ★ ALSO NEEDS cortina_gpon.hw_l3_ds=1 - without it the PON DS route is CPU_0+FE_BYPASS and every entry installed here is unreachable");
+	"install downstream HW flows (default ON; runtime changes affect new flows only); requires the data GEM routed into L3FE via cortina_gpon.hw_l3_ds=1");
 
 /* DS LAN-egress port override, -1 = resolve it from the L2FE ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 18. */
@@ -876,7 +876,7 @@ static int cn_l3e_flush_auto_flows(struct cn_l3e *l3e);
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 33. */
 bool cortina_ni_hw_l3_fwd_active(void)
 {
-	return hw_l3_fwd && cn_l3e;
+	return hw_l3_fwd && cn_l3e && cn_l3e_install_ok;
 }
 EXPORT_SYMBOL_GPL(cortina_ni_hw_l3_fwd_active);
 
@@ -1011,23 +1011,26 @@ int cortina_ni_wan_pppoe_session_set(u16 session)
 }
 EXPORT_SYMBOL_GPL(cortina_ni_wan_pppoe_session_set);
 
-/* hw_pppoe writer. Plain bool set, plus one safety: turning ...
- * dev/MEASURED-cortina-ni-flowoffload.c.md sec 46. */
 static int hw_pppoe_set(const char *val, const struct kernel_param *kp)
 {
-	bool was = hw_pppoe;
+	struct kernel_param parsed = *kp;
+	bool next;
 	int ret;
 
-	ret = param_set_bool(val, kp);
+	parsed.arg = &next;
+	ret = param_set_bool(val, &parsed);
 	if (ret)
 		return ret;
-	if (was && !hw_pppoe && cn_l3e &&
-	    READ_ONCE(cn_l3e->data_pppoe_session)) {
-		mutex_lock(&cn_flow_offload_mutex);
-		cortina_ni_wan_pppoe_session_set(0);
-		mutex_unlock(&cn_flow_offload_mutex);
+	mutex_lock(&cn_flow_offload_mutex);
+	if (hw_pppoe && !next && cn_l3e) {
+		ret = cn_l3e_flush_auto_flows(cn_l3e);
+		if (!ret && READ_ONCE(cn_l3e->data_pppoe_session))
+			ret = cortina_ni_wan_pppoe_session_set(0);
 	}
-	return 0;
+	if (!ret)
+		WRITE_ONCE(hw_pppoe, next);
+	mutex_unlock(&cn_flow_offload_mutex);
+	return ret;
 }
 
 /* Stamp the US (LAN->WAN) routed PON egress into a ...
@@ -2357,40 +2360,8 @@ static LIST_HEAD(cn_block_cb_list);
 static int cn_setup_tc_block(struct net_device *dev,
 			     struct flow_block_offload *f)
 {
-	struct flow_block_cb *block_cb;
-	flow_setup_cb_t *cb = cn_setup_tc_block_cb;
-
-	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
-		return -EOPNOTSUPP;
-
-	f->driver_block_list = &cn_block_cb_list;
-
-	switch (f->command) {
-	case FLOW_BLOCK_BIND:
-		block_cb = flow_block_cb_lookup(f->block, cb, dev);
-		if (block_cb) {
-			flow_block_cb_incref(block_cb);
-			return 0;
-		}
-		block_cb = flow_block_cb_alloc(cb, dev, dev, NULL);
-		if (IS_ERR(block_cb))
-			return PTR_ERR(block_cb);
-		flow_block_cb_incref(block_cb);
-		flow_block_cb_add(block_cb, f);
-		list_add_tail(&block_cb->driver_list, &cn_block_cb_list);
-		return 0;
-	case FLOW_BLOCK_UNBIND:
-		block_cb = flow_block_cb_lookup(f->block, cb, dev);
-		if (!block_cb)
-			return -ENOENT;
-		if (!flow_block_cb_decref(block_cb)) {
-			flow_block_cb_remove(block_cb, f);
-			list_del(&block_cb->driver_list);
-		}
-		return 0;
-	default:
-		return -EOPNOTSUPP;
-	}
+	return gpon_flow_block_setup(dev, f, &cn_block_cb_list,
+				     cn_setup_tc_block_cb, NULL);
 }
 
 /* ndo_setup_tc hook for the cortina-ni netdevs (eth0 / gpon0) */
@@ -2538,6 +2509,8 @@ static int cn_l3e_init(struct cn_l3e *l3e)
 	};
 	int ret;
 
+	cn_l3e_install_ok = false;
+
 	/* lean SW shadow + sweep reverse map (~0.9 MB total) */
 	l3e->shadow_crc32 = kvcalloc(CN_L3E_ENTRIES, sizeof(u32), GFP_KERNEL);
 	l3e->shadow_crc16 = kvcalloc(CN_L3E_ENTRIES, sizeof(u16), GFP_KERNEL);
@@ -2561,10 +2534,12 @@ static int cn_l3e_init(struct cn_l3e *l3e)
 	/* stock profile/tuple/mask classify config so the engine ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 145. */
 	ret = cortina_l3fe_classify_setup(l3e->ne_base);
-	if (ret)
+	if (ret) {
 		dev_warn(l3e->dev,
 			 "l3fe: classify_setup timed out (%d) - hash lookup not configured\n",
 			 ret);
+		goto free;
+	}
 
 	/* ★ Divergence B+C (gated OFF by default): steer routed ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 146. */
@@ -2878,10 +2853,28 @@ void cortina_ni_flowoffload_stats(u64 out[CA_L3FE_STAT_COUNT])
 /* ★ CONFIG_GPON_FLOW_DIAG gates the READ only.  The bring-up WRITE below is a
  * control, not a measurement -- this family REPORTS, it never decides. */
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+static void cn_l3e_debug_commit(struct seq_file *m, const u64 rx[2],
+				const u16 stage[CN_L3E_STG_N])
+{
+	int i;
+
+	/* Preserve baselines and the one-shot latch across seq_file overflow retries. */
+	if (seq_has_overflowed(m))
+		return;
+	cn_l3e_ni_rx_prev[0] = rx[0];
+	cn_l3e_ni_rx_prev[1] = rx[1];
+	for (i = 0; i < CN_L3E_STG_N; i++)
+		cn_l3e_stage_prev[i] = stage[i];
+	cn_l3e_stage_seen = true;
+	cn_l3e_latch_vec = -1;
+}
+
 int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 {
 	struct cn_l3e *l3e = cn_l3e;
 	unsigned long flags;
+	u64 rx[2];
+	u16 stage[CN_L3E_STG_N];
 	u32 cache_cnt;
 	int i;
 
@@ -3041,7 +3034,7 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		    * silent - printing that hint unconditionally read as "the
 		    * witness is broken" even on a healthy us_hits>0 sample. */
 		   atomic_read(&cn_l3e_us_hits) ? "" :
-		   " (us_hits=0 too => the WITNESS is broken, not the DS leg)");
+		   " (no upstream control hit recorded; verify offered traffic)");
 	/* ★★ STAGE-A PRECONDITION, reported by the GPON driver: which PDC route
 	 * the DS data GEM was programmed with.  FE-bypass = the frame never
 	 * reaches ANY forwarding engine, so ds_hits CANNOT be non-zero and no
@@ -3067,30 +3060,24 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 			   "ni_hv: l3fe_rx(0xa9bc)=%llu delta=%llu l3qm_rx(0xa9fc)=%llu delta=%llu  [cumulative total since boot; delta = since the previous read of THIS file]\n",
 			   l3fe_rx, l3fe_rx - cn_l3e_ni_rx_prev[0],
 			   l3qm_rx, l3qm_rx - cn_l3e_ni_rx_prev[1]);
-		seq_puts(m,
-			 "ni_hv: l3fe_rx is a VALID DS ingress witness ONLY when ds_pdc says L3_WAN; under FE_BYPASS it is 0 by construction (which is what the 2026-07-19 'DS bumps no counter' note was actually observing - the route, not a phantom counter)\n");
-		cn_l3e_ni_rx_prev[0] = l3fe_rx;
-		cn_l3e_ni_rx_prev[1] = l3qm_rx;
+		seq_puts(m, "ni_hv: aggregate ingress; LAN traffic also increments l3fe_rx under DS FE_BYPASS. Attribute downstream traffic separately.\n");
+		rx[0] = l3fe_rx;
+		rx[1] = l3qm_rx;
 	}
 	/* ★★ STAGE A, measured INSIDE the engine: the L3FE's own four ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 116. */
 	{
-		u16 c[CN_L3E_STG_N];
 		int k;
 
-		cn_l3e_stage_read(l3e, c);
+		cn_l3e_stage_read(l3e, stage);
 		seq_puts(m, "l3fe_stage:");
 		for (k = 0; k < CN_L3E_STG_N; k++)
 			seq_printf(m, " %s=%u(%s)", cn_l3e_stage_name[k],
-				   c[k] & 0x3ff,
+				   stage[k] & 0x3ff,
 				   !cn_l3e_stage_seen ? "first-read" :
-				   c[k] != cn_l3e_stage_prev[k] ? "ADVANCING" :
+				   stage[k] != cn_l3e_stage_prev[k] ? "ADVANCING" :
 								  "frozen");
-		seq_puts(m,
-			 "  [10-bit, wraps every 1024 frames: only ADVANCING vs frozen is meaningful. l3fe_in frozen during a download = the DS frame never enters the engine = STAGE A]\n");
-		for (k = 0; k < CN_L3E_STG_N; k++)
-			cn_l3e_stage_prev[k] = c[k];
-		cn_l3e_stage_seen = true;
+		seq_puts(m, "  [10-bit aggregate counters, modulo 1024; an unchanged value does not prove absence of traffic]\n");
 	}
 	/* ★★ STAGE B vs C, from the engine's own frozen descriptor. ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 117. */
@@ -3137,7 +3124,6 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		else if (!hits)
 			seq_puts(m,
 				 "latch: no installed entry's CRC32 appears in the descriptor => either the latched frame belonged to a different flow (re-arm with ONLY the flow under test running), or the engine built a DIFFERENT key from it (STAGE B)\n");
-		cn_l3e_latch_vec = -1;	/* one-shot: re-arm for another capture */
 	}
 	/* ★ Per-flow, per-direction HIT poll of the AUTO ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 118. */
@@ -3255,7 +3241,7 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		else if (!dsn)
 			verdict = "STAGE 0: no DS entry in silicon - every reply rule was REFUSED; enable the cn_rep_dbg refusal lines to see which branch";
 		else if (!us)
-			verdict = "INCONCLUSIVE: us_hits is 0 as well, so the age-re-arm witness is not working - fix the witness before judging DS";
+			verdict = "INCONCLUSIVE: no upstream control hit recorded; verify offered traffic before judging DS";
 		else if (!ds)
 			verdict = "STAGE A/B FAIL: DS entries are live and the witness works (us_hits>0), but a DS entry NEVER matched => the DS frame does not reach the T2 lookup, or the engine's HDR_I key differs from ours. Next: boot with cortina_ni.hw_ds_probe=1 (then 2) to confirm, and do NOT chase the egress action yet";
 		else if (hw_ds_probe)
@@ -3357,6 +3343,7 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 			cn_l3e_age_set(l3e, e->idx, CN_L3E_AGE_IDLE);
 		}
 	}
+	cn_l3e_debug_commit(m, rx, stage);
 	mutex_unlock(&cn_flow_offload_mutex);
 	return 0;
 }
@@ -3441,7 +3428,7 @@ ssize_t cortina_ni_l3fe_debug_write(struct file *file, const char __user *ubuf,
 		}
 		cn_l3e_latch_arm(l3e);
 		cn_l3e_latch_vec = vec;
-		pr_info("cortina-l3fe: latch ARMED (vector %d) - `cat /proc/cortina_l3fe` to read the captured descriptor\n",
+		pr_info("cortina-l3fe: latch ARMED (vector %d) - read /sys/kernel/debug/cortina-l3fe/state\n",
 			vec);
 		err = 0;
 		goto out;

@@ -9,9 +9,7 @@ include $(INCLUDE_DIR)/image.mk
 # TFTP'd into RAM and bootm'd at the U-Boot prompt (stop key Ctrl+A), so NAND
 # is never written during bring-up.
 #
-# The aarch64 kernel Image is position-independent and relocates itself, so the
-# FIT load/entry can sit at any 2 MiB-aligned DRAM offset; 0x02000000 keeps it
-# clear of the low memory U-Boot/ATF use and of the TFTP landing area.
+# Boards must keep the decompressed image clear of bootloader DMA and reserved RAM.
 KERNEL_LOADADDR := 0x02000000
 
 define Device/Default

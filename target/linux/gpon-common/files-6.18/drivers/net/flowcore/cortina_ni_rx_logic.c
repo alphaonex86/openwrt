@@ -96,7 +96,6 @@ bool cortina_ni_l2fe_fdb_action_da(u32 action, u32 *ldpid)
 
 /* The per-lport L2FE profile. Stock init state (validated ...
  * dev/MEASURED-cortina_ni_rx_logic.c.md sec 4. */
-#define CA_NI_LPORT_ETH_NI6		0x06
 #define CA_NI_LPORT_CPU_0		0x10
 #define CA_NI_LPORT_CPU_7		0x17
 #define CA_NI_LPORT_L3_LAN		0x19
@@ -113,6 +112,7 @@ bool cortina_ni_l2fe_fdb_action_da(u32 action, u32 *ldpid)
 #define CA_NI_L2FE_ILPB_D2_GEM		0x180222a3u	/* GEM/LLID >=0x20 (S-TPID) */
 #define CA_NI_L2FE_ILPB_D1_INIT		0x000001cbu
 #define CA_NI_L2FE_ILPB_D1_STAMOVE	0x80000000u	/* regs.h spelled it BIT(31) */
+#define CA_NI_L2FE_ILPB_D1_MOVE_FWD	0x40000000u
 #define CA_NI_L2FE_ILPB_D0_INIT		0xc1000000u
 #define CA_NI_L2FE_ELPB_D0_LAN		0x00000003u
 #define CA_NI_L2FE_ELPB_D0_WAN		0x0000000bu
@@ -143,8 +143,11 @@ void cortina_ni_rx_lport_profile(unsigned int lport,
 	else
 		p->ilpb_d2 = CA_NI_L2FE_ILPB_D2_GEM;
 	p->ilpb_d1 = CA_NI_L2FE_ILPB_D1_INIT;
-	if (lport <= CA_NI_LPORT_ETH_NI6 ||
-	    (lport >= CA_NI_LPORT_CPU_0 && lport <= CA_NI_LPORT_CPU_7))
+	/* Physical ingress, including PON, must tolerate source MAC movement. */
+	if (lport <= CA_NI_LSPID_PON)
+		p->ilpb_d1 |= CA_NI_L2FE_ILPB_D1_STAMOVE |
+				CA_NI_L2FE_ILPB_D1_MOVE_FWD;
+	else if (lport >= CA_NI_LPORT_CPU_0 && lport <= CA_NI_LPORT_CPU_7)
 		p->ilpb_d1 |= CA_NI_L2FE_ILPB_D1_STAMOVE;
 	p->ilpb_d0 = CA_NI_L2FE_ILPB_D0_INIT;
 

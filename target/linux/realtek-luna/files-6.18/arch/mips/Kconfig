@@ -1139,6 +1139,9 @@ config FW_ARC
 config ARCH_MAY_HAVE_PC_FDC
 	bool
 
+config BOOT_RAW
+	bool
+
 config CEVT_BCM1480
 	bool
 
@@ -2515,13 +2518,13 @@ config CPU_R4X00_BUGS64
 
 config MIPS_ASID_SHIFT
 	int
-	default 6 if CPU_R3000 || CPU_R3K_TLB
+	default 6 if CPU_R3000
 	default 0
 
 config MIPS_ASID_BITS
 	int
 	default 0 if MIPS_ASID_BITS_VARIABLE
-	default 6 if CPU_R3000 || CPU_R3K_TLB
+	default 6 if CPU_R3000
 	default 8
 
 config MIPS_ASID_BITS_VARIABLE
@@ -3040,18 +3043,6 @@ choice
 		depends on CMDLINE_BOOL
 		bool "Extend builtin kernel arguments with bootloader arguments"
 endchoice
-
-config BOOT_RAW
-	bool "Enable the kernel to be executed from the load address"
-	default n
-	help
-	 Allow the kernel to be executed from the load address for
-	 bootloaders which cannot read the ELF format. This places
-	 a jump to start_kernel at the load address.
-
-	 If unsure, say N.
-
-
 
 endmenu
 

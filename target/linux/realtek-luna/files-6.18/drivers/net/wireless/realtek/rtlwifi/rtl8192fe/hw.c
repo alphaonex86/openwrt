@@ -753,15 +753,15 @@ static bool _rtl92fe_llt_table_init(struct ieee80211_hw *hw)
 	u8tmp = rtl_read_byte(rtlpriv, REG_AUTO_LLT + 2);
 	rtl_write_byte(rtlpriv, REG_AUTO_LLT + 2, u8tmp | BIT(0));
 
-	while (u8tmp & BIT(0)) {
+	for (testcnt = 0; testcnt < 100; testcnt++) {
 		u8tmp = rtl_read_byte(rtlpriv, REG_AUTO_LLT + 2);
+		if (!(u8tmp & BIT(0)))
+			return true;
 		udelay(10);
-		testcnt++;
-		if (testcnt > 10)
-			break;
 	}
 
-	return true;
+	pr_err("rtl8192fe: LLT initialization timed out\n");
+	return false;
 }
 
 static void _rtl92fe_gen_refresh_led_state(struct ieee80211_hw *hw)

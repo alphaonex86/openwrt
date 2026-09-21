@@ -120,12 +120,7 @@
  * PCIe input against the port that chip's own MAC gate selects, so the pair
  * cannot drift apart again silently.
  *
- * DELIVERY INVARIANT: every GISR interrupt is delivered to CPU 0.  Only CPU 0's
- * block carries routing and mask bits; a second CPU's block, where the chip has
- * one, is masked shut, so a secondary CPU can never take an interrupt this
- * driver did not arrange.  Per-CPU affinity is OWED work and needs a running
- * SMP kernel to verify, which this family cannot have until the CPS/CM question
- * is settled.
+ * Each input is enabled on at most one CPU; affinity moves its mask atomically.
  *
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
@@ -136,6 +131,7 @@
 #include <linux/of_irq.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/cpu.h>
 
 #define LUNA_INTC_INPUTS	64
 #define LUNA_INTC_WORDS	(LUNA_INTC_INPUTS / 32)	/* mask/status */
@@ -145,6 +141,7 @@
 /* ⚠ SEVEN, AND IT IS COUNTED FROM THE HARDWARE, NOT DERIVED ...
  * dev/MEASURED-irq-luna.c.md sec 1. */
 #define LUNA_INTC_IRR_WORDS	7
+#define LUNA_INTC_TIMER_IRR	4
 #define LUNA_INTC_PERIPH_EN	12	/* GIMR0 bit12 = master peripheral enable */
 
 /*
@@ -158,6 +155,7 @@ struct luna_intc_chip {
 	/* Byte distance to the NEXT CPU's block, or 0 where this chip has only
 	 * one block for this driver to arrange. */
 	u32		cpu_stride;
+	u32		cpu1_timer_irr;
 };
 
 static const struct luna_intc_chip rtl9602c_intc_chip = {
@@ -167,13 +165,15 @@ static const struct luna_intc_chip rtl9602c_intc_chip = {
 	.irr	= { 0x03333330, 0x30302222, 0x00020226, 0x22020333,
 		    0x63333063, 0x32322022, 0x00333000 },
 	.cpu_stride = 0,	/* this driver arranges one block here */
+	.cpu1_timer_irr = 0,
 };
 
 static const struct luna_intc_chip rtl9603cvd_intc_chip = {
 	.name	= "RTL9603CVD",
 	.irr	= { 0x03333330, 0x30302222, 0x00020222, 0x22020333,
 		    0x33333063, 0x32322022, 0x00333000 },
-	.cpu_stride = 0x40,	/* CPU 1's block, masked shut below */
+	.cpu_stride = 0x40,
+	.cpu1_timer_irr = 0x33333603,	/* TC1 to CPU1; TC0 disconnected */
 };
 
 struct luna_intc {
@@ -181,18 +181,21 @@ struct luna_intc {
 	raw_spinlock_t			lock;
 	struct irq_domain		*domain;
 	const struct luna_intc_chip	*c;
+	u8				target[LUNA_INTC_INPUTS];
 };
 
 static void luna_intc_mask(struct irq_data *d)
 {
 	struct luna_intc *ic = irq_data_get_irq_chip_data(d);
 	unsigned int word = d->hwirq / 32;
+	void __iomem *base;
 	u32 val;
 
 	raw_spin_lock(&ic->lock);
-	val = readl(ic->base + LUNA_INTC_GIMR(word));
+	base = ic->base + ic->c->cpu_stride * ic->target[d->hwirq];
+	val = readl(base + LUNA_INTC_GIMR(word));
 	val &= ~BIT(d->hwirq % 32);
-	writel(val, ic->base + LUNA_INTC_GIMR(word));
+	writel(val, base + LUNA_INTC_GIMR(word));
 	raw_spin_unlock(&ic->lock);
 }
 
@@ -200,19 +203,61 @@ static void luna_intc_unmask(struct irq_data *d)
 {
 	struct luna_intc *ic = irq_data_get_irq_chip_data(d);
 	unsigned int word = d->hwirq / 32;
+	void __iomem *base;
 	u32 val;
 
 	raw_spin_lock(&ic->lock);
-	val = readl(ic->base + LUNA_INTC_GIMR(word));
+	base = ic->base + ic->c->cpu_stride * ic->target[d->hwirq];
+	val = readl(base + LUNA_INTC_GIMR(word));
 	val |= BIT(d->hwirq % 32);
-	writel(val, ic->base + LUNA_INTC_GIMR(word));
+	writel(val, base + LUNA_INTC_GIMR(word));
 	raw_spin_unlock(&ic->lock);
 }
+
+#ifdef CONFIG_SMP
+static int luna_intc_set_affinity(struct irq_data *d,
+				 const struct cpumask *mask, bool force)
+{
+	struct luna_intc *ic = irq_data_get_irq_chip_data(d);
+	unsigned int cpu = cpumask_first_and(mask, force ? cpu_possible_mask :
+					    cpu_online_mask);
+	unsigned int word = d->hwirq / 32;
+	u32 bit = BIT(d->hwirq % 32);
+	void __iomem *base;
+	unsigned long flags;
+
+	if (cpu >= (ic->c->cpu_stride ? 2 : 1))
+		return -EINVAL;
+	/* The two clockevent routes are wired to their respective CPU blocks. */
+	if (ic->c->cpu_stride && (d->hwirq == 43 || d->hwirq == 44)) {
+		cpu = d->hwirq - 43;
+		if (!cpumask_test_cpu(cpu, mask) ||
+		    !cpumask_test_cpu(cpu, force ? cpu_possible_mask : cpu_online_mask))
+			return -EINVAL;
+	}
+
+	raw_spin_lock_irqsave(&ic->lock, flags);
+	base = ic->base + ic->c->cpu_stride * ic->target[d->hwirq];
+	writel(readl(base + LUNA_INTC_GIMR(word)) & ~bit,
+	       base + LUNA_INTC_GIMR(word));
+	ic->target[d->hwirq] = cpu;
+	base = ic->base + ic->c->cpu_stride * cpu;
+	if (!irqd_irq_masked(d) && !irqd_irq_disabled(d))
+		writel(readl(base + LUNA_INTC_GIMR(word)) | bit,
+		       base + LUNA_INTC_GIMR(word));
+	irq_data_update_effective_affinity(d, cpumask_of(cpu));
+	raw_spin_unlock_irqrestore(&ic->lock, flags);
+	return IRQ_SET_MASK_OK;
+}
+#endif
 
 static struct irq_chip luna_intc_irqchip = {
 	.name		= "rtl960x-intc",
 	.irq_mask	= luna_intc_mask,
 	.irq_unmask	= luna_intc_unmask,
+#ifdef CONFIG_SMP
+	.irq_set_affinity = luna_intc_set_affinity,
+#endif
 };
 
 static int luna_intc_map(struct irq_domain *d, unsigned int irq,
@@ -222,6 +267,7 @@ static int luna_intc_map(struct irq_domain *d, unsigned int irq,
 
 	irq_set_chip_and_handler(irq, &luna_intc_irqchip, handle_level_irq);
 	irq_set_chip_data(irq, ic);
+	irq_data_update_effective_affinity(irq_get_irq_data(irq), cpumask_of(0));
 	/* routing (GIRR) is pre-loaded with the stock-observed values in init */
 
 	return 0;
@@ -236,12 +282,13 @@ static void luna_intc_dispatch(struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	struct luna_intc *ic = irq_desc_get_handler_data(desc);
+	void __iomem *base = ic->base + ic->c->cpu_stride * smp_processor_id();
 	int word;
 
 	chained_irq_enter(chip, desc);
 	for (word = 0; word < LUNA_INTC_WORDS; word++) {
-		unsigned long pending = readl(ic->base + LUNA_INTC_GISR(word)) &
-					readl(ic->base + LUNA_INTC_GIMR(word));
+		unsigned long pending = readl(base + LUNA_INTC_GISR(word)) &
+					readl(base + LUNA_INTC_GIMR(word));
 		unsigned int bit;
 
 		if (word == 0)
@@ -274,14 +321,15 @@ static int __init luna_intc_init(struct device_node *node,
 	for (i = 0; i < LUNA_INTC_IRR_WORDS; i++)
 		writel(chip->irr[i], ic->base + LUNA_INTC_IRR(i));
 
-	/* Mask a second CPU's block shut where the chip has one: only CPU 0
-	 * carries routing, so a secondary CPU can never take an interrupt this
-	 * driver did not arrange. */
+	/* Route both blocks before any input is assigned to the second CPU. */
 	if (chip->cpu_stride) {
 		void __iomem *other = ic->base + chip->cpu_stride;
 
-		writel(0, other + LUNA_INTC_GIMR(0));
+		writel(BIT(LUNA_INTC_PERIPH_EN), other + LUNA_INTC_GIMR(0));
 		writel(0, other + LUNA_INTC_GIMR(1));
+		for (i = 0; i < LUNA_INTC_IRR_WORDS; i++)
+			writel(i == LUNA_INTC_TIMER_IRR ? chip->cpu1_timer_irr :
+			       chip->irr[i], other + LUNA_INTC_IRR(i));
 	}
 
 	ic->domain = irq_domain_create_linear(of_fwnode_handle(node),

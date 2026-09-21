@@ -50,30 +50,16 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		/*
-		 * THE SECOND CPU IS NOT DESCRIBED, DELIBERATELY -- and the
-		 * question the earlier draft of this file left open is now
-		 * ANSWERED, which is why it stays out rather than going in.
-		 *
-		 * MEASURED: the vendor kernel prints
-		 *	MIPS CPS SMP unable to proceed without a CM
-		 * and then still reaches "Brought up 2 CPUs". So the two
-		 * logical CPUs are NOT a Coherent Processing System: there is
-		 * no Coherence Manager, and the pair is two VPEs of one
-		 * MT-ASE core (the core advertises "mt" among its ASEs).
-		 *
-		 * That needs CONFIG_MIPS_MT_SMP, which this subtarget does
-		 * not build (it is configured for the RTL9607C's CPS). Until
-		 * it does, a second cpu node describes a CPU nothing can
-		 * bring up. One CPU is correct-but-slower; a wrong second-CPU
-		 * description hangs in SMP bring-up.
-		 *
-		 * OWED at M2+: CONFIG_MIPS_MT_SMP for this chip, then cpu@1.
-		 */
+		/* Two VPEs of one MT-ASE core; no Coherence Manager. */
 		cpu@0 {
 			device_type = "cpu";
 			compatible = "mti,interaptiv";	/* MEASURED */
 			reg = <0>;
+		};
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "mti,interaptiv";
+			reg = <1>;
 		};
 	};
 
@@ -146,30 +132,14 @@
 		interrupts = <3>, <4>, <7>;
 	};
 
-	/*
-	 * SoC timer channel TC0 drives the system tick.
-	 *
-	 * MEASURED: the vendor kernel maps 0x18003200 and 0x18003210 as
-	 * clockevents and 0x18003280 as its clocksource, at a 200 MHz base.
-	 * We need only TC0; the window covers TC0 and TC1.
-	 *
-	 * The driver is the family one already in this target
-	 * (timer-rtl960x.c). It is reached through the fallback compatible
-	 * rather than by editing that driver's match table, so nothing
-	 * about the RTL9602C build changes. Its register layout
-	 * (DATA/CNT/CTRL/INT at +0x00/+0x04/+0x08/+0x0c) and its 200 MHz
-	 * input both hold here.
-	 *
-	 * NOTE the CP0 count/compare clockevent is NOT built for this
-	 * target (no CONFIG_CEVT_R4K), which is what leaves CP0 IRQ 7 free
-	 * for the aggregator to deliver TC0 on.
-	 */
+	/* Stock: TC0/TC1 clockevents, TC8 clocksource; CP0 IRQ7 serves GISR. */
 	timer@18003200 {
-		compatible = "realtek,rtl9603cvd-timer", "realtek,rtl9602c-timer";
-		reg = <0x18003200 0x20>;
+		compatible = "realtek,rtl9603cvd-timer", "realtek,otto-timer";
+		reg = <0x18003200 0x10>, <0x18003210 0x10>,
+		      <0x18003280 0x10>;
 		clocks = <&lx_clk>;
 		interrupt-parent = <&intc>;
-		interrupts = <43>;		/* TC0 */
+		interrupts = <43>, <44>;		/* TC0, TC1 */
 	};
 
 	/*

@@ -1153,6 +1153,11 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	}
 	spin_unlock(&rtlpriv->locks.rf_ps_lock);
 
+	if (rtl92fe_tx_hang_detect(hw)) {
+		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_resets++;
+		pr_warn("rtl8192fe: TX stuck after a TXDMA error, restarting the hardware\n");
+		ieee80211_restart_hw(hw);
+	}
 	if (rtl92fe_dump_rf) {
 		rtl92fe_dump_rf = 0;
 		pr_info("rtl8192fe RFdump RF_A 00=%05x 18=%05x 33=%05x b2=%05x df=%05x | RF_B 00=%05x 18=%05x df=%05x\n",

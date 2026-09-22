@@ -593,6 +593,7 @@ u64 rtl92fe_get_desc(struct ieee80211_hw *hw,
 		     u8 *pdesc, bool istx, u8 desc_name);
 bool rtl92fe_is_tx_desc_closed(struct ieee80211_hw *hw, u8 hw_queue, u16 index);
 void rtl92fe_tx_polling(struct ieee80211_hw *hw, u8 hw_queue);
+bool rtl92fe_tx_hang_detect(struct ieee80211_hw *hw);
 void rtl92fe_tx_fill_cmddesc(struct ieee80211_hw *hw, u8 *pdesc,
 			     struct sk_buff *skb);
 

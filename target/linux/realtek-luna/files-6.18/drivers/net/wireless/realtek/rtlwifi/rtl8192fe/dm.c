@@ -17,6 +17,20 @@
 
 static int rtl92fe_dump_rf;
 module_param_named(dump_rf, rtl92fe_dump_rf, int, 0644);
+
+/* MEASURED 2026-09-21 on the G24W: the detector fired once and
+ * ieee80211_restart_hw() then FAILED (drv_start refused, keys -5), leaving a
+ * chip that no `wifi up` could start again.  A mute AP is recoverable, an
+ * unstartable one is not, so the restart ships OFF until the restart path
+ * itself is proven on the board; the detection, the count and the status
+ * write-back are unconditional.
+ */
+static bool rtl92fe_restart_on_tx_hang;
+module_param_named(restart_on_tx_hang, rtl92fe_restart_on_tx_hang, bool, 0644);
+MODULE_PARM_DESC(restart_on_tx_hang,
+		 "restart the MAC when TX is stuck after a TXDMA error "
+		 "(default 0: the one measured restart left the chip unable "
+		 "to start)");
 MODULE_PARM_DESC(dump_rf,
 		 "set 1 to one-shot dump operating RF/BB/MAC-AFE regs in the dm watchdog");
 
@@ -1157,8 +1171,10 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	rtl92fe_txdma_error(hw);
 	if (rtl92fe_tx_hang_detect(hw)) {
 		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_resets++;
-		pr_warn("TX stuck after a TXDMA error, restarting the hardware\n");
-		ieee80211_restart_hw(hw);
+		pr_warn("TX stuck after a TXDMA error, restart_on_tx_hang=%d\n",
+			rtl92fe_restart_on_tx_hang);
+		if (rtl92fe_restart_on_tx_hang)
+			ieee80211_restart_hw(hw);
 	}
 	if (rtl92fe_dump_rf) {
 		rtl92fe_dump_rf = 0;

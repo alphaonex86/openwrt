@@ -6,6 +6,7 @@
 
 void rtl92fe_get_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val);
 void rtl92fe_read_eeprom_info(struct ieee80211_hw *hw);
+void rtl92fe_txdma_error(struct ieee80211_hw *hw);
 void rtl92fe_interrupt_recognized(struct ieee80211_hw *hw,
 				  struct rtl_int *int_vec);
 int rtl92fe_hw_init(struct ieee80211_hw *hw);

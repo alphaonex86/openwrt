@@ -1884,7 +1884,7 @@ static void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 	rtlpci->txdma_err++;
 	rtlpci->txdma_status |= status;
 	rtl_write_dword(rtlpriv, REG_TXDMA_STATUS, status);
-	pr_warn_ratelimited("rtl8192fe: TXDMA error 0x%08x (%u so far)\n",
+	pr_warn_ratelimited("TXDMA error 0x%08x (%u so far)\n",
 			    status, rtlpci->txdma_err);
 }
 

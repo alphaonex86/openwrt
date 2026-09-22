@@ -922,6 +922,12 @@ new_trx_end:
 	}
 }
 
+/* HISRE carries TXERR and RXFOVW alone; a cleared interrupt is ours. */
+static bool _rtl_pci_irq_ours(const struct rtl_int *intvec)
+{
+	return intvec->intb || (intvec->inta && intvec->inta != 0xffff);
+}
+
 static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 {
 	struct ieee80211_hw *hw = dev_id;
@@ -977,7 +983,7 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 	 * and saying IRQ_HANDLED here is the same lie as above -- it keeps the
 	 * kernel from ever noticing a line that will not go away.
 	 * 0xffff is the bus-abort / device-gone pattern; also not ours. */
-	if (!intvec.inta || intvec.inta == 0xffff) {
+	if (!_rtl_pci_irq_ours(&intvec)) {
 		ret = IRQ_NONE;
 		goto done;
 	}

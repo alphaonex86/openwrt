@@ -11,6 +11,7 @@
 #include "dm.h"
 #include "fw.h"
 #include "trx.h"
+#include "hw.h"
 
 /* Dynamic-management (DM) layer for the RTL8192F. The 8192F ... -- dev/MEASURED-dm.c.md sec 1. */
 
@@ -1153,6 +1154,7 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	}
 	spin_unlock(&rtlpriv->locks.rf_ps_lock);
 
+	rtl92fe_txdma_error(hw);
 	if (rtl92fe_tx_hang_detect(hw)) {
 		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_resets++;
 		pr_warn("TX stuck after a TXDMA error, restarting the hardware\n");

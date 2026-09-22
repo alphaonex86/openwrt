@@ -732,6 +732,9 @@ static bool _rtl92fe_llt_table_init(struct ieee80211_hw *hw)
 	/* The RTL8192F packet buffer holds 0xF7 TX pages; the ... -- dev/MEASURED-hw.c.md sec 5. */
 	txpktbuf_bndy = TX_PAGE_BOUNDARY;
 
+	/* Vendor: the normal/extra quotas are latched by LD_RQPN, so before it. */
+	rtl_write_byte(rtlpriv, REG_RQPN_NPQ, TX_PAGE_NUM_NPQ_92F);
+	rtl_write_byte(rtlpriv, REG_RQPN_NPQ + 2, 0);
 	rtl_write_dword(rtlpriv, REG_RQPN, RQPN_INIT_VALUE);
 
 	rtl_write_byte(rtlpriv, REG_TRXFF_BNDY, txpktbuf_bndy);

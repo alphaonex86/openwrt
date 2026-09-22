@@ -115,7 +115,7 @@ static int rtl92fe_init_sw_vars(struct ieee80211_hw *hw)
 				    IMR_RDU			|
 				    IMR_ROK			|
 				    0);
-	rtlpci->irq_mask[1] = (u32)(IMR_RXFOVW | 0);
+	rtlpci->irq_mask[1] = (u32)(IMR_RXFOVW | IMR_TXERR);
 
 	/* for LPS & IPS */
 	rtlpriv->psc.inactiveps = rtlpriv->cfg->mod_params->inactiveps;

@@ -43,7 +43,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	unsigned int rows[RTL_PCI_MAX_TX_QUEUE_COUNT][6];
 	u64 addresses[RTL_PCI_MAX_TX_QUEUE_COUNT];
-	u32 bcn_irq, bcn_tasklet;
+	u32 bcn_irq, bcn_tasklet, txdma_err, txdma_status, hang_resets;
 	unsigned long flags;
 	int q;
 
@@ -66,6 +66,9 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	}
 	bcn_irq = rtlpci->bcn_irq;
 	bcn_tasklet = rtlpci->bcn_tasklet;
+	txdma_err = rtlpci->txdma_err;
+	txdma_status = rtlpci->txdma_status;
+	hang_resets = rtlpci->tx_hang_resets;
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
 
 	seq_puts(m, "queue entries queued head write cached_read own dma\n");
@@ -73,7 +76,8 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 		seq_printf(m, "%d %u %u %u %u %u %u %016llx\n", q, rows[q][0],
 			   rows[q][1], rows[q][2], rows[q][3], rows[q][4],
 			   rows[q][5], addresses[q]);
-	seq_printf(m, "bcn_irq %u bcn_tasklet %u\n", bcn_irq, bcn_tasklet);
+	seq_printf(m, "bcn_irq %u bcn_tasklet %u txdma_err %u txdma_status %08x hang_resets %u\n",
+		   bcn_irq, bcn_tasklet, txdma_err, txdma_status, hang_resets);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rtl_pci_tx_queues);

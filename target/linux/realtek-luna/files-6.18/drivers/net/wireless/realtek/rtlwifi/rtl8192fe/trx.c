@@ -1155,6 +1155,41 @@ bool rtl92fe_is_tx_desc_closed(struct ieee80211_hw *hw, u8 hw_queue, u16 index)
 	return ret;
 }
 
+/* Vendor check_hangup: after a TXDMA error, a pending ring whose HW read
+ * index has not moved for a whole watchdog tick is a hang.  Reads nothing
+ * until an error was counted.
+ */
+bool rtl92fe_tx_hang_detect(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	bool pending = false, stuck = false;
+	u8 q;
+
+	if (rtlpci->txdma_err == rtlpci->txdma_err_seen)
+		return false;
+	for (q = 0; q < RTL_PCI_MAX_TX_QUEUE_COUNT; q++) {
+		struct rtl8192_tx_ring *ring = &rtlpci->tx_ring[q];
+		u16 rp;
+
+		if (q == BEACON_QUEUE || !skb_queue_len(&ring->queue))
+			continue;
+		rp = (rtl_read_dword(rtlpriv, get_desc_addr_fr_q_idx(q)) >> 16) &
+		     0x0fff;
+		if (rtlpci->hang_armed && rp == rtlpci->hang_rp[q])
+			stuck = true;
+		rtlpci->hang_rp[q] = rp;
+		pending = true;
+	}
+	if (!rtlpci->hang_armed && pending) {
+		rtlpci->hang_armed = true;
+		return false;
+	}
+	rtlpci->hang_armed = false;
+	rtlpci->txdma_err_seen = rtlpci->txdma_err;
+	return stuck;
+}
+
 void rtl92fe_tx_polling(struct ieee80211_hw *hw, u8 hw_queue)
 {
 	/* The RTL8192F PCIe engine advances its own write pointer ...

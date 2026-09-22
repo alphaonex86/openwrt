@@ -1869,6 +1869,22 @@ void rtl92fe_card_disable(struct ieee80211_hw *hw)
 	rtlpriv->phy.iqk_initialized = false;
 }
 
+/* Vendor 8192cd on TXERR: read TXDMA_STATUS, log, count, write it back. */
+static void rtl92fe_txdma_error(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	u32 status = rtl_read_dword(rtlpriv, REG_TXDMA_STATUS);
+
+	if (!status)
+		return;
+	rtlpci->txdma_err++;
+	rtlpci->txdma_status |= status;
+	rtl_write_dword(rtlpriv, REG_TXDMA_STATUS, status);
+	pr_warn_ratelimited("rtl8192fe: TXDMA error 0x%08x (%u so far)\n",
+			    status, rtlpci->txdma_err);
+}
+
 void rtl92fe_interrupt_recognized(struct ieee80211_hw *hw,
 				  struct rtl_int *intvec)
 {
@@ -1880,6 +1896,8 @@ void rtl92fe_interrupt_recognized(struct ieee80211_hw *hw,
 
 	intvec->intb = rtl_read_dword(rtlpriv, REG_HISRE) & rtlpci->irq_mask[1];
 	rtl_write_dword(rtlpriv, REG_HISRE, intvec->intb);
+	if (intvec->intb & IMR_TXERR)
+		rtl92fe_txdma_error(hw);
 }
 
 void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)

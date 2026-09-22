@@ -198,6 +198,12 @@ struct rtl_pci {
 	u32 reg_bcn_ctrl_val;
 	u32 bcn_irq;
 	u32 bcn_tasklet;
+	u32 txdma_err;
+	u32 txdma_err_seen;
+	u32 txdma_status;
+	u32 tx_hang_resets;
+	u16 hang_rp[RTL_PCI_MAX_TX_QUEUE_COUNT];
+	bool hang_armed;
 
 	 /*ASPM*/ u8 const_pci_aspm;
 	u8 const_hwsw_rfoff_d3;

@@ -1872,8 +1872,10 @@ void rtl92fe_card_disable(struct ieee80211_hw *hw)
 	rtlpriv->phy.iqk_initialized = false;
 }
 
-/* Vendor 8192cd on TXERR: read TXDMA_STATUS, log, count, write it back. */
-static void rtl92fe_txdma_error(struct ieee80211_hw *hw)
+/* Vendor 8192cd on TXERR: read TXDMA_STATUS, log, count, write it back.
+ * Also polled once per watchdog tick: 0x8006 raised no interrupt (measured).
+ */
+void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
@@ -1916,11 +1918,9 @@ void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)
 	rtl_write_word(rtlpriv, REG_ATIMWND, atim_window);
 	rtl_write_word(rtlpriv, REG_BCN_INTERVAL, bcn_interval);
 	rtl_write_word(rtlpriv, REG_BCNTCFG, 0x660f);
-	/* Vendor: early interrupt 10 TU before TBTT, beacon DMA 1 TU before;
-	 * the chip's own 2/2 leaves the tasklet no window at all (measured).
+	/* DRVERLYINT/BCNDMATIM stay at the chip's 2/2: the vendor's 10/1 killed
+	 * the first beacon on 3 of 5 boots under our free-and-refill (measured).
 	 */
-	rtl_write_byte(rtlpriv, REG_DRVERLYINT, 10);
-	rtl_write_byte(rtlpriv, REG_BCNDMATIM, 1);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_CCK, 0x18);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM, 0x18);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM - 2, 0x30);

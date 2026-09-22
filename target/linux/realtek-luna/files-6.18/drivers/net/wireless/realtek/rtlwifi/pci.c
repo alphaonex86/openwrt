@@ -1586,6 +1586,8 @@ int rtl_pci_reset_trx_ring(struct ieee80211_hw *hw)
 		}
 	}
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
+	/* A queue stopped on a full ring survives a driver stop/start otherwise. */
+	ieee80211_wake_queues(hw);
 
 	return 0;
 }

@@ -1155,7 +1155,7 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 
 	if (rtl92fe_tx_hang_detect(hw)) {
 		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_resets++;
-		pr_warn("rtl8192fe: TX stuck after a TXDMA error, restarting the hardware\n");
+		pr_warn("TX stuck after a TXDMA error, restarting the hardware\n");
 		ieee80211_restart_hw(hw);
 	}
 	if (rtl92fe_dump_rf) {

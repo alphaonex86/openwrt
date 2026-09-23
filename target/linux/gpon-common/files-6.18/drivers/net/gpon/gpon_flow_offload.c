@@ -2,6 +2,7 @@
 /* gpon_flow_offload -- the TC hardware-offload lifecycle, ...
  * dev/MEASURED-gpon_flow_offload.c.md sec 1. */
 #include <linux/errno.h>
+#include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/jiffies.h>
 #include <linux/list.h>
@@ -98,6 +99,28 @@ void gpon_flow_offload_free(struct gpon_flow_offload *fo)
 	kfree(fo);
 }
 
+/* One WAN tag as DATA, for a family that declared ops->wan_vlan: a PUSH on the
+ * upstream leg, a POP on the downstream one, and never a second tag. */
+static bool gpon_flow_vlan_carry(const struct gpon_flow_offload *fo,
+				 const struct flow_action_entry *fa, bool ds_leg,
+				 struct gpon_flow_act *act)
+{
+	bool push = fa->id == FLOW_ACTION_VLAN_PUSH;
+
+	if (!fo || !fo->ops->wan_vlan || act->vlan_vid || act->vlan_pop ||
+	    push == ds_leg)
+		return false;
+	if (!push) {
+		act->vlan_pop = 1;
+		return true;
+	}
+	if (fa->vlan.proto != htons(ETH_P_8021Q) || !fa->vlan.vid ||
+	    fa->vlan.vid >= VLAN_N_VID - 1)
+		return false;
+	act->vlan_vid = fa->vlan.vid;
+	return true;
+}
+
 /* ── the ACTION decode ... -- dev/MEASURED-gpon_flow_offload.c.md sec 2. */
 int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 			  bool ds_leg, struct gpon_flow_act *act,
@@ -179,6 +202,8 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 		case FLOW_ACTION_VLAN_POP:
 			/* Reached only when the WAN sub-interface's LOWER device is ...
 			 * dev/MEASURED-gpon_flow_offload.c.md sec 6. */
+			if (gpon_flow_vlan_carry(fo, fa, ds_leg, act))
+				break;
 			if (fo && fo->ops->note_vlan_action)
 				fo->ops->note_vlan_action(fo->sh, ds_leg,
 					fa->id == FLOW_ACTION_VLAN_PUSH ?

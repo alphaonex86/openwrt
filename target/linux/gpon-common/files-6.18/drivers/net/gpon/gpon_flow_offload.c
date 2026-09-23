@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/ip.h>
 #include <linux/jiffies.h>
+#include <linux/list.h>
 #include <linux/netdevice.h>
 #include <linux/rhashtable.h>
 #include <linux/slab.h>
@@ -14,6 +15,7 @@
 
 struct gpon_flow_entry {
 	struct rhash_head	node;
+	struct list_head	link;		/* fo->entries */
 	unsigned long		cookie;
 	u32			idx;		/* the engine's, opaque */
 	bool			ds;
@@ -30,6 +32,10 @@ struct gpon_flow_offload {
 	const struct gpon_flow_ops	*ops;
 	void				*sh;
 	struct rhashtable		table;
+	/* Every entry the table holds, for flush: rhashtable's walker may MISS
+	 * objects removed between walk_stop and walk_start, which is exactly
+	 * what a flush does (X111W 2026-09-23: rc 0, flows left behind). */
+	struct list_head		entries;
 	bool				table_ready;
 	GPON_FLOW_TALLY_FIELD
 };
@@ -54,6 +60,7 @@ struct gpon_flow_offload *gpon_flow_offload_new(const struct gpon_flow_ops *ops,
 		return NULL;
 	fo->ops = ops;
 	fo->sh = sh;
+	INIT_LIST_HEAD(&fo->entries);
 	if (rhashtable_init(&fo->table, &gpon_flow_ht_params)) {
 		kfree(fo);
 		return NULL;
@@ -217,8 +224,10 @@ static int gpon_flow_entry_retire(struct gpon_flow_offload *fo,
 		return err;
 	entry->removed = true;
 	err = rhashtable_remove_fast(&fo->table, &entry->node, gpon_flow_ht_params);
-	if (!err)
+	if (!err) {
+		list_del(&entry->link);
 		kfree(entry);
+	}
 	return err;
 }
 
@@ -247,6 +256,7 @@ static int gpon_flow_install_entry(struct gpon_flow_offload *fo,
 		kfree(entry);
 		return err;
 	}
+	list_add_tail(&entry->link, &fo->entries);
 	err = fo->ops->install(fo->sh, key, act, ctx, entry_priv(entry), &entry->idx);
 	entry->installing = false;
 	if (!err)
@@ -352,40 +362,20 @@ int gpon_flow_offload_diag(const struct gpon_flow_offload *fo,
 
 int gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 {
-	struct rhashtable_iter it;
-	struct gpon_flow_entry *e;
+	struct gpon_flow_entry *e, *next;
 	int ret = 0;
 
 	if (!fo || !fo->table_ready)
 		return 0;
 
-	/* ⚠ REMOVING WHILE WALKING. rhashtable's iterator is ...
-	 * dev/MEASURED-gpon_flow_offload.c.md sec 9. */
-	rhashtable_walk_enter(&fo->table, &it);
-	do {
-		rhashtable_walk_start(&it);
-		e = rhashtable_walk_next(&it);
-		while (e && !IS_ERR(e)) {
-			int err;
+	list_for_each_entry_safe(e, next, &fo->entries, link) {
+		int err = e->installing ? 0 : gpon_flow_entry_retire(fo, e);
 
-			rhashtable_walk_stop(&it);
-			err = e->installing ? 0 : gpon_flow_entry_retire(fo, e);
-			/* An entry the engine would NOT retire keeps its
-			 * software owner: freeing it here drops the only handle
-			 * that could ever retire it, so the hardware entry goes
-			 * on forwarding with nobody left to stop it. */
-			if (err) {
-				if (!ret)
-					ret = err;
-			}
-			rhashtable_walk_start(&it);
-			e = rhashtable_walk_next(&it);
-		}
-		rhashtable_walk_stop(&it);
-	} while (e == ERR_PTR(-EAGAIN));
-	rhashtable_walk_exit(&it);
-	if (!ret && IS_ERR(e))
-		ret = PTR_ERR(e);
+		/* An entry the engine would NOT retire keeps its software owner:
+		 * freeing it would drop the only handle that can ever retire it. */
+		if (err && !ret)
+			ret = err;
+	}
 	return ret;
 }
 

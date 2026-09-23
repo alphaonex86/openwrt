@@ -4,6 +4,7 @@
 #ifndef GPON_FLOW_OFFLOAD_H
 #define GPON_FLOW_OFFLOAD_H
 
+#include <linux/errno.h>
 #include <linux/types.h>
 
 #include "gpon_flow.h"
@@ -22,6 +23,10 @@ struct gpon_flow_act {
 	u8  nat_valid;
 	u8  port_valid;
 	u8  dmac_valid;		/* BOTH ETH mangle halves were seen		*/
+	/* ONE 802.1Q tag on the WAN, carried only for a family declaring
+	 * ops->wan_vlan: the VID the US leg pushes, or the DS leg's pop.	*/
+	u16 vlan_vid;		/* US: 1..4094, 0 = no tag pushed		*/
+	u8  vlan_pop;		/* DS: 1 = the rule pops one tag		*/
 };
 
 /* The devices the rule names, and which leg this is. The core ...
@@ -58,16 +63,32 @@ struct gpon_flow_ops {
 	 * reports LIVENESS only, which is what TC actually asks for. */
 	int (*stats)(void *sh, u32 idx, void *priv, unsigned long *lastused);
 
-	/* Optional: a VLAN push/pop on the rule is always refused (no engine
-	 * here can express a tag as a hit-action), but a family that keeps a
-	 * refusal ledger wants to ATTRIBUTE it rather than count it as one of
-	 * N anonymous unsupported reasons. */
+	/* Optional: a VLAN push/pop the core does not carry is refused, but a
+	 * family that keeps a refusal ledger wants to ATTRIBUTE it rather than
+	 * count it as one of N anonymous unsupported reasons. */
 	void (*note_vlan_action)(void *sh, bool ds_leg, u16 vid);
+
+	/* The engine can put ONE 802.1Q tag on the WAN: the core then carries
+	 * a US push / DS pop as DATA (act->vlan_*) and install() decides.
+	 * false = refused and attributed through note_vlan_action, as before. */
+	bool wan_vlan;
 
 	/* Bytes of per-entry family state, appended to the core's ...
 	 * dev/MEASURED-gpon_flow_offload.h.md sec 6. */
 	size_t priv_size;
 };
+
+/* The VID an upstream leg egresses with: the rule's push, which must agree with
+ * the tag the WAN L3 device carries when it has one. -> 0 and *vid (0 =
+ * untagged), or -EINVAL when the two disagree. PURE. */
+static inline int gpon_flow_wan_vid(const struct gpon_flow_act *a, u16 dev_vid,
+				    u16 *vid)
+{
+	if (a->vlan_vid && dev_vid && a->vlan_vid != dev_vid)
+		return -EINVAL;
+	*vid = a->vlan_vid ? a->vlan_vid : dev_vid;
+	return 0;
+}
 
 struct gpon_flow_offload;
 

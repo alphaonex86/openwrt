@@ -211,6 +211,21 @@ enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
 						  bool tpid_8021q, int sid,
 						  bool ac_mac_vld);
 
+/* Where a leg's WAN 802.1Q tag comes from.  DEV: the WAN-side device IS (or
+ * rides) the VLAN upper, so the chain walk resolves it.  RULE: the real device
+ * is in the flowtable, so nf_flow_table emits the tag as the rule's own
+ * VLAN_PUSH (US) / VLAN_POP (DS), carried by the core as act->vlan_*. */
+enum cn_wan_tag_src {
+	CN_WAN_TAG_NONE = 0,
+	CN_WAN_TAG_DEV,
+	CN_WAN_TAG_RULE,
+};
+
+/* -> the source, or -EINVAL when the rule pushes a VID the device does not
+ * carry.  *vid: the tag's VID; 0 on a DS RULE leg, whose pop names none. */
+int cn_wan_tag_resolve(bool ds_leg, u16 dev_vid, u16 rule_vid, bool rule_pop,
+		       u16 *vid);
+
 /* ===== round 3 (2026-09-02): the packed-slot idioms spelled ...
  * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 8. */
 u32 cn_tpid_slot_store(u32 word, unsigned int i, u16 tpid);

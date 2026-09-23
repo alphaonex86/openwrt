@@ -12,7 +12,9 @@
 #include <linux/crc32.h>
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
+#include <linux/inetdevice.h>
 #include <linux/io.h>
+#include <linux/if_arp.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
 #include <linux/ip.h>
@@ -1111,9 +1113,9 @@ static int cn_l3e_set_us_wan_vlan(struct cn_l3e *l3e, struct cn_l3e_act *act,
 
 /* cn_l3e_set_ds_wan_vlan() - make the DS leg POP the WAN tag, ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 55. */
-static void cn_l3e_set_ds_wan_vlan(struct cn_l3e_act *act, u16 vid)
+static void cn_l3e_set_ds_wan_vlan(struct cn_l3e_act *act, bool tagged)
 {
-	if (!vid)
+	if (!tagged)
 		return;			/* untagged WAN: nothing arrives to strip */
 	act->vlan_vld = 1;		/* SET mode (not a valid bit) */
 	act->vlan_cnt = 0;		/* zero tags on the wire after the edit */
@@ -1915,6 +1917,52 @@ static bool cn_flow_refuse_vlan_wan(struct net_device *wan_dev, bool ds_leg)
 	return false;
 }
 
+/* Is @addr_h (host order) owned by a PPP device?  The DS leg's destination is
+ * the WAN address, so this names the WAN's L3 layer when no chain walk can. */
+static bool cn_addr_on_ppp(struct net_device *dev, u32 addr_h)
+{
+	struct net_device *l3;
+	bool ppp;
+
+	if (!dev)
+		return false;
+	rcu_read_lock();
+	l3 = __ip_dev_find(dev_net(dev), htonl(addr_h), false);
+	ppp = l3 && l3->type == ARPHRD_PPP;
+	rcu_read_unlock();
+	return ppp;
+}
+
+/* The tag came as RULE data (ops->wan_vlan): the real WAN device is in the
+ * flowtable, so no chain walk exists to resolve the PPPoE layer.  The US leg
+ * reads it from its own PPPOE_PUSH, the DS leg from the armed session shadow --
+ * the same witness an untagged PPPoE WAN's DS leg answers from.  A DS leg whose
+ * WAN address sits on PPP while no US leg has armed the shadow yet is REFUSED
+ * (nf re-offers it): taken as IPoE it would arm a DMA-AFT strip on the CPU
+ * lspids that carry the session's own LCP (sec 97).  The two knobs select
+ * exactly as they do on the device route. -> false = refused. */
+static bool cn_flow_rule_tag(bool ds_leg, u16 vid, u16 rule_sid,
+			     struct net_device *idev, u32 ds_da,
+			     bool *vlan_pppoe, u16 *sid)
+{
+	u16 s = ds_leg ? READ_ONCE(cn_l3e->data_pppoe_session) : rule_sid;
+
+	if (ds_leg && !s && cn_addr_on_ppp(idev, ds_da)) {
+		atomic_inc(&cn_vlan_pppoe_no_sid);
+		return false;
+	}
+	if (!hw_vlan_wan || (s && !hw_vlan_pppoe)) {
+		cn_vlan_wan_account(ds_leg, vid, CN_VLAN_WAN_ACTION);
+		return false;
+	}
+	if (s) {
+		*vlan_pppoe = true;
+		*sid = s;
+		atomic_inc(&cn_vlan_pppoe_ok);
+	}
+	return true;
+}
+
 /* The ENGINE half of a TC flow install. The LIFECYCLE half -- ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 78. */
 static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
@@ -1934,6 +1982,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 	struct net_device *odev = ctx->odev;
 	bool ds_leg = ctx->ds_leg, vlan_wan = false;
 	u16 vlan_wan_vid = 0;			/* 0 = untagged WAN = untouched */
+	int tag = CN_WAN_TAG_NONE;		/* where the WAN tag comes from */
 	int profile, err;
 	u16 pppoe_sid = a->pppoe_sid;
 	struct cn_wan_encap wenc = { .vid = -1, .sid = -1 };
@@ -1963,11 +2012,17 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 
 	/* ★ The DS leg's WAN side is its INGRESS device, so this is ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 80. */
-	if (ds_leg && ctx->idev) {
-		vlan_wan_vid = cn_aft_wan_vid(ctx->idev);
-		if (vlan_wan_vid &&
+	if (ds_leg) {
+		tag = cn_wan_tag_resolve(true, ctx->idev ?
+					 cn_aft_wan_vid(ctx->idev) : 0,
+					 a->vlan_vid, a->vlan_pop, &vlan_wan_vid);
+		if (tag == CN_WAN_TAG_DEV &&
 		    !cn_wan_vlan_programmable(ctx->idev, vlan_wan_vid, &wenc))
 			vlan_wan = cn_flow_refuse_vlan_wan(ctx->idev, true);
+		else if (tag == CN_WAN_TAG_RULE)
+			vlan_wan = !cn_flow_rule_tag(true, vlan_wan_vid, 0,
+						     ctx->idev, k->ip_da,
+						     &vlan_pppoe, &vlan_wan_sid);
 	}
 	if (vlan_wan)
 		return -EOPNOTSUPP;
@@ -1988,14 +2043,26 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 
 	/* ★ US leg ONLY: the WAN is this leg's EGRESS, i.e. the ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 81. */
-	if (!ds_leg && !vlan_wan_vid) {
+	if (!ds_leg) {
 		/* the US leg's WAN side is the REDIRECT device */
-		vlan_wan_vid = cn_aft_wan_vid(odev);
+		tag = cn_wan_tag_resolve(false, cn_aft_wan_vid(odev),
+					 a->vlan_vid, false, &vlan_wan_vid);
+		if (tag < 0) {
+			cn_vlan_wan_account(false, a->vlan_vid,
+					    CN_VLAN_WAN_ACTION);
+			cn_rep_dbg("refuse: US leg pushes vid %u, the WAN device carries %u\n",
+				   a->vlan_vid, vlan_wan_vid);
+			return -EOPNOTSUPP;
+		}
 		/* ★ SCOPED TO A *DIRECT* VLAN UPPER UNTIL 2026-08-05, and the ...
 		 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 82. */
-		if (vlan_wan_vid &&
+		if (tag == CN_WAN_TAG_DEV &&
 		    !cn_wan_vlan_programmable(odev, vlan_wan_vid, &wenc))
 			vlan_wan = cn_flow_refuse_vlan_wan(odev, false);
+		else if (tag == CN_WAN_TAG_RULE)
+			vlan_wan = !cn_flow_rule_tag(false, vlan_wan_vid,
+						     pppoe_sid, NULL, 0,
+						     &vlan_pppoe, &vlan_wan_sid);
 	}
 	if (!ds_leg && vlan_wan)
 		return -EOPNOTSUPP;
@@ -2143,7 +2210,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 		cn_l3e_set_ds_egress(&act, lan_ldpid);
 		/* ★ The DS leg must POP the WAN tag, and "leave the block at ...
 		 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 93. */
-		cn_l3e_set_ds_wan_vlan(&act, vlan_wan_vid);
+		cn_l3e_set_ds_wan_vlan(&act, tag != CN_WAN_TAG_NONE);
 		act.mac_da_idx = lut;
 		act.mac_da_idx_vld = 1;
 		cn_rep_dbg("DS next-hop DMAC %pM -> L2-FDB[%d] ldpid=%u mcgid=0x%03x, egress SMAC via L3-IF[%u]\n",
@@ -2192,7 +2259,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 
 	/* ★★ READ THE ENTRY BACK OUT OF THE TABLE, BY LITERAL BIT ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 96. */
-	if (vlan_wan_vid) {
+	if (tag != CN_WAN_TAG_NONE) {
 		const void *raw = cn_l3e->fib_tbl +
 				  (size_t)entry->hash_idx * CN_L3E_FIB_BYTES;
 		u64 rb_vid = cn_fib_field(raw, 145, 12);
@@ -2217,7 +2284,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 
 	/* The hardware WAN VLAN edit, last: the flow is in HW and ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 143. */
-	if (vlan_wan_vid && !vlan_pppoe) {
+	if (tag != CN_WAN_TAG_NONE && !vlan_pppoe) {
 		/* ★★ A PPPoE tagged flow is kept OUT of the DMA-AFT. THE ...
 		 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 97. */
 		err = cn_aft_install(cn_l3e, &entry->aft, vlan_wan_vid, ds_leg);
@@ -2320,6 +2387,7 @@ static const struct gpon_flow_ops cn_flow_ops = {
 	.remove			= cn_flow_remove,
 	.stats			= cn_flow_stats_op,
 	.note_vlan_action	= cn_flow_note_vlan_action,
+	.wan_vlan		= true,
 	.priv_size		= sizeof(struct cn_flow_priv),
 };
 

@@ -272,6 +272,21 @@ enum cn_wan_vlan_verdict cn_wan_vlan_walk_verdict(u16 want_vid, bool walk_ok,
 	return CN_WAN_VLAN_OK_PPPOE;
 }
 
+int cn_wan_tag_resolve(bool ds_leg, u16 dev_vid, u16 rule_vid, bool rule_pop,
+		       u16 *vid)
+{
+	*vid = dev_vid;
+	if (!ds_leg && rule_vid && dev_vid && rule_vid != dev_vid)
+		return -EINVAL;
+	if (dev_vid)
+		return CN_WAN_TAG_DEV;
+	if (ds_leg ? rule_pop : rule_vid != 0) {
+		*vid = ds_leg ? 0 : rule_vid;
+		return CN_WAN_TAG_RULE;
+	}
+	return CN_WAN_TAG_NONE;
+}
+
 /* ===== round 3 (2026-09-02): the packed-slot idioms spelled ...
  * dev/MEASURED-cortina_ni_flowoffload_logic.c.md sec 11. */
 u32 cn_tpid_slot_store(u32 word, unsigned int i, u16 tpid)

@@ -16,6 +16,7 @@
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
 #include <linux/bitops.h>
+#include <linux/bug.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include "rtl9602c_l34_logic.h"	/* hoisted logic */
@@ -834,9 +835,9 @@ out:
  * from the CPU -- and with no lease no flow re-provisions it (X111W after a
  * PPPoE session, 2026-09-23). Refused while a flow still owns the tables. */
 /* Caller holds the table mutex. `core_empty`: the offload core holds no flow,
- * so a NAPT reservation still standing belongs to nobody -- a leak (measured
- * 2026-09-23: 2 pairs after a flush with 0 live flows). Its row is zeroed, which
- * is the right cleanup even for a timed-out write, and its index returned. */
+ * so a reservation still standing belongs to nobody. A SAFETY NET that must
+ * never fire: the leak it was written for (2026-09-23) was the core flush
+ * missing entries, fixed there. Its row is zeroed and its index returned. */
 static int l34_sweep_orphans(struct rtl9602c_l34 *l, unsigned int *swept)
 {
 	u32 zero[L34_WORDS_NAPTR_IN] = { 0 };
@@ -897,9 +898,8 @@ int rtl9602c_l34_wan_release(struct rtl9602c_l34 *l, bool core_empty)
 		ret = l34_sweep_orphans(l, &swept);
 		if (ret)
 			goto out;
-		if (swept)
-			pr_warn("rtl9602c-l34: %u orphaned reservation(s) swept (NAPT + LAN neighbour): no flow owned them\n",
-				swept);
+		WARN(swept, "rtl9602c-l34: %u orphaned reservation(s) swept (NAPT + LAN neighbour): no flow owned them\n",
+		     swept);
 	}
 	if (l34_has_owners(l)) {
 		unsigned int nu, no, ni;

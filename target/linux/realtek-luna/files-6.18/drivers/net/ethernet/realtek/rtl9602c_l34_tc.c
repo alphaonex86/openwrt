@@ -134,6 +134,12 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	 * session a different edge, so the interface tables are rewritten instead
 	 * of encapsulating with a session the far end has forgotten. */
 	edge.wan_pppoe_sid = a->pppoe_sid;
+	/* The tag comes from the flow too: on PPPoE over gpon0.<vid> the routed
+	 * device is the ppp one, which carries no VID of its own. */
+	if (gpon_flow_wan_vid(a, edge.wan_vlan, &edge.wan_vlan))
+		return l34_refuse(&ep->l34,
+				  "the rule's VLAN push disagrees with the WAN "
+				  "device's own tag");
 
 	/* The rule's own next hop and NAT address must be the ones ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 8. */
@@ -295,6 +301,7 @@ static void rtl9602c_l34_op_note_vlan(void *sh, bool ds_leg, u16 vid)
 static const struct gpon_flow_ops rtl9602c_l34_flow_ops = {
 	.is_lan_side	= rtl9602c_l34_is_lan_side,
 	.note_vlan_action = rtl9602c_l34_op_note_vlan,
+	.wan_vlan	= true,		/* NETIF VLANID + CTAG_IF carry the tag */
 	.install	= rtl9602c_l34_op_install,
 	.remove		= rtl9602c_l34_op_remove,
 	.abort_install	= rtl9602c_l34_op_remove,

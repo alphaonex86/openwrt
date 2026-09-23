@@ -709,9 +709,11 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 	step[0].tbl = L34_TBL_NETIF;
 	step[0].idx = idx;
 	step[0].words = L34_WORDS_NETIF;
-	/* Untagged frames still carry the switch's internal PVID. */
+	/* Untagged frames still carry the switch's internal PVID; a tagged WAN
+	 * egresses with its VID, which is what stock's isCtagIf=1 says. */
 	l34_netif_encode(step[0].w, wan_mac, wan_ip,
 			 vlan ? vlan : SW_DEFAULT_VID);
+	l34_field_set(step[0].w, L34_NETIF_CTAG_LSP, L34_NETIF_CTAG_W, vlan != 0);
 
 	/* Lower-half WAN route via NEXTHOP[idx]. */
 	step[1].tbl = L34_TBL_L3ROUTE;

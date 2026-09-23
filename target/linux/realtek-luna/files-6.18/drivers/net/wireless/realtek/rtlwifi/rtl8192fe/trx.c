@@ -359,6 +359,12 @@ static void rtl92f_spy(const char *dir, struct ieee80211_hdr *hdr, u32 len,
 		      ieee80211_is_deauth(fc) || ieee80211_is_disassoc(fc) ||
 		      ieee80211_is_action(fc)))
 			return;			/* beacons/probes: too chatty */
+		/* auth/assoc are unicast by 802.11: a broadcast one received is a
+		 * foreign or malformed frame (a neighbour's beacon read one byte late
+		 * logged ~10 lines/s on the serial console, 2026-09-23) */
+		if (dir[0] == 'R' && is_multicast_ether_addr(hdr->addr1) &&
+		    !(ieee80211_is_deauth(fc) || ieee80211_is_disassoc(fc)))
+			return;
 		if (crc)
 			return;			/* skip neighbours' bad-CRC mgmt flood
 						 * (check-BSSID is off for probe-req RX,

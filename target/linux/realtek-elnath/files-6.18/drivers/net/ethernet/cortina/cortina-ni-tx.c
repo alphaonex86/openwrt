@@ -33,9 +33,13 @@
 
 #define CA_NI_RECLAIM_INTERVAL	msecs_to_jiffies(10)
 
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static bool tx_debug;
 module_param(tx_debug, bool, 0644);
 MODULE_PARM_DESC(tx_debug, "dump the first transmitted frames/descriptors");
+#else
+static const bool tx_debug;	/* CONFIG_CORTINA_DEBUG off: dead code */
+#endif
 
 /* ★ 2026-07-23 host-free HW-forward test knob: when >= 0, ...
  * dev/MEASURED-cortina-ni-tx.c.md sec 3. */

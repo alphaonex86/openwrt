@@ -35,9 +35,13 @@
 static bool rx_skip_portcfg;
 module_param(rx_skip_portcfg, bool, 0644);
 
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static bool rx_debug;
 module_param(rx_debug, bool, 0644);
 MODULE_PARM_DESC(rx_debug, "dump the first received descriptors/frames");
+#else
+static const bool rx_debug;	/* CONFIG_CORTINA_DEBUG off: dead code */
+#endif
 
 /* ★ TEMPORARY DIAGNOSTIC (rx_frag_tap, 2026-07-27 - REVERT ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 2. */

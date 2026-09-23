@@ -4,6 +4,9 @@ config interface 'loopback'
 	option ipaddr '127.0.0.1'
 	option netmask '255.0.0.0'
 
+config globals 'globals'
+	option ula_prefix 'fdca:9607::/48'
+
 # M3d: LAN = br-lan bridging eth0 (Cortina-NI port0) with the WiFi APs
 # (wlan0 2.4G + wlan1 5G join via wifi-iface network 'lan'), mirroring the
 # stock br0 topology. The bring-up-era direct-eth0 config (used during M2
@@ -20,10 +23,11 @@ config interface 'lan'
 	option proto 'static'
 	option ipaddr '192.168.1.11'
 	option netmask '255.255.255.0'
+	option ip6assign '60'
 
 # Stage D: gpon0 = the GPON WAN data path (cortina-gpon). Carrier comes up
 # when the OLT's OMCI provisioning (data T-CONT + GEM) is installed; netifd
-# then DHCPs the WAN lease (lab: 192.168.158.0/24 from hades).
+# then DHCPs the WAN lease (lab: 192.168.160.0/24, the bench's own DHCP).
 #
 # keepalive = "<lcp-echo-failure> <lcp-echo-interval>"; only PPPoE/PPP protos
 # read it, so it is inert while proto is dhcp and is here so a switch to pppoe
@@ -61,3 +65,11 @@ config interface 'wan'
 	option keepalive '6 20'
 	option persist '1'
 	option holdoff '5'
+
+# IPv6 on its OWN logical interface over the same device, so losing the v6 half
+# never costs the v4 service; the delegated prefix feeds br-lan via ip6assign.
+config interface 'wan6'
+	option device 'gpon0'
+	option proto 'dhcpv6'
+	option reqaddress 'try'
+	option reqprefix 'auto'

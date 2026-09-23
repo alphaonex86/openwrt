@@ -23,6 +23,15 @@ u32 luna_gmac_rxcdo_pack(unsigned int ring_size)
 	       (((ring_size - 1) >> 8) & 0xf) << 4;
 }
 
+/* May a TX frame be DMA'd from skb->data in place? Only a LINEAR frame of at
+ * least the minimum length: a fragmented skb needs the linear copy (sec 47)
+ * and a runt needs the zero-pad the copy slot provides. */
+bool luna_gmac_tx_zero_copy(bool nonlinear, unsigned int len,
+			    unsigned int min_len)
+{
+	return !nonlinear && len >= min_len;
+}
+
 /* Bad-frame verdict, SPLIT from luna_eth.c eth_rx(): is a ...
  * dev/MEASURED-luna_gmac_logic.c.md sec 1. */
 bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,

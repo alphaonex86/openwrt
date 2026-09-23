@@ -1765,7 +1765,7 @@ static netdev_tx_t eth_tx_frame(struct luna_eth *ep, struct net_device *ndev,
 	 * the skb is held until reclaim. MEASURED 2026-09-22 on G24W: the per-packet
 	 * copy capped CPU-path v6 at ~21 k pps on one core. Non-linear or runt
 	 * frames keep the copy path (sec 47: a flat copy of a fragmented skb). */
-	zero_copy = !skb_is_nonlinear(skb) && len >= ETH_ZLEN;
+	zero_copy = luna_gmac_tx_zero_copy(skb_is_nonlinear(skb), len, ETH_ZLEN);
 	if (zero_copy) {
 		buf = skb->data;
 	} else if (skb_copy_bits(skb, 0, buf, len)) {

@@ -402,6 +402,7 @@ struct rtl9602c_eth {
 	struct rtl9602c_l34 l34;	/* switch L3/L4 (NAPT) hardware-offload engine */
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	struct gpon_flow_offload *fo;	/* the COMMON TC lifecycle, drivers/net/gpon/ */
+	struct notifier_block l34_addr_nb;	/* releases the WAN rows when its address leaves */
 #endif
 	/* Host uplink port, learned from the RX descriptor src_port_num. All RX
 	 * arrives on the board's single connected LAN port, so this resolves to the
@@ -2732,6 +2733,11 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			/* The COMMON lifecycle owns the cookie map and the entry; ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 118. */
 			ep->fo = gpon_flow_offload_new(&rtl9602c_l34_flow_ops, ep);
+			ep->l34_addr_nb.notifier_call = rtl9602c_l34_inetaddr_event;
+			if (ep->fo && register_inetaddr_notifier(&ep->l34_addr_nb)) {
+				dev_warn(dev, "L34: no address notifier; a WAN that changes address keeps its stale tables\n");
+				ep->l34_addr_nb.notifier_call = NULL;
+			}
 			if (!ep->fo) {
 				dev_warn(dev, "L34: the common TC lifecycle could not be created; software forwarding\n");
 			} else if (devm_add_action_or_reset(dev, rtl9602c_l34_fo_release,

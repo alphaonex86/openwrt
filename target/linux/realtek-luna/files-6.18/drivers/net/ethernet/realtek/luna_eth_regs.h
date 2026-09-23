@@ -107,7 +107,9 @@
  * filled, the switch sent PAUSE (p3_tx_pause 42774) and G24W forwarded
  * CPU-path v6 at ~40 Mb/s with the CPU 99% idle (measured 2026-09-22). */
 #define RX_RING_SIZE		1024
-#define TX_RING_SIZE		64
+/* TX is the SDK's GMAC0_TX1_SIZE: with 64 slots gpon0 (which drops rather than
+ * stops its queue on a full ring) discarded ~5% of a CPU-path v6 flow. */
+#define TX_RING_SIZE		2048
 #define RX_BUF_SIZE		2048
 
 /* RX flow-control assert / de-assert thresholds. */

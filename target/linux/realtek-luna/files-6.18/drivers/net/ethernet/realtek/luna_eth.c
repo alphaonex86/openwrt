@@ -1094,10 +1094,15 @@ static void eth_free_rings(struct luna_eth *ep)
 		}
 	}
 	for (i = 0; i < TX_RING_SIZE; i++) {
+		if (ep->tx_skb[i]) {		/* zero-copy frames still in flight */
+			dma_unmap_single(ep->dev, ep->tx_buf_dma[i],
+					 ep->tx_buf_len[i], DMA_TO_DEVICE);
+			dev_kfree_skb_any(ep->tx_skb[i]);
+			ep->tx_skb[i] = NULL;
+		}
 		kfree(ep->tx_buf[i]);
 		ep->tx_buf[i] = NULL;
 	}
-	/* TX skbs are freed inline at xmit (copied into tx_buf), nothing to free. */
 	if (ep->rx_ring)
 		dma_free_coherent(ep->dev, RX_RING_SIZE * sizeof(struct rx_desc),
 				  ep->rx_ring, ep->rx_ring_dma);
@@ -1644,6 +1649,10 @@ static void eth_tx_reclaim(struct luna_eth *ep)
 			break;
 		dma_unmap_single(ep->dev, ep->tx_buf_dma[i], ep->tx_buf_len[i],
 				 DMA_TO_DEVICE);
+		if (ep->tx_skb[i]) {		/* a zero-copy frame is done now */
+			dev_consume_skb_any(ep->tx_skb[i]);
+			ep->tx_skb[i] = NULL;
+		}
 		ep->tx_dirty++;
 	}
 	/* The same reserve as eth_xmit(), and not cosmetic: waking the queue at a
@@ -1711,6 +1720,7 @@ static netdev_tx_t eth_tx_frame(struct luna_eth *ep, struct net_device *ndev,
 	dma_addr_t da;
 	void *buf;
 	u32 opts1;
+	bool zero_copy;
 
 	if (len > RX_BUF_SIZE) {		/* must fit a copy slot */
 		ndev->stats.tx_dropped++;
@@ -1750,9 +1760,15 @@ static netdev_tx_t eth_tx_frame(struct luna_eth *ep, struct net_device *ndev,
 		return NETDEV_TX_OK;
 	}
 
-	/* Copy the WHOLE frame into the linear copy slot. Use ...
-	 * dev/MEASURED-luna_eth.c.md sec 47. */
-	if (skb_copy_bits(skb, 0, buf, len)) {
+	/* ZERO-COPY for a linear frame of at least ETH_ZLEN: the GMAC DMAs from
+	 * skb->data directly, as rtl9602c_eth.c does on the same family engine, and
+	 * the skb is held until reclaim. MEASURED 2026-09-22 on G24W: the per-packet
+	 * copy capped CPU-path v6 at ~21 k pps on one core. Non-linear or runt
+	 * frames keep the copy path (sec 47: a flat copy of a fragmented skb). */
+	zero_copy = !skb_is_nonlinear(skb) && len >= ETH_ZLEN;
+	if (zero_copy) {
+		buf = skb->data;
+	} else if (skb_copy_bits(skb, 0, buf, len)) {
 		spin_unlock_irqrestore(&ep->tx_lock, flags);
 		ndev->stats.tx_dropped++;
 		dev_kfree_skb_any(skb);
@@ -1781,6 +1797,7 @@ static netdev_tx_t eth_tx_frame(struct luna_eth *ep, struct net_device *ndev,
 	}
 	ep->tx_buf_dma[i] = da;
 	ep->tx_buf_len[i] = len;
+	ep->tx_skb[i] = zero_copy ? skb : NULL;
 	ep->tx_ring[i].addr = da | DMA_BUS_WINDOW;
 	ep->tx_ring[i].opts2 = opts2;
 	ep->tx_ring[i].opts3 = opts3;
@@ -1801,7 +1818,8 @@ static netdev_tx_t eth_tx_frame(struct luna_eth *ep, struct net_device *ndev,
 
 	ndev->stats.tx_packets++;
 	ndev->stats.tx_bytes += len;
-	dev_consume_skb_any(skb);	/* bytes copied; release immediately */
+	if (!zero_copy)
+		dev_consume_skb_any(skb);	/* bytes copied; release immediately */
 	return NETDEV_TX_OK;
 }
 

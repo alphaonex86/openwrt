@@ -102,9 +102,11 @@
 #define RXD_LEN_MASK		0x1fff	/* RX length, low bits of opts1 */
 #define TXD_LEN_MASK		0x1ffff	/* TX length */
 
-/* Ring geometry.  Not silicon: our own sizing, but identical on both drivers,
- * so it is a family choice rather than a per-board one. */
-#define RX_RING_SIZE		64
+/* Ring geometry.  RX is STOCK's: the RTL9603CVD's running vendor driver prints
+ * RX_RING_SIZE[0]=1024 and the SDK's GMAC0_RX1_SIZE is 1024. With 64 the ring
+ * filled, the switch sent PAUSE (p3_tx_pause 42774) and G24W forwarded
+ * CPU-path v6 at ~40 Mb/s with the CPU 99% idle (measured 2026-09-22). */
+#define RX_RING_SIZE		1024
 #define TX_RING_SIZE		64
 #define RX_BUF_SIZE		2048
 

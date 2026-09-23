@@ -180,6 +180,20 @@ static bool l34_has_owners(struct rtl9602c_l34 *l)
 	       !bitmap_empty(l->in_reserved, L34_NAPT_ENTRIES);
 }
 
+/* Caller holds the table mutex. WHICH ownership is live -- the answer to a
+ * refusal that names only "busy". */
+static void l34_owner_counts(struct rtl9602c_l34 *l, unsigned int *neigh,
+			     unsigned int *out, unsigned int *in)
+{
+	unsigned int i;
+
+	*neigh = 0;
+	for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++)
+		*neigh += l->lan_neigh[i].users;
+	*out = bitmap_weight(l->out_reserved, L34_NAPT_ENTRIES);
+	*in = bitmap_weight(l->in_reserved, L34_NAPT_ENTRIES);
+}
+
 /* The same question from OUTSIDE the lock, for a caller deciding whether a
  * reprogram would cost somebody else their acceleration. */
 bool rtl9602c_l34_has_owners(struct rtl9602c_l34 *l)
@@ -814,6 +828,97 @@ out:
 	return ret;
 }
 
+/* The WAN address the tables describe has left the kernel: invalidate every
+ * WAN row wan_setup() programs, the NETIF claim first. Left in place, NETIF[WAN]
+ * keeps claiming frames to the WAN MAC and routes a unicast DHCP OFFER away
+ * from the CPU -- and with no lease no flow re-provisions it (X111W after a
+ * PPPoE session, 2026-09-23). Refused while a flow still owns the tables. */
+/* Caller holds the table mutex. `core_empty`: the offload core holds no flow,
+ * so a NAPT reservation still standing belongs to nobody -- a leak (measured
+ * 2026-09-23: 2 pairs after a flush with 0 live flows). Its row is zeroed, which
+ * is the right cleanup even for a timed-out write, and its index returned. */
+static int l34_sweep_orphans(struct rtl9602c_l34 *l, unsigned int *swept)
+{
+	u32 zero[L34_WORDS_NAPTR_IN] = { 0 };
+	unsigned int i;
+	int ret;
+
+	*swept = 0;
+	for_each_set_bit(i, l->out_reserved, L34_NAPT_ENTRIES) {
+		ret = l34_tbl_write(l, L34_TBL_NAPT_OUT, i, zero, L34_WORDS_NAPT_OUT);
+		if (ret)
+			return ret;
+		__clear_bit(i, l->out_reserved);
+		(*swept)++;
+	}
+	for_each_set_bit(i, l->in_reserved, L34_NAPT_ENTRIES) {
+		ret = l34_tbl_write(l, L34_TBL_NAPTR_IN, i, zero, L34_WORDS_NAPTR_IN);
+		if (ret)
+			return ret;
+		__clear_bit(i, l->in_reserved);
+		(*swept)++;
+	}
+	/* ...and a LAN neighbour nobody owns (measured the next sitting: neigh=1
+	 * with the core empty) */
+	for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++) {
+		if (!l->lan_neigh[i].users)
+			continue;
+		ret = l34_neigh_clear(l, i);
+		if (ret)
+			return ret;
+		l->lan_neigh[i].users = 0;
+		(*swept)++;
+	}
+	return 0;
+}
+
+int rtl9602c_l34_wan_release(struct rtl9602c_l34 *l, bool core_empty)
+{
+	const struct { enum l34_tbl tbl; u16 idx; unsigned int words; } rows[] = {
+		{ L34_TBL_NETIF,   L34_NETIF_WAN, L34_WORDS_NETIF },
+		{ L34_TBL_L3ROUTE, L34_NETIF_WAN, L34_WORDS_L3ROUTE },
+		{ L34_TBL_L3ROUTE, L34_NETIF_WAN + L34_RT_CPU_SLOT_OFF, L34_WORDS_L3ROUTE },
+		{ L34_TBL_L3ROUTE, L34_RT_POOL_BASE + L34_NETIF_WAN, L34_WORDS_L3ROUTE },
+		{ L34_TBL_NEXTHOP, L34_NETIF_WAN, L34_WORDS_NEXTHOP },
+		{ L34_TBL_EXTIP,   L34_NETIF_WAN, L34_WORDS_EXTIP },
+		{ L34_TBL_PPPOE,   L34_NETIF_WAN, L34_WORDS_PPPOE },
+		{ L34_TBL_ARP,     L34_ARP_WAN_BASE + L34_NETIF_WAN, L34_WORDS_ARP },
+	};
+	u32 zero[L34_WORDS_NETIF] = { 0 };
+	unsigned int i;
+	int ret = 0;
+
+	if (!l->ready)
+		return -ENODEV;
+	mutex_lock(&l->lock);
+	if (core_empty) {
+		unsigned int swept;
+
+		ret = l34_sweep_orphans(l, &swept);
+		if (ret)
+			goto out;
+		if (swept)
+			pr_warn("rtl9602c-l34: %u orphaned reservation(s) swept (NAPT + LAN neighbour): no flow owned them\n",
+				swept);
+	}
+	if (l34_has_owners(l)) {
+		unsigned int nu, no, ni;
+
+		l34_owner_counts(l, &nu, &no, &ni);
+		pr_warn("rtl9602c-l34: WAN rows kept: owners neigh=%u out_reserved=%u in_reserved=%u\n",
+			nu, no, ni);
+		ret = -EBUSY;
+		goto out;
+	}
+	for (i = 0; i < ARRAY_SIZE(rows) && !ret; i++)
+		ret = l34_tbl_write(l, rows[i].tbl, rows[i].idx, zero, rows[i].words);
+	if (!ret)
+		l->provisioned = false;
+out:
+	mutex_unlock(&l->lock);
+	return ret;
+}
+
 /* Program BOTH interface slots from one reading of the live ...
  * dev/MEASURED-rtl9602c_l34.c.md sec 7. */
 int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
@@ -1169,6 +1274,13 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	 * nothing installed printed `hits=0` and then dumped 1278 set bits. */
 	l34_hit_sweep(l);
 	seq_printf(sf, "provisioned %u\n", l->provisioned ? 1 : 0);
+	{
+		unsigned int nu, no, ni;
+
+		l34_owner_counts(l, &nu, &no, &ni);
+		seq_printf(sf, "owners neigh=%u out_reserved=%u in_reserved=%u\n",
+			   nu, no, ni);
+	}
 	if (l->provisioned)
 		seq_printf(sf, "wan %pI4h via %pI4h %pM netif %u\nlan %pI4h/%u %pM netif %u\n",
 			   &l->edge.wan_ip, &l->edge.gw_ip, l->edge.gw_mac,

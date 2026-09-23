@@ -285,6 +285,7 @@ int  rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 int  rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 			    const u8 *lan_mac, u32 lan_net, u8 prefix, u16 vlan);
 int  rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e);
+int  rtl9602c_l34_wan_release(struct rtl9602c_l34 *l, bool core_empty);
 bool rtl9602c_l34_has_owners(struct rtl9602c_l34 *l);
 int  rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f);
 int  rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f);

@@ -2,6 +2,7 @@
 /* RTL9602C L34 -> the COMMON TC hardware-offload lifecycle. ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 1. */
 
+#include <linux/inetdevice.h>	/* in_ifaddr, the WAN address notifier */
 #include <net/flow_offload.h>	/* struct flow_cls_offload, the block cb type */
 #include <net/pkt_cls.h>	/* FLOW_CLS_*, FLOW_BLOCK_*, flow_block_cb_*   */
 #include "gpon_flow_block.h"
@@ -274,6 +275,7 @@ static void rtl9602c_l34_fo_release(void *data)
 {
 	struct rtl9602c_eth *ep = data;
 
+	unregister_inetaddr_notifier(&ep->l34_addr_nb);
 	gpon_flow_offload_free(ep->fo);
 	ep->fo = NULL;
 }
@@ -343,6 +345,35 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 	}
 	mutex_unlock(&rtl9602c_l34_tc_mutex);
 	return err;
+}
+
+/* The provisioned WAN address left the kernel (a PPPoE session ended, a lease
+ * changed): retire the flows built on it and release the WAN rows, so the next
+ * flow provisions the new edge and nothing in between is claimed. */
+static int rtl9602c_l34_inetaddr_event(struct notifier_block *nb,
+				       unsigned long event, void *ptr)
+{
+	struct rtl9602c_eth *ep = container_of(nb, struct rtl9602c_eth, l34_addr_nb);
+	struct in_ifaddr *ifa = ptr;
+	int ret;
+
+	if (event != NETDEV_DOWN || !ep->fo || !ep->l34.provisioned ||
+	    ntohl(ifa->ifa_local) != ep->l34.edge.wan_ip)
+		return NOTIFY_DONE;
+	mutex_lock(&rtl9602c_l34_tc_mutex);
+	/* under this mutex no install is in flight, so a flush that succeeded
+	 * left the core's table empty */
+	ret = gpon_flow_offload_flush(ep->fo);
+	if (!ret)
+		ret = rtl9602c_l34_wan_release(&ep->l34, true);
+	mutex_unlock(&rtl9602c_l34_tc_mutex);
+	if (ret)
+		netdev_warn(ep->ndev, "L34: WAN %pI4 left and its tables were NOT released (%d)\n",
+			    &ifa->ifa_local, ret);
+	else
+		netdev_info(ep->ndev, "L34: WAN %pI4 left; its tables are released\n",
+			    &ifa->ifa_local);
+	return NOTIFY_DONE;
 }
 
 static int rtl9602c_l34_setup_block(struct net_device *dev,

@@ -86,6 +86,9 @@ static bool sw_cpu_tag;
 module_param(sw_cpu_tag, bool, 0644);
 MODULE_PARM_DESC(sw_cpu_tag, "enable the switch CPU-port tag engine (default off: plain-L2 forwarding)");
 
+/* CONFIG_LUNA_DEBUG: the bring-up aids below are compiled in only on request;
+ * off, each knob is a constant 0 and its branches are dead code. */
+#if IS_ENABLED(CONFIG_LUNA_DEBUG)
 static int rx_dump = 6;
 module_param(rx_dump, int, 0644);
 MODULE_PARM_DESC(rx_dump, "hex-dump the first N received frames (bring-up framing check)");
@@ -93,6 +96,25 @@ MODULE_PARM_DESC(rx_dump, "hex-dump the first N received frames (bring-up framin
 static int tx_dump = 6;
 module_param(tx_dump, int, 0644);
 MODULE_PARM_DESC(tx_dump, "hex-dump the first N transmitted frames + descriptors");
+
+static unsigned int diag_ms = 3000;
+module_param(diag_ms, uint, 0644);
+MODULE_PARM_DESC(diag_ms, "period of the per-port real-link/rxpkts diagnostic (0 = off)");
+
+static int diag_count = 12;
+module_param(diag_count, int, 0644);
+MODULE_PARM_DESC(diag_count, "number of periodic link/rxpkts diagnostic dumps");
+
+static bool phy_survey = true;
+module_param(phy_survey, bool, 0644);
+MODULE_PARM_DESC(phy_survey, "at open, READ each copper port's BMCR/BMSR under BOTH OCP maps and dump them (read-only; turns a 3-boot experiment into a 1-boot one)");
+#else
+static const int rx_dump;
+static const int tx_dump;
+static const unsigned int diag_ms;
+static const int diag_count;
+static const bool phy_survey;
+#endif
 
 static bool copper_phy = true;
 module_param(copper_phy, bool, 0644);
@@ -102,7 +124,6 @@ static bool rtl8221b_phy = true;
 module_param(rtl8221b_phy, bool, 0644);
 MODULE_PARM_DESC(rtl8221b_phy, "de-assert the RTL8221B 2.5G PHY reset (SerDes-6 uplink)");
 
-static unsigned int diag_ms = 3000;
 /* Default 0 = do NOT assert the GPHY reset, which is what the vendor does. A
  * param and not a deletion, so the old behaviour is one bootarg away. */
 static bool gphy_reset;
@@ -111,13 +132,6 @@ MODULE_PARM_DESC(gphy_reset,
 		 "assert SOFTWARE_RST.CMD_GPHY_RST_PS during copper PHY bring-up "
 		 "(default 0: the vendor never asserts it, and we run none of the "
 		 "re-initialisation that reset would require)");
-
-module_param(diag_ms, uint, 0644);
-MODULE_PARM_DESC(diag_ms, "period of the per-port real-link/rxpkts diagnostic (0 = off)");
-
-static int diag_count = 12;
-module_param(diag_count, int, 0644);
-MODULE_PARM_DESC(diag_count, "number of periodic link/rxpkts diagnostic dumps");
 
 /* Which receive FIFOs stay in reset. Stock holds NONE; the one this board had
  * asserted came from our own GPON pad recipe writing CFG_PCSXF, which is 0x48
@@ -163,10 +177,6 @@ static int gphy_map = 1;
 static int phy_settle_ms;
 module_param(phy_settle_ms, int, 0644);
 MODULE_PARM_DESC(phy_settle_ms, "ms to wait after the PHY patch-done bit (0 = current behaviour; the RTL9603CVD's own U-Boot waits 800)");
-
-static bool phy_survey = true;
-module_param(phy_survey, bool, 0644);
-MODULE_PARM_DESC(phy_survey, "at open, READ each copper port's BMCR/BMSR under BOTH OCP maps and dump them (read-only; turns a 3-boot experiment into a 1-boot one)");
 
 static bool cpu_no_loopback = true;
 module_param(cpu_no_loopback, bool, 0644);
@@ -724,6 +734,7 @@ static int eth_phy_ctrl_apply(struct luna_eth *ep)
 	return rc;
 }
 
+#if IS_ENABLED(CONFIG_LUNA_DEBUG)
 /* Writing this re-applies BASE_PHYAD and dumps the survey again, so a whole
  * sweep costs one boot instead of one build each. */
 static int resurvey_set(const char *val, const struct kernel_param *kp)
@@ -745,6 +756,7 @@ static int resurvey_set(const char *val, const struct kernel_param *kp)
 	mutex_unlock(&luna_gphy_lock);
 	return rc;
 }
+#endif
 /* Clear the diagnostic's subject.  Called from ndo_stop and, as the lifetime
  * guarantee, from a devres action that runs before devres frees @ep. */
 static void luna_eth_survey_withdraw(void *cookie)
@@ -757,9 +769,11 @@ static void luna_eth_survey_withdraw(void *cookie)
 	mutex_unlock(&luna_gphy_lock);
 }
 
+#if IS_ENABLED(CONFIG_LUNA_DEBUG)
 static const struct kernel_param_ops resurvey_ops = { .set = resurvey_set };
 module_param_cb(resurvey, &resurvey_ops, NULL, 0200);
 MODULE_PARM_DESC(resurvey, "write anything: re-apply base_phyad and re-dump the PHY survey");
+#endif
 
 /* The three public accessors: each takes the indirect window for the WHOLE
  * command/data sequence, and nothing inside takes it again. */

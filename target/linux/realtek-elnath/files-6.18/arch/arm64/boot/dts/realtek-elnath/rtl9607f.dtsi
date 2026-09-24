@@ -1,0 +1,465 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+/* The RTL9607F (Elnath) SoC: everything a board on this chip shares.
+ * A board file includes this and adds its model, RAM, panel and flash. */
+
+/ {
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+	interrupt-parent = <&gic>;
+
+
+	/* NI DMA pools and persistent crash records. */
+	reserved-memory {
+		#address-cells = <0x02>;
+		#size-cells = <0x02>;
+		ranges;
+
+		/* ★★ build79: no-map so the CPU-EPP ring region is carved OUT of the RAM
+		 * linear map -> memremap(MEMREMAP_WC) SUCCEEDS on it (build78's WC was
+		 * REJECTED because a mapped System-RAM region can't be remapped WC).  The
+		 * NE DMA is non-coherent, so the ring MUST be uncached; WC on a no-map
+		 * carveout gives an uncached CPU view without touching NAPI/dma_sync. */
+		ddr_cache_buffer: buf@bc48000 {
+			no-map;
+			reg = <0x00 0x0bc48000 0x00 0x20000>;
+		};
+
+		/*
+		 * ★ CRASH TRACE (2026-08-20).  A reserved DRAM window pstore/ram
+		 * writes a panic and a rolling console tail into, read back from
+		 * /sys/fs/pstore on the NEXT boot.  Placed just above
+		 * ddr_cache_buffer (which ends at 0x0bc68000) and clear of both NI
+		 * DMA pools and of the 0x05000000 TFTP load region.
+		 *
+		 * NOT `no-map`, unlike its neighbours: those are carved OUT of the
+		 * linear map precisely so memremap(WC) succeeds for the NE rings,
+		 * whereas pstore/ram wants an ordinary mapping -- carving this one
+		 * out is what would break it.
+		 *
+		 * It survives a panic or a watchdog bite and NOT a power cut: the
+		 * records are DRAM.  Verified in place by
+		 *   python3 ONU-test-case/crash_trace.py --board=... --probe
+		 * which refuses a region falling outside this board's memory map.
+		 */
+		ramoops@bc80000 {
+			compatible = "ramoops";
+			reg = <0x00 0x0bc80000 0x00 0x20000>;	/* 128 KiB */
+			record-size  = <0x00004000>;	/*  16 KiB per oops/panic */
+			console-size = <0x00010000>;	/*  64 KiB rolling console */
+		};
+
+		ddr_noncache_buffer: buf@9000000 {
+			no-map;
+			reg = <0x00 0x09000000 0x00 0x1628800>;
+		};
+
+		/* BL31's TrustZone buffer ("SECURE DRAM SIZE is 0x00040000" at every
+		 * boot; stock's tz_buffer).  Left as RAM, the slab allocator took a
+		 * page of it and the aborted write panicked the board with an SError
+		 * (2026-09-24, PA 0x0ffec000).  Guarded by dts_vs_measured.py
+		 * FIRMWARE_CARVEOUTS. */
+		tz_buffer@ffc0000 {
+			no-map;
+			reg = <0x00 0x0ffc0000 0x00 0x40000>;
+		};
+	};
+
+
+	psci {
+		compatible = "arm,psci-0.2";
+		method = "smc";
+	};
+
+
+	cpus {
+		#address-cells = <0x02>;
+		#size-cells = <0x00>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x00 0x00>;
+			enable-method = "psci";
+		};
+
+		cpu1: cpu@100 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x00 0x100>;
+			enable-method = "psci";
+		};
+	};
+
+
+	timer {
+		compatible = "arm,armv8-timer";
+		/* secure, non-secure, virtual, hypervisor PPIs (13/14/11/10) */
+		interrupts = <0x01 0x0d 0xff08>,
+			     <0x01 0x0e 0xff08>,
+			     <0x01 0x0b 0xff08>,
+			     <0x01 0x0a 0xff08>;
+	};
+
+
+	gic: interrupt-controller@4f8000000 {
+		compatible = "arm,gic-v3";
+		#interrupt-cells = <0x03>;
+		#redistributor-regions = <0x01>;
+		interrupt-controller;
+		/* GICD @ 0x4_f8000000 (64 KiB), GICR @ 0x4_f8040000 (512 KiB) */
+		reg = <0x04 0xf8000000 0x00 0x10000>,
+		      <0x04 0xf8040000 0x00 0x80000>;
+		interrupts = <0x01 0x09 0x04>;
+	};
+
+
+	uart_clk: uart-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0x00>;
+		clock-frequency = <125000000>;	/* 125 MHz APB */
+	};
+
+
+	uart0: serial@f43291c0 {
+		compatible = "cortina,serial";
+		reg = <0x00 0xf43291c0 0x00 0x30>;
+		interrupts = <0x00 0x04 0x04>;	/* GIC SPI 4, level-high */
+		clocks = <&uart_clk>;
+		clock-frequency = <125000000>;
+		status = "okay";
+	};
+
+
+	/*
+	 * The G3 APB peripheral clock. Named after the silicon's own name for
+	 * it rather than after the first consumer that needed it: it feeds the
+	 * whole peripheral block, and calling it "uart" would send the next
+	 * reader looking for a serial dependency the watchdog does not have.
+	 */
+	apb_clk: g3-apb-pclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0x00>;
+		clock-frequency = <125000000>;	/* 125 MHz APB */
+	};
+
+
+	/*
+	 * Hardware watchdog (PER_WDT). Three register windows, all taken from
+	 * this board's own live device tree:
+	 *
+	 *   0  0xf432902c  the 12-register PER_WDT block
+	 *   1  0xf43200c8  GLOBAL_GLOBAL_CONFIG -- the SoC reset enables that
+	 *                  turn an expired counter into an actual reset. They
+	 *                  are outside the block, which is why the driver takes
+	 *                  a second window; the word also holds power-down bits
+	 *                  for other subsystems, so it is read-modify-written.
+	 *   2  0xf43203c8  GLOBAL_DDR_RESET_MODE. Declared to keep the binding
+	 *                  faithful to the vendor's; NOT consumed -- this part
+	 *                  resets DDR cold and the register reads 0 on a working
+	 *                  device, so there is nothing for us to set.
+	 *
+	 * delay-reset is in 16 kHz cycles: 134 -> 8.4 ms between the expiry
+	 * event and the reset, matching what the vendor firmware programs.
+	 *
+	 * The expiry INTERRUPT is deliberately not described. It is routed
+	 * through a peripheral interrupt controller this port has no driver
+	 * for, and it is optional in the binding: it only carries a
+	 * notification for boards that want the timeout WITHOUT a reset. With
+	 * reset-on-timeout the hardware restarts the SoC by itself.
+	 */
+	watchdog@f432902c {
+		compatible = "cortina,wdt";
+		reg = <0x00 0xf432902c 0x00 0x30>,
+		      <0x00 0xf43200c8 0x00 0x04>,
+		      <0x00 0xf43203c8 0x00 0x04>;
+		clocks = <&apb_clk>;
+		reset-on-timeout;
+		delay-reset = <0x86>;	/* 134 */
+		status = "okay";
+	};
+
+
+	/*
+	 * Cortina NI (network engine) — the RTL9607F Ethernet packet engine.
+	 * 22 register windows read BY POSITIONAL INDEX (null placeholder slots
+	 * keep their position). resets=/pinctrl-0/nvmem-cells are deliberately
+	 * OMITTED for M2: the bootloader already de-asserted/muxed the NI (it
+	 * TFTPs through it), so of_*_get soft-fails and the driver continues.
+	 */
+	ethernet@f4300000 {
+		compatible = "cortina,ni-interface";
+		reg = <0x04 0xf4300000 0x00 0x10000  0x04 0xf4320194 0x00 0x10
+		       0x04 0xf4329128 0x00 0x48     0x00 0xf4500000 0x00 0x2000
+		       0x04 0xf7001000 0x00 0x1000   0x00 0x80000000 0x00 0x2c000
+		       0x00 0x0bc48000 0x00 0x20000  0x01 0x09000000 0x00 0x1628800
+		       0x04 0xf5500000 0x00 0xc000   0x04 0xf4320000 0x00 0x1000
+		       0x04 0xf432d000 0x00 0x20b8   0x04 0xf4600000 0x00 0x100000
+		       0x04 0x00 0x00 0x00           0x04 0xf4330000 0x00 0x10000
+		       0x04 0xd000 0x00 0x00         0x04 0xf4700000 0x00 0x100
+		       0x00 0x90301000 0x00 0x2000   0x04 0x00 0x00 0x00
+		       0x00 0x90300800 0x00 0xb8     0x00 0x90300900 0x00 0x10
+		       0x00 0x90300a00 0x00 0xec     0x00 0x90300b00 0x00 0x3c4>;
+		interrupt-parent = <&gic>;
+		interrupts = <0x00 0x54 0x04>, <0x00 0x55 0x04>, <0x00 0x56 0x04>, <0x00 0x57 0x04>,
+			     <0x00 0x58 0x04>, <0x00 0x59 0x04>, <0x00 0x5a 0x04>, <0x00 0x5b 0x04>,
+			     <0x00 0x4c 0x04>, <0x00 0x4d 0x04>, <0x00 0x4e 0x04>, <0x00 0x4f 0x04>,
+			     <0x00 0x48 0x04>, <0x00 0x49 0x04>, <0x00 0x4a 0x04>, <0x00 0x4b 0x04>;
+		memory-region = <&ddr_cache_buffer>, <&ddr_noncache_buffer>;
+		/* ★★ 2026-07-15: NO dma-coherent - the NE runs FULLY NON-COHERENT on our
+		 * kernel.  The ACE/coherent fabric path does not work here even though it
+		 * does on stock: the CPU-EPP descriptor writeback with the stock coherent
+		 * attr 0x12008060 raised QM_INT_SRC bit30 (axim_cpuepp_resp_error) per frame
+		 * and never reached DRAM, and the DMA-LSO ACE descriptor fetch (usr_pat
+		 * ace_cmd) never completed (TXQ rptr pinned 0).  Every DMA path is therefore
+		 * explicitly non-coherent now: RX ring + RX pool are memremap-WC with the
+		 * non-coherent QM AXI attrs, and the TX rings/buffers rely on the DMA API's
+		 * cache maintenance - which dma-coherent would silently DISABLE (it makes
+		 * dma_alloc_coherent return cached memory and dma_map_single skip the cache
+		 * clean).  (The old build51 note claimed dma-coherent made the coherent
+		 * writeback work; live 0x611c bit30 + poison descriptors disproved that.) */
+
+		ethernet@0 {
+			local-mac-address = [00 00 00 00 00 00];
+		};
+
+		mdio {
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+
+			phy1: phy@1 { compatible = "ethernet-phy-ieee802.3-c22"; reg = <0x01>; };
+			phy2: phy@2 { compatible = "ethernet-phy-ieee802.3-c22"; reg = <0x02>; };
+			phy3: phy@3 { compatible = "ethernet-phy-ieee802.3-c22"; reg = <0x03>; };
+			phy4: phy@4 { compatible = "ethernet-phy-ieee802.3-c22"; reg = <0x04>; };
+		};
+	};
+
+
+	/*
+	 * Cortina-Access QSPI flash controller -> the boot SPI-NAND (Fudan
+	 * FM25S01A, 128 MiB / 128 KiB blocks / 2 KiB pages, in the mainline
+	 * SPI-NAND table).  Layout mirrors the stock mtdparts (live-verified
+	 * on stock: "ca_spinand_flash:2048K(boot),256K@0x280000(env),
+	 * 256K@0x2C0000(env2),256K@0x300000(static_conf),
+	 * 251648K@0x340000(ubi_device)"; the last one truncates to the
+	 * 128 MiB device end = 0x7cc0000).  The 0x200000-0x280000 gap is the
+	 * vendor bad-block-list area - deliberately unmapped.
+	 *
+	 * ★ EVERY partition is read-only: this OpenWrt runs from RAM and must
+	 * NEVER write the NAND (stock firmware + per-board factory data live
+	 * there).  The read-only flags also force the UBI attach (bootargs
+	 * ubi.mtd=ubi_device) into ro mode.  ubi_Config/config_hs.xml is the
+	 * per-board provisioning source, read at boot from userspace: the base
+	 * MAC (ELAN_MAC_ADDR) by the 05_factory_mac uci-defaults script, and the
+	 * GPON serial number (GPON_SN) by /etc/init.d/gpon-identity, which pushes
+	 * it into the GPON driver (cortina-gpon holds ranging off until it has it).
+	 */
+	qspi: spi@f4324000 {
+		compatible = "cortina,ca-qspi";
+		reg = <0x04 0xf4324000 0x00 0x50>;
+		reg-names = "qspi-base";
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+		spi-tx-bus-width = <0x01>;
+		spi-rx-bus-width = <0x01>;
+	};
+
+
+	/*
+	 * Cortina GPON MAC (CA8277C class) — PON register window 0x4_F5500000,
+	 * 48 KiB; the GPON MAC block sits at window + 0x6000.  Validated on real
+	 * hardware: the vendor-id register reads ASCII "XPON" (the ONU serial
+	 * number prefix).  The same window is also listed positionally in the
+	 * cortina,ni-interface node; the gpon driver ioremaps it non-exclusively.
+	 */
+	gpon@f5500000 {
+		compatible = "realtek,rtl9607f-gpon";
+		reg = <0x04 0xf5500000 0x00 0xc000>;
+		/*
+		 * The GPON MAC has no dedicated GIC SPI: its int_top feeds
+		 * GLOBAL_PON_INTERRUPT_0 (GLB+0x180, PON_MACi bit0), which is
+		 * line 5 of the NE global sub-controller ne_ictl@0xf4320194
+		 * (cortina,per-ictl: +0 STATUS/+4 ENABLE), whose output is
+		 * GIC SPI 1 (stock DTB: ne_ictl interrupts = <0 1 4>, child
+		 * pon_ictl@0 interrupts = <5>).  We carry no per-ictl irqchip,
+		 * so the gpon driver takes GIC SPI 1 directly (IRQF_SHARED)
+		 * and manages the PON_MACe / ne_ictl-line-5 gates itself.
+		 */
+		interrupts = <0x00 0x01 0x04>;	/* GIC SPI 1, level-high (NE global) */
+	};
+
+
+	/*
+	 * PCIe root complex "pcie0" -> 5 GHz WiFi endpoint [10ec:c852] RTW8852CE
+	 * (WiFi 6, mainline rtw89).  Faithful to the board's stock DTB (mtd6 UBI
+	 * DTB0): reg map, GIC SPI 44/45, pci-domain 0, num-lanes 2 (the endpoint
+	 * trains Gen2 x1), and the authentic revB v1.1 (2024.06.04) SerDes table.
+	 * clocks/resets/phys are omitted like pcie2: the glue drives the rstmgr/
+	 * GPIO registers directly (S0_* masks, gate_pcie0 bits 10/22 in GLB 0xc8).
+	 * MUST stay ordered BEFORE pcie2: stock brings pcie0/S0 up first -- its
+	 * 2-lane LONG RX-cal preconditions the SHARED SerDes analog that pcie2's
+	 * SHORT cal depends on (probe order follows DT order).
+	 * NOTE: the glue's pcie0 path applies its RE'd table (identical pairs) to
+	 * lane0 only, as proven live; serdes-cfg-dataB is carried for fidelity.
+	 * ★ XTAL FLAG: non-40M variant, same as pcie2.
+	 */
+	pcie0: pcie@f4325000 {
+		compatible = "cortina,venus-pcie";
+		reg = <0x00 0xf4325000 0x00 0x400>,	/* glbl_regs   */
+		      <0x00 0xa0000000 0x00 0x1000>,	/* rc_dbi      */
+		      <0x00 0xa0001000 0x00 0x2000>,	/* config      */
+		      <0x00 0xa0300000 0x00 0x100000>,	/* iatu        */
+		      <0x00 0xf4333000 0x00 0x2000>;	/* serdes_phy  */
+		reg-names = "glbl_regs", "rc_dbi", "config", "iatu", "serdes_phy";
+
+		device_type = "pci";
+		#address-cells = <0x03>;
+		#size-cells = <0x02>;
+		bus-range = <0x00 0xff>;
+		ranges = <0x81000000 0x00 0x00        0x00 0xa0003000 0x00 0x10000>,	/* downstream I/O  */
+			 <0x82000000 0x00 0xa0400000 0x00 0xa0400000 0x00 0xfc00000>;	/* non-prefetch mem */
+
+		id = <0x00>;
+		num-viewport = <0x01>;
+		num-lanes = <0x02>;
+		linux,pci-domain = <0x00>;
+
+		interrupts = <0x00 0x2c 0x04>, <0x00 0x2d 0x04>;	/* GIC SPI 44,45 level-high (stock) */
+
+		/* Stock DTB pcie0 serdes-cfg-dataB, revB v1.1 (2024.06.04), 25 MHz XTAL. */
+		serdes-cfg-dataB = <0x04 0xa855 0x08 0x60c6 0x10 0x4000 0x18 0x1f 0x20 0x3591 0x28 0xf610 0x2c 0xa91d 0x30 0xc008 0x34 0xf732 0x38 0x1000 0x74 0xca1f 0x78 0xe0e2 0x80 0xd488 0x84 0x77dd 0x88 0x23 0x8c 0x1b63 0x90 0x4f30 0x9c 0x61d6 0xa0 0xf802 0xac 0xb813 0xc0 0x55 0xc8 0xf0f3 0x24 0x520c 0x104 0xa84a 0x108 0x60c6 0x110 0x4000 0x118 0x1f 0x120 0x3591 0x128 0xf610 0x12c 0xa91d 0x130 0xc008 0x134 0xf732 0x138 0x1000 0x174 0xda1f 0x178 0xe0e2 0x188 0x23 0x18c 0x1b63 0x190 0x4f0c 0x19c 0x61d6 0x1a0 0xf802 0x1ac 0xb813 0x1bc 0xe900 0x1c0 0x4a 0x1c8 0xf0f3 0x124 0x520c>;
+
+		status = "okay";
+
+		#interrupt-cells = <0x01>;
+		interrupt-map-mask = <0x00 0x00 0x00 0x07>;
+		interrupt-map = <0x00 0x00 0x00 0x01 &pcie0_intc 0x00>,	/* INT A */
+				<0x00 0x00 0x00 0x02 &pcie0_intc 0x01>,	/* INT B */
+				<0x00 0x00 0x00 0x03 &pcie0_intc 0x02>,	/* INT C */
+				<0x00 0x00 0x00 0x04 &pcie0_intc 0x03>;	/* INT D */
+
+		pcie0_intc: interrupt-controller {
+			interrupt-controller;
+			#address-cells = <0x00>;
+			#interrupt-cells = <0x01>;
+		};
+	};
+
+
+	/*
+	 * PCIe root complex "pcie2" -> 2.4 GHz WiFi endpoint [10ec:0192] RTL8192F.
+	 * Faithful to the board's stock DTB (mtd6 UBI DTB0): reg map, GIC SPI 46/47,
+	 * pci-domain 1, and the authentic revB v1.1 (2024.06.04) SerDes table.
+	 * clocks/resets/phys/iommus are omitted for bring-up (the glue treats them
+	 * optional and the bootloader already ungated the PCIe clocks).
+	 * ★ XTAL FLAG: this is the non-40M SerDes variant; if this board runs a
+	 * 40 MHz crystal, replace the pairs with the stock serdes-cfg-dataB_40M set.
+	 */
+	pcie2: pcie@f4327000 {
+		compatible = "cortina,venus-pcie";
+		reg = <0x00 0xf4327000 0x00 0x400>,	/* glbl_regs   */
+		      <0x00 0xc0000000 0x00 0x1000>,	/* rc_dbi      */
+		      <0x00 0xc0001000 0x00 0x2000>,	/* config      */
+		      <0x00 0xc0300000 0x00 0x100000>,	/* iatu        */
+		      <0x00 0xf4337000 0x00 0x1000>;	/* serdes_phy  */
+		reg-names = "glbl_regs", "rc_dbi", "config", "iatu", "serdes_phy";
+
+		device_type = "pci";
+		#address-cells = <0x03>;
+		#size-cells = <0x02>;
+		bus-range = <0x00 0xff>;
+		ranges = <0x81000000 0x00 0x00        0x00 0xc0003000 0x00 0x10000>,	/* downstream I/O  */
+			 <0x82000000 0x00 0xc0400000 0x00 0xc0400000 0x00 0xfc00000>;	/* non-prefetch mem */
+
+		id = <0x02>;
+		num-viewport = <0x01>;
+		num-lanes = <0x01>;
+		linux,pci-domain = <0x01>;
+
+		interrupts = <0x00 0x2e 0x04>, <0x00 0x2f 0x04>;	/* GIC SPI 46,47 level-high (stock) */
+
+		/* 25 MHz-XTAL SerDes table (from a live stock dump).  It carries stock's
+		 * low-block CMU/analog config (0x08/0x0c/0x14/0x1c, 0x3c-0x50, 0x68/0x94/0x98/
+		 * 0xa4/0xa8/0xb0/0xb4/0xb8) which the stock DTB write-list omits (it relies on
+		 * them being HW/cal defaults) -- these are what LOCK the CMU cold (bare
+		 * write-list alone reads 0x500e = unlocked; +these -> 0x780e).  page0 also uses
+		 * the RX manual-override VALUES (0x2c=0xa91d bit4 SET, 0x90=0x4f28) so the RX
+		 * front-end locks from the fixed code applied IN-RESET (the CMU only locks during
+		 * the in-reset table apply; an out-of-reset runtime cal drops the lock and cannot
+		 * re-lock on this revB silicon).  Result: CMU+CDR lock cold 0x780e.  Each page
+		 * ends with the 0x24/0x124 bit9 cal edge. */
+		serdes-cfg-dataB = <0x04 0xa855 0x10 0x5000 0x18 0x1f 0x20 0x3591 0x24 0x520c 0x28 0xc670 0x2c 0xa90d 0x30 0xc008 0x34 0xf732 0x38 0x5000 0x64 0x7d63 0x6c 0xea1 0x70 0x2001 0x74 0xda1f 0x78 0x66eb 0x80 0xd488 0x84 0x77dd 0x88 0x23 0x8c 0x1b63 0x90 0x4f30 0x9c 0x1d6 0xa0 0xf802 0xac 0xb8d3 0xbc 0x7055 0xc8 0xf0f3 0x24 0x500c 0x24 0x520c 0x104 0xa84a 0x110 0x5000 0x118 0x1f 0x120 0x3591 0x124 0x520c 0x128 0xc670 0x12c 0xa90d 0x130 0xc008 0x134 0xf732 0x138 0x5000 0x164 0x7d63 0x16c 0xf41 0x170 0x2001 0x174 0xda1f 0x180 0xd4aa 0x188 0x23 0x18c 0x1b63 0x190 0x4f0c 0x19c 0x1d6 0x1a0 0xf802 0x1ac 0xb9d3 0x1bc 0xd04a 0x1c8 0xf0f3 0x124 0x500c 0x124 0x520c>;  /* AUTO table (0x2c=0xa90d): the LONG-cal ramp runs the HW cal engine (needs auto mode); manual mode blocks cal-done (bit4). */
+
+		/* M3a/M3b PCIe bring-up boot: enabled to test the clean-room glue in
+		 * isolation (WiFi driver not yet built) — expect "cortina-pcie … Link up"
+		 * + [10ec:0192] endpoint enumeration.  If the glue SErrors on serdes MMIO,
+		 * the boot log will show it. */
+		status = "okay";
+
+		#interrupt-cells = <0x01>;
+		interrupt-map-mask = <0x00 0x00 0x00 0x07>;
+		interrupt-map = <0x00 0x00 0x00 0x01 &pcie2_intc 0x00>,	/* INT A */
+				<0x00 0x00 0x00 0x02 &pcie2_intc 0x01>,	/* INT B */
+				<0x00 0x00 0x00 0x03 &pcie2_intc 0x02>,	/* INT C */
+				<0x00 0x00 0x00 0x04 &pcie2_intc 0x03>;	/* INT D */
+
+		pcie2_intc: interrupt-controller {
+			interrupt-controller;
+			#address-cells = <0x00>;
+			#interrupt-cells = <0x01>;
+		};
+	};
+
+
+	/*
+	 * ======================= FRONT PANEL: GPIO, LEDs, BUTTONS ==============
+	 *
+	 * The SoC's peripheral GPIO block is five 32-pin groups, three words each
+	 * (CFG/OUT/IN) at PERI + 0x300 + 0x24 * group, plus one pin-mux word per
+	 * group at GLB + 0x130 + 4 * group where setting bit N routes pin N to the
+	 * GPIO block.  One node per group, so only the three groups this board
+	 * actually uses are mapped; the second reg entry is that group's mux word,
+	 * which the driver OR-s the requested pin into (we build without PINCTRL,
+	 * so nothing else would route the pad).
+	 *
+	 * Only CFG/OUT/IN are mapped (length 0xc).  The rest of each 0x24 bank
+	 * block is interrupt logic, which the driver does not implement — hence the
+	 * buttons below are gpio-keys-POLLED.
+	 *
+	 * ★ Shared with the GPON driver: cortina-gpon's cg_laser_on() also writes
+	 * these same CFG/OUT words for the BOSA/laser nets it owns, including
+	 * whole-register stores to groups 3 and 4.  That is why this driver only
+	 * ever read-modify-writes single bits and maps the window non-exclusively.
+	 * A consequence to be aware of: the GPON driver re-applies stock's group-3
+	 * snapshot on every (re-)activation, which momentarily forces the LED levels
+	 * on this list; the panel daemon re-asserts them on its next poll.
+	 */
+	gpio0: gpio@f4329300 {
+		compatible = "cortina,ca77xx-gpio";
+		reg = <0x04 0xf4329300 0x00 0x0c>,	/* group 0 CFG/OUT/IN   */
+		      <0x04 0xf4320130 0x00 0x04>;	/* group 0 pin-mux word */
+		gpio-controller;
+		#gpio-cells = <0x02>;
+		ngpios = <0x10>;
+	};
+
+
+	gpio3: gpio@f432936c {
+		compatible = "cortina,ca77xx-gpio";
+		reg = <0x04 0xf432936c 0x00 0x0c>,	/* group 3 CFG/OUT/IN   */
+		      <0x04 0xf432013c 0x00 0x04>;	/* group 3 pin-mux word */
+		gpio-controller;
+		#gpio-cells = <0x02>;
+		ngpios = <0x19>;
+	};
+
+
+	gpio4: gpio@f4329390 {
+		compatible = "cortina,ca77xx-gpio";
+		reg = <0x04 0xf4329390 0x00 0x0c>,	/* group 4 CFG/OUT/IN   */
+		      <0x04 0xf4320140 0x00 0x04>;	/* group 4 pin-mux word */
+		gpio-controller;
+		#gpio-cells = <0x02>;
+		ngpios = <0x11>;
+	};
+};

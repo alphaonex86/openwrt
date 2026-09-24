@@ -104,6 +104,22 @@ int luna_flow_hash(const struct luna_flow_hash_config *cfg,
 	return 0;
 }
 
+/* ONE 802.1Q tag on the WAN is per-flow data in the path5 entry: the upstream
+ * leg egresses tagged with the WAN VID, the downstream leg matches the tagged
+ * frame the rule pops.  A pop and the provisioned WAN must agree. */
+int luna_flow_wan_tag(bool ds_leg, u16 wan_vid, bool pop,
+		      struct luna_flow_path5 *a)
+{
+	if (!a || wan_vid >= 4095)
+		return -EINVAL;
+	if (ds_leg ? pop != !!wan_vid : pop)
+		return -EOPNOTSUPP;
+	a->ingress_ctag = ds_leg && pop;
+	a->ctag.vid = ds_leg ? 0 : wan_vid;
+	a->ctag.tagged = !ds_leg && wan_vid;
+	return 0;
+}
+
 int luna_flow_path5_encode(const struct gpon_flow_key *key,
 			   const struct luna_flow_path5 *a,
 			   u32 w[LUNA_FLOW_WORDS])

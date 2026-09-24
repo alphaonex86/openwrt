@@ -68,6 +68,8 @@ u32 luna_flow_entry_count(const struct luna_flow_hash_config *cfg);
 int luna_flow_hash(const struct luna_flow_hash_config *cfg,
 		   const struct gpon_flow_key *key, u32 extra,
 		   u16 *first, u16 *second);
+int luna_flow_wan_tag(bool ds_leg, u16 wan_vid, bool pop,
+		      struct luna_flow_path5 *action);
 int luna_flow_path5_encode(const struct gpon_flow_key *key,
 			   const struct luna_flow_path5 *action,
 			   u32 words[LUNA_FLOW_WORDS]);

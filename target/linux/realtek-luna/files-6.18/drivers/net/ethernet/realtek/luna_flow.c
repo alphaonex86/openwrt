@@ -207,7 +207,9 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 		if (ret)
 			return ret;
 		edge.wan_pppoe_sid = act->pppoe_sid;
-		if (edge.wan_vlan || edge.lan_vlan || act->nat_addr != edge.wan_ip)
+		/* PPPoE over gpon0.<vid> routes through ppp, which has no VID. */
+		if (gpon_flow_wan_vid(act, edge.wan_vlan, &edge.wan_vlan) ||
+		    edge.lan_vlan || act->nat_addr != edge.wan_ip)
 			return -EOPNOTSUPP;
 		if (!e->provisioned || !gpon_edge_same_iface(&edge, &e->edge)) {
 			ret = gpon_flow_offload_flush(e->fo);
@@ -223,6 +225,9 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 	} else if (!e->provisioned || key->ip_da != e->edge.wan_ip) {
 		return -EAGAIN;
 	}
+	ret = luna_flow_wan_tag(ds, e->edge.wan_vlan, act->vlan_pop, &a);
+	if (ret)
+		return ret;
 	ret = luna_flow_mac_get(&e->macs, &p->mac, act->gw_dmac,
 				ds ? ep->lan_flood_mask : BIT(ep->c->sw_map->pon_port));
 	if (ret)
@@ -272,6 +277,7 @@ static int luna_flow_stats(void *sh, u32 index, void *priv, unsigned long *lastu
 
 static const struct gpon_flow_ops luna_flow_ops = {
 	.is_lan_side = luna_flow_lan,
+	.wan_vlan = true,	/* the path5 entry carries the tag per flow */
 	.install = luna_flow_install,
 	.remove = luna_flow_remove,
 	.abort_install = luna_flow_remove,

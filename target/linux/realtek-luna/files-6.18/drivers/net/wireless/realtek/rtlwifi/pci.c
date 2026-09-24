@@ -1148,6 +1148,7 @@ static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 	struct ieee80211_hw *hw = rtlpriv->hw;
 	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct ieee80211_vif *vif = READ_ONCE(mac->vif);
 	struct rtl_tcb_desc tcb_desc = {};
 	struct sk_buff *skb;
 	u32 late_us;
@@ -1157,12 +1158,14 @@ static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 	 * chip downloads the beacon, so the chip keeps the previous one.
 	 */
 	rtlpci->bcn_tasklet++;
+	if (!vif)	/* a beacon interrupt that outlived the interface */
+		return;
 	late_us = (u32)ktime_to_us(ktime_get()) - READ_ONCE(rtlpci->bcn_irq_us);
 	if (rtlpci->bcn_prep_budget_us && late_us > rtlpci->bcn_prep_budget_us) {
 		rtlpci->bcn_late++;
 		return;
 	}
-	skb = ieee80211_beacon_get(hw, mac->vif, 0);
+	skb = ieee80211_beacon_get(hw, vif, 0);
 	if (skb)
 		rtl_pci_tx(hw, NULL, skb, &tcb_desc);
 }

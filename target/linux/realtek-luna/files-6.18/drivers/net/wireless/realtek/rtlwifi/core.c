@@ -115,12 +115,47 @@ void rtl_wowlan_fw_cb(const struct firmware *firmware, void *context)
 EXPORT_SYMBOL(rtl_wowlan_fw_cb);
 
 /*mutex for start & stop is must here. */
+static void rtl_op_stop(struct ieee80211_hw *hw, bool suspend);
+
+/* The vendor's check_hangup close/open, through mac80211: it calls start()
+ * on the RUNNING adapter and then replays the interface, keys and stations,
+ * so start() stops the adapter first and forgets what is about to be
+ * replayed -- else start() returns 0 on a live chip and add_interface
+ * refuses the vif it still holds.
+ */
+void rtl_restart_hw(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
+	if (!test_and_set_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status))
+		ieee80211_restart_hw(hw);
+}
+EXPORT_SYMBOL_GPL(rtl_restart_hw);
+
+static void rtl_restart_forget(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_mac *mac = rtl_mac(rtlpriv);
+
+	rtl_op_stop(hw, false);
+	mutex_lock(&rtlpriv->locks.conf_mutex);
+	mac->vif = NULL;
+	mac->beacon_enabled = 0;
+	mac->opmode = NL80211_IFTYPE_UNSPECIFIED;
+	spin_lock_bh(&rtlpriv->locks.entry_list_lock);
+	INIT_LIST_HEAD(&rtlpriv->entry_list);
+	spin_unlock_bh(&rtlpriv->locks.entry_list_lock);
+	mutex_unlock(&rtlpriv->locks.conf_mutex);
+}
+
 static int rtl_op_start(struct ieee80211_hw *hw)
 {
 	int err = 0;
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
 
+	if (test_and_clear_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status))
+		rtl_restart_forget(hw);
 	if (!is_hal_stop(rtlhal))
 		return 0;
 	if (!test_bit(RTL_STATUS_INTERFACE_START, &rtlpriv->status))

@@ -88,6 +88,16 @@
 			no-map;
 			reg = <0x00 0x09000000 0x00 0x1628800>;
 		};
+
+		/* BL31's TrustZone buffer ("SECURE DRAM SIZE is 0x00040000" at every
+		 * boot; stock's tz_buffer).  Left as RAM, the slab allocator took a
+		 * page of it and the aborted write panicked the board with an SError
+		 * (2026-09-24, PA 0x0ffec000).  Guarded by dts_vs_measured.py
+		 * FIRMWARE_CARVEOUTS. */
+		tz_buffer@ffc0000 {
+			no-map;
+			reg = <0x00 0x0ffc0000 0x00 0x40000>;
+		};
 	};
 
 	psci {

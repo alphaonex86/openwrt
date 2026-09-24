@@ -137,10 +137,19 @@ static void rtl_restart_forget(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_mac *mac = rtl_mac(rtlpriv);
 
+	/* As remove_interface does before a stop: no beacon interrupt may
+	 * reach the prepare tasklet once the vif is forgotten.
+	 */
+	mutex_lock(&rtlpriv->locks.conf_mutex);
+	if (mac->beacon_enabled) {
+		mac->beacon_enabled = 0;
+		rtlpriv->cfg->ops->update_interrupt_mask(hw, 0,
+				rtlpriv->cfg->maps[RTL_IBSS_INT_MASKS]);
+	}
+	mutex_unlock(&rtlpriv->locks.conf_mutex);
 	rtl_op_stop(hw, false);
 	mutex_lock(&rtlpriv->locks.conf_mutex);
 	mac->vif = NULL;
-	mac->beacon_enabled = 0;
 	mac->opmode = NL80211_IFTYPE_UNSPECIFIED;
 	spin_lock_bh(&rtlpriv->locks.entry_list_lock);
 	INIT_LIST_HEAD(&rtlpriv->entry_list);

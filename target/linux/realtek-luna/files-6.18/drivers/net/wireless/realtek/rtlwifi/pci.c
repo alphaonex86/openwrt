@@ -8,6 +8,7 @@
 #include "ps.h"
 #include "efuse.h"
 #include <linux/interrupt.h>
+#include <linux/ktime.h>
 #include <linux/export.h>
 #include <linux/module.h>
 #ifdef CONFIG_MAC80211_DEBUGFS
@@ -43,7 +44,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	unsigned int rows[RTL_PCI_MAX_TX_QUEUE_COUNT][6];
 	u64 addresses[RTL_PCI_MAX_TX_QUEUE_COUNT];
-	u32 bcn_irq, bcn_tasklet, txdma_err, txdma_status, hang_resets;
+	u32 bcn_irq, bcn_tasklet, bcn_late, txdma_err, txdma_status, hang_resets;
 	unsigned long flags;
 	int q;
 
@@ -66,6 +67,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	}
 	bcn_irq = rtlpci->bcn_irq;
 	bcn_tasklet = rtlpci->bcn_tasklet;
+	bcn_late = rtlpci->bcn_late;
 	txdma_err = rtlpci->txdma_err;
 	txdma_status = rtlpci->txdma_status;
 	hang_resets = rtlpci->tx_hang_resets;
@@ -76,8 +78,9 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 		seq_printf(m, "%d %u %u %u %u %u %u %016llx\n", q, rows[q][0],
 			   rows[q][1], rows[q][2], rows[q][3], rows[q][4],
 			   rows[q][5], addresses[q]);
-	seq_printf(m, "bcn_irq %u bcn_tasklet %u txdma_err %u txdma_status %08x hang_resets %u\n",
-		   bcn_irq, bcn_tasklet, txdma_err, txdma_status, hang_resets);
+	seq_printf(m, "bcn_irq %u bcn_tasklet %u bcn_late %u txdma_err %u txdma_status %08x hang_resets %u\n",
+		   bcn_irq, bcn_tasklet, bcn_late, txdma_err, txdma_status,
+		   hang_resets);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rtl_pci_tx_queues);
@@ -1004,6 +1007,7 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE,
 			"prepare beacon for interrupt!\n");
 		rtlpci->bcn_irq++;
+		WRITE_ONCE(rtlpci->bcn_irq_us, (u32)ktime_to_us(ktime_get()));
 		tasklet_schedule(&rtlpriv->works.irq_prepare_bcn_tasklet);
 	}
 
@@ -1143,11 +1147,21 @@ static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 						works.irq_prepare_bcn_tasklet);
 	struct ieee80211_hw *hw = rtlpriv->hw;
 	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	struct rtl_tcb_desc tcb_desc = {};
 	struct sk_buff *skb;
+	u32 late_us;
 
-	/* The only steady-state beacon writer: inside the beacon-early window. */
-	rtl_pcidev(rtl_pcipriv(hw))->bcn_tasklet++;
+	/* The only steady-state beacon writer: inside the beacon-early window.
+	 * A run that starts past the budget could still be rewriting when the
+	 * chip downloads the beacon, so the chip keeps the previous one.
+	 */
+	rtlpci->bcn_tasklet++;
+	late_us = (u32)ktime_to_us(ktime_get()) - READ_ONCE(rtlpci->bcn_irq_us);
+	if (rtlpci->bcn_prep_budget_us && late_us > rtlpci->bcn_prep_budget_us) {
+		rtlpci->bcn_late++;
+		return;
+	}
 	skb = ieee80211_beacon_get(hw, mac->vif, 0);
 	if (skb)
 		rtl_pci_tx(hw, NULL, skb, &tcb_desc);

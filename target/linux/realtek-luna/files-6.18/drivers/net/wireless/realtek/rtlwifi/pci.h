@@ -198,6 +198,12 @@ struct rtl_pci {
 	u32 reg_bcn_ctrl_val;
 	u32 bcn_irq;
 	u32 bcn_tasklet;
+	/* The beacon rewrite must end before the beacon DMA: the chip sets the
+	 * budget (us after the early interrupt), 0 = no limit.
+	 */
+	u32 bcn_irq_us;
+	u32 bcn_prep_budget_us;
+	u32 bcn_late;
 	u32 txdma_err;
 	u32 txdma_err_seen;
 	u32 txdma_status;

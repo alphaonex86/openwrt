@@ -995,6 +995,23 @@ dma64_end:
 	return true;
 }
 
+/* Vendor 88XX MAC init (Hal88XXGen.c): the beacon-early interrupt 10 TU
+ * before TBTT, the beacon DMA 1 TU before it.  At the chip's own 2/2 both
+ * fire together and the tasklet rewrites the descriptor the DMA is reading
+ * (TXDMA_STATUS payload OVF/UDN, the whole TXDMA halts).  The tasklet gets
+ * the gap minus one TU of margin; a later run keeps the previous beacon.
+ */
+static void _rtl92fe_set_beacon_window(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	const u8 early_tu = 10, dma_tu = 1;
+
+	rtl_write_byte(rtlpriv, REG_DRVERLYINT, early_tu);
+	rtl_write_byte(rtlpriv, REG_BCNDMATIM, dma_tu);
+	rtlpci->bcn_prep_budget_us = (early_tu - dma_tu - 1) * 1024;
+}
+
 static void _rtl92fe_hw_configure(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -1045,6 +1062,7 @@ static void _rtl92fe_hw_configure(struct ieee80211_hw *hw)
 
 	/* TBTT prohibit hold time. */
 	rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 1, 0xff); /* 8 ms */
+	_rtl92fe_set_beacon_window(hw);
 
 	rtl_write_byte(rtlpriv, REG_PIFS, 0);
 	rtl_write_byte(rtlpriv, REG_AGGR_BREAK_TIME, 0x16);
@@ -1918,9 +1936,7 @@ void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)
 	rtl_write_word(rtlpriv, REG_ATIMWND, atim_window);
 	rtl_write_word(rtlpriv, REG_BCN_INTERVAL, bcn_interval);
 	rtl_write_word(rtlpriv, REG_BCNTCFG, 0x660f);
-	/* DRVERLYINT/BCNDMATIM stay at the chip's 2/2: the vendor's 10/1 killed
-	 * the first beacon on 3 of 5 boots under our free-and-refill (measured).
-	 */
+	/* DRVERLYINT/BCNDMATIM: set once at MAC init, _rtl92fe_set_beacon_window. */
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_CCK, 0x18);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM, 0x18);
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM - 2, 0x30);

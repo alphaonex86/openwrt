@@ -822,12 +822,10 @@ void rtl92fe_tx_fill_desc(struct ieee80211_hw *hw,
 				ptcb_desc->use_driver_rate = true;
 				set_tx_desc_tx_rate(pdesc, DESC_RATE11M);
 			} else {
-				/* AP mode: the firmware rate-adaptation engine has no live ...
-				 * dev/MEASURED-trx.c.md sec 3. */
-				ptcb_desc->use_driver_rate = true;
-				/* Pin legacy CCK 11M for data. With the RF front-end enabled ...
-				 * dev/MEASURED-trx.c.md sec 4. */
-				set_tx_desc_tx_rate(pdesc, DESC_RATE11M);
+				/* Data rate is the firmware RA's: the peer macid is
+				 * CONNECTed with its RA mask (hw.c).  The CCK 11M pin
+				 * it replaces: dev/MEASURED-trx.c.md sec 3-4. */
+				ptcb_desc->use_driver_rate = false;
 			}
 		}
 

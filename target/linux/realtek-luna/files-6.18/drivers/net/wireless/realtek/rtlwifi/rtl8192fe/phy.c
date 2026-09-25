@@ -1675,8 +1675,13 @@ void rtl92fe_phy_set_bw_mode_callback(struct ieee80211_hw *hw)
 	case HT_CHANNEL_WIDTH_20_40:
 		reg_bw_opmode &= ~BW_OPMODE_20MHZ;
 		rtl_write_byte(rtlpriv, REG_BWOPMODE, reg_bw_opmode);
-		reg_prsr_rsc = (reg_prsr_rsc & 0x90) |
-			       (mac->cur_40_prime_sc << 5);
+		/* RRSR_RSC (RRSR[22:21]) stays 0 on the 8192F: the vendor's 8192FE
+		 * bandwidth handler (SwBWMode88XX_N) clears it at 40 MHz and
+		 * rtl8xxxu's 8192F never sets it.  The 92EE value (prime_sc) left
+		 * the client's frames unacknowledged at HT40 (X111W 2026-09-25:
+		 * uplink 0.1-2.6 Mbps, client TX rate down to 6 Mbps).
+		 */
+		reg_prsr_rsc &= ~(BIT(6) | BIT(5));
 		rtl_write_byte(rtlpriv, REG_RRSR + 2, reg_prsr_rsc);
 		break;
 	default:

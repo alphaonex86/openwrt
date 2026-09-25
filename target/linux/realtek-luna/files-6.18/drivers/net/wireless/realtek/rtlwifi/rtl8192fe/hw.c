@@ -513,7 +513,8 @@ void rtl92fe_set_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val)
 		u8 reg_tmp;
 		u8 short_preamble = (bool)(*(u8 *)val);
 
-		reg_tmp = (rtlpriv->mac80211.cur_40_prime_sc) << 5;
+		/* RRSR_RSC stays 0 on the 8192F, see rtl92fe_phy_set_bw_mode_callback */
+		reg_tmp = 0;
 		if (short_preamble)
 			reg_tmp |= 0x80;
 		rtl_write_byte(rtlpriv, REG_RRSR + 2, reg_tmp);

@@ -16,6 +16,16 @@ define Device/realtek_rtl9607c
 endef
 TARGET_DEVICES += realtek_rtl9607c
 
+# Console diagnostic only: boot with initcall_blacklist=rtl9602c_gpon_init.
+define Device/unknown_unknown
+  DEVICE_VENDOR := UNKNOWN
+  DEVICE_MODEL := UNKNOWN
+  DEVICE_DTS := rtl9607c_unknown
+  DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
+  SOC := rtl9607c
+endef
+TARGET_DEVICES += unknown_unknown
+
 # LANLY G24W (RTL9603CVD). Same interAptiv MIPS32 R2 core as the RTL9607C
 # above -- MEASURED from the board's own /proc/cpuinfo ("MIPS interAptiv
 # V2.0", isa mips32r2, tlb_entries 64) -- so it belongs in THIS subtarget

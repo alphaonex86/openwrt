@@ -739,7 +739,7 @@ static bool _rtl92fe_llt_table_init(struct ieee80211_hw *hw)
 	rtl_write_dword(rtlpriv, REG_RQPN, RQPN_INIT_VALUE);
 
 	rtl_write_byte(rtlpriv, REG_TRXFF_BNDY, txpktbuf_bndy);
-	rtl_write_word(rtlpriv, REG_TRXFF_BNDY + 2, 0x3f00 - 1);
+	rtl_write_word(rtlpriv, REG_TRXFF_BNDY + 2, RXFF_BNDY_92F);
 
 	rtl_write_byte(rtlpriv, REG_DWBCN0_CTRL + 1, txpktbuf_bndy);
 	rtl_write_byte(rtlpriv, REG_DWBCN1_CTRL + 1, txpktbuf_bndy);

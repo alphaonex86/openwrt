@@ -53,9 +53,4 @@ enum rtl_desc_qsel {
 
 /* TX/RX descriptor rate codes (DESC_RATE1M..DESC_RATEMCS15) ... -- dev/MEASURED-def.h.md sec 3. */
 
-/* Vendor MAC_RXFF_SIZE: a 16 KB RX FIFO with 384 B kept for C2H packets, so the
- * boundary is 16000-1.  0x3eff kept only 256 B and let RX data and firmware
- * C2H overlap by 128 B; stock reads 0x3e7f (X111W register diff, 2026-09-26). */
-#define RXFF_BNDY_92F			0x3e7f
-
 #endif

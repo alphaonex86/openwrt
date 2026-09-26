@@ -44,3 +44,14 @@ define Device/hsgq_x111w
 	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls
 endef
 TARGET_DEVICES += hsgq_x111w
+
+define Device/vsol_v2801rgw
+  DEVICE_VENDOR := VSOL
+  DEVICE_MODEL := V2801RGW
+  DEVICE_DTS := rtl9602c_v2801rgw
+  DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
+  SOC := rtl9602c
+  IMAGES :=
+  DEVICE_PACKAGES :=
+endef
+TARGET_DEVICES += vsol_v2801rgw

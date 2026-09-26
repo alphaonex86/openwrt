@@ -1151,9 +1151,12 @@
 #define _SIFS_OFDM_TRX(x)			(((x) & 0xFF) << 8)
 
 #define _TBTT_PROHIBIT_HOLD(x)			(((x) & 0xFF) << 8)
-/* [3:0] setup 4, [7:4] infra hold 0, [19:8] AP hold 0x400: X111W stock reads 0x80040004,
- * the vendor's 8192F line writes REG_TBTT_PROHIBIT_CFG 0x40004 (2026-09-26). */
-#define TBTT_PROHIBIT_AP_92F			0x00040004
+/* [3:0] setup 4, [7:4] infra hold 0, [19:8] AP hold. Stock holds 0x400 (0x80040004; vendor
+ * REG_TBTT_PROHIBIT_CFG 0x40004); MEASURED 2026-09-26 on the G24W under an Ethernet load, our
+ * beacon path (tasklet-rewritten, early 10 TU) still hit TXDMA payload OVF/UDN once per ~180 s
+ * at 0x400 and never at 0x500 (3/3); the extra 8 ms only holds data TX while a late beacon
+ * is still pending. FINDING-rtl8192fe-txdma-0x6000-restart-2026-09-25.md. */
+#define TBTT_PROHIBIT_AP_92F			0x00050004
 
 #define DIS_EDCA_CNT_DWN			BIT(11)
 

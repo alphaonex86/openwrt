@@ -100,13 +100,6 @@ static void _rtl92fe_resume_tx_beacon(struct ieee80211_hw *hw)
 			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 				"beacon arm: step1 FIELD write 0x%08x "
 				"([19:8]=0x%03x)\n", v, tbtt_prohibit_field);
-		} else {
-			u32 v = rtl_read_dword(rtlpriv, REG_TBTT_PROHIBIT);
-
-			v = (v & ~0x000fffffu) | TBTT_PROHIBIT_AP_92F;
-			rtl_write_dword(rtlpriv, REG_TBTT_PROHIBIT, v);
-			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-				"beacon arm: step1 stock TBTT prohibit 0x%08x\n", v);
 		}
 	}
 	if (beacon_arm_steps & BIT(2)) {
@@ -114,6 +107,15 @@ static void _rtl92fe_resume_tx_beacon(struct ieee80211_hw *hw)
 		tmp |= BIT(0);
 		rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 2, tmp);
 		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD, "beacon arm: step2 done\n");
+	}
+	if ((beacon_arm_steps & BIT(1)) && tbtt_prohibit_field < 0) {
+		/* last, whole: the vendor's twenty bits (step2's bit 16 is hold bit 8 on this chip) */
+		u32 v = rtl_read_dword(rtlpriv, REG_TBTT_PROHIBIT);
+
+		v = (v & ~0x000fffffu) | TBTT_PROHIBIT_AP_92F;
+		rtl_write_dword(rtlpriv, REG_TBTT_PROHIBIT, v);
+		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
+			"beacon arm: TBTT prohibit 0x%08x (vendor)\n", v);
 	}
 }
 

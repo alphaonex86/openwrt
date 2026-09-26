@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/dts-v1/;
+
+#include "rtl9602c.dtsi"
+
+/ {
+	model = "VSOL V2801RGW (RTL9602C, console bring-up)";
+	compatible = "vsol,v2801rgw", "realtek,rtl9602c";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x02f00000>, <0x03000000 0x00f00000>;
+	};
+
+	/* Own stock map and bsp_prom_meminit exclude these; purpose is unproven. */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		stock-reserved@2f00000 {
+			no-map;
+			reg = <0x02f00000 0x00100000>;
+		};
+
+		stock-reserved@3f00000 {
+			no-map;
+			reg = <0x03f00000 0x00100000>;
+		};
+	};
+
+	/delete-node/ ethernet@18012000;
+	/delete-node/ flash@14000000;
+	/delete-node/ watchdog@18003260;
+};

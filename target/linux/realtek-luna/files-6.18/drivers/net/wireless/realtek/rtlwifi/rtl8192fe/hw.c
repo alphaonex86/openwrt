@@ -101,9 +101,12 @@ static void _rtl92fe_resume_tx_beacon(struct ieee80211_hw *hw)
 				"beacon arm: step1 FIELD write 0x%08x "
 				"([19:8]=0x%03x)\n", v, tbtt_prohibit_field);
 		} else {
-			rtl_write_byte(rtlpriv, REG_TBTT_PROHIBIT + 1, 0xff);
+			u32 v = rtl_read_dword(rtlpriv, REG_TBTT_PROHIBIT);
+
+			v = (v & ~0x000fffffu) | TBTT_PROHIBIT_AP_92F;
+			rtl_write_dword(rtlpriv, REG_TBTT_PROHIBIT, v);
 			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-				"beacon arm: step1 legacy byte poke (0xff)\n");
+				"beacon arm: step1 stock TBTT prohibit 0x%08x\n", v);
 		}
 	}
 	if (beacon_arm_steps & BIT(2)) {

@@ -1151,6 +1151,9 @@
 #define _SIFS_OFDM_TRX(x)			(((x) & 0xFF) << 8)
 
 #define _TBTT_PROHIBIT_HOLD(x)			(((x) & 0xFF) << 8)
+/* [3:0] setup 4, [7:4] infra hold 0, [19:8] AP hold 0x400: X111W stock reads 0x80040004,
+ * the vendor's 8192F line writes REG_TBTT_PROHIBIT_CFG 0x40004 (2026-09-26). */
+#define TBTT_PROHIBIT_AP_92F			0x00040004
 
 #define DIS_EDCA_CNT_DWN			BIT(11)
 

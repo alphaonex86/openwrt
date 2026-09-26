@@ -1014,23 +1014,26 @@
 #define HQSEL_MGTQ				BIT(4)
 #define HQSEL_HIQ				BIT(5)
 
-/* REG_TRXDMA_CTRL / REG_TXDMA_PQ_MAP (0x010C) ... -- dev/MEASURED-reg.h.md sec 4. */
-#define _TXDMA_HIQ_MAP(x)			(((x) & 0x3) << 14)
-#define _TXDMA_MGQ_MAP(x)			(((x) & 0x3) << 12)
-#define _TXDMA_BKQ_MAP(x)			(((x) & 0x3) << 10)
-#define _TXDMA_BEQ_MAP(x)			(((x) & 0x3) << 8)
-#define _TXDMA_VIQ_MAP(x)			(((x) & 0x3) << 6)
-#define _TXDMA_VOQ_MAP(x)			(((x) & 0x3) << 4)
+/* REG_TXDMA_PQ_MAP (0x010C) on the 8192F: THREE-bit field per queue, bits 4..21 (vendor
+ * halmac_bit2.h *_MAP_V1); the 2-bit 8192ee layout put BE on quota 5 and BK on quota 7.
+ * FINDING-rtl8192fe-txdma-0x6000-restart-2026-09-25.md. */
+#define _TXDMA_HIQ_MAP(x)			(((x) & 0x7) << 19)
+#define _TXDMA_MGQ_MAP(x)			(((x) & 0x7) << 16)
+#define _TXDMA_BKQ_MAP(x)			(((x) & 0x7) << 13)
+#define _TXDMA_BEQ_MAP(x)			(((x) & 0x7) << 10)
+#define _TXDMA_VIQ_MAP(x)			(((x) & 0x7) << 7)
+#define _TXDMA_VOQ_MAP(x)			(((x) & 0x7) << 4)
 
+#define QUEUE_EXTRA				0
 #define QUEUE_LOW				1
 #define QUEUE_NORMAL				2
 #define QUEUE_HIGH				3
 
-/* Composite queue->engine priority map written (as a 16-bit ... -- dev/MEASURED-reg.h.md sec 5. */
+/* Every queue on the NORMAL quota: X111W stock reads 0x00124924 (2026-09-26). */
 #define TRXDMA_CTRL_QMAP_VALUE			\
-	(_TXDMA_VOQ_MAP(QUEUE_HIGH)   | _TXDMA_VIQ_MAP(QUEUE_NORMAL) |	\
-	 _TXDMA_BEQ_MAP(QUEUE_LOW)    | _TXDMA_BKQ_MAP(QUEUE_LOW)    |	\
-	 _TXDMA_MGQ_MAP(QUEUE_HIGH)   | _TXDMA_HIQ_MAP(QUEUE_HIGH))
+	(_TXDMA_VOQ_MAP(QUEUE_NORMAL) | _TXDMA_VIQ_MAP(QUEUE_NORMAL) |	\
+	 _TXDMA_BEQ_MAP(QUEUE_NORMAL) | _TXDMA_BKQ_MAP(QUEUE_NORMAL) |	\
+	 _TXDMA_MGQ_MAP(QUEUE_NORMAL) | _TXDMA_HIQ_MAP(QUEUE_NORMAL))
 
 #define _LLT_NO_ACTIVE				0x0
 #define _LLT_WRITE_ACCESS			0x1
@@ -1055,13 +1058,15 @@
 #define LPQ_PUBLIC_DIS				BIT(25)
 #define LD_RQPN					BIT(31)
 
-/* TX packet-buffer page allocation (8192F, all-three-queue / ... -- dev/MEASURED-reg.h.md sec 6. */
-#define TX_TOTAL_PAGE_NUM_92F			0xF7
-#define TX_PAGE_NUM_PUBQ_92F			0xDE
-#define TX_PAGE_NUM_HPQ_92F			0x08
-#define TX_PAGE_NUM_LPQ_92F			0x08
-#define TX_PAGE_NUM_NPQ_92F			0x08
-#define TX_PAGE_BOUNDARY			(TX_TOTAL_PAGE_NUM_92F + 1)
+/* TX packet-buffer page quotas and boundary as stock loads them: X111W stock reads RQPN
+ * 0x009a000e, RQPN_NPQ 0x04044949, boundary 0xf6 (2026-09-26); vendor HalCfg.h agrees. */
+#define TX_PAGE_NUM_PUBQ_92F			0x9A
+#define TX_PAGE_NUM_HPQ_92F			0x0E
+#define TX_PAGE_NUM_LPQ_92F			0x00
+#define TX_PAGE_NUM_NPQ_92F			0x49
+#define TX_PAGE_NUM_EPQ_92F			0x04
+#define TX_PAGE_BOUNDARY			0xF6
+#define RXFF_BNDY_92F				0x3e7f	/* 16 KB RX FIFO less 384 B of C2H; stock reads it */
 #define RQPN_INIT_VALUE				\
 	(LD_RQPN | _PUBQ(TX_PAGE_NUM_PUBQ_92F) |	\
 	 _LPQ(TX_PAGE_NUM_LPQ_92F) | _HPQ(TX_PAGE_NUM_HPQ_92F))

@@ -730,12 +730,11 @@ static bool _rtl92fe_llt_table_init(struct ieee80211_hw *hw)
 	u8 txpktbuf_bndy;
 	u8 u8tmp, testcnt = 0;
 
-	/* The RTL8192F packet buffer holds 0xF7 TX pages; the ... -- dev/MEASURED-hw.c.md sec 5. */
 	txpktbuf_bndy = TX_PAGE_BOUNDARY;
 
 	/* Vendor: the normal/extra quotas are latched by LD_RQPN, so before it. */
 	rtl_write_byte(rtlpriv, REG_RQPN_NPQ, TX_PAGE_NUM_NPQ_92F);
-	rtl_write_byte(rtlpriv, REG_RQPN_NPQ + 2, 0);
+	rtl_write_byte(rtlpriv, REG_RQPN_NPQ + 2, TX_PAGE_NUM_EPQ_92F);
 	rtl_write_dword(rtlpriv, REG_RQPN, RQPN_INIT_VALUE);
 
 	rtl_write_byte(rtlpriv, REG_TRXFF_BNDY, txpktbuf_bndy);
@@ -864,11 +863,11 @@ static bool _rtl92fe_init_mac(struct ieee80211_hw *hw)
 	rtl_write_dword(rtlpriv, REG_HISR, 0xffffffff);
 	rtl_write_dword(rtlpriv, REG_HISRE, 0xffffffff);
 
-	/* TRXDMA_CTRL (REG_TXDMA_PQ_MAP) is a 16-bit, ... -- dev/MEASURED-hw.c.md sec 7. */
-	dwordtmp = rtl_read_word(rtlpriv, REG_TRXDMA_CTRL);
+	/* A 32-bit register on the 8192F (the map reaches bit 21); the RX-DMA nibble is kept. */
+	dwordtmp = rtl_read_dword(rtlpriv, REG_TRXDMA_CTRL);
 	dwordtmp &= 0xf;
 	dwordtmp |= TRXDMA_CTRL_QMAP_VALUE;
-	rtl_write_word(rtlpriv, REG_TRXDMA_CTRL, dwordtmp);
+	rtl_write_dword(rtlpriv, REG_TRXDMA_CTRL, dwordtmp);
 	/* Reported Tx status from HW for rate adaptive. */
 	rtl_write_byte(rtlpriv, REG_FWHW_TXQ_CTRL + 1, 0x1F);
 

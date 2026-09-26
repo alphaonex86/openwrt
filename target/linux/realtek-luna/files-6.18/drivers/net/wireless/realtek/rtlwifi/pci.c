@@ -1140,6 +1140,9 @@ static void _rtl_pci_irq_tasklet(struct tasklet_struct *t)
 
 static int rtl_pci_tx(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
 		      struct sk_buff *skb, struct rtl_tcb_desc *ptcb_desc);
+static int rtl_pci_tx_timed(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+			    struct sk_buff *skb, struct rtl_tcb_desc *ptcb_desc,
+			    bool beacon_window);
 
 static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 {
@@ -1167,7 +1170,7 @@ static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 	}
 	skb = ieee80211_beacon_get(hw, vif, 0);
 	if (skb)
-		rtl_pci_tx(hw, NULL, skb, &tcb_desc);
+		rtl_pci_tx_timed(hw, NULL, skb, &tcb_desc, true);
 }
 
 static void _rtl_pci_init_trx_var(struct ieee80211_hw *hw)
@@ -1658,10 +1661,10 @@ static bool rtl_pci_tx_chk_waitq_insert(struct ieee80211_hw *hw,
 	return true;
 }
 
-static int rtl_pci_tx(struct ieee80211_hw *hw,
+static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 		      struct ieee80211_sta *sta,
 		      struct sk_buff *skb,
-		      struct rtl_tcb_desc *ptcb_desc)
+		      struct rtl_tcb_desc *ptcb_desc, bool beacon_window)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
@@ -1700,6 +1703,12 @@ static int rtl_pci_tx(struct ieee80211_hw *hw,
 		rtlpriv->stats.txbytesunicast += skb->len;
 
 	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
+	if (beacon_window && rtlpci->bcn_prep_budget_us &&
+	    (u32)((u32)ktime_to_us(ktime_get()) - READ_ONCE(rtlpci->bcn_irq_us)) >
+	    rtlpci->bcn_prep_budget_us) {
+		rtlpci->bcn_late++;
+		goto drop;
+	}
 	ring = &rtlpci->tx_ring[hw_queue];
 	if (hw_queue != BEACON_QUEUE) {
 		if (rtlpriv->use_new_trx_flow)
@@ -1822,6 +1831,12 @@ drop:
 	/* adapter_tx consumes the packet even when the ring is full. */
 	ieee80211_free_txskb(hw, skb);
 	return 0;
+}
+
+static int rtl_pci_tx(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+		     struct sk_buff *skb, struct rtl_tcb_desc *ptcb_desc)
+{
+	return rtl_pci_tx_timed(hw, sta, skb, ptcb_desc, false);
 }
 
 static void rtl_pci_flush(struct ieee80211_hw *hw, u32 queues, bool drop)

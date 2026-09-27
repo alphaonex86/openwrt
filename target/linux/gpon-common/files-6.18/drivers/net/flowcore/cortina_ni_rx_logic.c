@@ -118,14 +118,26 @@ bool cortina_ni_l2fe_fdb_action_da(u32 action, u32 *ldpid)
 #define CA_NI_L2FE_ELPB_D0_WAN		0x0000000bu
 
 /* Stock L2FE VLAN membership check-id map (aal_l2_vlan.c __g_l2_vlan_port_map):
- * lport -> membership check-id.  NI0-7 -> 0-7, CPU_0 -> 8, CPU_1 -> 9,
- * L3_WAN/L3_LAN (0x18/0x19) -> 15, GEM (0x20+) -> 7.  Programmed into the
- * MMSHP_CHK_ID_MAP so the membership check qualifies LAN<->CPU forwarding. */
+ * lport -> membership check-id, programmed into MMSHP_CHK_ID_MAP so the
+ * membership check qualifies LAN<->CPU forwarding. Kept EXACTLY as stock ships
+ * it, hole included: CPU_2 reads 0 where its neighbours count on, and no formula
+ * reproduces that, so it is written down. Every lport not listed is 0. */
+#define CA_NI_CHKID_L3			15	/* L3_WAN and L3_LAN share one id */
+#define CA_NI_CHKID_PON			7	/* 0x20..0x3f: LLID/GEM and CPU-MQ alike */
 static const u8 ca_ni_vlan_chkid_map[CA_NI_L2FE_LPORT_COUNT] = {
-	 0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0,
-	 8, 9, 0,10,11,12,13,14,15,15, 0, 0, 0, 0, 0, 0,
-	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+	[0] = 0, [1] = 1, [2] = 2, [3] = 3,		/* NI0..NI7: their own number */
+	[4] = 4, [5] = 5, [6] = 6, [7] = 7,
+	[CA_NI_LPORT_CPU_0 + 0] = 8,
+	[CA_NI_LPORT_CPU_0 + 1] = 9,
+	[CA_NI_LPORT_CPU_0 + 2] = 0,			/* CPU_2: stock's exception */
+	[CA_NI_LPORT_CPU_0 + 3] = 10,
+	[CA_NI_LPORT_CPU_0 + 4] = 11,
+	[CA_NI_LPORT_CPU_0 + 5] = 12,
+	[CA_NI_LPORT_CPU_0 + 6] = 13,
+	[CA_NI_LPORT_CPU_0 + 7] = 14,
+	[CA_NI_LSPID_L3_WAN] = CA_NI_CHKID_L3,
+	[CA_NI_LPORT_L3_LAN] = CA_NI_CHKID_L3,
+	[CA_NI_LPORT_GEM_FIRST ... CA_NI_L2FE_LPORT_COUNT - 1] = CA_NI_CHKID_PON,
 };
 
 /* Declared deviation from moved-verbatim: the shell derived ...

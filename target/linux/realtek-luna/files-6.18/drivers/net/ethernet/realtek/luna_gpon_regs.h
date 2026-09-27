@@ -231,6 +231,10 @@
  * offset 0x90. RX path registers (NUM/page mapping from the transceiver's
  * register map):
  */
+#define BOSA_A0(n)		(0x000 + (n))	/* SFF-8472 A0h byte n (slave 0x50) */
+#define BOSA_A2(n)		(0x100 + (n))	/* SFF-8472 A2h byte n (slave 0x51) */
+#define BOSA_W(n)		(0x200 + (n))	/* analog/APC register Wn (slave 0x54) */
+#define BOSA_R(n)		(0x300 + (n))	/* MCU control/status register Rn (slave 0x55) */
 #define BOSA_REG_NUM		0x390		/* chip NUM (0x8290), 2 bytes  */
 #define BOSA_REG_VID		0x394		/* manufacturer ID (0x0001)    */
 #define BOSA_REG_W4		0x204		/* [4] EN_L booster (1=on)     */

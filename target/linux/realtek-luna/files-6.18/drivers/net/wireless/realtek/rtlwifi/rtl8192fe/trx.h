@@ -116,6 +116,12 @@ static inline void set_tx_desc_ampdu_density(__le32 *__pdesc, u32 __val)
 	le32p_replace_bits((__pdesc + 2), __val, GENMASK(22, 20));
 }
 
+/* the frame is a BT-coexistence null: the firmware sends it around BT slots */
+static inline void set_tx_desc_bt_null(__le32 *__pdesc, u32 __val)
+{
+	le32p_replace_bits((__pdesc + 2), __val, BIT(23));
+}
+
 /* Dword 3 */
 static inline void set_tx_desc_use_rate(__le32 *__pdesc, u32 __val)
 {
@@ -198,6 +204,12 @@ static inline void set_tx_desc_rts_sc(__le32 *__pdesc, u32 __val)
 static inline void set_tx_desc_tx_buffer_size(__le32 *__pdesc, u32 __val)
 {
 	le32p_replace_bits((__pdesc + 7), __val, GENMASK(15, 0));
+}
+
+/* Dword 8 */
+static inline void set_tx_desc_en_hwseq(__le32 *__pdesc, u32 __val)
+{
+	le32p_replace_bits((__pdesc + 8), __val, BIT(15));
 }
 
 /* Dword 9 */

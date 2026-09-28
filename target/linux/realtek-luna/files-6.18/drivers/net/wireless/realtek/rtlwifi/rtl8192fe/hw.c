@@ -1144,12 +1144,13 @@ dma64_end:
 		       TX_DESC_NUM_92F | ((RTL8192FE_SEG_NUM << 12) & 0x3000));
 	rtl_write_word(rtlpriv, REG_HI7Q_TXBD_NUM,
 		       TX_DESC_NUM_92F | ((RTL8192FE_SEG_NUM << 12) & 0x3000));
-	/* RX ring depth and the segment count; bit 15 is BIT_SYS_32_64 (vendor HalComBit.h),
-	 * the 64-bit 16-byte segment layout -- CLEAR: this host runs the vendor's 8-byte
-	 * segments (TXBD_SEG_32_64_SEL 0), as pci.h/trx.h lay them out. */
+	/* RX ring depth, the segment count, and bit 15 = BIT_SYS_32_64 (vendor HalComBit.h):
+	 * SET, the 16-byte (4-dword) segment layout pci.h/trx.h lay out. It MUST agree with
+	 * `struct rtl_rx_buffer_desc` -- a chip told 8-byte segments while the host lays out
+	 * 16 kills RX and TX (2026-09-28, both Luna APs off the air; bd32_layout_guard). */
 	rtl_write_word(rtlpriv, REG_RX_RXBD_NUM,
 		       RX_DESC_NUM_92F |
-		       ((RTL8192FE_SEG_NUM << 13) & 0x6000));
+		       ((RTL8192FE_SEG_NUM << 13) & 0x6000) | 0x8000);
 
 	rtl_write_dword(rtlpriv, REG_TSFTIMER_HCI, 0xFFFFFFFF);
 

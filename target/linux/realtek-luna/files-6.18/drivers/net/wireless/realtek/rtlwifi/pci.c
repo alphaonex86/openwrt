@@ -1353,6 +1353,10 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
  */
 #define RTL_PCI_RX_QUEUE_USED	1
 
+static void _rtl_pci_free_rx_ring(struct ieee80211_hw *hw, int rxring_idx);
+
+/* A ring that fails part-way frees what it prepared (buffers, mappings, the coherent
+ * ring): the probe's failure path never reaches the deinit (Codex, 2026-09-28). */
 static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 {
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
@@ -1379,7 +1383,7 @@ static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 			entry = &rtlpci->rx_ring[rxring_idx].buffer_desc[i];
 			if (!_rtl_pci_init_one_rxdesc(hw, (u8 *)entry,
 						      rxring_idx, i))
-				return -ENOMEM;
+				goto err_unwind;
 		}
 	} else {
 		struct rtl_rx_desc *entry = NULL;
@@ -1403,13 +1407,17 @@ static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 			entry = &rtlpci->rx_ring[rxring_idx].desc[i];
 			if (!_rtl_pci_init_one_rxdesc(hw, (u8 *)entry,
 						      rxring_idx, i))
-				return -ENOMEM;
+				goto err_unwind;
 		}
 
 		rtlpriv->cfg->ops->set_desc(hw, (u8 *)entry, false,
 					    HW_DESC_RXERO, &tmp_one);
 	}
 	return 0;
+
+err_unwind:
+	_rtl_pci_free_rx_ring(hw, rxring_idx);
+	return -ENOMEM;
 }
 
 static void _rtl_pci_free_tx_ring(struct ieee80211_hw *hw,
@@ -1472,6 +1480,7 @@ static void _rtl_pci_free_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 		dma_unmap_single(&rtlpci->pdev->dev, *((dma_addr_t *)skb->cb),
 				 rtlpci->rxbuffersize, DMA_FROM_DEVICE);
 		kfree_skb(skb);
+		rtlpci->rx_ring[rxring_idx].rx_buf[i] = NULL;
 	}
 
 	/* free dma of this ring */
@@ -1504,7 +1513,7 @@ static int _rtl_pci_init_trx_ring(struct ieee80211_hw *hw)
 	for (rxring_idx = 0; rxring_idx < RTL_PCI_RX_QUEUE_USED; rxring_idx++) {
 		ret = _rtl_pci_init_rx_ring(hw, rxring_idx);
 		if (ret)
-			return ret;
+			goto err_free_rings;
 	}
 
 	for (i = 0; i < RTL_PCI_MAX_TX_QUEUE_COUNT; i++) {
@@ -1516,15 +1525,19 @@ static int _rtl_pci_init_trx_ring(struct ieee80211_hw *hw)
 	return 0;
 
 err_free_rings:
+	/* Only the rings that exist are freed, and the error that stopped us is the one
+	 * returned: an RX failure used to leak every ring before it (Codex, 2026-09-28). */
 	for (rxring_idx = 0; rxring_idx < RTL_PCI_RX_QUEUE_USED; rxring_idx++)
-		_rtl_pci_free_rx_ring(hw, rxring_idx);
+		if (rtlpci->rx_ring[rxring_idx].desc ||
+		    rtlpci->rx_ring[rxring_idx].buffer_desc)
+			_rtl_pci_free_rx_ring(hw, rxring_idx);
 
 	for (i = 0; i < RTL_PCI_MAX_TX_QUEUE_COUNT; i++)
 		if (rtlpci->tx_ring[i].desc ||
 		    rtlpci->tx_ring[i].buffer_desc)
 			_rtl_pci_free_tx_ring(hw, i);
 
-	return 1;
+	return ret;
 }
 
 static int _rtl_pci_deinit_trx_ring(struct ieee80211_hw *hw)

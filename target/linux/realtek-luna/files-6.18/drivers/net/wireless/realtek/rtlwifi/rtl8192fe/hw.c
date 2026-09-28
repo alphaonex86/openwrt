@@ -48,6 +48,21 @@ static u32 _rtl92fe_bcn_budget_us(u8 early_tu, u8 dma_tu)
 
 static void _rtl92fe_set_beacon_window(struct ieee80211_hw *hw);
 
+/* One token of `pokes`: 1 = (addr, val) parsed, 0 = the end, -1 = malformed (p stays on it). */
+static int _rtl92fe_poke_next(const char **p, unsigned int *addr, unsigned int *val)
+{
+	int used;
+
+	if (!**p)
+		return 0;
+	if (sscanf(*p, "%x:%x%n", addr, val, &used) != 2 || *addr > 0xffff || *val > 0xff)
+		return -1;
+	*p += used;
+	if (**p == ',')
+		(*p)++;
+	return 1;
+}
+
 static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -55,17 +70,21 @@ static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 	const char *p = pokes;
 	unsigned int addr, val, n = 0;
 	bool timing = false;
-	int used;
+	int r;
 
 	if (!p || !*p)
 		return;
-	while (*p) {
-		if (sscanf(p, "%x:%x%n", &addr, &val, &used) != 2 || addr > 0xffff || val > 0xff) {
-			pr_warn("pokes: cannot parse %.24s -- stopping here\n", p);
-			return;
-		}
+	/* The whole list is validated before one byte is written: a malformed token after
+	 * a timing poke once left the chip's window in force without the budget that
+	 * follows it below (Codex, 2026-09-28). */
+	while ((r = _rtl92fe_poke_next(&p, &addr, &val)) > 0)
+		;
+	if (r < 0) {
+		pr_warn("pokes: cannot parse %.24s -- the whole list is REFUSED, nothing written\n", p);
+		return;
+	}
+	for (p = pokes; _rtl92fe_poke_next(&p, &addr, &val) > 0; n++) {
 		rtl_write_byte(rtlpriv, addr, (u8)val);
-		n++;
 		/* The driver's own view follows the poke: the BCN_CTRL cache carries the
 		 * poked base so a later set/clear transition works on it (a re-apply on
 		 * every update would override the transition -- Codex, 2026-09-28). */
@@ -73,9 +92,6 @@ static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 			rtlpci->reg_bcn_ctrl_val = (u8)val;
 		if (addr == REG_DRVERLYINT || addr == REG_BCNDMATIM)
 			timing = true;
-		p += used;
-		if (*p == ',')
-			p++;
 	}
 	if (timing) {
 		u8 early = rtl_read_byte(rtlpriv, REG_DRVERLYINT);

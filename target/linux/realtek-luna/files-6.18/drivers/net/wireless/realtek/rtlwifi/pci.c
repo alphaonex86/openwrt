@@ -1906,9 +1906,10 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 
 drop:
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
-	/* adapter_tx consumes the packet even when the ring is full. */
+	/* adapter_tx consumes the packet even when the ring is full -- and SAYS so: a
+	 * command packet the chip never took must not be reported as sent (Codex, 2026-09-28). */
 	ieee80211_free_txskb(hw, skb);
-	return 0;
+	return -ENOBUFS;
 }
 
 static int rtl_pci_tx(struct ieee80211_hw *hw, struct ieee80211_sta *sta,

@@ -543,8 +543,9 @@ static void _rtl92fe_download_rsvd_page(struct ieee80211_hw *hw)
 	} while (!(bcnvalid_reg & BIT(0)) && dlbcn_count < 5);
 
 	if (!(bcnvalid_reg & BIT(0)))
-		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-			"Download RSVD page failed!\n");
+		pr_warn("rtl8192fe: reserved pages NOT downloaded after %u attempt(s): the firmware's "
+			"page locations are stale (a command the chip never took is not an upload)\n",
+			dlbcn_count);
 
 	/* Enable Bcn */
 	_rtl92fe_set_bcn_ctrl_reg(hw, BIT(3), 0);

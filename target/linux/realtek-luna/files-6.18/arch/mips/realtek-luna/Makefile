@@ -3,3 +3,4 @@
 
 obj-y := prom.o setup.o irq-luna.o timer-luna.o
 obj-$(CONFIG_PCI) += pcie-luna.o
+obj-$(CONFIG_CPU_HAS_WB) += wbflush.o

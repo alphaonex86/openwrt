@@ -202,6 +202,7 @@ struct rtl_pci {
 	 * budget (us after the early interrupt), 0 = no limit.
 	 */
 	u32 bcn_irq_us;
+	u32 bcn_done_us;			/* when the tasklet published the beacon */
 	u32 bcn_prep_budget_us;
 	u32 bcn_late;
 	u32 txdma_err;

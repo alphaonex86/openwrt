@@ -1171,6 +1171,7 @@ static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 	skb = ieee80211_beacon_get(hw, vif, 0);
 	if (skb)
 		rtl_pci_tx_timed(hw, NULL, skb, &tcb_desc, true);
+	rtlpci->bcn_done_us = (u32)ktime_to_us(ktime_get());
 }
 
 static void _rtl_pci_init_trx_var(struct ieee80211_hw *hw)

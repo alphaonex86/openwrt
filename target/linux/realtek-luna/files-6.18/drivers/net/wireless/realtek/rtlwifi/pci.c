@@ -11,10 +11,8 @@
 #include <linux/ktime.h>
 #include <linux/export.h>
 #include <linux/module.h>
-#ifdef CONFIG_MAC80211_DEBUGFS
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
-#endif
 
 MODULE_AUTHOR("lizhaoming	<chaoming_li@realsil.com.cn>");
 MODULE_AUTHOR("Realtek WlanFAE	<wlanfae@realtek.com>");
@@ -46,7 +44,7 @@ static const u8 ac_to_hwq[] = {
 	BK_QUEUE
 };
 
-#ifdef CONFIG_MAC80211_DEBUGFS
+#if IS_ENABLED(CONFIG_MAC80211_DEBUGFS) || IS_ENABLED(CONFIG_RTLWIFI_DEBUG)
 static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 {
 	struct ieee80211_hw *hw = m->private;
@@ -2481,12 +2479,23 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	PROBE_RUNG(6, "rtl_pci_intr_mode_decide -- request_irq HAS run");
 
 	set_bit(RTL_STATUS_INTERFACE_START, &rtlpriv->status);
+#if IS_ENABLED(CONFIG_MAC80211_DEBUGFS) || IS_ENABLED(CONFIG_RTLWIFI_DEBUG)
+	{
+		/* The product build has no mac80211 debugfs, so the wiphy dir is NULL and
+		 * this file never appeared (2026-09-28); rtlwifi's own dir is there. */
+		struct dentry *dir = NULL;
 #ifdef CONFIG_MAC80211_DEBUGFS
-	if (IS_ERR_OR_NULL(hw->wiphy->debugfsdir) ||
-	    IS_ERR_OR_NULL(debugfs_create_file("rtlwifi_tx_queues", 0400,
-				      hw->wiphy->debugfsdir, hw,
-				      &rtl_pci_tx_queues_fops)))
-		pr_warn("rtlwifi: TX queue diagnostics unavailable\n");
+		dir = hw->wiphy->debugfsdir;
+#endif
+#ifdef CONFIG_RTLWIFI_DEBUG
+		if (IS_ERR_OR_NULL(dir))
+			dir = rtlpriv->dbg.debugfs_dir;
+#endif
+		if (IS_ERR_OR_NULL(dir) ||
+		    IS_ERR_OR_NULL(debugfs_create_file("rtlwifi_tx_queues", 0400, dir, hw,
+						       &rtl_pci_tx_queues_fops)))
+			pr_warn("rtlwifi: TX queue diagnostics unavailable\n");
+	}
 #endif
 	return 0;
 

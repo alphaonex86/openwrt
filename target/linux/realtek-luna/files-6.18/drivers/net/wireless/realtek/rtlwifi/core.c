@@ -13,6 +13,15 @@
 #include <linux/export.h>
 #include <net/cfg80211.h>
 
+/* DIAGNOSTIC ARM (2026-09-28): TX A-MPDU has been refused since 2026-07-06 because the
+ * aggregated-BD path "wedged the HW" -- measured before the BD segment layout (REG_RX_RXBD_NUM
+ * bit 15, 16-byte segments) agreed with the descriptors. Without aggregation every 60 B frame
+ * pays a whole PPDU, which is the small-frame downlink loss both Luna APs show against stock.
+ * 1 = the mainline path (rtl_tx_agg_start); 0 = the refusal (default, the shipping behaviour). */
+static int tx_ampdu;
+module_param(tx_ampdu, int, 0444);
+MODULE_PARM_DESC(tx_ampdu, "DIAGNOSTIC: accept TX A-MPDU sessions (default 0 = refuse)");
+
 u8 channel5g[CHANNEL_MAX_NUMBER_5G] = {
 	36, 38, 40, 42, 44, 46, 48,		/* Band 1 */
 	52, 54, 56, 58, 60, 62, 64,		/* Band 2 */
@@ -1447,6 +1456,8 @@ static int rtl_op_ampdu_action(struct ieee80211_hw *hw,
 
 	switch (action) {
 	case IEEE80211_AMPDU_TX_START:
+		if (tx_ampdu)
+			return rtl_tx_agg_start(hw, vif, sta, tid, &params->ssn);
 		/* Refuse AP TX aggregation. On this new-trx-flow RTL8192FE the
 		 * aggregated-frame BD/segment TX path wedges the HW: a fresh BE
 		 * (data) stream sends its first few MPDUs NON-aggregated (which

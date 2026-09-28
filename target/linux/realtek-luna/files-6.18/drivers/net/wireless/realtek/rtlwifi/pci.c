@@ -1428,6 +1428,13 @@ static void _rtl_pci_free_tx_ring(struct ieee80211_hw *hw,
 		ring->idx = (ring->idx + 1) % ring->entries;
 	}
 
+	if (prio == BEACON_QUEUE && rtlpci->bcn_prev) {
+		dma_unmap_single(&rtlpci->pdev->dev, rtlpci->bcn_prev_dma,
+				 rtlpci->bcn_prev->len, DMA_TO_DEVICE);
+		kfree_skb(rtlpci->bcn_prev);
+		rtlpci->bcn_prev = NULL;
+	}
+
 	/* free dma of this ring */
 	dma_free_coherent(&rtlpci->pdev->dev,
 			  sizeof(*ring->desc) * ring->entries, ring->desc,
@@ -1752,13 +1759,21 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 						    HW_DESC_OWN, &zero);
 		}
 		dma_wmb();
+		/* The MAC downloads again before each TBTT and may hold the
+		 * previous descriptor's address; a beacon is freed only once
+		 * the NEXT one has been published, never at its own replacement.
+		 */
+		if (rtlpci->bcn_prev) {
+			dma_unmap_single(&rtlpci->pdev->dev, rtlpci->bcn_prev_dma,
+					 rtlpci->bcn_prev->len, DMA_TO_DEVICE);
+			kfree_skb(rtlpci->bcn_prev);
+			rtlpci->bcn_prev = NULL;
+		}
 		old = __skb_dequeue(&ring->queue);
 		if (old) {
-			dma_unmap_single(&rtlpci->pdev->dev,
-				rtlpriv->cfg->ops->get_desc(hw, entry, true,
-							HW_DESC_TXBUFF_ADDR),
-				old->len, DMA_TO_DEVICE);
-			kfree_skb(old);
+			rtlpci->bcn_prev = old;
+			rtlpci->bcn_prev_dma = rtlpriv->cfg->ops->get_desc(hw, entry, true,
+								HW_DESC_TXBUFF_ADDR);
 		}
 	}
 

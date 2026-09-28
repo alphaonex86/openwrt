@@ -1147,7 +1147,8 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 		fw_ps_awake = false;
 
 	spin_lock(&rtlpriv->locks.rf_ps_lock);
-	if ((ppsc->rfpwr_state == ERFON) &&
+	if (!rtlpriv->cfg->mod_params->disable_watchdog &&
+	    (ppsc->rfpwr_state == ERFON) &&
 	    ((!fw_current_inpsmode) && fw_ps_awake) &&
 	    (!ppsc->rfchange_inprogress)) {
 		rtl92fe_dm_common_info_self_update(hw);

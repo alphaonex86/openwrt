@@ -2012,6 +2012,59 @@ static void rtl92fe_txbd_snapshot(struct rtl_priv *rtlpriv, u16 *hw_idx)
 		hw_idx[i] = rtl_read_dword(rtlpriv, rtl92fe_txbd_idx_regs[i]) >> 16;
 }
 
+/* The endpoint's own PCIe config space through the DBI backdoor (the handshake of
+ * _rtl92fe_enable_aspm_back_door): a dword read, and a write under a byte-enable nibble. */
+static bool _rtl92fe_dbi_read(struct rtl_priv *rtlpriv, u16 addr, u32 *val)
+{
+	unsigned int n = 0;
+	u8 busy;
+
+	rtl_write_word(rtlpriv, REG_BACKDOOR_DBI_DATA, addr);
+	rtl_write_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2, 0x2);
+	busy = rtl_read_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2);
+	while (busy && n++ < 20) {
+		udelay(10);
+		busy = rtl_read_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2);
+	}
+	if (busy)
+		return false;
+	*val = rtl_read_dword(rtlpriv, REG_BACKDOOR_DBI_RDATA);
+	return true;
+}
+
+static void _rtl92fe_dbi_write(struct rtl_priv *rtlpriv, u16 addr_be, u32 val)
+{
+	unsigned int n = 0;
+	u8 busy;
+
+	rtl_write_dword(rtlpriv, REG_BACKDOOR_DBI_WDATA, val);
+	rtl_write_word(rtlpriv, REG_BACKDOOR_DBI_DATA, addr_be);
+	rtl_write_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2, 0x1);
+	busy = rtl_read_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2);
+	while (busy && n++ < 20) {
+		udelay(10);
+		busy = rtl_read_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2);
+	}
+}
+
+/* DIAGNOSTIC (G24W, 2026-09-28): did the PCIe LINK itself report an error since the last
+ * look? DevSta (config 0x7a) bits 0-3 = correctable / non-fatal / fatal / unsupported
+ * request, write-1-to-clear, and LnkSta (0x82). A beacon download that fails 1 in ~1500 on
+ * one host and never on another is asked about its bus before its registers. */
+static void rtl92fe_pcie_link_witness(struct rtl_priv *rtlpriv, char *out, size_t len)
+{
+	u32 devctl_sta = 0, lnkctl_sta = 0;
+
+	if (!_rtl92fe_dbi_read(rtlpriv, 0x78, &devctl_sta) ||
+	    !_rtl92fe_dbi_read(rtlpriv, 0x80, &lnkctl_sta)) {
+		scnprintf(out, len, "pcie: dbi busy");
+		return;
+	}
+	scnprintf(out, len, "pcie devsta %04x lnksta %04x", devctl_sta >> 16, lnkctl_sta >> 16);
+	if (devctl_sta & 0x000f0000)		/* clear what was reported: the next line says "since" */
+		_rtl92fe_dbi_write(rtlpriv, 0xc078, devctl_sta & 0x000f0000);
+}
+
 /* DIAGNOSTIC (G24W, 2026-09-28): hold every other TX queue's DMA from the beacon's early
  * interrupt to its TBDOK/TBDER, so the beacon download never shares the engine with a probe
  * response or a data frame. The vendor's own per-queue stop bits of REG_PCIE_CTRL
@@ -2043,7 +2096,7 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	u32 status = rtl_read_dword(rtlpriv, REG_TXDMA_STATUS);
 	u16 now[ARRAY_SIZE(rtl92fe_txbd_idx_regs)];
-	char moved[48] = "";
+	char moved[48] = "", link[40];
 	unsigned int i, n = 0;
 
 	if (!status)
@@ -2052,6 +2105,7 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 	rtlpci->txdma_status |= status;
 	rtl_write_dword(rtlpriv, REG_TXDMA_STATUS, status);
 	rtl92fe_txbd_snapshot(rtlpriv, now);
+	rtl92fe_pcie_link_witness(rtlpriv, link, sizeof(link));
 	for (i = 0; i < ARRAY_SIZE(now); i++)
 		if (now[i] != rtl92fe_txbd_at_early[i])
 			n += scnprintf(moved + n, sizeof(moved) - n, " %s+%u",
@@ -2065,7 +2119,7 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 	 * path carries almost only beacons, so the context that discriminates
 	 * a late beacon rewrite from a starved DMA is printed with the error.
 	 */
-	pr_warn_ratelimited("TXDMA error 0x%08x (%u so far) bcn: %uus after irq, tasklet done at %uus, tasklet %u late %u, DWBCN0 0x%08x free_tail 0x%02x mgq_idx 0x%08x, queues moved since the early irq:%s (errors with %u / without %u), guard %s stuck %u\n",
+	pr_warn_ratelimited("TXDMA error 0x%08x (%u so far) bcn: %uus after irq, tasklet done at %uus, tasklet %u late %u, DWBCN0 0x%08x free_tail 0x%02x mgq_idx 0x%08x, queues moved since the early irq:%s (errors with %u / without %u), guard %s stuck %u, %s\n",
 			    status, rtlpci->txdma_err,
 			    (u32)ktime_to_us(ktime_get()) - rtlpci->bcn_irq_us,
 			    rtlpci->bcn_done_us - rtlpci->bcn_irq_us,
@@ -2076,7 +2130,7 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 			    n ? moved : " none",
 			    rtl92fe_err_with_txq, rtl92fe_err_without_txq,
 			    bcn_dma_guard ? (rtl92fe_guard_armed ? "armed" : "released") : "off",
-			    rtl92fe_guard_stuck);
+			    rtl92fe_guard_stuck, link);
 }
 
 void rtl92fe_interrupt_recognized(struct ieee80211_hw *hw,

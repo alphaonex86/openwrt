@@ -1013,6 +1013,19 @@ void rtl92fe_set_desc(struct ieee80211_hw *hw, u8 *pdesc8, bool istx,
 		case HW_DESC_TX_NEXTDESC_ADDR:
 			set_tx_desc_next_desc_address(pdesc, *(u32 *)val);
 			break;
+		case HW_DESC_TXBUFF_ADDR: {
+			/* The beacon's payload address, in BOTH places the fill writes it:
+			 * the TXBD's segment 1 and the tx desc (pci.c's fixed beacon copy). */
+			struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+			u32 addr = *(u32 *)val;
+
+			set_txbuffer_desc_add_low_with_offset(pdesc, 1, addr);
+			set_txbuffer_desc_add_high_with_offset(pdesc, 1, 0,
+							       rtlpriv->cfg->mod_params->dma64);
+			set_tx_desc_tx_buffer_address(
+				(__le32 *)rtlpci->tx_ring[BEACON_QUEUE].desc, addr);
+			break;
+		}
 		case HW_DESC_OWN: {
 			struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 			struct rtl8192_tx_ring *ring = &rtlpci->tx_ring[q_idx];

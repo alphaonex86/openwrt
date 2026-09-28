@@ -24,6 +24,15 @@ MODULE_DESCRIPTION("PCI basic driver for rtlwifi");
  * timeouts ENABLED); mainline sets Completion Timeout Disable below, so a read whose completion
  * the host delays waits forever -- the shape of "the PCIe engine reports itself stuck".
  * 1 = mainline (the A/B control), 0 = the chip's timeout stays enabled, as stock. */
+/* DIAGNOSTIC (G24W TXDMA 0x6000, 2026-09-28): the vendor keeps ONE persistent beacon buffer
+ * and rewrites it in place; ours maps a fresh skb per beacon, so the descriptor's buffer
+ * address moves at every TBTT. bcn_bounce=1 publishes every beacon from one fixed coherent
+ * buffer instead -- no varying address, no cache maintenance on the payload. */
+static int bcn_bounce = 1;
+module_param(bcn_bounce, int, 0444);
+MODULE_PARM_DESC(bcn_bounce, "publish beacons from one fixed coherent buffer (default 1)");
+#define BCN_BOUNCE_SIZE 2048
+
 static int comp_tmout_dis = 1;
 module_param(comp_tmout_dis, int, 0444);
 MODULE_PARM_DESC(comp_tmout_dis,
@@ -1326,6 +1335,12 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 						    (u8 *)&nextdescaddress);
 		}
 	}
+	if (prio == BEACON_QUEUE && bcn_bounce) {
+		rtlpci->bcn_bounce = dma_alloc_coherent(&rtlpci->pdev->dev, BCN_BOUNCE_SIZE,
+							&rtlpci->bcn_bounce_dma, GFP_KERNEL);
+		if (!rtlpci->bcn_bounce)
+			pr_warn("rtlwifi: no coherent beacon buffer -- beacons map their own skb\n");
+	}
 	return 0;
 }
 
@@ -1420,6 +1435,18 @@ err_unwind:
 	return -ENOMEM;
 }
 
+/* The mapping to retire with a queued TX skb: a beacon published from the fixed copy keeps
+ * its own mapping in bcn_cur_dma while the descriptor holds the copy's address. */
+static dma_addr_t _rtl_pci_tx_skb_dma(struct ieee80211_hw *hw, unsigned int prio, u8 *entry)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+
+	if (prio == BEACON_QUEUE && rtlpci->bcn_bounce)
+		return rtlpci->bcn_cur_dma;
+	return rtlpriv->cfg->ops->get_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR);
+}
+
 static void _rtl_pci_free_tx_ring(struct ieee80211_hw *hw,
 				  unsigned int prio)
 {
@@ -1437,9 +1464,7 @@ static void _rtl_pci_free_tx_ring(struct ieee80211_hw *hw,
 		else
 			entry = (u8 *)(&ring->desc[ring->idx]);
 
-		dma_unmap_single(&rtlpci->pdev->dev,
-				 rtlpriv->cfg->ops->get_desc(hw, (u8 *)entry,
-						true, HW_DESC_TXBUFF_ADDR),
+		dma_unmap_single(&rtlpci->pdev->dev, _rtl_pci_tx_skb_dma(hw, prio, entry),
 				 skb->len, DMA_TO_DEVICE);
 		kfree_skb(skb);
 		ring->idx = (ring->idx + 1) % ring->entries;
@@ -1450,6 +1475,11 @@ static void _rtl_pci_free_tx_ring(struct ieee80211_hw *hw,
 				 rtlpci->bcn_prev->len, DMA_TO_DEVICE);
 		kfree_skb(rtlpci->bcn_prev);
 		rtlpci->bcn_prev = NULL;
+	}
+	if (prio == BEACON_QUEUE && rtlpci->bcn_bounce) {
+		dma_free_coherent(&rtlpci->pdev->dev, BCN_BOUNCE_SIZE, rtlpci->bcn_bounce,
+				  rtlpci->bcn_bounce_dma);
+		rtlpci->bcn_bounce = NULL;
 	}
 
 	/* free dma of this ring */
@@ -1629,8 +1659,7 @@ int rtl_pci_reset_trx_ring(struct ieee80211_hw *hw)
 					entry = (u8 *)(&ring->desc[ring->idx]);
 
 				dma_unmap_single(&rtlpci->pdev->dev,
-						 rtlpriv->cfg->ops->get_desc(hw, (u8 *)entry,
-								true, HW_DESC_TXBUFF_ADDR),
+						 _rtl_pci_tx_skb_dma(hw, i, entry),
 						 skb->len, DMA_TO_DEVICE);
 				dev_kfree_skb_irq(skb);
 				ring->idx = (ring->idx + 1) % ring->entries;
@@ -1794,8 +1823,7 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 		old = __skb_dequeue(&ring->queue);
 		if (old) {
 			rtlpci->bcn_prev = old;
-			rtlpci->bcn_prev_dma = rtlpriv->cfg->ops->get_desc(hw, entry, true,
-								HW_DESC_TXBUFF_ADDR);
+			rtlpci->bcn_prev_dma = rtlpci->bcn_cur_dma;
 		}
 	}
 
@@ -1836,6 +1864,18 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 	after = rtlpriv->cfg->ops->get_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR);
 	if (!after || after == before)
 		goto drop;
+	if (hw_queue == BEACON_QUEUE) {
+		/* The skb keeps its own mapping (unmapped when it is retired); the chip is
+		 * pointed at the one fixed coherent copy when there is one. */
+		rtlpci->bcn_cur_dma = after;
+		if (rtlpci->bcn_bounce && skb->len <= BCN_BOUNCE_SIZE) {
+			u32 bounce = (u32)rtlpci->bcn_bounce_dma;
+
+			memcpy(rtlpci->bcn_bounce, skb->data, skb->len);
+			rtlpriv->cfg->ops->set_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR,
+						    (u8 *)&bounce);
+		}
+	}
 
 	__skb_queue_tail(&ring->queue, skb);
 

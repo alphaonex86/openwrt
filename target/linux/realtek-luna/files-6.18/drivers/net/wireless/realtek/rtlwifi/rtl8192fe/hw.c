@@ -111,6 +111,57 @@ static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 	pr_info("pokes: %u byte(s) written (after %s)\n", n, where);
 }
 
+/* ★ THE SAME BISECT KNOB FOR THE 32-BIT REGISTERS (2026-09-28). The X111W's stock leaves the
+ * front-end pinmux words 0x920-0x944 at the PHY table defaults while this port applies the
+ * vendor's RFE7 branch unconditionally (blank efuse -> rfe_type forced to 7), and its AP
+ * receives a 1 m client at -100 dBm. Restoring stock's words on ONE image, with the IQK and
+ * the width untouched, is the discriminator. A MASK restores one field of a word other code
+ * also owns (MAC 0x4c). */
+static char *bbpokes = "";
+module_param(bbpokes, charp, 0444);
+MODULE_PARM_DESC(bbpokes, "DIAGNOSTIC: 32-bit register writes 0xADDR:VAL[/MASK],... applied once "
+		 "after the front-end init (default none)");
+
+static int _rtl92fe_bbpoke_next(const char **p, unsigned int *addr, unsigned int *val,
+				unsigned int *mask)
+{
+	int used, used2;
+
+	if (!**p)
+		return 0;
+	if (sscanf(*p, "%x:%x%n", addr, val, &used) != 2 || *addr > 0xfffc || (*addr & 3))
+		return -1;
+	*mask = 0xffffffff;
+	if ((*p)[used] == '/') {
+		if (sscanf(*p + used, "/%x%n", mask, &used2) != 1 || !*mask)
+			return -1;
+		used += used2;
+	}
+	*p += used;
+	if (**p == ',')
+		(*p)++;
+	return 1;
+}
+
+static void _rtl92fe_apply_bbpokes(struct ieee80211_hw *hw)
+{
+	const char *p = bbpokes;
+	unsigned int addr, val, mask, n = 0;
+	int r;
+
+	if (!p || !*p)
+		return;
+	while ((r = _rtl92fe_bbpoke_next(&p, &addr, &val, &mask)) > 0)
+		;
+	if (r < 0) {
+		pr_warn("bbpokes: cannot parse %.24s -- the whole list is REFUSED, nothing written\n", p);
+		return;
+	}
+	for (p = bbpokes; _rtl92fe_bbpoke_next(&p, &addr, &val, &mask) > 0; n++)
+		rtl_set_bbreg(hw, addr, mask, val);
+	pr_info("bbpokes: %u dword(s) written (after front-end init)\n", n);
+}
+
 static void _rtl92fe_set_bcn_ctrl_reg(struct ieee80211_hw *hw,
 				      u8 set_bits, u8 clear_bits)
 {
@@ -1086,10 +1137,12 @@ dma64_end:
 		       TX_DESC_NUM_92F | ((RTL8192FE_SEG_NUM << 12) & 0x3000));
 	rtl_write_word(rtlpriv, REG_HI7Q_TXBD_NUM,
 		       TX_DESC_NUM_92F | ((RTL8192FE_SEG_NUM << 12) & 0x3000));
-	/* RX ring depth + 0x8000 = enable RX DMA. */
+	/* RX ring depth and the segment count; bit 15 is BIT_SYS_32_64 (vendor HalComBit.h),
+	 * the 64-bit 16-byte segment layout -- CLEAR: this host runs the vendor's 8-byte
+	 * segments (TXBD_SEG_32_64_SEL 0), as pci.h/trx.h lay them out. */
 	rtl_write_word(rtlpriv, REG_RX_RXBD_NUM,
 		       RX_DESC_NUM_92F |
-		       ((RTL8192FE_SEG_NUM << 13) & 0x6000) | 0x8000);
+		       ((RTL8192FE_SEG_NUM << 13) & 0x6000));
 
 	rtl_write_dword(rtlpriv, REG_TSFTIMER_HCI, 0xFFFFFFFF);
 
@@ -1677,6 +1730,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	 */
 	HWINIT_RUNG(9, "bt_hw_init");
 	_rtl92fe_config_trx_mode_ab(hw);
+	_rtl92fe_apply_bbpokes(hw);
 
 	/* RX/TX engine is configured (RCR/CR) via the MAC init + hw_configure
 	 * above; finish with calibration.

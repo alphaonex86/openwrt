@@ -634,30 +634,18 @@ static bool _rtl92fe_phy_bb_config_parafile(struct ieee80211_hw *hw)
 	return true;
 }
 
-/* ★★★ TEMPORARY DIAGNOSTIC, 2026-09-01 -- REMOVE once the ... -- dev/MEASURED-phy.c.md sec 2. */
-static int mac_array_pairs;
-module_param(mac_array_pairs, int, 0644);
-MODULE_PARM_DESC(mac_array_pairs,
-		 "DIAGNOSTIC: write only the first N pairs of the MAC array (0 = all)");
-
 static bool _rtl92fe_phy_config_mac_with_headerfile(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	u32 i;
 	u32 arraylength;
 	u32 *ptrarray;
-	u32 pairs, stop;
 
 	arraylength = RTL8192FE_MAC_ARRAY_LEN;
 	ptrarray = RTL8192FE_MAC_ARRAY;
-	pairs = arraylength / 2;
-	stop = (mac_array_pairs > 0 && (u32)mac_array_pairs < pairs)
-		? (u32)mac_array_pairs : pairs;
-	pr_info("rtl8192fe: MAC array %u pair(s); writing %u%s\n",
-		pairs, stop, stop == pairs ? " (all)" : "");
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 		"Img:RTL8192FE_MAC_ARRAY LEN %d\n", arraylength);
-	for (i = 0; i < stop * 2; i = i + 2)
+	for (i = 0; i < arraylength; i = i + 2)
 		rtl_write_byte(rtlpriv, ptrarray[i], (u8)ptrarray[i + 1]);
 	return true;
 }

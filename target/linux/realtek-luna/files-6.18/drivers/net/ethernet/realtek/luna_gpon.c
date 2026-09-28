@@ -2370,8 +2370,8 @@ static const struct { u16 reg; u8 val; } bosa_tx_golden[] __initconst = {
 	{ BOSA_W(57), 0x2d },	/* APCDIG bias DAC power        */
 	{ BOSA_W(53), 0xcf },	/* TX/APC fault detection       */
 	{ BOSA_W(60), 0x03 },	/* TIA power config             */
-	{ BOSA_W(132), 0xf2 },	/* W88 DSR TX APC set-point         */
-	{ BOSA_W(124), 0xe9 },	/* W80 TX backup/state             */
+	{ BOSA_W(88), 0xf2 },	/* W88 DSR TX APC set-point         */
+	{ BOSA_W(80), 0xe9 },	/* W80 TX backup/state             */
 	{ BOSA_W(48), 0x0e },	/* TX_ENMODE (enable, last)    */
 };
 
@@ -2591,56 +2591,56 @@ static const struct { u16 reg; u8 val; } bosa_init_golden[] __initconst = {
 	{BOSA_W(71),0xcc}, {BOSA_W(72),0x4d}, {BOSA_W(73),0x2a}, {BOSA_W(74),0x22},
 	{BOSA_W(75),0x89}, {BOSA_W(76),0x85},
 	{BOSA_REG_W77,BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN},
-	{BOSA_W(78),0x80}, {BOSA_W(79),0x3f}, {BOSA_W(80),0x00}, {BOSA_W(81),0x00},
-	{BOSA_W(82),0x00}, {BOSA_W(83),0x00},
+	{BOSA_W(78),0x80}, {BOSA_W(79),0x3f}, {BOSA_REG_MAGIC_CODE,0x00}, {BOSA_REG_SW_VERSION,0x00},
+	{BOSA_PAGE2(0x52),0x00}, {BOSA_REG_CONTROL1,0x00},
 	{BOSA_REG_CONTROL2,0x4d},	/* TX_POW_CTL/ENLD_L/LOS_PIN_TRI */
-	{BOSA_W(85),0x30},	/* CONTROL3: bit1 = fault-release strobe (re-arm path) */
-	{BOSA_W(86),0x00}, {BOSA_W(87),0xf4}, {BOSA_W(88),0x00}, {BOSA_W(89),0xfe},
-	{BOSA_W(90),0xff}, {BOSA_W(91),0x01}, {BOSA_W(92),0x00}, {BOSA_W(93),0xff},
-	{BOSA_W(94),0x00}, {BOSA_W(95),0x02}, {BOSA_W(96),0x00}, {BOSA_W(97),0x03},
-	{BOSA_W(98),0xff}, {BOSA_W(99),0x07},
-	{BOSA_W(100),0x43},	/* APD control (RX log "apd"; RX bring-up writes it too) */
-	{BOSA_W(101),0x00}, {BOSA_W(102),0xa0}, {BOSA_W(103),0xc0}, {BOSA_W(104),0x00},
-	{BOSA_W(105),0x08}, {BOSA_W(106),0x10}, {BOSA_W(107),0xe0}, {BOSA_W(108),0xe0},
-	{BOSA_W(109),0xe0}, {BOSA_W(110),0xff}, {BOSA_W(111),0xf4}, {BOSA_W(112),0x84},
-	{BOSA_W(113),0x82}, {BOSA_W(114),0x50}, {BOSA_W(115),0x00}, {BOSA_W(116),0xff},
-	{BOSA_W(117),0x00}, {BOSA_W(118),0x10}, {BOSA_W(119),0x00}, {BOSA_W(120),0x00},
-	{BOSA_W(121),0xff}, {BOSA_W(122),0x00}, {BOSA_W(123),0x08},
-	{BOSA_W(124),0xe9},	/* W80 TX backup/state (= bosa_tx_golden) */
-	{BOSA_W(125),0x00}, {BOSA_W(126),0x00}, {BOSA_W(127),0x00}, {BOSA_W(128),0x00},
-	{BOSA_W(129),0x01}, {BOSA_W(130),0x00}, {BOSA_W(131),0x88},
-	{BOSA_W(132),0xf2},	/* W88 DSR TX APC set-point (= bosa_tx_golden) */
-	{BOSA_W(133),0x00}, {BOSA_W(134),0x00}, {BOSA_W(135),0x08}, {BOSA_W(136),0x00},
-	{BOSA_W(137),0x00}, {BOSA_W(138),0x00}, {BOSA_W(139),0x00}, {BOSA_W(140),0x00},
-	{BOSA_W(141),0x00}, {BOSA_W(142),0x00}, {BOSA_W(143),0x00}, {BOSA_W(144),0x00},
-	{BOSA_W(145),0x00}, {BOSA_W(146),0x08}, {BOSA_W(147),0x00}, {BOSA_W(148),0x00},
-	{BOSA_W(149),0x00}, {BOSA_W(150),0x00}, {BOSA_W(151),0x00}, {BOSA_W(152),0x00},
-	{BOSA_W(153),0x00}, {BOSA_W(154),0x00}, {BOSA_W(155),0x00}, {BOSA_W(156),0x00},
-	{BOSA_W(157),0x00}, {BOSA_W(158),0x00}, {BOSA_W(159),0x00}, {BOSA_W(160),0x00},
-	{BOSA_W(161),0x00}, {BOSA_W(162),0x00}, {BOSA_W(163),0x00}, {BOSA_W(164),0x00},
-	{BOSA_W(165),0x00}, {BOSA_W(166),0x00}, {BOSA_W(167),0x08}, {BOSA_W(168),0x00},
-	{BOSA_W(169),0x00}, {BOSA_W(170),0x00}, {BOSA_W(171),0x00}, {BOSA_W(172),0x00},
-	{BOSA_W(173),0x00}, {BOSA_W(174),0x00}, {BOSA_W(175),0x08}, {BOSA_W(176),0x00},
-	{BOSA_W(177),0x00}, {BOSA_W(178),0x00}, {BOSA_W(179),0x00}, {BOSA_W(180),0x00},
-	{BOSA_W(181),0x00}, {BOSA_W(182),0x00}, {BOSA_W(183),0xca}, {BOSA_W(184),0x00},
-	{BOSA_W(185),0x00}, {BOSA_W(186),0x00}, {BOSA_W(187),0x00}, {BOSA_W(188),0x00},
-	{BOSA_W(189),0x00}, {BOSA_W(190),0x00}, {BOSA_W(191),0x00}, {BOSA_W(192),0x00},
-	{BOSA_W(193),0xfc}, {BOSA_W(194),0x00}, {BOSA_W(195),0x00}, {BOSA_W(196),0x00},
-	{BOSA_W(197),0x02}, {BOSA_W(198),0x00}, {BOSA_W(199),0xe3}, {BOSA_W(200),0x00},
-	{BOSA_W(201),0x00}, {BOSA_W(202),0x00}, {BOSA_W(203),0x00}, {BOSA_W(204),0x00},
-	{BOSA_W(205),0x00}, {BOSA_W(206),0x00}, {BOSA_W(207),0x00}, {BOSA_W(208),0x00},
-	{BOSA_W(209),0x00}, {BOSA_W(210),0x00}, {BOSA_W(211),0x00}, {BOSA_W(212),0x00},
-	{BOSA_W(213),0x00}, {BOSA_W(214),0x00}, {BOSA_W(215),0x00}, {BOSA_W(216),0x00},
-	{BOSA_W(217),0x00}, {BOSA_W(218),0x00}, {BOSA_W(219),0x00}, {BOSA_W(220),0x00},
-	{BOSA_W(221),0x00}, {BOSA_W(222),0x00}, {BOSA_W(223),0x00}, {BOSA_W(224),0x00},
-	{BOSA_W(225),0x00}, {BOSA_W(226),0x00}, {BOSA_W(227),0x00}, {BOSA_W(228),0x00},
-	{BOSA_W(229),0x00}, {BOSA_W(230),0x00}, {BOSA_W(231),0x00}, {BOSA_W(232),0x00},
-	{BOSA_W(233),0x00}, {BOSA_W(234),0x00}, {BOSA_W(235),0x08}, {BOSA_W(236),0x00},
-	{BOSA_W(237),0x00}, {BOSA_W(238),0x00}, {BOSA_W(239),0x00}, {BOSA_W(240),0x00},
-	{BOSA_W(241),0x00}, {BOSA_W(242),0x00}, {BOSA_W(243),0x08}, {BOSA_W(244),0x00},
-	{BOSA_W(245),0x00}, {BOSA_W(246),0x00}, {BOSA_W(247),0x00}, {BOSA_W(248),0x00},
-	{BOSA_W(249),0x00}, {BOSA_W(250),0x00}, {BOSA_W(251),0x00}, {BOSA_W(252),0x00},
-	{BOSA_W(253),0x00}, {BOSA_W(254),0x08}, {BOSA_W(255),0x00},
+	{BOSA_REG_CONTROL3,0x30},	/* CONTROL3: bit1 = fault-release strobe (re-arm path) */
+	{BOSA_PAGE2(0x56),0x00}, {BOSA_PAGE2(0x57),0xf4}, {BOSA_REG_SW_INT_CODE,0x00}, {BOSA_REG_INT_MASK1,0xfe},
+	{BOSA_PAGE2(0x5a),0xff}, {BOSA_PAGE2(0x5b),0x01}, {BOSA_PAGE2(0x5c),0x00}, {BOSA_PAGE2(0x5d),0xff},
+	{BOSA_PAGE2(0x5e),0x00}, {BOSA_PAGE2(0x5f),0x02}, {BOSA_REG_FAULT_INHIBIT,0x00}, {BOSA_REG_FAULT_INHIBIT2,0x03},
+	{BOSA_REG_SW_FAULT_INHIBIT1,0xff}, {BOSA_REG_SW_FAULT_INHIBIT2,0x07},
+	{BOSA_REG_DAC_HB,0x43},	/* APD control (RX log "apd"; RX bring-up writes it too) */
+	{BOSA_REG_DAC_LB,0x00}, {BOSA_REG_EXT_RSSI_LOW_TH,0xa0}, {BOSA_REG_EXT_RSSI_HIGH_TH,0xc0}, {BOSA_PAGE2(0x68),0x00},
+	{BOSA_REG_RX_TH,0x08}, {BOSA_PAGE2(0x6a),0x10}, {BOSA_PAGE2(0x6b),0xe0}, {BOSA_PAGE2(0x6c),0xe0},
+	{BOSA_PAGE2(0x6d),0xe0}, {BOSA_PAGE2(0x6e),0xff}, {BOSA_PAGE2(0x6f),0xf4}, {BOSA_PAGE2(0x70),0x84},
+	{BOSA_PAGE2(0x71),0x82}, {BOSA_PAGE2(0x72),0x50}, {BOSA_REG_READY_DELAY,0x00}, {BOSA_REG_DDMI_W_LCT,0xff},
+	{BOSA_REG_DDMI_W_HCT,0x00}, {BOSA_REG_DEBUG_CTL,0x10}, {BOSA_REG_DEBUG_SL1,0x00}, {BOSA_REG_DEBUG_SL2,0x00},
+	{BOSA_REG_IMPD_TH_ORI,0xff}, {BOSA_PAGE2(0x7a),0x00}, {BOSA_PAGE2(0x7b),0x08},
+	{BOSA_W(80),0xe9},	/* W80 TX backup/state (= bosa_tx_golden) */
+	{BOSA_W(81),0x00}, {BOSA_W(82),0x00}, {BOSA_W(83),0x00}, {BOSA_W(84),0x00},
+	{BOSA_W(85),0x01}, {BOSA_W(86),0x00}, {BOSA_W(87),0x88},
+	{BOSA_W(88),0xf2},	/* W88 DSR TX APC set-point (= bosa_tx_golden) */
+	{BOSA_PAGE2(0x85),0x00}, {BOSA_PAGE2(0x86),0x00}, {BOSA_PAGE2(0x87),0x08}, {BOSA_PAGE2(0x88),0x00},
+	{BOSA_PAGE2(0x89),0x00}, {BOSA_PAGE2(0x8a),0x00}, {BOSA_PAGE2(0x8b),0x00}, {BOSA_PAGE2(0x8c),0x00},
+	{BOSA_PAGE2(0x8d),0x00}, {BOSA_PAGE2(0x8e),0x00}, {BOSA_PAGE2(0x8f),0x00}, {BOSA_PAGE2(0x90),0x00},
+	{BOSA_PAGE2(0x91),0x00}, {BOSA_PAGE2(0x92),0x08}, {BOSA_PAGE2(0x93),0x00}, {BOSA_PAGE2(0x94),0x00},
+	{BOSA_PAGE2(0x95),0x00}, {BOSA_PAGE2(0x96),0x00}, {BOSA_PAGE2(0x97),0x00}, {BOSA_PAGE2(0x98),0x00},
+	{BOSA_PAGE2(0x99),0x00}, {BOSA_PAGE2(0x9a),0x00}, {BOSA_PAGE2(0x9b),0x00}, {BOSA_PAGE2(0x9c),0x00},
+	{BOSA_PAGE2(0x9d),0x00}, {BOSA_PAGE2(0x9e),0x00}, {BOSA_PAGE2(0x9f),0x00}, {BOSA_PAGE2(0xa0),0x00},
+	{BOSA_PAGE2(0xa1),0x00}, {BOSA_PAGE2(0xa2),0x00}, {BOSA_PAGE2(0xa3),0x00}, {BOSA_PAGE2(0xa4),0x00},
+	{BOSA_PAGE2(0xa5),0x00}, {BOSA_PAGE2(0xa6),0x00}, {BOSA_PAGE2(0xa7),0x08}, {BOSA_PAGE2(0xa8),0x00},
+	{BOSA_PAGE2(0xa9),0x00}, {BOSA_PAGE2(0xaa),0x00}, {BOSA_PAGE2(0xab),0x00}, {BOSA_PAGE2(0xac),0x00},
+	{BOSA_PAGE2(0xad),0x00}, {BOSA_PAGE2(0xae),0x00}, {BOSA_PAGE2(0xaf),0x08}, {BOSA_PAGE2(0xb0),0x00},
+	{BOSA_PAGE2(0xb1),0x00}, {BOSA_PAGE2(0xb2),0x00}, {BOSA_PAGE2(0xb3),0x00}, {BOSA_PAGE2(0xb4),0x00},
+	{BOSA_PAGE2(0xb5),0x00}, {BOSA_PAGE2(0xb6),0x00}, {BOSA_PAGE2(0xb7),0xca}, {BOSA_PAGE2(0xb8),0x00},
+	{BOSA_PAGE2(0xb9),0x00}, {BOSA_PAGE2(0xba),0x00}, {BOSA_PAGE2(0xbb),0x00}, {BOSA_PAGE2(0xbc),0x00},
+	{BOSA_PAGE2(0xbd),0x00}, {BOSA_PAGE2(0xbe),0x00}, {BOSA_PAGE2(0xbf),0x00}, {BOSA_PAGE2(0xc0),0x00},
+	{BOSA_PAGE2(0xc1),0xfc}, {BOSA_PAGE2(0xc2),0x00}, {BOSA_PAGE2(0xc3),0x00}, {BOSA_PAGE2(0xc4),0x00},
+	{BOSA_PAGE2(0xc5),0x02}, {BOSA_PAGE2(0xc6),0x00}, {BOSA_PAGE2(0xc7),0xe3}, {BOSA_PAGE2(0xc8),0x00},
+	{BOSA_PAGE2(0xc9),0x00}, {BOSA_PAGE2(0xca),0x00}, {BOSA_PAGE2(0xcb),0x00}, {BOSA_PAGE2(0xcc),0x00},
+	{BOSA_PAGE2(0xcd),0x00}, {BOSA_PAGE2(0xce),0x00}, {BOSA_PAGE2(0xcf),0x00}, {BOSA_PAGE2(0xd0),0x00},
+	{BOSA_PAGE2(0xd1),0x00}, {BOSA_PAGE2(0xd2),0x00}, {BOSA_PAGE2(0xd3),0x00}, {BOSA_PAGE2(0xd4),0x00},
+	{BOSA_PAGE2(0xd5),0x00}, {BOSA_PAGE2(0xd6),0x00}, {BOSA_PAGE2(0xd7),0x00}, {BOSA_PAGE2(0xd8),0x00},
+	{BOSA_PAGE2(0xd9),0x00}, {BOSA_PAGE2(0xda),0x00}, {BOSA_PAGE2(0xdb),0x00}, {BOSA_PAGE2(0xdc),0x00},
+	{BOSA_PAGE2(0xdd),0x00}, {BOSA_PAGE2(0xde),0x00}, {BOSA_PAGE2(0xdf),0x00}, {BOSA_PAGE2(0xe0),0x00},
+	{BOSA_PAGE2(0xe1),0x00}, {BOSA_PAGE2(0xe2),0x00}, {BOSA_PAGE2(0xe3),0x00}, {BOSA_PAGE2(0xe4),0x00},
+	{BOSA_PAGE2(0xe5),0x00}, {BOSA_PAGE2(0xe6),0x00}, {BOSA_PAGE2(0xe7),0x00}, {BOSA_PAGE2(0xe8),0x00},
+	{BOSA_PAGE2(0xe9),0x00}, {BOSA_PAGE2(0xea),0x00}, {BOSA_PAGE2(0xeb),0x08}, {BOSA_PAGE2(0xec),0x00},
+	{BOSA_PAGE2(0xed),0x00}, {BOSA_PAGE2(0xee),0x00}, {BOSA_PAGE2(0xef),0x00}, {BOSA_PAGE2(0xf0),0x00},
+	{BOSA_PAGE2(0xf1),0x00}, {BOSA_PAGE2(0xf2),0x00}, {BOSA_PAGE2(0xf3),0x08}, {BOSA_PAGE2(0xf4),0x00},
+	{BOSA_PAGE2(0xf5),0x00}, {BOSA_PAGE2(0xf6),0x00}, {BOSA_PAGE2(0xf7),0x00}, {BOSA_PAGE2(0xf8),0x00},
+	{BOSA_PAGE2(0xf9),0x00}, {BOSA_PAGE2(0xfa),0x00}, {BOSA_PAGE2(0xfb),0x00}, {BOSA_PAGE2(0xfc),0x00},
+	{BOSA_PAGE2(0xfd),0x00}, {BOSA_PAGE2(0xfe),0x08}, {BOSA_PAGE2(0xff),0x00},
 	/* ---- page 3 (I2C slave 0x55): MCU control/status page ---- */
 	{BOSA_R(0),0xd6}, {BOSA_R(1),0xca},
 	{BOSA_R(2),0xa9},	/* ADC readout hi (polled by bosa_read_dd) */
@@ -2717,7 +2717,7 @@ static void __init bosa_tx_enable(void)
 {
 	int i;
 
-	/* Load the A4 register image (0x200-0x27c) + base/control ...
+	/* Load the A4 register image (0x200-BOSA_W(80)) + base/control ...
 	 * dev/MEASURED-luna_gpon.c.md sec 94. */
 	for (i = 0; i < ARRAY_SIZE(bosa_init_golden); i++)
 		bosa_write_reg(bosa_init_golden[i].reg, bosa_init_golden[i].val);
@@ -2903,8 +2903,8 @@ static void __init bosa_apc_calibrate(void)
 	 * ignition ceilings; the servo converges the live bias well below them. */
 	bosa_set_field(0x245, 0xff, 0x10);
 	bosa_set_field(0x245, 0x0c, 0x00);		/* W6932 field (default 0) */
-	bosa_write_reg(0x284, 0x01);
-	bosa_write_reg(0x27c, 0x08);
+	bosa_write_reg(BOSA_W(88), 0x01);
+	bosa_write_reg(BOSA_W(80), 0x08);
 	bosa_write_reg(0x247, 0x05);
 	bosa_write_reg(0x248, 0x86);			/* W72 bias-max */
 	bosa_write_reg(0x239, 0xfc);
@@ -2930,7 +2930,7 @@ static void __init bosa_apc_calibrate(void)
 		bosa_set_bit(0x24e, 7, 1);		/* W78 b7 (apc_init prefix) */
 		bosa_w77_walk(bosa_w77_batch1, ARRAY_SIZE(bosa_w77_batch1), 10);
 		bosa_set_bit(0x243, 7, 1);		/* W67 b7 */
-		bosa_set_field(0x27c, 0x08, 0x00);	/* W80 clear bit3 */
+		bosa_set_field(BOSA_W(80), 0x08, 0x00);	/* W80 clear bit3 */
 		bosa_w77_walk(bosa_w77_batch2, ARRAY_SIZE(bosa_w77_batch2), 10);
 		pr_info("luna-gpon: DBG post-W77hs: EN_L=%d bias=0x%02x R29=0x%02x R33=0x%02x 0x383=0x%02x R30=0x%02x\n",
 			!!(bosa_read_reg(0x204) & 0x10), bosa_read_reg(0x236) & 0xff,
@@ -2962,7 +2962,7 @@ static void __init bosa_apc_calibrate(void)
 	bosa_set_field(0x235, 0xff, 0x00);
 
 	/* idx5 DIGITAL_POWER_ON: turn on the digital/laser power, then blind settle */
-	bosa_set_bit(0x27c, 4, 1);			/* W80 bit4 = 1 */
+	bosa_set_bit(BOSA_W(80), 4, 1);			/* W80 bit4 = 1 */
 	bosa_set_bit(0x380, 0, 1);
 	mdelay(101);
 	pr_info("luna-gpon: DBG post-DPO: bias(0x236)=0x%02x 0x389=0x%02x 0x383=0x%02x R30=0x%02x\n",
@@ -2981,11 +2981,11 @@ static void __init bosa_apc_calibrate(void)
 
 	/* RTL8290B FSU (Field Setup Unit) offset/gain auto-cal plus ...
 	 * dev/MEASURED-luna_gpon.c.md sec 101. */
-	bosa_set_field(0x27c, 0xc0, 0x03);	/* apcLoopMode DCL: W80[7:6]=3 */
-	bosa_set_bit(0x27c, 5, 0);		/* FSU arm: W80 b5 low */
-	bosa_set_bit(0x27c, 4, 1);		/*          W80 b4 high */
+	bosa_set_field(BOSA_W(80), 0xc0, 0x03);	/* apcLoopMode DCL: W80[7:6]=3 */
+	bosa_set_bit(BOSA_W(80), 5, 0);		/* FSU arm: W80 b5 low */
+	bosa_set_bit(BOSA_W(80), 4, 1);		/*          W80 b4 high */
 	bosa_set_bit(0x20e, 7, 1);		/*          W14 b7 high (LOADIN) */
-	bosa_set_bit(0x27c, 5, 1);		/*          W80 b5 high (path strobe) */
+	bosa_set_bit(BOSA_W(80), 5, 1);		/*          W80 b5 high (path strobe) */
 	bosa_set_bit(0x241, 6, 0);		/* fsuMode 0: W65 b6 */
 	bosa_write_reg(BOSA_REG_W77, BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN |
 		       BOSA_W77_MOD_MAX_LOADIN);	/* W77=0xb0 arms the done-check */
@@ -2999,11 +2999,11 @@ static void __init bosa_apc_calibrate(void)
 		udelay(200);
 	}
 	bosa_set_bit(0x20e, 7, 0);		/* finalize: de-assert W14 LOADIN */
-	bosa_set_bit(0x27c, 4, 0);		/*           de-assert W80 b4 -> latch */
-	pr_info("luna-gpon: DBG post-FSU: done=%d R29=0x%02x bias=0x%02x R33=0x%02x 0x383=0x%02x 0x27c=0x%02x\n",
+	bosa_set_bit(BOSA_W(80), 4, 0);		/*           de-assert W80 b4 -> latch */
+	pr_info("luna-gpon: DBG post-FSU: done=%d R29=0x%02x bias=0x%02x R33=0x%02x 0x383=0x%02x BOSA_W(80)=0x%02x\n",
 		locked, bosa_read_reg(0x31d) & 0xff, bosa_read_reg(0x236) & 0xff,
 		bosa_read_reg(0x321) & 0xff, bosa_read_reg(0x383) & 0xff,
-		bosa_read_reg(0x27c) & 0xff);
+		bosa_read_reg(BOSA_W(80)) & 0xff);
 
 	/* txEnableFlow (B-flow: laser output enable AFTER FSU ...
 	 * dev/MEASURED-luna_gpon.c.md sec 284. */
@@ -3027,7 +3027,7 @@ static void __init bosa_apc_calibrate(void)
 	/* (removed an idx4 0x245 loop_mode write — the RTL8290B loop mode is W80[7:6],
 	 * set by FSU/DCL) */
 	bosa_set_field(0x230, 0xff, 0x00);		/* idx5 */
-	bosa_set_field(0x27c, 0xff, 0xe9);		/* W80=0xe9: converged (DCL[7:6]=3 + b5 + 0x09) */
+	bosa_set_field(BOSA_W(80), 0xff, 0xe9);		/* W80=0xe9: converged (DCL[7:6]=3 + b5 + 0x09) */
 	mdelay(51);					/* idx6 */
 	/* (removed a 0x24d low-nibble write — W77 owned by the FSU ...
 	 * dev/MEASURED-luna_gpon.c.md sec 103. */
@@ -3124,12 +3124,12 @@ static void __init rtl8290b_apc_init(void)
 
 	/* step 5: ERC chopper + W80 b3 toggle */
 	bosa_set_bit(0x243, 7, 1);
-	bosa_set_bit(0x284, 6, 1);
-	bosa_set_bit(0x284, 5, 1);
-	bosa_set_bit(0x284, 4, 1);		/* apcErcChopperEn = 1 (b6/b5/b4) */
-	t8 = bosa_read_reg(0x27c) & 0xff;
-	bosa_write_reg(0x27c, t8 & 0xf7);
-	bosa_write_reg(0x27c, t8 | 0x08);
+	bosa_set_bit(BOSA_W(88), 6, 1);
+	bosa_set_bit(BOSA_W(88), 5, 1);
+	bosa_set_bit(BOSA_W(88), 4, 1);		/* apcErcChopperEn = 1 (b6/b5/b4) */
+	t8 = bosa_read_reg(BOSA_W(80)) & 0xff;
+	bosa_write_reg(BOSA_W(80), t8 & 0xf7);
+	bosa_write_reg(BOSA_W(80), t8 | 0x08);
 
 	/* step 6: W77 walk BATCH 2 */
 	bosa_w77_walk(bosa_w77_batch2, ARRAY_SIZE(bosa_w77_batch2), 11);
@@ -3145,7 +3145,7 @@ static void __init rtl8290b_apc_init(void)
 	bosa_set_field(0x237, 0xff, 0x20);	/* Imod init 0x200 >> 4 (stock seed)	*/
 	bosa_set_field(0x238, 0xf0, 0x00);	/* Imod[3:0] = 0		*/
 	bosa_set_bit(0x23d, 7, 1);
-	bosa_set_field(0x27c, 0xc0, 0x03);	/* apcLoopMode DCL (remap 1->3)	*/
+	bosa_set_field(BOSA_W(80), 0xc0, 0x03);	/* apcLoopMode DCL (remap 1->3)	*/
 	bosa_set_bit(0x24a, 4, 0);		/* apcLoopModeEx = 0		*/
 	bosa_set_field(0x23d, 0x70, 0x04);	/* apcLaserOnDelay = 4		*/
 	bosa_set_field(0x23d, 0x03, 0x02);	/* apcSettleCnt = 2		*/
@@ -3165,7 +3165,7 @@ static void __init rtl8290b_apc_init(void)
 	bosa_set_field(0x242, 0x06, 0x00);	/* fsuErcRampm = 0 (b1-2)	*/
 
 	/* step 10: txsd off-rst */
-	bosa_set_bit(0x27c, 3, 1);		/* txsdOffRstCount = 1		*/
+	bosa_set_bit(BOSA_W(80), 3, 1);		/* txsdOffRstCount = 1		*/
 
 	/* step 11: ceilings + enables (modmax 0xcc, biasmax 0x4d, biasmin 0x01) */
 	bosa_set_bit(0x246, 2, 0);
@@ -3174,7 +3174,7 @@ static void __init rtl8290b_apc_init(void)
 	bosa_set_bit(0x246, 1, 0);
 	bosa_set_field(0x248, 0xff, 0x4d);
 	bosa_set_bit(0x246, 1, 1);		/* apcBiasMax = 0x4d		*/
-	bosa_set_bit(0x284, 7, 0);		/* apcCrossEn = 0		*/
+	bosa_set_bit(BOSA_W(88), 7, 0);		/* apcCrossEn = 0		*/
 	bosa_set_bit(0x246, 0, 0);
 	bosa_set_field(0x249, 0xff, 0x01);
 	bosa_set_bit(0x246, 0, 1);		/* apcBiasMin = 0x01		*/
@@ -3182,11 +3182,11 @@ static void __init rtl8290b_apc_init(void)
 	bosa_set_bit(0x246, 3, 1);		/* apcBiasMinEn = 1		*/
 	bosa_set_field(0x283, 0xff, 0x01);	/* apcCrossStr = 1		*/
 
-	/* step 12: FSU ARM (0x27c b5=0->b4=1->0x20e b7=1->0x27c b5=1) + commit */
-	bosa_set_bit(0x27c, 5, 0);
-	bosa_set_bit(0x27c, 4, 1);
+	/* step 12: FSU ARM (BOSA_W(80) b5=0->b4=1->0x20e b7=1->BOSA_W(80) b5=1) + commit */
+	bosa_set_bit(BOSA_W(80), 5, 0);
+	bosa_set_bit(BOSA_W(80), 4, 1);
 	bosa_set_bit(0x20e, 7, 1);
-	bosa_set_bit(0x27c, 5, 1);
+	bosa_set_bit(BOSA_W(80), 5, 1);
 	bosa_write_reg(0x232, 0xc0);
 	bosa_write_reg(0x24a, 0x60);
 
@@ -4320,7 +4320,8 @@ static int pidump_proc_show(struct seq_file *s, void *v)
 	/* Only the mapped PON-IP windows (gaps bus-fault on read). Ranges match the
 	 * readable spans of cross-compiler/stock_dump_good.txt. */
 	static const u32 ranges[][2] = {
-		{0x0000, 0x03fc}, {0x2000, 0x2bfc}, {0x4000, 0x40fc}, {0x5400, 0x54fc},
+		{0x0000, 0x03fc}, {0x2000, 0x2bfc},	/* the four readable PON-IP windows */
+		{0x4000, 0x40fc}, {0x5400, 0x54fc},	/* of stock_dump_good.txt, in order */
 	};
 	u32 off, val;
 	int r;
@@ -5435,7 +5436,7 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 		seq_printf(s, "bosa_p2: W54_236=%02x W56_238=%02x W57_239=%02x W61_24d=%02x W88_284=%02x (O5 19 22 2d b0 76)\n",
 			   bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x238) & 0xff,
 			   bosa_read_reg(0x239) & 0xff, bosa_read_reg(0x24d) & 0xff,
-			   bosa_read_reg(0x284) & 0xff);
+			   bosa_read_reg(BOSA_W(88)) & 0xff);
 		seq_printf(s, "bosa_apc: W69_245=%02x(loopmode) W58_23a=%02x(iavg) W72_248=%02x(biasmax) W73_249=%02x(biasmin 0x2a)\n",
 			   bosa_read_reg(0x245) & 0xff, bosa_read_reg(0x23a) & 0xff,
 			   bosa_read_reg(0x248) & 0xff, bosa_read_reg(0x249) & 0xff);
@@ -7920,7 +7921,7 @@ static void gpon_optical_work_fn(struct work_struct *w)
 				r = bosa_read_reg(BOSA_REG_R29);
 				if (r >= 0 && (r & 0x3c) == 0x3c) {
 					bosa_set_bit(0x20e, 7, 0);
-					bosa_set_bit(0x27c, 4, 0);
+					bosa_set_bit(BOSA_W(80), 4, 0);
 					apc_offk_latched = 1;
 					pr_info("luna-gpon: OFFK LATCHED: R29(0x31d)=0x%02x (modulator nulled)\n",
 						r & 0xff);

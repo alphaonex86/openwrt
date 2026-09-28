@@ -619,7 +619,8 @@ static u32 rtl92fe_rsvd_layout(u8 *buf, u32 size, struct rtl92fe_rsvd_pkt *pkt, 
 			return 0;
 		if (i)
 			rtl92fe_rsvd_desc(buf + at - RSVD_DESC_LEN, &pkt[i]);
-		memcpy(buf + at, pkt[i].data, pkt[i].len);
+		if (pkt[i].len)			/* RSVD_FIRST is {NULL, 0} */
+			memcpy(buf + at, pkt[i].data, pkt[i].len);
 		pkt[i].page = page;
 		end = at + pkt[i].len;
 		page += DIV_ROUND_UP(RSVD_DESC_LEN + pkt[i].len, RSVD_PAGE_LEN);

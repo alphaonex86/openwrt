@@ -708,7 +708,8 @@ static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
 /* FIB_REG0 bank bases (absolute); FP_CFG_FIB_PDOWN bit11 cleared = fiber on. */
 #define C2_FIB_REG0_PDOWN	BIT(11)
 static const u32 c2_fib_reg0_banks[] = {
-	C2_FIB_REG(0, 0), C2_FIB_REG(1, 0), C2_FIB_REG(2, 0), C2_FIB_REG(3, 0),
+	C2_FIB_REG(0, 0), C2_FIB_REG(1, 0),	/* FIB_REG0 of each of the four banks */
+	C2_FIB_REG(2, 0), C2_FIB_REG(3, 0),
 };
 
 /* Full SerDes analog + WSDS golden table: the operating point ...

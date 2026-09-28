@@ -25,7 +25,15 @@ static u8 _rtl92fe_map_hwqueue_to_fwqueue(struct sk_buff *skb, u8 hw_queue)
 	return skb->priority;
 }
 
-static void _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
+/* The RTL8192F PHY-status report is a PAGED 28-byte block, byte 0 low nibble = page:
+ *   page 0 (CCK)  byte 1 PWDB (dBm = PWDB - 110: the new CCK AGC, 0xa9c[17]), byte 12 SQ
+ *   page 1 (OFDM) bytes 1..4 PWDB per path, 16..19 EVM (s8, half dB), 20..23 CFO tail (s8),
+ *                 24..27 SNR (s8, half dB)
+ *   page 2        bytes 1..4 PWDB per path only -- no EVM, no CFO
+ * The legacy AGC-report layout this port carried until 2026-09-28 read a valid page-1 block
+ * as -110 dBm with CFO 0 -- the "-100 dBm at 1 m" -- and fed that to the DM. Explicit byte
+ * math: no struct overlay (dev/rtl9607c-test/rtl8192fe_physts_test.c). */
+static bool _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 				       struct rtl_stats *pstatus, u8 *pdesc,
 				       struct rx_fwinfo *p_drvinfo,
 				       bool bpacket_match_bssid,
@@ -33,183 +41,90 @@ static void _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 				       bool packet_beacon)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	struct phy_status_rpt *p_phystrpt = (struct phy_status_rpt *)p_drvinfo;
-	s8 rx_pwr_all, rx_pwr[4];
-	u8 rf_rx_num = 0, evm, pwdb_all;
-	u8 i, max_spatial_stream;
-	u32 rssi, total_rssi = 0;
-	bool is_cck = pstatus->is_cck;
-	u8 lan_idx, vga_idx;
+	const u8 *b = (const u8 *)p_drvinfo;
+	u8 page = b[0] & 0x0f;
+	s8 rx_pwr_all = -110, rx_pwr;
+	u8 pwdb_all = 0, rf_rx_num = 0, i, max_ss;
+	u32 total_rssi = 0;
 
-	/* Record it for next packet processing */
+	/* `rtl_stats` lives OUTSIDE pci.c's RX loop: every field a page may not
+	 * write is cleared here, or the previous frame's level is inherited. */
 	pstatus->packet_matchbssid = bpacket_match_bssid;
 	pstatus->packet_toself = bpacket_toself;
 	pstatus->packet_beacon = packet_beacon;
 	pstatus->rx_mimo_signalquality[0] = -1;
 	pstatus->rx_mimo_signalquality[1] = -1;
+	pstatus->signalquality = 0;
+	pstatus->rxpower = -110;
+	memset(pstatus->rx_pwr, 0, sizeof(pstatus->rx_pwr));
+	memset(pstatus->rx_mimo_signalstrength, 0,
+	       sizeof(pstatus->rx_mimo_signalstrength));
 
-	if (is_cck) {
-		u8 cck_highpwr;
-		u8 cck_agc_rpt;
+	if (page == 0) {
+		u8 sq_rpt = b[12];
 
-		/* CCK driver-info layout differs from the OFDM packet. */
-		cck_agc_rpt = p_phystrpt->cck_agc_rpt_ofdm_cfosho_a;
-
-		/* Hardware does not provide RSSI for CCK; the PWDB / average
-		 * PWDB used for rate adaptation are computed here from the
-		 * reported LNA index and VGA index.
-		 */
-		cck_highpwr = (u8)rtl_get_bbreg(hw, RFPGA0_XA_HSSIPARAMETER2,
-						BIT(9));
-
-		lan_idx = ((cck_agc_rpt & 0xE0) >> 5);
-		vga_idx = (cck_agc_rpt & 0x1f);
-
-		/* RTL8192F CCK LNA/VGA gain table.  The per-LNA-index base
-		 * gains below are the RTL8192F values (the 8192F CCK front
-		 * end uses a different gain spread from the 8192E).
-		 */
-		switch (lan_idx) {
-		case 7:
-			if (vga_idx <= 27)
-				rx_pwr_all = -100 + 2 * (27 - vga_idx);
-			else
-				rx_pwr_all = -100;
-			break;
-		case 6:
-			rx_pwr_all = -48 + 2 * (2 - vga_idx);
-			break;
-		case 5:
-			rx_pwr_all = -42 + 2 * (7 - vga_idx);
-			break;
-		case 4:
-			rx_pwr_all = -36 + 2 * (7 - vga_idx);
-			break;
-		case 3:
-			rx_pwr_all = -24 + 2 * (7 - vga_idx);
-			break;
-		case 2:
-			if (cck_highpwr)
-				rx_pwr_all = -12 + 2 * (5 - vga_idx);
-			else
-				rx_pwr_all = -6 + 2 * (5 - vga_idx);
-			break;
-		case 1:
-			rx_pwr_all = 8 - 2 * vga_idx;
-			break;
-		case 0:
-			rx_pwr_all = 14 - 2 * vga_idx;
-			break;
-		default:
-			rx_pwr_all = 0;
-			break;
-		}
-		rx_pwr_all += 16;
+		rx_pwr_all = (s8)((int)b[1] - 110);
 		pwdb_all = rtl_query_rxpwrpercentage(rx_pwr_all);
-
-		if (!cck_highpwr) {
-			if (pwdb_all >= 80)
-				pwdb_all = ((pwdb_all - 80) << 1) +
-					   ((pwdb_all - 80) >> 1) + 80;
-			else if ((pwdb_all <= 78) && (pwdb_all >= 20))
-				pwdb_all += 3;
-			if (pwdb_all > 100)
-				pwdb_all = 100;
-		}
-
-		pstatus->rx_pwdb_all = pwdb_all;
-		pstatus->bt_rx_rssi_percentage = pwdb_all;
-		pstatus->recvsignalpower = rx_pwr_all;
-
-		/* Signal quality (EVM) for CCK. */
 		if (bpacket_match_bssid) {
-			u8 sq, sq_rpt;
-
-			if (pstatus->rx_pwdb_all > 40) {
-				sq = 100;
-			} else {
-				sq_rpt = p_phystrpt->cck_sig_qual_ofdm_pwdb_all;
-				if (sq_rpt > 64)
-					sq = 0;
-				else if (sq_rpt < 20)
-					sq = 100;
-				else
-					sq = ((64 - sq_rpt) * 100) / 44;
-			}
+			u8 sq = sq_rpt >= 64 ? 0 :
+				sq_rpt <= 20 ? 100 : (u8)((64 - sq_rpt) * 9 / 4);
 
 			pstatus->signalquality = sq;
 			pstatus->rx_mimo_signalquality[0] = sq;
-			pstatus->rx_mimo_signalquality[1] = -1;
 		}
-	} else {
-		/* RSSI for HT/OFDM rate, per RF path. */
+	} else if (page == 1 || page == 2) {
 		for (i = RF90_PATH_A; i < RF6052_MAX_PATH; i++) {
-			if (rtlpriv->dm.rfpath_rxenable[i])
-				rf_rx_num++;
-
-			rx_pwr[i] = ((p_phystrpt->path_agc[i].gain & 0x3f) * 2)
-				    - 110;
-
-			pstatus->rx_pwr[i] = rx_pwr[i];
-			rssi = rtl_query_rxpwrpercentage(rx_pwr[i]);
-			total_rssi += rssi;
-
-			pstatus->rx_mimo_signalstrength[i] = (u8)rssi;
+			if (!rtlpriv->dm.rfpath_rxenable[i])
+				continue;
+			rf_rx_num++;
+			rx_pwr = (s8)((int)b[1 + i] - 110);
+			pstatus->rx_pwr[i] = rx_pwr;
+			pstatus->rx_mimo_signalstrength[i] =
+				rtl_query_rxpwrpercentage(rx_pwr);
+			total_rssi += pstatus->rx_mimo_signalstrength[i];
+			if (rx_pwr > rx_pwr_all)
+				rx_pwr_all = rx_pwr;
 		}
-
-		/* Average PWDB computed by hardware (for rate adaptation). */
-		rx_pwr_all = ((p_phystrpt->cck_sig_qual_ofdm_pwdb_all >> 1)
-			      & 0x7f) - 110;
-
 		pwdb_all = rtl_query_rxpwrpercentage(rx_pwr_all);
-		pstatus->rx_pwdb_all = pwdb_all;
-		pstatus->bt_rx_rssi_percentage = pwdb_all;
 		pstatus->rxpower = rx_pwr_all;
-		pstatus->recvsignalpower = rx_pwr_all;
+		if (page == 1) {
+			max_ss = (pstatus->rate >= DESC_RATEMCS8 &&
+				  pstatus->rate <= DESC_RATEMCS15) ? 2 : 1;
+			for (i = 0; i < max_ss; i++) {
+				/* -128 is the PHY's "no EVM" sentinel: quality 0, never 100 */
+				s8 evm_half_db = (s8)b[16 + i];
+				u8 evm = evm_half_db == -128 ? 0 :
+					 rtl_evm_db_to_percentage(evm_half_db / 2);
 
-		/* EVM of HT rate. */
-		if (pstatus->rate >= DESC_RATEMCS8 &&
-		    pstatus->rate <= DESC_RATEMCS15)
-			max_spatial_stream = 2;
-		else
-			max_spatial_stream = 1;
-
-		for (i = 0; i < max_spatial_stream; i++) {
-			evm = rtl_evm_db_to_percentage(
-						p_phystrpt->stream_rxevm[i]);
-
+				if (bpacket_match_bssid) {
+					if (i == 0)
+						pstatus->signalquality = evm;
+					pstatus->rx_mimo_signalquality[i] = evm;
+				}
+			}
 			if (bpacket_match_bssid) {
-				if (i == 0)
-					pstatus->signalquality =
-						(u8)(evm & 0xff);
-				pstatus->rx_mimo_signalquality[i] =
-					(u8)(evm & 0xff);
+				for (i = RF90_PATH_A; i <= RF90_PATH_B; i++)
+					rtlpriv->dm.cfo_tail[i] = (s8)b[20 + i];
+				if (rtlpriv->dm.packet_count == 0xffffffff)
+					rtlpriv->dm.packet_count = 0;
+				else
+					rtlpriv->dm.packet_count++;
 			}
 		}
-
-		if (bpacket_match_bssid) {
-			for (i = RF90_PATH_A; i <= RF90_PATH_B; i++)
-				rtl_priv(hw)->dm.cfo_tail[i] =
-					(int)p_phystrpt->path_cfotail[i];
-
-			if (rtl_priv(hw)->dm.packet_count == 0xffffffff)
-				rtl_priv(hw)->dm.packet_count = 0;
-			else
-				rtl_priv(hw)->dm.packet_count++;
-		}
 	}
-
-	/* Map RSSI to a 0..100 UI percentage. */
-	if (is_cck)
+	pstatus->rx_pwdb_all = pwdb_all;
+	pstatus->bt_rx_rssi_percentage = pwdb_all;
+	pstatus->recvsignalpower = rx_pwr_all;
+	if (page == 0 || rf_rx_num == 0)
 		pstatus->signalstrength =
-			(u8)(rtl_signal_scale_mapping(hw, pwdb_all));
-	else if (rf_rx_num != 0)
+			(u8)rtl_signal_scale_mapping(hw, pwdb_all);
+	else
 		pstatus->signalstrength =
-			(u8)(rtl_signal_scale_mapping(hw,
-						      total_rssi /= rf_rx_num));
+			(u8)rtl_signal_scale_mapping(hw, total_rssi / rf_rx_num);
+	return page <= 2;
 }
 
-static void _rtl92fe_translate_rx_signal_stuff(struct ieee80211_hw *hw,
+static bool _rtl92fe_translate_rx_signal_stuff(struct ieee80211_hw *hw,
 					       struct sk_buff *skb,
 					       struct rtl_stats *pstatus,
 					       u8 *pdesc,
@@ -263,10 +178,14 @@ static void _rtl92fe_translate_rx_signal_stuff(struct ieee80211_hw *hw,
 			rtl_priv(hw)->dm.dbginfo.num_non_be_pkt++;
 	}
 
-	_rtl92fe_query_rxphystatus(hw, pstatus, pdesc, p_drvinfo,
-				   packet_matchbssid, packet_toself,
-				   packet_beacon);
+	/* an unknown page carries no level: nothing is fed to the DM as a
+	 * zero-strength sample, and the caller marks the frame NO_SIGNAL_VAL */
+	if (!_rtl92fe_query_rxphystatus(hw, pstatus, pdesc, p_drvinfo,
+					packet_matchbssid, packet_toself,
+					packet_beacon))
+		return false;
 	rtl_process_phyinfo(hw, tmp_buf, pstatus);
+	return true;
 }
 
 static void _rtl92fe_insert_emcontent(struct rtl_tcb_desc *ptcb_desc,
@@ -441,6 +360,7 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 	struct ieee80211_hdr *hdr;
 	__le32 *pdesc = (__le32 *)pdesc8;
 	u32 phystatus = get_rx_desc_physt(pdesc);
+	bool level = false;
 	u8 wake_match;
 
 	if (get_rx_status_desc_rpt_sel(pdesc) == 0)
@@ -515,10 +435,15 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 		p_drvinfo = (struct rx_fwinfo *)(skb->data +
 						 status->rx_bufshift + 24);
 
-		_rtl92fe_translate_rx_signal_stuff(hw, skb, status, pdesc8,
-						   p_drvinfo);
+		level = _rtl92fe_translate_rx_signal_stuff(hw, skb, status,
+							   pdesc8, p_drvinfo);
 	}
-	rx_status->signal = status->recvsignalpower + 10;
+	/* the paged report is dBm already (PWDB - 110); the legacy +10 went with
+	 * the legacy decoder */
+	if (level)
+		rx_status->signal = status->recvsignalpower;
+	else
+		rx_status->flag |= RX_FLAG_NO_SIGNAL_VAL;
 	if (status->packet_report_type == TX_REPORT2) {
 		status->macid_valid_entry[0] =
 			get_rx_rpt2_desc_macid_valid_1(pdesc);

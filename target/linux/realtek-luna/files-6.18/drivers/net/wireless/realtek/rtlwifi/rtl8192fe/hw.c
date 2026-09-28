@@ -16,6 +16,7 @@
 #include "led.h"
 #include <linux/of.h>
 #include "hw.h"
+#include "hwvar_width.h"
 #include "../pwrseqcmd.h"
 #include "pwrseq.h"
 
@@ -521,14 +522,12 @@ void rtl92fe_get_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val)
 		*((bool *)(val)) = ppsc->fw_current_inpsmode;
 		break;
 	case HW_VAR_CORRECT_TSF:{
-		u64 tsf;
-		u32 *ptsf_low = (u32 *)&tsf;
-		u32 *ptsf_high = ((u32 *)&tsf) + 1;
+		/* composed by value: splitting a u64 through two u32 pointers puts the
+		 * halves in little-endian order, swapped on this big-endian host */
+		u32 tsf_high = rtl_read_dword(rtlpriv, REG_TSFTR + 4);
+		u32 tsf_low = rtl_read_dword(rtlpriv, REG_TSFTR);
 
-		*ptsf_high = rtl_read_dword(rtlpriv, (REG_TSFTR + 4));
-		*ptsf_low = rtl_read_dword(rtlpriv, REG_TSFTR);
-
-		*((u64 *)(val)) = tsf;
+		*((u64 *)(val)) = rtl92fe_tsf_compose(tsf_high, tsf_low);
 		}
 		break;
 	case HAL_DEF_WOWLAN:
@@ -631,11 +630,12 @@ void rtl92fe_set_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val)
 			rtl_write_byte(rtlpriv, (REG_MACID + idx), val[idx]);
 		break;
 	case HW_VAR_BASIC_RATE:{
-		u16 b_rate_cfg = ((u16 *)val)[0];
+		/* every caller passes a u32 (mac->basic_rates): read it as one. `((u16 *)val)[0]`
+		 * is its HIGH half on this big-endian host -- 0 -- so RRSR became 0x0d (CCK
+		 * only) and every OFDM/HT frame was acknowledged at a CCK rate its sender
+		 * cannot wait for: the Luna APs' deaf uplink (stock writes 0x15d). */
+		u16 b_rate_cfg = rtl92fe_rrsr_from_basic(val);
 
-		b_rate_cfg = b_rate_cfg & 0x15f;
-		b_rate_cfg |= 0x01;
-		b_rate_cfg = (b_rate_cfg | 0xd) & (~BIT(1));
 		rtl_write_byte(rtlpriv, REG_RRSR, b_rate_cfg & 0xff);
 		rtl_write_byte(rtlpriv, REG_RRSR + 1, (b_rate_cfg >> 8) & 0xff);
 		break; }

@@ -2182,9 +2182,10 @@ label_lps_done:
 		(u32)(rtlpriv->stats.rxbytesunicast_inperiod * 8 / 2 /
 		1024 / 1024);
 
-	/* <3> DM */
-	if (!rtlpriv->cfg->mod_params->disable_watchdog)
-		rtlpriv->cfg->ops->dm_watchdog(hw);
+	/* <3> DM -- the driver's dm_watchdog honours disable_watchdog itself, so a TX
+	 * hang is still detected and recovered with the DM off (2026-09-28: an arm
+	 * with the DM off measured a dead AP for 12 min after its first TXDMA error). */
+	rtlpriv->cfg->ops->dm_watchdog(hw);
 
 	/* <4> roaming */
 	if (mac->link_state == MAC80211_LINKED &&

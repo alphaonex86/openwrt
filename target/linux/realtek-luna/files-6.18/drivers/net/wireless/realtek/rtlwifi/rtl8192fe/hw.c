@@ -26,6 +26,40 @@ static int xtal_cap = -1;
 module_param(xtal_cap, int, 0644);
 MODULE_PARM_DESC(xtal_cap, "RTL8192F crystal load-cap trim 0..0x3f (<0 = use EFUSE/board-cal value)");
 
+/* ★★ A BISECT KNOB, NOT A CONFIG KNOB (2026-09-28). The G24W's own stock differs from
+ * ours in the beacon block (BCN_CTRL 0x5c vs 0x1f, BCN_CTRL_1, DRVERLYINT 5 vs 10 TU,
+ * ATIMWND, BCN_MAX_ERR, RXTSF offsets, TBTT hold); the X111W runs ours clean. `pokes`
+ * writes declared BYTES after hw init, after the beacon set-up and after every BCN_CTRL
+ * update, so an arm can put any register at the vendor's value without a rebuild:
+ *   rtl8192fe.pokes=0x550:5c,0x551:10,0x558:05  (hex address:hex byte, comma-separated) */
+static char *pokes = "";
+module_param(pokes, charp, 0444);
+MODULE_PARM_DESC(pokes, "DIAGNOSTIC: byte writes 0xADDR:VAL,... applied after init and after "
+		 "each beacon-control update (default none)");
+
+static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	const char *p = pokes;
+	unsigned int addr, val, n = 0;
+	int used;
+
+	if (!p || !*p)
+		return;
+	while (*p) {
+		if (sscanf(p, "%x:%x%n", &addr, &val, &used) != 2 || addr > 0xffff || val > 0xff) {
+			pr_warn("pokes: cannot parse %.24s -- stopping here\n", p);
+			return;
+		}
+		rtl_write_byte(rtlpriv, addr, (u8)val);
+		n++;
+		p += used;
+		if (*p == ',')
+			p++;
+	}
+	pr_info("pokes: %u byte(s) written (after %s)\n", n, where);
+}
+
 static void _rtl92fe_set_bcn_ctrl_reg(struct ieee80211_hw *hw,
 				      u8 set_bits, u8 clear_bits)
 {
@@ -36,6 +70,7 @@ static void _rtl92fe_set_bcn_ctrl_reg(struct ieee80211_hw *hw,
 	rtlpci->reg_bcn_ctrl_val &= ~clear_bits;
 
 	rtl_write_byte(rtlpriv, REG_BCN_CTRL, (u8)rtlpci->reg_bcn_ctrl_val);
+	_rtl92fe_apply_pokes(hw, "bcn_ctrl");
 }
 
 static void _rtl92fe_stop_tx_beacon(struct ieee80211_hw *hw)
@@ -1654,6 +1689,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 		(u32)rtlphy->reg_e94, (u32)rtlphy->reg_e9c,
 		(u32)rtlphy->reg_eb4, (u32)rtlphy->reg_ebc);
 
+	_rtl92fe_apply_pokes(hw, "hw_init");
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 		"end of Rtl8192FE hw init %x\n", err);
 	return 0;
@@ -1968,6 +2004,7 @@ void rtl92fe_set_beacon_related_registers(struct ieee80211_hw *hw)
 	rtl_write_byte(rtlpriv, REG_RXTSF_OFFSET_OFDM - 2, 0x30);
 	rtlpci->reg_bcn_ctrl_val |= BIT(3);
 	rtl_write_byte(rtlpriv, REG_BCN_CTRL, (u8)rtlpci->reg_bcn_ctrl_val);
+	_rtl92fe_apply_pokes(hw, "beacon_related_registers");
 
 	/* NB: do NOT set ENSWBCN (REG_CR bit8) here to force a ...
 	 * dev/MEASURED-hw.c.md sec 22. */

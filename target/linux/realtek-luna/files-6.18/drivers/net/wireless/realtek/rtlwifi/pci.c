@@ -22,6 +22,16 @@ MODULE_AUTHOR("Larry Finger	<Larry.FInger@lwfinger.net>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PCI basic driver for rtlwifi");
 
+/* MEASURED 2026-09-28 on the G24W: stock leaves the endpoint's DevCtl2 at 0x0000 (completion
+ * timeouts ENABLED); mainline sets Completion Timeout Disable below, so a read whose completion
+ * the host delays waits forever -- the shape of "the PCIe engine reports itself stuck".
+ * 1 = mainline (the A/B control), 0 = the chip's timeout stays enabled, as stock. */
+static int comp_tmout_dis = 1;
+module_param(comp_tmout_dis, int, 0444);
+MODULE_PARM_DESC(comp_tmout_dis,
+		 "set the endpoint's PCIe Completion Timeout Disable bit as mainline does "
+		 "(default 1); 0 leaves the chip's completion timeout enabled, as stock");
+
 static const u16 pcibridge_vendors[PCI_BRIDGE_VENDOR_MAX] = {
 	INTEL_VENDOR_ID,
 	ATI_VENDOR_ID,
@@ -376,8 +386,9 @@ static void rtl_pci_parse_configuration(struct pci_dev *pdev,
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_TRACE, "Link Control Register =%x\n",
 		pcipriv->ndis_adapter.linkctrl_reg);
 
-	pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,
-				 PCI_EXP_DEVCTL2_COMP_TMOUT_DIS);
+	if (comp_tmout_dis)
+		pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,
+					 PCI_EXP_DEVCTL2_COMP_TMOUT_DIS);
 
 	tmp = 0x17;
 	pci_write_config_byte(pdev, 0x70f, tmp);

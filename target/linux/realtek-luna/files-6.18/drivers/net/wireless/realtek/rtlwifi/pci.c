@@ -27,10 +27,12 @@ MODULE_DESCRIPTION("PCI basic driver for rtlwifi");
 /* DIAGNOSTIC (G24W TXDMA 0x6000, 2026-09-28): the vendor keeps ONE persistent beacon buffer
  * and rewrites it in place; ours maps a fresh skb per beacon, so the descriptor's buffer
  * address moves at every TBTT. bcn_bounce=1 publishes every beacon from one fixed coherent
- * buffer instead -- no varying address, no cache maintenance on the payload. */
-static int bcn_bounce = 1;
+ * buffer instead -- no varying address, no cache maintenance on the payload. MEASURED
+ * 2026-09-28 04:40: 4 errors in 7.5 min with it, the idle rate unchanged -- REFUTED as the
+ * cause, kept as an arm (default off). */
+static int bcn_bounce;
 module_param(bcn_bounce, int, 0444);
-MODULE_PARM_DESC(bcn_bounce, "publish beacons from one fixed coherent buffer (default 1)");
+MODULE_PARM_DESC(bcn_bounce, "DIAGNOSTIC: publish beacons from one fixed coherent buffer (default 0)");
 #define BCN_BOUNCE_SIZE 2048
 
 static int comp_tmout_dis = 1;

@@ -37,11 +37,24 @@ module_param(pokes, charp, 0444);
 MODULE_PARM_DESC(pokes, "DIAGNOSTIC: byte writes 0xADDR:VAL,... applied after init and after "
 		 "each beacon-control update (default none)");
 
+/* The beacon preparation budget the guards in pci.c consume: the time after the early
+ * interrupt within which a beacon write still lands before the chip's download at
+ * BCNDMATIM. Zero means "no guard" to pci.c, so a window of one TU or less is not a
+ * budget at all. */
+static u32 _rtl92fe_bcn_budget_us(u8 early_tu, u8 dma_tu)
+{
+	return early_tu > dma_tu + 1 ? (u32)(early_tu - dma_tu - 1) * 1024 : 0;
+}
+
+static void _rtl92fe_set_beacon_window(struct ieee80211_hw *hw);
+
 static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	const char *p = pokes;
 	unsigned int addr, val, n = 0;
+	bool timing = false;
 	int used;
 
 	if (!p || !*p)
@@ -53,9 +66,31 @@ static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 		}
 		rtl_write_byte(rtlpriv, addr, (u8)val);
 		n++;
+		/* The driver's own view follows the poke: the BCN_CTRL cache carries the
+		 * poked base so a later set/clear transition works on it (a re-apply on
+		 * every update would override the transition -- Codex, 2026-09-28). */
+		if (addr == REG_BCN_CTRL)
+			rtlpci->reg_bcn_ctrl_val = (u8)val;
+		if (addr == REG_DRVERLYINT || addr == REG_BCNDMATIM)
+			timing = true;
 		p += used;
 		if (*p == ',')
 			p++;
+	}
+	if (timing) {
+		u8 early = rtl_read_byte(rtlpriv, REG_DRVERLYINT);
+		u8 dma = rtl_read_byte(rtlpriv, REG_BCNDMATIM);
+		u32 budget = _rtl92fe_bcn_budget_us(early, dma);
+
+		if (!budget) {
+			pr_warn("pokes: early=%u dma=%u leaves no preparation window -- REFUSED, "
+				"the driver's window is restored\n", early, dma);
+			_rtl92fe_set_beacon_window(hw);
+		} else {
+			rtlpci->bcn_prep_budget_us = budget;
+			pr_info("pokes: beacon window early=%u dma=%u -> budget %u us\n",
+				early, dma, budget);
+		}
 	}
 	pr_info("pokes: %u byte(s) written (after %s)\n", n, where);
 }
@@ -70,7 +105,6 @@ static void _rtl92fe_set_bcn_ctrl_reg(struct ieee80211_hw *hw,
 	rtlpci->reg_bcn_ctrl_val &= ~clear_bits;
 
 	rtl_write_byte(rtlpriv, REG_BCN_CTRL, (u8)rtlpci->reg_bcn_ctrl_val);
-	_rtl92fe_apply_pokes(hw, "bcn_ctrl");
 }
 
 static void _rtl92fe_stop_tx_beacon(struct ieee80211_hw *hw)
@@ -1060,7 +1094,7 @@ static void _rtl92fe_set_beacon_window(struct ieee80211_hw *hw)
 
 	rtl_write_byte(rtlpriv, REG_DRVERLYINT, early_tu);
 	rtl_write_byte(rtlpriv, REG_BCNDMATIM, dma_tu);
-	rtlpci->bcn_prep_budget_us = (early_tu - dma_tu - 1) * 1024;
+	rtlpci->bcn_prep_budget_us = _rtl92fe_bcn_budget_us(early_tu, dma_tu);
 }
 
 static void _rtl92fe_hw_configure(struct ieee80211_hw *hw)

@@ -72,6 +72,17 @@ MODULE_PARM_DESC(tbtt_prohibit_field,
 		 "TBTT_PROHIBIT field [19:8] value (-1 = the legacy 0xff byte "
 		 "poke; 0x138 is what the vendor driver programs)");
 
+/* MEASURED 2026-09-28 on the G24W (RTL9603CVD): stock leaves the endpoint's PCIe
+ * DevCtl at its power-on 0x2810 (MRRS 512 B, Enable No Snoop set); the mainline
+ * MRRS backdoor below wiped bits 8-15 and left 0x2010. On a CPS host with a
+ * coherence manager a snooped read takes the coherent path. 1 = keep the chip's
+ * bits and set only the MRRS field; 0 = the mainline clearing (the A/B). */
+static int nosnoop = 1;
+module_param(nosnoop, int, 0644);
+MODULE_PARM_DESC(nosnoop,
+		 "keep the endpoint's Enable-No-Snoop DevCtl bit as the chip powers "
+		 "up with it (default 1); 0 clears DevCtl[15:8] as mainline does");
+
 static void _rtl92fe_resume_tx_beacon(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -1119,8 +1130,8 @@ static void _rtl92fe_enable_aspm_back_door(struct ieee80211_hw *hw)
 
 	if (tmp8 == 0) {
 		tmp32 = rtl_read_dword(rtlpriv, REG_BACKDOOR_DBI_RDATA);
-		if ((tmp32 & 0xff00) != 0x2000) {
-			tmp32 &= 0xffff00ff;
+		if ((tmp32 & (nosnoop ? 0x7000 : 0xff00)) != 0x2000) {
+			tmp32 &= nosnoop ? 0xffff8fff : 0xffff00ff;
 			rtl_write_dword(rtlpriv, REG_BACKDOOR_DBI_WDATA,
 					tmp32 | BIT(13));
 			rtl_write_word(rtlpriv, REG_BACKDOOR_DBI_DATA, 0xf078);

@@ -1962,8 +1962,8 @@ bool rtl_cmd_send_packet(struct ieee80211_hw *hw, struct sk_buff *skb)
 {
 	struct rtl_tcb_desc tcb_desc = { .cmd_or_init = 1 };
 
-	rtl_priv(hw)->intf_ops->adapter_tx(hw, NULL, skb, &tcb_desc);
-	return true;
+	/* The skb is consumed either way; true only when the chip was actually given it. */
+	return rtl_priv(hw)->intf_ops->adapter_tx(hw, NULL, skb, &tcb_desc) == 0;
 }
 EXPORT_SYMBOL(rtl_cmd_send_packet);
 

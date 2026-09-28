@@ -120,7 +120,8 @@ static void _rtl92fe_apply_pokes(struct ieee80211_hw *hw, const char *where)
 static char *bbpokes = "";
 module_param(bbpokes, charp, 0444);
 MODULE_PARM_DESC(bbpokes, "DIAGNOSTIC: 32-bit register writes 0xADDR:VAL[/MASK],... applied once "
-		 "after the front-end init (default none)");
+		 "after the front-end init; VAL holds the bits IN POSITION (a captured word), "
+		 "only the MASK bits are written (default none)");
 
 static int _rtl92fe_bbpoke_next(const char **p, unsigned int *addr, unsigned int *val,
 				unsigned int *mask)
@@ -157,8 +158,14 @@ static void _rtl92fe_apply_bbpokes(struct ieee80211_hw *hw)
 		pr_warn("bbpokes: cannot parse %.24s -- the whole list is REFUSED, nothing written\n", p);
 		return;
 	}
-	for (p = bbpokes; _rtl92fe_bbpoke_next(&p, &addr, &val, &mask) > 0; n++)
-		rtl_set_bbreg(hw, addr, mask, val);
+	for (p = bbpokes; _rtl92fe_bbpoke_next(&p, &addr, &val, &mask) > 0; n++) {
+		/* VAL carries the bits IN POSITION (a captured word, masked), so this is a
+		 * raw read-modify-write -- never rtl_set_bbreg(addr, mask, val), whose value
+		 * is right-aligned and shifted by the mask's trailing zeros (Codex, 2026-09-28) */
+		u32 word = rtl_get_bbreg(hw, addr, MASKDWORD);
+
+		rtl_set_bbreg(hw, addr, MASKDWORD, (word & ~mask) | (val & mask));
+	}
 	pr_info("bbpokes: %u dword(s) written (after front-end init)\n", n);
 }
 

@@ -35,6 +35,15 @@ module_param(bcn_bounce, int, 0444);
 MODULE_PARM_DESC(bcn_bounce, "DIAGNOSTIC: publish beacons from one fixed coherent buffer (default 0)");
 #define BCN_BOUNCE_SIZE 2048
 
+/* DIAGNOSTIC ARM (G24W TXDMA 0x6000, 2026-09-28): on a CPU_HAS_WB SoC `dma_wmb()` is a
+ * plain sync, which does not drain the external write buffer; the vendor drains it with
+ * wbflush (mb()/iob()). With tx_wbflush=1 a TX or beacon descriptor is handed to the chip
+ * only after mb(), so no descriptor or payload write-back can still be in flight when the
+ * chip fetches it. Default 0: the shipped behaviour, unchanged. */
+static int tx_wbflush;
+module_param(tx_wbflush, int, 0444);
+MODULE_PARM_DESC(tx_wbflush, "DIAGNOSTIC: drain the write buffer (mb) before a TX descriptor is handed over (default 0)");
+
 static int comp_tmout_dis = 1;
 module_param(comp_tmout_dis, int, 0444);
 MODULE_PARM_DESC(comp_tmout_dis,
@@ -1889,7 +1898,10 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 
 	__skb_queue_tail(&ring->queue, skb);
 
-	dma_wmb();
+	if (tx_wbflush)
+		mb();
+	else
+		dma_wmb();
 	if (rtlpriv->use_new_trx_flow) {
 		rtlpriv->cfg->ops->set_desc(hw, entry, true,
 					    HW_DESC_OWN, &hw_queue);

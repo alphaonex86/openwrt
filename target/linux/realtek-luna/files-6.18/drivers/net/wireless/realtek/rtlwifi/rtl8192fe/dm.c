@@ -26,7 +26,7 @@ module_param_named(dump_rf, rtl92fe_dump_rf, int, 0644);
 static bool rtl92fe_restart_on_tx_hang = true;
 module_param_named(restart_on_tx_hang, rtl92fe_restart_on_tx_hang, bool, 0644);
 MODULE_PARM_DESC(restart_on_tx_hang,
-		 "restart the MAC when TX is stuck after a TXDMA error (default 1)");
+		 "restart the MAC when TX is stuck: a queue's HW index unmoved for 60 s with no live queue, or the PCIe engine's own 0x3f3 witness (default 1)");
 MODULE_PARM_DESC(dump_rf,
 		 "set 1 to one-shot dump operating RF/BB/MAC-AFE regs in the dm watchdog");
 
@@ -1166,9 +1166,13 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 
 	rtl92fe_txdma_error(hw);
 	if (rtl92fe_tx_hang_detect(hw)) {
-		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_resets++;
-		pr_warn("TX stuck after a TXDMA error, restart_on_tx_hang=%d\n",
-			rtl92fe_restart_on_tx_hang);
+		struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+
+		rtlpci->tx_hang_resets++;
+		pr_warn("TX stuck: %s (txdma_err=%u so far), restart_on_tx_hang=%d\n",
+			rtlpci->pcie_tx_stuck ? "the PCIe engine reports itself stuck (0x3f3)"
+					      : "a queue's HW index unmoved for 60 s, no other queue alive",
+			rtlpci->txdma_err, rtl92fe_restart_on_tx_hang);
 		if (rtl92fe_restart_on_tx_hang)
 			rtl_restart_hw(hw);
 	}

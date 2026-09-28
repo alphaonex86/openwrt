@@ -2303,3 +2303,11 @@
 #define WOL_REASON_DEAUTH			BIT(3)
 #define WOL_REASON_FW_DISCONNECT		BIT(4)
 #endif
+
+/* PCIe engine self-check (vendor HAL CheckHang88XX, the 8192F arm): write 0x04,
+ * read back; 0x05 = TX DMA stuck. The software rule beside it: a queue's HW
+ * read index unmoved for 60 s with frames pending and no other queue alive. */
+#define REG_PCIE_STUCK_CHK	0x3f3
+#define PCIE_STUCK_CHK_ARM	0x04
+#define PCIE_STUCK_CHK_TX	0x05
+#define TX_HANG_PENDING_S	60

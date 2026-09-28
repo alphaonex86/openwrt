@@ -205,11 +205,11 @@ struct rtl_pci {
 	u32 bcn_prep_budget_us;
 	u32 bcn_late;
 	u32 txdma_err;
-	u32 txdma_err_seen;
 	u32 txdma_status;
 	u32 tx_hang_resets;
 	u16 hang_rp[RTL_PCI_MAX_TX_QUEUE_COUNT];
-	bool hang_armed;
+	unsigned long hang_since[RTL_PCI_MAX_TX_QUEUE_COUNT];	/* jiffies, 0 = no clock */
+	bool pcie_tx_stuck;
 
 	 /*ASPM*/ u8 const_pci_aspm;
 	u8 const_hwsw_rfoff_d3;

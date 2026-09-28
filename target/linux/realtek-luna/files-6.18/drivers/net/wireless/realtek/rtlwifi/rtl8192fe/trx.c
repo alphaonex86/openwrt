@@ -1159,45 +1159,56 @@ bool rtl92fe_is_tx_desc_closed(struct ieee80211_hw *hw, u8 hw_queue, u16 index)
 	return ret;
 }
 
-/* Vendor check_hangup: after a TXDMA error, a pending ring whose HW read
- * index has not moved since it was last seen is a hang; an index that moved
- * retires the error.  Reads nothing until an error was counted, and an
- * idle tick decides nothing.
+/* The PCIe engine's own word: arm the self-check and read it back. */
+static bool rtl92fe_pcie_tx_stuck(struct rtl_priv *rtlpriv)
+{
+	rtl_write_byte(rtlpriv, REG_PCIE_STUCK_CHK, PCIE_STUCK_CHK_ARM);
+	return rtl_read_byte(rtlpriv, REG_PCIE_STUCK_CHK) == PCIE_STUCK_CHK_TX;
+}
+
+/* Vendor check_hangup, re-expressed: on every watchdog tick a queue with
+ * frames pending whose HW read index has not moved for TX_HANG_PENDING_S is
+ * hung -- unless ANY queue moved or drained this tick, which restarts every
+ * clock. Independent of the TXDMA error counter, which stays a diagnostic.
+ * The silicon witness declares a hang on its own.
  */
 bool rtl92fe_tx_hang_detect(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	unsigned long now = jiffies ? jiffies : 1;
 	bool stuck = false, alive = false;
 	u8 q;
 
-	if (rtlpci->txdma_err == rtlpci->txdma_err_seen)
-		return false;
-	if (!rtlpci->hang_armed) {
-		memset(rtlpci->hang_rp, 0xff, sizeof(rtlpci->hang_rp));
-		rtlpci->hang_armed = true;
-	}
 	for (q = 0; q < RTL_PCI_MAX_TX_QUEUE_COUNT; q++) {
 		struct rtl8192_tx_ring *ring = &rtlpci->tx_ring[q];
 		u16 rp;
 
-		if (q == BEACON_QUEUE || !skb_queue_len(&ring->queue))
+		if (q == BEACON_QUEUE)
 			continue;
+		if (!skb_queue_len(&ring->queue)) {
+			if (rtlpci->hang_since[q])
+				alive = true;			/* it drained */
+			rtlpci->hang_since[q] = 0;
+			continue;
+		}
 		rp = (rtl_read_dword(rtlpriv, get_desc_addr_fr_q_idx(q)) >> 16) &
 		     0x0fff;
-		if (rtlpci->hang_rp[q] != 0xffff) {
-			if (rp == rtlpci->hang_rp[q])
+		if (rtlpci->hang_since[q] && rp == rtlpci->hang_rp[q]) {
+			if (time_after_eq(now, rtlpci->hang_since[q] +
+					       TX_HANG_PENDING_S * HZ))
 				stuck = true;
-			else
-				alive = true;
+			continue;
 		}
+		if (rtlpci->hang_since[q])
+			alive = true;				/* the index moved */
+		rtlpci->hang_since[q] = now;
 		rtlpci->hang_rp[q] = rp;
 	}
-	if (!stuck && !alive)
-		return false;
-	rtlpci->hang_armed = false;
-	rtlpci->txdma_err_seen = rtlpci->txdma_err;
-	return stuck && !alive;
+	if (alive)
+		memset(rtlpci->hang_since, 0, sizeof(rtlpci->hang_since));
+	rtlpci->pcie_tx_stuck = rtl92fe_pcie_tx_stuck(rtlpriv);
+	return rtlpci->pcie_tx_stuck || (stuck && !alive);
 }
 
 void rtl92fe_tx_polling(struct ieee80211_hw *hw, u8 hw_queue)

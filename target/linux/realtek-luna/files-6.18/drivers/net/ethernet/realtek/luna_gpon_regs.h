@@ -233,13 +233,40 @@
  */
 #define BOSA_A0(n)		(0x000 + (n))	/* SFF-8472 A0h byte n (slave 0x50) */
 #define BOSA_A2(n)		(0x100 + (n))	/* SFF-8472 A2h byte n (slave 0x51) */
-#define BOSA_W(n)		(0x200 + (n))	/* analog/APC register Wn (slave 0x54) */
+#define BOSA_PAGE2(off)		(0x200 + (off))	/* byte @off of the analog/APC page (slave 0x54), no name established */
+/* Wn is NOT linear: W0..W79 = 0x200..0x24f, then W80..W88 = 0x27c..0x284
+ * (europa_reg_definition.h: W79=0x24F, W80=0x27C, W88=0x284). Nothing above
+ * W88 is named there; 0x250..0x27b carry their own names (BOSA_REG_*). */
+#define BOSA_W(n)		((n) < 80 ? BOSA_PAGE2(n) : BOSA_PAGE2(0x7c + (n) - 80))	/* analog/APC register Wn */
 #define BOSA_R(n)		(0x300 + (n))	/* MCU control/status register Rn (slave 0x55) */
 #define BOSA_REG_NUM		0x390		/* chip NUM (0x8290), 2 bytes  */
 #define BOSA_REG_VID		0x394		/* manufacturer ID (0x0001)    */
 #define BOSA_REG_W4		0x204		/* [4] EN_L booster (1=on)     */
 #define BOSA_REG_W41		0x229		/* [4] RXI_PWDN_L (0=RX on)    */
 #define BOSA_REG_CONTROL2	0x254		/* [6] LOS_PIN_TRI (0=drive SD)*/
+/* the rest of 0x250..0x279 the transceiver's register definition names (europa_reg_definition.h) */
+#define BOSA_REG_MAGIC_CODE	0x250
+#define BOSA_REG_SW_VERSION	0x251
+#define BOSA_REG_CONTROL1	0x253
+#define BOSA_REG_CONTROL3	0x255
+#define BOSA_REG_SW_INT_CODE	0x258
+#define BOSA_REG_INT_MASK1	0x259
+#define BOSA_REG_FAULT_INHIBIT	0x260
+#define BOSA_REG_FAULT_INHIBIT2	0x261
+#define BOSA_REG_SW_FAULT_INHIBIT1	0x262
+#define BOSA_REG_SW_FAULT_INHIBIT2	0x263
+#define BOSA_REG_DAC_HB	0x264
+#define BOSA_REG_DAC_LB	0x265
+#define BOSA_REG_EXT_RSSI_LOW_TH	0x266
+#define BOSA_REG_EXT_RSSI_HIGH_TH	0x267
+#define BOSA_REG_RX_TH	0x269
+#define BOSA_REG_READY_DELAY	0x273
+#define BOSA_REG_DDMI_W_LCT	0x274
+#define BOSA_REG_DDMI_W_HCT	0x275
+#define BOSA_REG_DEBUG_CTL	0x276
+#define BOSA_REG_DEBUG_SL1	0x277
+#define BOSA_REG_DEBUG_SL2	0x278
+#define BOSA_REG_IMPD_TH_ORI	0x279
 #define BOSA_REG_STATUS2	0x383		/* [2] RX_LOS_STATUS (0=signal)*/
 #define BOSA_REG_W77		0x24d		/* APC max-enable strobes = the MCU command byte */
 /*

@@ -916,8 +916,6 @@ new_trx_end:
 					RTL_PCI_MAX_RX_COUNT;
 
 			rx_remained_cnt--;
-			rtl_write_word(rtlpriv, 0x3B4,
-				       rtlpci->rx_ring[hw_queue].next_rx_rp);
 		}
 		if (((rtlpriv->link_info.num_rx_inperiod +
 		      rtlpriv->link_info.num_tx_inperiod) > 8) ||
@@ -928,6 +926,16 @@ new_trx_end:
 			_rtl_pci_prepare_rxdesc(hw, skb, (u8 *)buffer_desc,
 					       rxring_idx,
 					       rtlpci->rx_ring[rxring_idx].idx);
+			/* ★ THE SLOT IS HANDED BACK ONLY ONCE IT HOLDS ITS NEW, MAPPED
+			 * BUFFER (Codex, 2026-09-28): the host index at 0x3B4 used to be
+			 * published BEFORE this refill, so the device was given a slot
+			 * whose descriptor still pointed at the buffer just unmapped and
+			 * handed up -- the vendor writes the BD info, then the index
+			 * (Hal88XXRxDesc / UpdateRXBDHostIdx). The barrier orders the
+			 * descriptor write before the doorbell. */
+			wmb();
+			rtl_write_word(rtlpriv, 0x3B4,
+				       rtlpci->rx_ring[hw_queue].next_rx_rp);
 		} else {
 			_rtl_pci_prepare_rxdesc(hw, skb, (u8 *)pdesc,
 					       rxring_idx,

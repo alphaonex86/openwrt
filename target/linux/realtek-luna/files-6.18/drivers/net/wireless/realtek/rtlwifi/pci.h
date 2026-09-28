@@ -205,6 +205,9 @@ struct rtl_pci {
 	u32 bcn_done_us;			/* when the tasklet published the beacon */
 	struct sk_buff *bcn_prev;		/* the beacon before the published one: freed one beacon later */
 	dma_addr_t bcn_prev_dma;
+	dma_addr_t bcn_cur_dma;			/* the published beacon's own skb mapping */
+	void *bcn_bounce;			/* one fixed coherent beacon buffer (bcn_bounce=1) */
+	dma_addr_t bcn_bounce_dma;
 	u32 bcn_prep_budget_us;
 	u32 bcn_late;
 	u32 txdma_err;

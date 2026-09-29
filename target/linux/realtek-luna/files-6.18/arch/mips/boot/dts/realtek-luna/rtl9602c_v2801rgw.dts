@@ -41,3 +41,9 @@
 	/delete-node/ flash@14000000;
 	/delete-node/ watchdog@18003260;
 };
+
+/* First diagnostic boot: this unit shares GPON2's splitter with two boards
+ * under test, and its optical wiring is unproven -- no laser is keyed. */
+&gpon {
+	status = "disabled";
+};

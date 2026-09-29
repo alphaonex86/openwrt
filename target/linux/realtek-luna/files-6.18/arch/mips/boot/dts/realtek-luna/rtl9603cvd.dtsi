@@ -299,4 +299,12 @@
 	 *       board's measured RAM.
 	 * ---------------------------------------------------------------
 	 */
+
+	/* The family GPON core (luna_gpon.c) drives the optical front end from
+	 * its init. A board whose PON wiring is not proven sets this "disabled":
+	 * a laser keyed on an unproven board transmits into a SHARED PON. */
+	gpon: gpon {
+		compatible = "realtek,luna-gpon";
+		status = "okay";
+	};
 };

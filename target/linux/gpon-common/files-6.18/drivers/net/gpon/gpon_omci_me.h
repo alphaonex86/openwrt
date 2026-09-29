@@ -171,6 +171,9 @@ struct omci_onu {
 	u32	rx_extended;		/* devid 0x0b frames seen (not served) */
 	u32	rx_bad_mic;		/* DS frames DISCARDED on an invalid MIC */
 	u32	rx_runt;		/* DS frames shorter than a 48-byte baseline PDU */
+	u32	rx_total;		/* DS frames handed to the responder */
+	u32	mic_conv_ok;		/* first OMCI_MIC_SELFCHECK_N: AAL5-BE MIC */
+	u32	mic_conv_bad;		/* first OMCI_MIC_SELFCHECK_N: any other */
 	u32	no_ack;			/* requests with AR clear: applied, not
 					 * answered — a silent path must still be
 					 * countable */

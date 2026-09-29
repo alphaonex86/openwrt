@@ -2,10 +2,12 @@
 /* TIER: CORE (prefix gpon_) — protocol only. NEVER touches ...
  * dev/MEASURED-gpon_omci_core.c.md sec 1. */
 #include <linux/crc32.h>
+#include <linux/kernel.h>
 #include <linux/string.h>
 
 #include "gpon_omci_core.h"
 #include "gpon_omci_me.h"	/* struct omci_onu + the ME model / dynamic store */
+#include "gpon_omci_mic.h"
 
 /* MIC (bytes 44..47) = the I.363.5 / AAL5 CRC-32 over bytes ...
  * dev/MEASURED-gpon_omci_core.c.md sec 2. */
@@ -221,6 +223,20 @@ void omci_mds_walk(struct omci_onu *o)
 	o->mds_tries++;
 }
 
+int omci_resp_fmt(const struct omci_onu *o, bool armed, u32 tx, u32 tx_fail,
+		  char *out, size_t sz)
+{
+	return scnprintf(out, sz,
+			 "ds_omci_rx     = %u (short=%u)\n"
+			 "omci_resp      = %s tx=%u fail=%u ds_crc ok=%u bad=%u"
+			 "  mds=%u store=%u avc=%u unhandled=%u dup_replay=%u ext=%u no_ack=%u\n"
+			 "omci_rx_bad_mic: %u (DS frames discarded on an invalid MIC)\n",
+			 o->rx_total, o->rx_runt, armed ? "armed" : "off", tx, tx_fail,
+			 o->mic_conv_ok, o->mic_conv_bad, o->mds, o->store_n,
+			 o->avc_count, o->unhandled, o->dup_replay, o->rx_extended,
+			 o->no_ack, o->rx_bad_mic);
+}
+
 int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		      u8 *resp, struct omci_accepted *accepted)
 {
@@ -232,9 +248,16 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 
 	/* ★ A BASELINE OMCI PDU IS 48 BYTES, FULL STOP (G.988 A.3). ...
 	 * dev/MEASURED-gpon_omci_core.c.md sec 9. */
+	o->rx_total++;
 	if (len < OMCI_LEN) {
 		o->rx_runt++;
 		return 0;
+	}
+	if (o->mic_conv_ok + o->mic_conv_bad < OMCI_MIC_SELFCHECK_N) {
+		if (gpon_omci_mic_conv(msg, len) == GPON_MIC_CONV_AAL5_BE)
+			o->mic_conv_ok++;
+		else
+			o->mic_conv_bad++;
 	}
 	devid = msg[3];
 	mt = msg[2] & 0x1f;

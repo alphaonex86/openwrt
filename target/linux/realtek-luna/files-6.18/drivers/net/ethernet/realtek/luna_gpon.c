@@ -5820,7 +5820,7 @@ static struct {
 	struct omci_data_binding binding;
 	u16 head, count;
 	u8 seed;
-	u32 queued, overflow, closed, accepted, resets, tx_errors;
+	u32 queued, overflow, closed, accepted, resets, tx_errors, tx_sent;
 } luna_omci;
 static bool luna_data_admitted;
 static struct {
@@ -6220,6 +6220,17 @@ void luna_omci_set_optical(u16 rx, u16 tx)
 }
 EXPORT_SYMBOL(luna_omci_set_optical);
 
+static int luna_omci_send(const u8 *msg, int n)
+{
+	int ret = luna_omci.tx(luna_omci.cookie, msg, n);
+
+	if (ret)
+		luna_omci.tx_errors++;
+	else
+		luna_omci.tx_sent++;
+	return ret;
+}
+
 /* Timer consumer serializes alarm TX with Get All Alarms resynchronization. */
 static void luna_omci_report_alarm(void)
 {
@@ -6233,11 +6244,9 @@ static void luna_omci_report_alarm(void)
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	if (!n)
 		return;
-	ret = luna_omci.tx(luna_omci.cookie, msg, n);
+	ret = luna_omci_send(msg, n);
 	spin_lock_irqsave(&luna_omci_lock, flags);
-	if (ret)
-		luna_omci.tx_errors++;
-	else
+	if (!ret)
 		omci_onu_alarm_sent(luna_omci.onu, msg);
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 }
@@ -6264,8 +6273,7 @@ void luna_omci_report_oper_up(void)
 	if (luna_omci.onu && luna_gpon_data_ready())
 		n = omci_onu_emit_veip_up_avc(luna_omci.onu, msg);
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
-	if (n > 0 && luna_omci.tx(luna_omci.cookie, msg, n)) {
-		luna_omci.tx_errors++;
+	if (n > 0 && luna_omci_send(msg, n)) {
 		/* The common GET projection reflects delivered operational state. */
 		spin_lock_irqsave(&luna_omci_lock, flags);
 		luna_omci.onu->avc_veip_up_sent = false;
@@ -6406,8 +6414,8 @@ static void luna_omci_poll(void)
 					   GPON_MCAST_GEM, &luna_omci.binding);
 		}
 		spin_unlock_irqrestore(&luna_omci_lock, flags);
-		if (n > 0 && luna_omci.tx(luna_omci.cookie, response, n))
-			luna_omci.tx_errors++;
+		if (n > 0)
+			luna_omci_send(response, n);
 #ifdef CONFIG_GPON_OMCI_DIAG
 		/* Preserve the shared request/response trace at its new owner. The
 		 * common predicate limits only bulk diagnostics, never acceptance. */
@@ -6922,10 +6930,15 @@ static void luna_vlan_service_show(struct seq_file *s)
 
 static void luna_omci_seq_show(struct seq_file *s)
 {
+	char resp[320] = "";
 	unsigned long flags;
 	u32 queued, count, overflow, closed, accepted, resets, tx_errors;
 
 	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (luna_omci.onu)
+		omci_resp_fmt(luna_omci.onu, READ_ONCE(luna_activation_ready),
+			      READ_ONCE(luna_omci.tx_sent), READ_ONCE(luna_omci.tx_errors),
+			      resp, sizeof(resp));
 	queued = luna_omci.queued;
 	count = luna_omci.count;
 	overflow = luna_omci.overflow;
@@ -6934,6 +6947,7 @@ static void luna_omci_seq_show(struct seq_file *s)
 	resets = luna_omci.resets;
 	tx_errors = READ_ONCE(luna_omci.tx_errors);
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	seq_puts(s, resp);
 	seq_printf(s, "omci_queue: queued=%u pending=%u overflow=%u closed=%u accepted=%u resets=%u tx_errors=%u\n",
 		   queued, count, overflow, closed, accepted, resets, tx_errors);
 	luna_vlan_service_show(s);

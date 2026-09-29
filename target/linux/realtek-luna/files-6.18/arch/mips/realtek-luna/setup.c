@@ -33,6 +33,8 @@
 #include <asm/smp-ops.h>
 #include <asm/time.h>
 
+#include "luna.h"
+
 /* SoC watchdog timer (KSEG1), TC block. Forcing a WDT timeout ...
  * dev/MEASURED-setup.c.md sec 1. */
 #define LUNA_RSTWDT_CTRL		((void __iomem *)CKSEG1ADDR(0x18003268))
@@ -43,7 +45,6 @@
 #define LUNA_RSTWDT_RST_FULLCHIP	0u		/* RESET_MODE = full chip   */
 
 extern char __dtb_start[];
-void prom_putchar(char c);	/* bring-up bisect markers (remove later) */
 
 static void luna_machine_restart(char *command)
 {
@@ -127,11 +128,11 @@ static void __init luna_enable_userlocal(void)
 {
 	unsigned int cfg3 = read_c0_config3();
 
-	/* M1 bring-up diagnostic: show how the CPU was identified (remove later). */
-	pr_emerg("LUNA-DIAG: prid=%08x cputype=%d config3=%08x ULRI=%d userlocal=%d mmips=%d\n",
-		 read_c0_prid(), current_cpu_type(), cfg3,
-		 !!(cfg3 & MIPS_CONF3_ULRI),
-		 cpu_has_userlocal ? 1 : 0, cpu_has_mmips ? 1 : 0);
+	if (IS_ENABLED(CONFIG_LUNA_DEBUG))
+		pr_emerg("LUNA-DIAG: prid=%08x cputype=%d config3=%08x ULRI=%d userlocal=%d mmips=%d\n",
+			 read_c0_prid(), current_cpu_type(), cfg3,
+			 !!(cfg3 & MIPS_CONF3_ULRI),
+			 cpu_has_userlocal ? 1 : 0, cpu_has_mmips ? 1 : 0);
 
 	if (cfg3 & MIPS_CONF3_ULRI)
 		current_cpu_data.options |= MIPS_CPU_ULRI;
@@ -146,7 +147,7 @@ static void __init luna_enable_userlocal(void)
 
 void __init plat_mem_setup(void)
 {
-	prom_putchar('['); prom_putchar('M'); prom_putchar(']');
+	luna_mark('M');
 #ifdef CONFIG_MIPS_CM
 	luna_l2_unbypass();		/* the L2 is hidden at reset on the 9603CVD */
 	luna_l2_invalidate_tags();	/* clean the boot-time garbage L2 tags */
@@ -251,11 +252,11 @@ void __init device_tree_init(void)
 	if (mips_cm_present()) {
 		unsigned long l2cfg = read_gcr_l2_config();
 
-		/* M1 bring-up diagnostic: dump the CM/L2 state (remove later). */
-		pr_emerg("LUNA-DIAG: cm_rev=%x config=%x config2=%x gcr_base=%llx l2cfg=%lx l2bypass=%d\n",
-			 mips_cm_revision(), read_c0_config(), read_c0_config2(),
-			 (unsigned long long)read_gcr_base(), l2cfg,
-			 !!(l2cfg & CM_GCR_L2_CONFIG_BYPASS));
+		if (IS_ENABLED(CONFIG_LUNA_DEBUG))
+			pr_emerg("LUNA-DIAG: cm_rev=%x config=%x config2=%x gcr_base=%llx l2cfg=%lx l2bypass=%d\n",
+				 mips_cm_revision(), read_c0_config(), read_c0_config2(),
+				 (unsigned long long)read_gcr_base(), l2cfg,
+				 !!(l2cfg & CM_GCR_L2_CONFIG_BYPASS));
 
 		write_gcr_base(read_gcr_base() & ~0xffULL);
 	}
@@ -283,14 +284,14 @@ void __init device_tree_init(void)
 
 void __init plat_time_init(void)
 {
-	prom_putchar('['); prom_putchar('T'); prom_putchar(']');
+	luna_mark('T');
 	of_clk_init(NULL);
 	timer_probe();
 }
 
 void __init arch_init_irq(void)
 {
-	prom_putchar('['); prom_putchar('I'); prom_putchar(']');
+	luna_mark('I');
 	irqchip_init();
-	prom_putchar('['); prom_putchar('i'); prom_putchar(']');	/* irqchip/GIC probe returned */
+	luna_mark('i');		/* irqchip/GIC probe returned */
 }

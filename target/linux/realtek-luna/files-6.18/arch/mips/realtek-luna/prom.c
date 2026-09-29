@@ -17,6 +17,8 @@
 #include <asm/bootinfo.h>
 #include <asm/prom.h>
 
+#include "luna.h"
+
 /* 16550 UART0 (KSEG1), reg-shift 2: THR @ +0x00, LSR @ +0x14, LSR.THRE = 0x20. */
 #define LUNA_UART0	((void __iomem *)CKSEG1ADDR(0x18002000))
 #define UART_THR	0x00
@@ -33,6 +35,16 @@ void prom_putchar(char c)
 	while (!(__raw_readb(LUNA_UART0 + UART_LSR) & UART_LSR_THRE))
 		;
 	__raw_writeb(c, LUNA_UART0 + UART_THR);
+}
+
+/* Bring-up bisect marker `[c]`, the earliest reliable output (CONFIG_LUNA_DEBUG). */
+void luna_mark(char c)
+{
+	if (!IS_ENABLED(CONFIG_LUNA_DEBUG))
+		return;
+	prom_putchar('[');
+	prom_putchar(c);
+	prom_putchar(']');
 }
 
 /* The bootloader enters Linux with a legacy MIPS argument ... -- dev/MEASURED-prom.c.md sec 1. */
@@ -60,11 +72,7 @@ void __init prom_init(void)
 {
 	int i;
 
-	/* Bring-up bisect markers (earliest reliable output; remove later). */
-	prom_putchar('\n');
-	prom_putchar('[');
-	prom_putchar('P');
-	prom_putchar(']');
+	luna_mark('P');
 
 	/* Clear the CPU's unmapped-memory-segment (UMSAR0..3 @ ...
 	 * dev/MEASURED-prom.c.md sec 2. */

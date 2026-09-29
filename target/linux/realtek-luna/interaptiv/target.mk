@@ -23,7 +23,6 @@ define Target/Description
 	Build firmware images for Realtek Luna GPON ONU SoCs built on a
 	MIPS interAptiv core (MIPS32 R2, big-endian) in a Coherent
 	Processing System (GIC + CM + CPC). DRAM and flash are per-board; run-from-RAM
-	bring-up via TFTP/initramfs. Kernel debugging (ftrace/kprobes) is on by
-	default here -- this subtarget is the instrumented reference for the
-	shared GPON datapath.
+	bring-up via TFTP/initramfs. Kernel debugging (ftrace/kprobes) follows the
+	build config's CONFIG_KERNEL_* options, off in the shipped config.
 endef

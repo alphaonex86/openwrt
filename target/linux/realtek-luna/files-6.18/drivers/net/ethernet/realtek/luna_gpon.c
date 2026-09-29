@@ -8121,6 +8121,23 @@ static int __init rtl9602c_gpon_init(void)
 		return -EINVAL;
 	}
 
+	/* The BOARD decides, before any register is touched: its device tree
+	 * must carry an enabled realtek,luna-gpon node. A board whose PON wiring
+	 * is unproven disables it, and nothing here keys a laser on a shared PON. */
+	{
+		struct device_node *np = of_find_compatible_node(NULL, NULL,
+								 "realtek,luna-gpon");
+		bool declared = np != NULL;
+		bool on = declared && of_device_is_available(np);
+
+		of_node_put(np);
+		if (!on) {
+			pr_info("luna-gpon: this board's device tree %s the GPON (realtek,luna-gpon) -- nothing touched\n",
+				declared ? "disables" : "does not declare");
+			return -ENODEV;
+		}
+	}
+
 	gpon_base = ioremap(GPON_PHYS_BASE, GPON_REG_SIZE);
 	if (!gpon_base) {
 		pr_err("luna-gpon: ioremap 0x%08x failed\n", GPON_PHYS_BASE);

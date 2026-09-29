@@ -166,12 +166,15 @@ static int rtl92fe_init_sw_vars(struct ieee80211_hw *hw)
 		return 1;
 	}
 
+	rtl92fe_led_register(hw);
 	return 0;
 }
 
 static void rtl92fe_deinit_sw_vars(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
+	rtl92fe_led_unregister(hw);
 
 	if (rtlpriv->rtlhal.pfirmware) {
 		vfree(rtlpriv->rtlhal.pfirmware);

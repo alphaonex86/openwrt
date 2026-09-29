@@ -98,6 +98,12 @@ struct omci_accepted {
 	u8 mt;
 };
 
+#define OMCI_MIC_SELFCHECK_N	16	/* DS frames judged for the MIC convention */
+
+/* The responder's counters in the /proc grammar every family prints. */
+int omci_resp_fmt(const struct omci_onu *o, bool armed, u32 tx, u32 tx_fail,
+		  char *out, size_t sz);
+
 /* Clear @accepted on entry, including discard/replay paths. AR-clear commits
  * produce an event with a zero return value. The caller serializes all ONU
  * state access; a caller that skips input must initialize its own NONE result. */

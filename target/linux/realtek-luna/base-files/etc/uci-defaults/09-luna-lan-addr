@@ -84,6 +84,20 @@ lanly,g24w)
 	uci -q commit network
 	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.13 (the shipped default 192.168.1.1 belongs to another bench)"
 	;;
+vsol,v2801rgw)
+	# bench onu5. Declared ONU_LAN_IP = 192.168.1.15, the address its stock
+	# firmware holds too (persisted 2026-09-29).
+	uci -q set network.lan.ipaddr='192.168.1.15'
+	uci -q commit network
+	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.15"
+	;;
+unknown,rtl9607c-unknown)
+	# bench onu4. Declared ONU_LAN_IP = 192.168.1.14. MEASURED 2026-09-29: with no
+	# arm it kept the interaptiv file's 192.168.1.13 -- the G24W's address.
+	uci -q set network.lan.ipaddr='192.168.1.14'
+	uci -q commit network
+	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.14"
+	;;
 "")
 	# THREE STATES: we could not ask which board this is. Change NOTHING --
 	# guessing here is how the wrong address gets applied to the wrong board,
@@ -91,10 +105,16 @@ lanly,g24w)
 	logger -t luna-lan-addr "board_name unreadable -- LAN address left as shipped"
 	;;
 *)
-	# A board with no entry keeps the shipped value, deliberately. Silence
-	# here means "nobody has declared this board's address", not "0.0.0.0 is
-	# fine" -- and it is visible in the log rather than merely absent.
-	logger -t luna-lan-addr "board_name=$board has no declared LAN address -- left as shipped"
+	# A board with no entry takes NO LAN address: the shipped value is ANOTHER
+	# board's (the interaptiv file holds the G24W's .13), and keeping it put a
+	# second host on a live bench's address (2026-09-29, the RTL9607C UNKNOWN).
+	# The console still reaches it; its declared address needs an arm above
+	# (ONU-test-case/ip_plan_audit.py names every board that lacks one).
+	uci -q delete network.lan.ipaddr
+	uci -q delete network.lan.netmask
+	uci -q set network.lan.proto='none'
+	uci -q commit network
+	logger -t luna-lan-addr "board_name=$board has no declared LAN address -- none taken"
 	;;
 esac
 

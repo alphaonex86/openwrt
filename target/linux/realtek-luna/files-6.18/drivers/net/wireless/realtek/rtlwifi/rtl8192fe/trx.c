@@ -242,16 +242,24 @@ static void _rtl92fe_insert_emcontent(struct rtl_tcb_desc *ptcb_desc,
 }
 
 /* handshake spy: a permanent, always-on in-tree instrument ... -- dev/MEASURED-trx.c.md sec 1. */
+#ifdef CONFIG_RTLWIFI_DEBUG
 static bool rtl92f_spy_on = true;
 module_param_named(spy, rtl92f_spy_on, bool, 0644);
 MODULE_PARM_DESC(spy, "1=log mgmt+EAPOL frames rx/tx to dmesg for 4-way debug (default on)");
+#else
+static const bool rtl92f_spy_on;
+#endif
 
 /* When on, also log EVERY unicast DATA frame (encrypted or not) at rx/tx -- the
  * definitive "does unicast downstream data reach tx_fill_desc" probe (run an
  * ONU->client unicast ICMP flood). Default off: too chatty for normal traffic. */
+#ifdef CONFIG_RTLWIFI_DEBUG
 static bool rtl92f_spy_data;
 module_param_named(spy_data, rtl92f_spy_data, bool, 0644);
 MODULE_PARM_DESC(spy_data, "1=also log every unicast DATA frame rx/tx (default off)");
+#else
+static const bool rtl92f_spy_data;
+#endif
 
 static const char *rtl92f_eapol_msg(u16 ki)
 {

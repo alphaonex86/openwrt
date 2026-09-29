@@ -51,4 +51,13 @@ set wireless.radio0.legacy_rates='1'
 commit wireless
 EOF
 
+# The BSSID is this unit's own MAC. The driver's compiled-in board cal carries ONE
+# unit's address, so without this every flashed unit of a model shares one BSSID.
+case "$MAC" in
+??:??:??:??:??:??)
+	uci -q set wireless.default_radio0.macaddr="$MAC"
+	uci -q commit wireless
+	;;
+esac
+
 exit 0

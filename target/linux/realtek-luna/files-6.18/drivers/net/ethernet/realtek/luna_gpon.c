@@ -874,10 +874,14 @@ module_param(data_gem_en, bool, 0644);
 MODULE_PARM_DESC(data_gem_en, "install the WAN data GEM datapath during config (default on)");
 /* trace=0 (default) silences the routine per-PLOAM/per-ACK dumps so the compact
  * O5 timeline survives the lossy serial console; key-PLOAM EVT + O5 lines always print. */
+#ifdef CONFIG_GPON_PLOAM_DIAG
 static bool trace;	/* default 0: per-PLOAM/ACK tracing is SLOW (printk over serial) and perturbs the
 			 * activation timing (breaks ranging when on). Set luna_gpon.trace=1 only for short diagnostics. */
 module_param(trace, bool, 0644);
 MODULE_PARM_DESC(trace, "verbose per-PLOAM/per-ACK serial spam (default 0)");
+#else
+static const bool trace;
+#endif
 
 static bool cdr_reseat_on_reactivate = true;	/* default ON (A/B 2026-06-15): on a deactivate->O1 re-range, re-pulse the
 			 * softirq-safe US-TX SerDes interface reset-B (WSDS_DIG_1D[16], the same primitive the
@@ -886,11 +890,15 @@ static bool cdr_reseat_on_reactivate = true;	/* default ON (A/B 2026-06-15): on 
 			 * A/B: TX-interface only (the locked DS RX framer is undisturbed). */
 module_param(cdr_reseat_on_reactivate, bool, 0644);
 MODULE_PARM_DESC(cdr_reseat_on_reactivate, "re-seat US-TX SerDes reset-B on re-range to cut activation flapping (default 0)");
+#ifdef CONFIG_GPON_PLOAM_DIAG
 static bool ploam_tx_dbg = true;	/* TEST: log per-send US-PLOAM TX (ENQ self-clear = HW transmitted) to
 					 * prove whether the urgent-queue ACK/Password actually leaves the ONU
 					 * (OLT raises LOAi = never gets our acks). Logs first 40 sends. */
 module_param(ploam_tx_dbg, bool, 0644);
 MODULE_PARM_DESC(ploam_tx_dbg, "log US-PLOAM CPU-TX ENQ self-clear per send (urgent-queue TX diagnostic)");
+#else
+static const bool ploam_tx_dbg;
+#endif
 /* o5_rearm_burst_gate: re-apply the US burst-gate cluster (0x5188/0x526c/0x6024/0x6260)
  * and re-arm the HW auto-No_message keepalive template on every O5 entry (not just __init),
  * so a re-ranged O5 after a GMAC/SDS reset does not run on US-side reset defaults. Default on;
@@ -7420,9 +7428,13 @@ static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
 
 /* The instrument must be REMOVABLE, because it is a SUSPECT. ...
  * dev/MEASURED-luna_gpon.c.md sec 240. */
+#ifdef CONFIG_GPON_PLOAM_DIAG
 static bool core_trace = true;
 module_param(core_trace, bool, 0644);
 MODULE_PARM_DESC(core_trace, "1=the core FSM's events are printed (default; needed to diagnose it). 0=silent, for measuring whether the printing itself perturbs activation");
+#else
+static const bool core_trace;
+#endif
 
 /* FAMILY half of the core's gpon_ploam_diag: read THIS ...
  * dev/MEASURED-luna_gpon.c.md sec 241. */

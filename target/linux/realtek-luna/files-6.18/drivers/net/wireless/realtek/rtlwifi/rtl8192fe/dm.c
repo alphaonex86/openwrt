@@ -15,8 +15,10 @@
 
 /* Dynamic-management (DM) layer for the RTL8192F. The 8192F ... -- dev/MEASURED-dm.c.md sec 1. */
 
+#ifdef CONFIG_RTLWIFI_DEBUG
 static int rtl92fe_dump_rf;
 module_param_named(dump_rf, rtl92fe_dump_rf, int, 0644);
+#endif
 
 /* A payload OVF/UDN halt is a known state of this TXDMA: the vendor's
  * check_hangup counts it (tx_dma_hangup) and answers with close/open.
@@ -1177,6 +1179,7 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 		if (rtl92fe_restart_on_tx_hang)
 			rtl_restart_hw(hw);
 	}
+#ifdef CONFIG_RTLWIFI_DEBUG
 	if (rtl92fe_dump_rf) {
 		rtl92fe_dump_rf = 0;
 		pr_info("rtl8192fe RFdump RF_A 00=%05x 18=%05x 33=%05x b2=%05x df=%05x | RF_B 00=%05x 18=%05x df=%05x\n",
@@ -1199,4 +1202,5 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 			rtl_read_byte(rtlpriv, 0x97),
 			rtl_read_byte(rtlpriv, 0xdc));
 	}
+#endif
 }

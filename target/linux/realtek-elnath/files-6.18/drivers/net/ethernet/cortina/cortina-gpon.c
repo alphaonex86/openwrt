@@ -2392,9 +2392,13 @@ static int cg_oltcap_show(struct seq_file *s, void *v)
 
 /* Per-message OMCI trace. DEFAULT OFF. The always-on ...
  * dev/MEASURED-cortina-gpon.c.md sec 98. */
+#ifdef CONFIG_GPON_OMCI_DIAG
 static bool cg_omci_trace;
 module_param_named(omci_trace, cg_omci_trace, bool, 0644);
 MODULE_PARM_DESC(omci_trace, "log one line per downstream OMCI PDU: message type, ME class/instance and, for a Get, the requested vs answered vs unmodelled attribute masks (default OFF)");
+#else
+static const bool cg_omci_trace;
+#endif
 
 /* Emit one trace line for the PDU just processed. @resp/@n ...
  * dev/MEASURED-cortina-gpon.c.md sec 129. */

@@ -241,15 +241,19 @@ set_password() {
 	done
 }
 
-# LuCI/UCI first, else this unit's MIB; an empty value keeps the driver's build
-# default. Refusals are logged, never fatal: the serial still ranges.
+# LuCI/UCI first, else this unit's MIB -- except the software version, which is
+# ours (owrt_version). An empty value keeps the driver's build default.
+# Refusals are logged, never fatal: the serial still ranges.
 set_omci_identity() {
 	local part="$1" source name val
 	config_get source identity source factory
 	for name in $OMCI_ID_NAMES; do
 		config_get val identity "$name"
-		[ -n "$val" ] || [ "$source" != factory ] ||
-			val=$("$RTK" -p "$part" "$name" 2>/dev/null)
+		case "$name" in
+		sw_ver1|sw_ver2) [ -n "$val" ] || val=$(owrt_version 2>/dev/null) ;;
+		*) [ -n "$val" ] || [ "$source" != factory ] ||
+			val=$("$RTK" -p "$part" "$name" 2>/dev/null) ;;
+		esac
 		[ -n "$val" ] || continue
 		[ -w "$OMCI_ID_DIR/onu_$name" ] || {
 			log "no driver parameter onu_$name; OMCI $name keeps the build default"

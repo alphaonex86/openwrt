@@ -87,6 +87,7 @@
 START=11
 
 . /lib/functions/gpon-cal.sh
+. /lib/functions/onu-identity.sh
 
 RETRY_FIRST=5		# seconds before the first re-attempt
 RETRY_MAX=300		# ceiling: keep looking ~every 5 min, forever
@@ -244,11 +245,16 @@ try_set() {
 	[ -z "$pwd" ] || echo "password $pwd" > "$GPON_PROC" 2>/dev/null ||
 		say "the driver refused PLOAM password (1..10 printable characters)" err
 
-	# The OMCI identity, LuCI/UCI first, also before the serial.
+	# The OMCI identity, LuCI/UCI first, also before the serial; the software
+	# version is ours (owrt_version), never the vendor's MIB.
 	for key in $OMCI_ID_KEYS; do
 		name=${key%%:*}
-		val=$(uci -q get "gpon.identity.$name" ||
-			printf '%s' "$ident" | sed -n "s/^$name //p")
+		case "$name" in
+		sw_ver1|sw_ver2) val=$(uci -q get "gpon.identity.$name" ||
+			owrt_version 2>/dev/null) ;;
+		*) val=$(uci -q get "gpon.identity.$name" ||
+			printf '%s' "$ident" | sed -n "s/^$name //p") ;;
+		esac
 		[ -n "$val" ] || continue
 		echo "id $name $val" > "$GPON_PROC" 2>/dev/null ||
 			say "the driver refused OMCI $name '$val'" err

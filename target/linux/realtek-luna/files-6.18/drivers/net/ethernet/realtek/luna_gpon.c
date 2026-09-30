@@ -2810,6 +2810,7 @@ static void __init bosa_tx_enable(void)
 /* Set once the cold ignition has run, so the periodic fault-service (driven from
  * the GPON FSM timer) only touches the laser after DIGITAL_POWER_ON. */
 static int bosa_laser_up;
+static int luna_laser_restrobe_owed;	/* each O3 entry: dev/MEASURED-luna_gpon.c.md sec 337 */
 
 /* Program the burst bias/mod DACs from laser_bias/laser_mod (0 = golden seed):
  * hi-8 into 0x236/0x237, the low nibbles into 0x238, each latched by the 0x23d
@@ -7470,6 +7471,7 @@ static void luna_op_analog_relock(void *sh)
 {
 	(void)sh;
 	gpon_txpll_relock();
+	WRITE_ONCE(luna_laser_restrobe_owed, 1);
 }
 
 static void luna_op_o3_feed_reset(void *sh)
@@ -8089,6 +8091,9 @@ static void gpon_optical_work_fn(struct work_struct *w)
 	mutex_lock(&bosa_lock);
 	if (luna_driver_ready && !luna_stopping) {
 		if (bosa_regs_live() && !laser_off && !skip_bosa) {
+			if (bosa_laser_up && xchg(&luna_laser_restrobe_owed, 0) &&
+			    (laser_bias || laser_mod))
+				luna_laser_dac_apply();
 			if (bosa_laser_up)
 				bosa_laser_maint();
 			/* OFFK runtime servo (stock europa_LoopMon equivalent): latch ...

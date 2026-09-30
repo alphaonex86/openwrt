@@ -22,6 +22,7 @@
 #include "gpon_ploam_diag.h"	/* the core's activation diagnostic: WHAT to read at Assign/Ranging/Deact */
 #include "gpon_gem_us.h"	/* GPON_GEM_US_RANGE_OK: the core's own bound predicate */
 #include "luna_gpon_logic.h"	/* hoisted logic */
+#include <gpon_ddm.h>	/* the common SFF-8472 A2h decode and the ANI-G unit */
 #include "hwio.h"	/* flowcore: the ONE canonical field-mask RMW */
 #include "gpon_gtc_ploam.h"	/* the core: the DS PLOAM buffer unpack, fed this shell's gpon_io */
 #include <linux/init.h>
@@ -1825,6 +1826,27 @@ static bool gpon_optical_cache_poll(void)
 {
 	s32 rx, tx;
 
+	/* A module that is not an RTL8290B has no RTL8290B DDM words: 0x166/0x168
+	 * are bytes of its identity EEPROM. The G24W's GN25L95 reported -30.00 dBm
+	 * RX to the OLT while its own A2h monitor read -8.87 (2026-09-30). Ask it the
+	 * standard way, through the decode the Cortina shell uses too. */
+	if (bosa_gn_identified || bosa_not_8290b) {
+		u8 raw[GPON_DDM_A2H_LEN];
+		struct gpon_ddm_a2h d;
+		int i, err = 0;
+
+		for (i = 0; i < GPON_DDM_A2H_LEN; i++) {
+			int b = bosa_i2c_read8(0x51, GPON_DDM_A2H_BASE + i);
+
+			err |= b < 0;
+			raw[i] = b < 0 ? 0 : b & 0xff;
+		}
+		if (gpon_ddm_a2h_decode(raw, err, &d) != GPON_DDM_OK)
+			return false;
+		anig_rx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.rx_pwr));
+		anig_tx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.tx_pwr));
+		return true;
+	}
 	rx = ddm_word_to_level(bosa_read16_median(0x168));	/* RX */
 	tx = ddm_word_to_level(bosa_read16_median(0x166));	/* TX */
 	if (rx == INT_MIN || tx == INT_MIN)

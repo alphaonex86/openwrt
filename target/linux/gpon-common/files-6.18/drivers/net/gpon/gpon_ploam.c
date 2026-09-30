@@ -16,6 +16,7 @@
 #define GPON_PLOAM_AVC_MAX		3	/* :6608 reports per O5 entry     */
 #define GPON_PLOAM_SN_REOFFER_TICKS	50	/* :6835 ~twice a second at O3    */
 #define GPON_PLOAM_HEALTHY_O5_TICKS	500	/* :6355 ~5 s = a healthy provision */
+#define GPON_PLOAM_KEEP_LOCK_GIVEUP_TICKS 3000	/* ~30 s below O4 after a keep-lock DEACT */
 #define GPON_PLOAM_RERANGE_LOG_MS	2000	/* :6096 flap damping on the summary */
 
 /* Guard/preamble defaults before the OLT has dictated any (:958-:959). */
@@ -211,6 +212,8 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		o->o4_entry_tick = o->ticks ? o->ticks : 1;
 	else
 		o->o4_entry_tick = 0;
+	if (st >= GPON_O4_RANGING)
+		o->keep_lock_tick = 0;
 
 	enum gpon_ostate prev = o->state;
 
@@ -426,9 +429,11 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			    !(o->state == GPON_O5_OPERATION && o->o5_entry_tick &&
 			      (o->ticks - o->o5_entry_tick) > GPON_PLOAM_HEALTHY_O5_TICKS)) {
 				o->ops->cdr_reseat(o->sh);
+				o->keep_lock_tick = 0;
 			} else if (o->cfg->cdr_reseat_on_reactivate) {
 				ev(o, GPON_PLOAM_EV_DEACT_KEEP_LOCK,
 				   o->o5_entry_tick ? o->ticks - o->o5_entry_tick : 0, 0);
+				o->keep_lock_tick = o->ticks ? o->ticks : 1;
 			}
 			set_state(o, GPON_O1_INITIAL, now_ms);
 		}
@@ -675,6 +680,18 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 			o->early_report_tick = o->ticks ? o->ticks : 1;
 			ev(o, GPON_PLOAM_EV_EARLY_DWELL, (u32)o->state, held);
 		}
+	}
+
+	/* A kept lock that never gets back past O3 was a bad one: the laptop X111W
+	 * (2026-09-30) decoded the DS as garbage after it and never ranged again. */
+	if (o->keep_lock_tick && o->state < GPON_O4_RANGING &&
+	    (o->ticks - o->keep_lock_tick) > GPON_PLOAM_KEEP_LOCK_GIVEUP_TICKS) {
+		ev(o, GPON_PLOAM_EV_KEEP_LOCK_GIVEUP, o->ticks - o->keep_lock_tick,
+		   (u32)o->state);
+		o->keep_lock_tick = 0;
+		o->ops->cdr_reseat(o->sh);
+		set_state(o, GPON_O1_INITIAL, now_ms);
+		return (int)(o->tx_total - tx0);
 	}
 
 	/* ★★ THE RANGING TIMER (G.984.3). An ONU-ID has been assigned ...

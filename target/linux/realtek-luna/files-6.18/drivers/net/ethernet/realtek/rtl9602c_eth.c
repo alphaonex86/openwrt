@@ -995,7 +995,7 @@ static int rtl9602c_eth_omci_xmit_ring0(struct rtl9602c_eth *ep, const u8 *omci,
 	txd_publish(ep, i, word0, false);  /* US OMCI: the GO is NOT optional */
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
-	if (ep->dbg_omci_tx < 30) {	/* first few only, so serial isn't flooded */
+	if (IS_ENABLED(CONFIG_LUNA_DEBUG) && ep->dbg_omci_tx < 30) {
 		/* PRIME PROBE: did the GMAC INSERT the cpu-tag on the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 60. */
 		u32 post_w0;
@@ -1221,7 +1221,7 @@ static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
 		ep_wr(ep, R_IO_CMD, ep_rd(ep, R_IO_CMD) | dmask);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
-	if (ep->dbg_omci_tx < 8)	/* first few only, so serial isn't flooded */
+	if (IS_ENABLED(CONFIG_LUNA_DEBUG) && ep->dbg_omci_tx < 8)
 		netdev_info(ep->ndev,
 			"omci_tx: w0=%08x w2=%08x w3=%08x hwring=%u doorbell=%s (sid_idx=%u pon=%u len=%u)\n",
 			word0, word2, word3, hwring,
@@ -1374,7 +1374,8 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 				 * log any DHCP-to-client (UDP dst port 68) DS frame + where
 				 * it routed. dst = eth hdr; [12:13]=ethertype 0x0800,
 				 * [23]=IP proto 0x11(UDP), [36:37]=UDP dst port 0x0044(68). */
-				if (len >= RX_CPU_PREFIX + 38 &&
+				if (IS_ENABLED(CONFIG_LUNA_DEBUG) &&
+				    len >= RX_CPU_PREFIX + 38 &&
 				    dst[12] == 0x08 && dst[13] == 0x00 &&
 				    dst[23] == 0x11 &&
 				    dst[36] == 0x00 && dst[37] == 0x44)

@@ -930,6 +930,13 @@ module_param(los_rerange_ticks, uint, 0644);
 MODULE_PARM_DESC(los_rerange_ticks, "drop to O1 + re-range after a REAL downstream LOS (optic_los AND no SerDes sig-detect) persists this many ~10ms ticks (fiber-pull recovery; 0=off, default 30 ~300ms ~= stock TO2)");
 static u32 gpon_los_run;			/* consecutive real-LOS (optic_los & !sds_sdet) tick count */
 
+/* G.984.3 TO1: an ONU-ID with no Ranging_Time for this long goes back to O1.  Stock
+ * runs TO1 10000 ms (G24W `diag gpon get`, ONU-G24W.md); without it an OLT that
+ * restarts with its light on leaves this ONU at O4 for good. */
+static uint o4_ranging_timeout_ticks = 1000;
+module_param(o4_ranging_timeout_ticks, uint, 0644);
+MODULE_PARM_DESC(o4_ranging_timeout_ticks, "G.984.3 TO1: back to O1 when no Ranging_Time follows the ONU-ID within this many ~10ms ticks (0=off, default 1000 = stock's 10 s)");
+
 /* The O1/O2/O3 dwell report -- the half the activation ...
  * dev/MEASURED-luna_gpon.c.md sec 32. */
 static uint early_dwell_report_ticks = 500;	/* ~5 s at the ~10ms tick */
@@ -8757,6 +8764,7 @@ skip_bosa_init:
 	 * dev/MEASURED-luna_gpon.c.md sec 270. */
 	luna_ploam_cfg_live.trace = trace;
 	luna_ploam_cfg_live.los_rerange_ticks = los_rerange_ticks;
+	luna_ploam_cfg_live.o4_ranging_timeout_ticks = o4_ranging_timeout_ticks;
 	luna_ploam_cfg_live.o5_provision_watchdog_ticks = o5_provision_watchdog_ticks;
 	luna_ploam_cfg_live.o5_ploam_keepalive_ticks = o5_ploam_keepalive_ticks;
 	/* The fourth, the same omission again: the core read early_dwell_report_ticks

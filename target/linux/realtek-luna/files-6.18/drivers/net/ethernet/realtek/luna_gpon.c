@@ -933,7 +933,7 @@ static u32 gpon_los_run;			/* consecutive real-LOS (optic_los & !sds_sdet) tick 
 /* G.984.3 TO1: an ONU-ID with no Ranging_Time for this long goes back to O1.  Stock
  * runs TO1 10000 ms (G24W `diag gpon get`, ONU-G24W.md); without it an OLT that
  * restarts with its light on leaves this ONU at O4 for good. */
-static uint o4_ranging_timeout_ticks = 1000;
+static uint o4_ranging_timeout_ticks = GPON_DWELL_TO1_TICKS;
 module_param(o4_ranging_timeout_ticks, uint, 0644);
 MODULE_PARM_DESC(o4_ranging_timeout_ticks, "G.984.3 TO1: back to O1 when no Ranging_Time follows the ONU-ID within this many ~10ms ticks (0=off, default 1000 = stock's 10 s)");
 

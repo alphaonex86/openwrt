@@ -17,7 +17,6 @@
 #define GPON_PLOAM_SN_REOFFER_TICKS	50	/* :6835 ~twice a second at O3    */
 #define GPON_PLOAM_HEALTHY_O5_TICKS	500	/* :6355 ~5 s = a healthy provision */
 #define GPON_PLOAM_KEEP_LOCK_GIVEUP_TICKS 3000	/* ~30 s below O4 after a keep-lock DEACT */
-#define GPON_PLOAM_O3_UNHEARD_TICKS	3000	/* ~30 s offering our SN with no ONU-ID */
 #define GPON_PLOAM_RERANGE_LOG_MS	2000	/* :6096 flap damping on the summary */
 
 /* Guard/preamble defaults before the OLT has dictated any (:958-:959). */
@@ -698,7 +697,7 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 	/* An SN nobody hears is never assigned nor deactivated: leave O3 so the next
 	 * entry relocks.  dev/MEASURED-gpon_ploam.c.md sec 47. */
 	if (o->state == GPON_O3_SERIAL && o->early_entry_tick &&
-	    (o->ticks - o->early_entry_tick) > GPON_PLOAM_O3_UNHEARD_TICKS) {
+	    gpon_dwell_expired(o->state, o->ticks - o->early_entry_tick, 0)) {
 		ev(o, GPON_PLOAM_EV_O3_UNHEARD, o->ticks - o->early_entry_tick, o->sn_tx);
 		set_state(o, GPON_O1_INITIAL, now_ms);
 		return (int)(o->tx_total - tx0);
@@ -706,9 +705,9 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 
 	/* ★★ THE RANGING TIMER (G.984.3). An ONU-ID has been assigned ...
 	 * dev/MEASURED-gpon_ploam.c.md sec 46. */
-	if (o->cfg->o4_ranging_timeout_ticks &&
-	    o->state == GPON_O4_RANGING && o->o4_entry_tick &&
-	    (o->ticks - o->o4_entry_tick) > o->cfg->o4_ranging_timeout_ticks) {
+	if (o->state == GPON_O4_RANGING && o->o4_entry_tick &&
+	    gpon_dwell_expired(o->state, o->ticks - o->o4_entry_tick,
+			       o->cfg->o4_ranging_timeout_ticks)) {
 		ev(o, GPON_PLOAM_EV_O4_TIMEOUT, o->ticks - o->o4_entry_tick, 0);
 		o->onu_id = 0xff;
 		o->ops->set_hw_onu_id(o->sh, 0xff);

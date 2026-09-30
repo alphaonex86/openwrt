@@ -38,24 +38,14 @@
 #   line.  The VALUE still comes from the kernel command line and no address is
 #   spelled here, so this stays correct for every board on this target -- which
 #   is the property the original comment claims and this now actually has.
-# A usable identity: six octets, unicast, and not an address every unit carries.
-valid() {
-	case "$1" in
-	??:??:??:??:??:??) ;;
-	*) return 1 ;;
-	esac
-	case "$1" in
-	?[13579bdf]:*|00:00:00:00:00:00|00:e0:4c:86:70:01|00:e0:4c:07:68:02) return 1 ;;
-	esac
-}
+. /lib/functions/onu-identity.sh
 cmd=$(sed -n 's/.*[ \t][A-Za-z0-9_]\{1,\}\.mac=\([0-9A-Fa-f:]\{17\}\).*/\1/p' /proc/cmdline | tr 'A-F' 'a-f')
-fac=$(/usr/sbin/rtk_factory -p config mac 2>/dev/null | tr 'A-F' 'a-f')
-if valid "$cmd"; then
+if unit_mac_valid "$cmd"; then
 	lc=$cmd src="the mac= boot parameter"
-elif valid "$fac"; then
-	lc=$fac src="this unit's factory config partition"
 else
-	exit 0
+	fac=$(/usr/sbin/rtk_factory -p config mac 2>/dev/null | tr 'A-F' 'a-f')
+	unit_mac_valid "$fac" || exit 0
+	lc=$fac src="this unit's factory config partition"
 fi
 
 for i in $(seq 0 7); do

@@ -17,14 +17,15 @@ GPON_SN_PATHS="/sys/module/luna_gpon/parameters/onu_sn
 /sys/module/gpon/parameters/onu_sn"
 
 . /lib/functions/gpon-cal.sh
+. /lib/functions/onu-identity.sh
 
 log() { logger -t gpon_provision "$@"; }
 
 # Locally-administered fallback MAC, derived from the SoC id, when no factory MAC
 # is present (per CLAUDE.md: surface that provisioning is missing on this unit).
 derive_laa() {
-	local cid h
-	cid=$(sed -n 's/.*[Ss]erial.*: *//p' /proc/cpuinfo | head -n1)
+	local cid="$1" h
+	[ -n "$cid" ] || cid=$(sed -n 's/.*[Ss]erial.*: *//p' /proc/cpuinfo | head -n1)
 	[ -n "$cid" ] || cid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 	h=$(printf '%s' "$cid" | md5sum | cut -c1-10)
 	printf '02:%s:%s:%s:%s:%s\n' "${h%????????}" "$(echo $h | cut -c3-4)" \
@@ -77,6 +78,11 @@ provision() {
 		[ -n "$olt" ]     || olt=$("$RTK"     -p "$part" olt_mode 2>/dev/null)
 	fi
 
+	mac=$(echo "$mac" | tr 'A-F' 'a-f')
+	if [ -n "$mac" ] && ! unit_mac_valid "$mac"; then
+		log "factory MAC '$mac' on '$part' is a placeholder or not unicast - not this unit's identity"
+		mac=""
+	fi
 	if [ -z "$mac" ]; then
 		# ★★ NO FACTORY MAC: DO NOT STOMP A MAC SOMEBODY BETTER ALREADY SET.
 		# MEASURED on the LANLY G24W (census 2026-08-27, mac_parity_vs_stock
@@ -88,21 +94,15 @@ provision() {
 		# something else. A valid unicast MAC that is not the family's shared
 		# silicon placeholder (00:e0:4c:86:70:01) is the unit's best known
 		# identity -- keep it, and say where it stops being our choice.
-		local cur first
+		local cur
 		cur=$(cat "/sys/class/net/$base/address" 2>/dev/null | tr 'A-F' 'a-f')
-		first="${cur%%:*}"
-		case "$cur" in
-		""|00:00:00:00:00:00|00:e0:4c:86:70:01) cur="" ;;
-		esac
-		case "$first" in
-		*[13579bdf]) cur="" ;;      # I/G bit set: not a unicast identity
-		esac
+		unit_mac_valid "$cur" || cur=""
 		if [ -n "$cur" ]; then
 			mac="$cur"
 			log "no factory MAC on '$part' - keeping $base's existing $mac (boot-parameter or driver-chosen); PROVISIONING MISSING on this unit"
 		else
-			mac=$(derive_laa)
-			log "NO factory MAC on '$part' - using random LAA $mac; PROVISIONING MISSING on this unit"
+			mac=$(derive_laa "$sn")
+			log "NO factory MAC on '$part' - using LAA $mac derived from ${sn:-this boot}; PROVISIONING MISSING on this unit"
 		fi
 	fi
 

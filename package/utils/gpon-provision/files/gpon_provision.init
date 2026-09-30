@@ -20,6 +20,10 @@ GPON_PWD_PATHS="/sys/module/luna_gpon/parameters/onu_password"
 # key gpon.identity.<name> = driver parameter onu_<name>.
 OMCI_ID_NAMES="vendor_id hw_ver sw_ver1 sw_ver2 model product_code loid loid_passwd"
 OMCI_ID_DIR=/sys/module/luna_gpon/parameters
+# This unit's WiFi cal from its MIB (HW_WLAN0_*): rtk_factory verb wlan_<x> ->
+# rtl8192fe parameter unit_<x>. All or nothing: the driver needs the whole set.
+WIFI_CAL_VERBS="wlan_cck_a wlan_cck_b wlan_ht40_a wlan_ht40_b wlan_thermal wlan_xcap wlan_reg_domain"
+WIFI_CAL_DIR=/sys/module/rtl8192fe/parameters
 
 . /lib/functions/gpon-cal.sh
 . /lib/functions/onu-identity.sh
@@ -128,6 +132,8 @@ provision() {
 	} > "$ENVFILE"
 
 	log "provisioned: MAC=$mac SN=${sn:-?} OLT_MODE=${olt:-?} (source=$source)"
+
+	set_wifi_cal "$part"
 
 	apply_mac "$base" "$mac"
 
@@ -262,6 +268,33 @@ set_omci_identity() {
 		printf '%s' "$val" > "$OMCI_ID_DIR/onu_$name" ||
 			log "OMCI $name '$val' refused by the driver"
 	done
+}
+
+# Before the radio starts (hw_init applies it), so this unit calibrates with its
+# own TX power and crystal trim instead of another unit's.
+set_wifi_cal() {
+	local part="$1" verb val vals=""
+	[ -d "$WIFI_CAL_DIR" ] || return 0
+	for verb in $WIFI_CAL_VERBS; do
+		val=$("$RTK" -p "$part" "$verb" 2>/dev/null)
+		case "$verb" in
+		wlan_cck_*|wlan_ht40_*)
+			echo "$val" | grep -qxE '([0-9a-fA-F]{2},){13}[0-9a-fA-F]{2}' ||
+				{ log "WiFi cal: $verb '$val' is not 14 hex bytes; the radio keeps the board table"; return 0; }
+			val=$(echo "$val" | sed 's/\([0-9a-fA-F][0-9a-fA-F]\)/0x\1/g') ;;
+		*)
+			echo "$val" | grep -qxE '[0-9]{1,3}' ||
+				{ log "WiFi cal: $verb '$val' is not a number; the radio keeps the board table"; return 0; }
+			;;
+		esac
+		vals="$vals$verb=$val "
+	done
+	for verb in $WIFI_CAL_VERBS; do
+		val=$(echo "$vals" | tr ' ' '\n' | sed -n "s/^$verb=//p")
+		printf '%s' "$val" > "$WIFI_CAL_DIR/unit_${verb#wlan_}" ||
+			log "WiFi cal: unit_${verb#wlan_}='$val' refused by the driver"
+	done
+	log "WiFi cal from this unit's MIB handed to the driver"
 }
 
 try_identity() {

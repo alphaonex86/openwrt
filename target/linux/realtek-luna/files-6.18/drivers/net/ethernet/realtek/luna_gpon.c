@@ -950,14 +950,13 @@ static u8 gpon_last_ds_type;
 static bool force_laser;
 module_param(force_laser, bool, 0444);
 MODULE_PARM_DESC(force_laser, "force US laser CW on (US_CFG FS_LON) — SerDes-TX emission diagnostic");
-/* Laser burst bias/mod DAC override (BOSA W54 0x236 hi-8 / ...
- * dev/MEASURED-luna_gpon.c.md sec 34. */
-static unsigned int laser_bias = 0x32;	/* Board-C REAL per-board calib (rtl8290b.data CAL_IBIAS 9960uA->code 0x32f). 0x18/0x34 25C-LUT A/B = no rate gain (2/6 vs 3/6), reverted */
-static unsigned int laser_mod = 0xbb;	/* Board-C REAL per-board calib (rtl8290b.data CAL_IMOD 36694uA->code 0xbbd) */
-module_param(laser_bias, uint, 0644);
-module_param(laser_mod, uint, 0644);
-MODULE_PARM_DESC(laser_bias, "BOSA bias DAC hi-8 (0x236) override; 0=keep A4-golden 0x19");
-MODULE_PARM_DESC(laser_mod, "BOSA mod DAC hi-8 (0x237) override for stronger burst peak; 0=keep golden 0x67");
+/* Laser burst bias/mod DACs: THIS unit's 12-bit codes from its own rtl8290b.data
+ * (CAL_IBIAS/CAL_IMOD, code = uA * 4096 / 50000), set by the provisioning or the
+ * command line; 0 keeps the golden seed. A compiled value would be one unit's
+ * calibration shipped to every unit. Registered with their setter beside
+ * luna_laser_dac_apply(). dev/MEASURED-luna_gpon.c.md sec 34. */
+static unsigned int laser_bias;
+static unsigned int laser_mod;
 /* rev-A bring-up US-TX SerDes CMU/PLL + TX-LA-LDO writes ...
  * dev/MEASURED-luna_gpon.c.md sec 35. */
 static unsigned int serdes_modev1_tx;	/* default 0: TESTED (COM_REG02/03/08/24/25 applied+readback-confirmed) =
@@ -2747,6 +2746,52 @@ static void __init bosa_tx_enable(void)
 /* Set once the cold ignition has run, so the periodic fault-service (driven from
  * the GPON FSM timer) only touches the laser after DIGITAL_POWER_ON. */
 static int bosa_laser_up;
+
+/* Program the burst bias/mod DACs from laser_bias/laser_mod (0 = golden seed):
+ * hi-8 into 0x236/0x237, the low nibbles into 0x238, each latched by the 0x23d
+ * strobe. Caller holds bosa_lock. */
+static void luna_laser_dac_apply(void)
+{
+	unsigned int bias = laser_bias ? laser_bias : 0x190;
+	unsigned int mod = laser_mod ? laser_mod : 0x670;
+
+	bosa_set_bit(0x23d, 7, 0);
+	bosa_set_field(0x236, 0xff, bias >> 4);
+	bosa_set_field(0x238, 0x0f, bias & 0x0f);
+	bosa_set_bit(0x23d, 7, 1);
+	bosa_set_bit(0x23d, 7, 0);
+	bosa_set_field(0x237, 0xff, mod >> 4);
+	bosa_set_field(0x238, 0xf0, (mod & 0x0f) << 4);
+	bosa_set_bit(0x23d, 7, 1);
+	mdelay(2);
+	pr_info("luna-gpon: laser DAC bias=0x%03x mod=0x%03x -> readback 0x236=0x%02x 0x237=0x%02x 0x238=0x%02x R30=0x%02x\n",
+		bias, mod, bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x237) & 0xff,
+		bosa_read_reg(0x238) & 0xff, bosa_read_reg(0x31e) & 0xff);
+}
+
+/* The provisioning writes the unit's codes after the driver started: apply them now. */
+static int laser_dac_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int code;
+
+	if (kstrtouint(val, 0, &code) || code > 0xfff)
+		return -EINVAL;
+	mutex_lock(&bosa_lock);
+	*(unsigned int *)kp->arg = code;
+	if (bosa_laser_up)
+		luna_laser_dac_apply();
+	mutex_unlock(&bosa_lock);
+	return 0;
+}
+
+static const struct kernel_param_ops laser_dac_ops = {
+	.set = laser_dac_set,
+	.get = param_get_uint,
+};
+module_param_cb(laser_bias, &laser_dac_ops, &laser_bias, 0644);
+module_param_cb(laser_mod, &laser_dac_ops, &laser_mod, 0644);
+MODULE_PARM_DESC(laser_bias, "burst bias DAC, this unit's 12-bit code (rtl8290b.data CAL_IBIAS uA*4096/50000); 0 = golden seed");
+MODULE_PARM_DESC(laser_mod, "burst modulation DAC, this unit's 12-bit code (rtl8290b.data CAL_IMOD uA*4096/50000); 0 = golden seed");
 static int apc_offk_armed;	/* rtl8290b_apc_init armed FSU/OFFK; servo will latch */
 static int apc_offk_latched;	/* runtime servo latched OFFK (R29 0x31d &0x3c==0x3c) */
 static u32 bosa_maint_faults;		/* recovery attempts (see the print below) */
@@ -8445,26 +8490,9 @@ static int __init rtl9602c_gpon_init(void)
 	 * once the PON TX clock runs, so calibrating earlier leaves OFFK_DONE dead. */
 	if (!laser_off) {
 		bosa_tx_enable();
-		/* Burst bias/mod override: MOD raises the peak, BIAS stays low to preserve
-		 * extinction. Latched via the 0x23d DAC strobe. Skipped if both 0. */
-		if (laser_bias || laser_mod) {
-			/* Board C's per-board laser calib (rtl8290b.data): bias DAC12=0x32f, mod
-			 * DAC12=0xbbd, so 0x238 = 0xdf -- the low nibbles are part of the DAC
-			 * value and must not be zeroed. */
-			bosa_set_bit(0x23d, 7, 0);
-			bosa_set_field(0x236, 0xff, laser_bias ? laser_bias : 0x19);
-			bosa_set_field(0x238, 0x0f, 0x0f);	/* IBIAS[3:0] = 0xf */
-			bosa_set_bit(0x23d, 7, 1);
-			bosa_set_bit(0x23d, 7, 0);
-			bosa_set_field(0x237, 0xff, laser_mod ? laser_mod : 0x67);
-			bosa_set_field(0x238, 0xf0, 0xd0);	/* IMOD[3:0] = 0xd */
-			bosa_set_bit(0x23d, 7, 1);
-			mdelay(2);
-			pr_info("luna-gpon: laser DAC override bias=0x%02x mod=0x%02x -> readback bias=0x%02x mod=0x%02x R30=0x%02x mpd=%02x/%02x\n",
-				laser_bias, laser_mod, bosa_read_reg(0x236) & 0xff,
-				bosa_read_reg(0x237) & 0xff, bosa_read_reg(0x31e) & 0xff,
-				bosa_read_reg(0x320) & 0xff, bosa_read_reg(0x321) & 0xff);
-		}
+		/* This unit's burst bias/mod, when the command line already carries them. */
+		if (laser_bias || laser_mod)
+			luna_laser_dac_apply();
 		/* bosa_laser_maint() (the ~50 ms fault re-ignite) is gated on ...
 		 * dev/MEASURED-luna_gpon.c.md sec 263. */
 		if (bosa_regs_live())

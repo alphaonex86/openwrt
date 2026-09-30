@@ -122,6 +122,7 @@ enum gpon_ploam_ev {
 	/* ★★★ THE EARLY LADDER, AND IT ONLY REPORTS (operator, ...
 	 * dev/MEASURED-gpon_ploam.h.md sec 3. */
 	GPON_PLOAM_EV_EARLY_DWELL,
+	GPON_PLOAM_EV_KEEP_LOCK_GIVEUP,	/* a = ticks since the keep-lock DEACT, b = state */
 };
 
 /* The imperative shell: every entry is a SIDE EFFECT the core ...
@@ -289,6 +290,7 @@ struct gpon_ploam {
 	u32 ticks;			/* FSM poll ticks (~10 ms each)              */
 	u32 o5_entry_tick;		/* tick of the last O5 entry (0 = not at O5) */
 	u32 o4_entry_tick;		/* tick of the last O4 entry (0 = not at O4) */
+	u32 keep_lock_tick;		/* tick a keep-lock DEACT left O5 (0 = none) */
 	u32 early_entry_tick;		/* tick this O1/O2/O3 dwell began (0 = not early) */
 	u32 early_report_tick;		/* tick of the last dwell report (0 = none yet)   */
 	int avc_sent;			/* oper-state AVCs emitted this O5           */

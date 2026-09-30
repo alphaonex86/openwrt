@@ -27,7 +27,7 @@ config interface 'loopback'
 	option netmask '255.0.0.0'
 
 config globals 'globals'
-	option ula_prefix 'fdca:9602::/48'
+	option ula_prefix 'auto'
 
 # LAN bridge over the Ethernet jack(s). Today only the CPU GMAC (eth0) is a
 # Linux netdev — the switch hardware-bridges FE+GE behind it — so eth0 is the

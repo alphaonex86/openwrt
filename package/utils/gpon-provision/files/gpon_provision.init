@@ -16,6 +16,10 @@ GPON_SN_PATHS="/sys/module/luna_gpon/parameters/onu_sn
 /sys/module/gpon_rtl9602c/parameters/onu_sn
 /sys/module/gpon/parameters/onu_sn"
 GPON_PWD_PATHS="/sys/module/luna_gpon/parameters/onu_password"
+# The OMCI identity stock's omci_app takes from the MIB: rtk_factory verb = UCI
+# key gpon.identity.<name> = driver parameter onu_<name>.
+OMCI_ID_NAMES="vendor_id hw_ver sw_ver1 sw_ver2 model product_code loid loid_passwd"
+OMCI_ID_DIR=/sys/module/luna_gpon/parameters
 
 . /lib/functions/gpon-cal.sh
 . /lib/functions/onu-identity.sh
@@ -237,6 +241,25 @@ set_password() {
 	done
 }
 
+# LuCI/UCI first, else this unit's MIB; an empty value keeps the driver's build
+# default. Refusals are logged, never fatal: the serial still ranges.
+set_omci_identity() {
+	local part="$1" source name val
+	config_get source identity source factory
+	for name in $OMCI_ID_NAMES; do
+		config_get val identity "$name"
+		[ -n "$val" ] || [ "$source" != factory ] ||
+			val=$("$RTK" -p "$part" "$name" 2>/dev/null)
+		[ -n "$val" ] || continue
+		[ -w "$OMCI_ID_DIR/onu_$name" ] || {
+			log "no driver parameter onu_$name; OMCI $name keeps the build default"
+			continue
+		}
+		printf '%s' "$val" > "$OMCI_ID_DIR/onu_$name" ||
+			log "OMCI $name '$val' refused by the driver"
+	done
+}
+
 try_identity() {
 	local part source sn p tmp staged=1
 
@@ -267,6 +290,7 @@ try_identity() {
 
 	laser_from_unit "$part" || return 1
 	set_password "$part"
+	set_omci_identity "$part"
 
 	for p in $GPON_SN_PATHS; do
 		[ -w "$p" ] || continue

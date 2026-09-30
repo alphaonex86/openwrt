@@ -263,11 +263,22 @@ static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
 		o->sn[i] = sn[i];
 }
 
+/* The build default every ONU model is seeded with until a unit provisions. */
+void omci_id_default(struct omci_identity *id);
+
 /* Provision one identity member from @len bytes, zero-padded to its wire size.
  * Refused (false, member unchanged) when @len exceeds it, or is not exactly 2
- * for the product code.  Until provisioned a member serves the build default. */
-bool omci_onu_set_id(struct omci_onu *o, enum omci_id_field f,
-		     const u8 *val, unsigned int len);
+ * for the product code.  @id NULL only validates. */
+bool omci_id_set(struct omci_identity *id, enum omci_id_field f,
+		 const u8 *val, unsigned int len);
+
+/* The same from text, as a provisioning script hands it over: @s up to its
+ * first newline, and the product code in hex (stock's MIB "31" is 0x0031). */
+bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
+		     const char *s);
+
+/* Each field's name, the rtk_factory verb that reads it from the MIB. */
+extern const char *const omci_id_names[OMCI_ID_FIELDS];
 
 /* ME class IDs presented in the MIB upload (G.988 + the HSGQ ...
  * dev/MEASURED-gpon_omci_me.h.md sec 24. */

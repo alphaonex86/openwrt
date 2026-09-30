@@ -498,6 +498,8 @@ struct cortina_gpon {
 	/* Stage C: the G.988 OMCI responder + US OMCI TX */
 	struct omci_onu *omci;		/* responder context (kzalloc'd at probe) */
 	spinlock_t omci_lock;		/* common model readers vs ordered worker */
+	struct omci_identity omci_id;	/* provisioned via /proc/gpon "id", under omci_lock */
+	bool omci_id_set;
 	bool omci_active;		/* transport permits requests */
 	bool omci_initialized;		/* accepted MIB survives same-identity LOS */
 	struct delayed_work veip_avc_work;	/* the ~31s post-O5 VEIP oper-up AVC */
@@ -1816,6 +1818,8 @@ static void cg_omci_arm_locked(struct cortina_gpon *cg, bool reinit_if_armed)
 			omci_onu_reinit(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
 	} else {
 		omci_onu_init(cg->omci, cg->sn, OMCI_MDS_POISON_SEED);
+		if (cg->omci_id_set)
+			cg->omci->id = cg->omci_id;
 		cg_omci_declare_uni_panel(cg->omci, cg->dev);
 	}
 	cg->omci_initialized = true;
@@ -3348,7 +3352,7 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 			     size_t len, loff_t *ppos)
 {
 	struct cortina_gpon *cg = cg_singleton;
-	char buf[32], *p;
+	char buf[48], *p;	/* "id loid " + 24 octets */
 	u32 sel, acc, data;
 	int i;
 
@@ -3364,6 +3368,29 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 		int ret = cg_sn_set(cg, strim(p + 3), CG_SN_BOARD);
 
 		return ret ? ret : len;
+	}
+	/* `echo "id <name> <value>" > /proc/gpon`: the OMCI identity stock's
+	 * omci_app takes from the unit's MIB (names: omci_id_names[]). */
+	if (strncmp(p, "id ", 3) == 0) {
+		char *name = p + 3, *val = strchr(name, ' ');
+		unsigned int f;
+
+		if (val)
+			*val++ = '\0';
+		for (f = 0; f < OMCI_ID_FIELDS; f++)
+			if (!strcmp(name, omci_id_names[f]))
+				break;
+		if (f == OMCI_ID_FIELDS || !omci_id_set_str(NULL, f, val ?: ""))
+			return -EINVAL;
+		spin_lock_bh(&cg->omci_lock);
+		if (!cg->omci_id_set)
+			omci_id_default(&cg->omci_id);
+		cg->omci_id_set = true;
+		omci_id_set_str(&cg->omci_id, f, val ?: "");
+		if (cg->omci_initialized)
+			cg->omci->id = cg->omci_id;
+		spin_unlock_bh(&cg->omci_lock);
+		return len;
 	}
 	if (strncmp(p, "password ", 9) == 0) {
 		u8 pwd[GPON_PLOAM_PASSWORD_LEN];

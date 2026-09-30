@@ -105,7 +105,7 @@ void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst)
 /* ME attribute model ---- Constant attribute bytes live in ...
  * dev/MEASURED-gpon_omci_me.c.md sec 4. struct omci_identity is in the header:
  * each ONU carries its own copy, seeded from this build default. */
-static const struct omci_identity omci_id_default = {
+static const struct omci_identity omci_id_default_bytes = {
 	/* The HSGQ-G008 OLT recognizes HSGQ ONUs; "XPON" was rejected. */
 	.vendor_id	  = { 'H', 'S', 'G', 'Q' },
 	.onu_g_version	  = { '0', '2', 'A', '5', 'B', '1' },
@@ -780,19 +780,64 @@ static const struct { u8 off, size; } omci_id_fields[OMCI_ID_FIELDS] = {
 	[OMCI_ID_LOID_PASSWD]	= OMCI_ID_FIELD(loid_passwd),
 };
 
-bool omci_onu_set_id(struct omci_onu *o, enum omci_id_field f,
-		     const u8 *val, unsigned int len)
+const char *const omci_id_names[OMCI_ID_FIELDS] = {
+	[OMCI_ID_VENDOR]	= "vendor_id",
+	[OMCI_ID_HW_VERSION]	= "hw_ver",
+	[OMCI_ID_SW_VERSION0]	= "sw_ver1",
+	[OMCI_ID_SW_VERSION1]	= "sw_ver2",
+	[OMCI_ID_EQUIPMENT]	= "model",
+	[OMCI_ID_PRODUCT_CODE]	= "product_code",
+	[OMCI_ID_LOID]		= "loid",
+	[OMCI_ID_LOID_PASSWD]	= "loid_passwd",
+};
+
+void omci_id_default(struct omci_identity *id)
+{
+	*id = omci_id_default_bytes;
+}
+
+bool omci_id_set(struct omci_identity *id, enum omci_id_field f,
+		 const u8 *val, unsigned int len)
 {
 	u8 *dst;
 
 	if ((unsigned int)f >= OMCI_ID_FIELDS || len > omci_id_fields[f].size ||
 	    (f == OMCI_ID_PRODUCT_CODE && len != 2))
 		return false;
-	dst = (u8 *)&o->id + omci_id_fields[f].off;
+	if (!id)
+		return true;
+	dst = (u8 *)id + omci_id_fields[f].off;
 	memset(dst, 0, omci_id_fields[f].size);
 	if (len)
 		memcpy(dst, val, len);
 	return true;
+}
+
+bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
+		     const char *s)
+{
+	unsigned int len = 0, code = 0;
+	u8 be[2];
+
+	while (s[len] && s[len] != '\n')
+		len++;
+	if (f != OMCI_ID_PRODUCT_CODE)
+		return omci_id_set(id, f, (const u8 *)s, len);
+	if (!len || len > 4)
+		return false;
+	for (; *s && *s != '\n'; s++) {
+		char c = *s;
+
+		if (c >= '0' && c <= '9')
+			code = code << 4 | (unsigned int)(c - '0');
+		else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f')
+			code = code << 4 | (unsigned int)((c | 0x20) - 'a' + 10);
+		else
+			return false;
+	}
+	be[0] = (u8)(code >> 8);
+	be[1] = (u8)code;
+	return omci_id_set(id, f, be, 2);
 }
 
 void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level)
@@ -1413,7 +1458,7 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	 * dev/MEASURED-gpon_omci_me.c.md sec 34. */
 	memset(o, 0, sizeof(*o));
 	memcpy(o->sn, sn, 8);
-	o->id = omci_id_default;
+	omci_id_default(&o->id);
 	omci_me_reset_values(o);
 	o->mds = mds_seed;
 	/* Seed the ANI-G optical levels with the static fallback: a ...

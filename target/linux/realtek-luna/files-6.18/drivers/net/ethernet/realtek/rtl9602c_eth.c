@@ -365,6 +365,7 @@ struct rtl9602c_eth {
 	u32		dbg_rearm;	/* soft TxFDP re-arms (publish + watchdog) */
 	struct work_struct recover_work;
 	bool		closing;	/* gate recover_work vs ndo_stop teardown */
+	bool		fabric_up;	/* switch + datapath tables built (first open) */
 	bool		in_recovery;	/* GMAC block may be power-gated: /proc
 					 * diag must not touch its MMIO (bus abort) */
 	u32		dbg_tx_recover;	/* completed GMAC power-cycle recoveries */
@@ -1839,6 +1840,8 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 	ep->dbg_tx_recover++;
 	ep->stall_since = 0;
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
+	if (!use_rst)
+		gpon_pbo_init();	/* an IP-block reset owes its PBO re-init (sec 96) */
 
 	if (!use_rst && ep->irq > 0)
 		enable_irq(ep->irq);
@@ -1990,28 +1993,32 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	if (gmac_reset) {
 		/* Stock-faithful cold start (the TX-park fix): halt the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 93. */
+		bool first = !ep->fabric_up;
+
 		rtl9602c_hw_stop(ep);
 		rtl9602c_ipsel_cycle();
 		/* re-establish the GMAC<->switch sync the reset tore down (the
 		 * catch-22 breaker) -- and it is the FABRIC, so a failure is not
 		 * something to carry on past. */
-		ret = rtl9602c_uboot_swcore_bringup(ep);
-		if (ret)
-			goto fail;
-		/* Faithful full stock-equivalent datapath init, in stock ...
-		 * dev/MEASURED-rtl9602c_eth.c.md sec 135. */
-		rtl9602c_datapath_tables_init();
+		if (first) {
+			ret = rtl9602c_uboot_swcore_bringup(ep);
+			if (ret)
+				goto fail;
+			/* Faithful full stock-equivalent datapath init, in stock ...
+			 * dev/MEASURED-rtl9602c_eth.c.md sec 135. */
+			rtl9602c_datapath_tables_init();
+		}
 		rtl9602c_hw_program(ep);
 		rtl9602c_tx_align(ep);	/* fresh engine: CDO=0 -> rot 0 */
 		/* SAME-BOARD DIFF FIX (stock-WORKING vs ours-BROKEN): the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 94. */
-		if (ipmux_soc) {
+		if (first && ipmux_soc) {
 			void __iomem *s100 = (void __iomem *)0xb8000100ul;
 			void __iomem *s104 = (void __iomem *)0xb8000104ul;
 			writel(readl(s100) | BIT(8), s100);	/* 0x18000100 bit8 -> stock */
 			writel(readl(s104) | BIT(2), s104);	/* 0x18000104 bit2 -> stock */
 		}
-		if (ipmux_neteng) {
+		if (first && ipmux_neteng) {
 			/* network-engine / IP-mux page 0x18001000 (KSEG1 0xb8001000). RMW the exact
 			 * same-board-diff bits to stock-WORKING values (don't clobber dynamic bits):
 			 *   0x18001000: set bit19 (stock 0x10281e6f vs mine 0x10201e6f)
@@ -2024,8 +2031,9 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		/* Re-establish the FULL PON US/DS-NIC datapath against the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 95. */
 		gpon_pbo_init();
-		/* DO NOT GATE THIS BLOCK ON A "RAN ONCE" FLAG. Tried ...
-		 * dev/MEASURED-rtl9602c_eth.c.md sec 96. */
+		/* Only the fabric is once: the GMAC reset and its PBO re-init stay
+		 * paired on every open. dev/MEASURED-rtl9602c_eth.c.md sec 96. */
+		ep->fabric_up = true;
 		goto hw_ready;
 	}
 

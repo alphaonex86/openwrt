@@ -302,6 +302,7 @@ struct gpon_ploam {
 	u8 boh_guard;			/* Upstream_Overhead d[0]   = guard bits        */
 	u8 boh_ptn;			/* Upstream_Overhead d[3]   = Type-3 pattern    */
 	u8 boh_delim[3];		/* Upstream_Overhead d[4..6]                    */
+	u8 boh_t12;			/* Upstream_Overhead (d[1] + d[2]) / 8 = Type-1+2 bytes */
 	u8 boh_t3pre;			/* Ext_Burst_Length d[0] = pre-ranged Type-3 len */
 	u8 boh_t3ranged;		/* Ext_Burst_Length d[1] = ranged Type-3 len     */
 	/* --- provisioning flags the PLOAM layer owns: set and cleared by PLOAM

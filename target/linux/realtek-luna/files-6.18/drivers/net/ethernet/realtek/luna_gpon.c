@@ -1819,6 +1819,21 @@ static int bosa_read16_median(u16 reg_hi)
 static s16 anig_rx_level = (s16)0xeedc;		/* #10 Optical signal level (DS RX) */
 static s16 anig_tx_level = (s16)0x04d7;		/* #14 Transmit optical level (TX)  */
 
+/* The module's own SFF-8472 A2h monitor, decoded. -> enum gpon_ddm_status */
+static int bosa_a2h_read(struct gpon_ddm_a2h *d)
+{
+	u8 raw[GPON_DDM_A2H_LEN];
+	int i, err = 0;
+
+	for (i = 0; i < GPON_DDM_A2H_LEN; i++) {
+		int b = bosa_i2c_read8(0x51, GPON_DDM_A2H_BASE + i);
+
+		err |= b < 0;
+		raw[i] = b < 0 ? 0 : b & 0xff;
+	}
+	return gpon_ddm_a2h_decode(raw, err, d);
+}
+
 /* Sample the calibrated DDM optical words and refresh the ANI-G level cache.
  * Called from process work at a slow cadence (never from the GET path);
  * a "not available" word keeps the previous cached value. */
@@ -1831,17 +1846,10 @@ static bool gpon_optical_cache_poll(void)
 	 * RX to the OLT while its own A2h monitor read -8.87 (2026-09-30). Ask it the
 	 * standard way, through the decode the Cortina shell uses too. */
 	if (bosa_gn_identified || bosa_not_8290b) {
-		u8 raw[GPON_DDM_A2H_LEN];
 		struct gpon_ddm_a2h d;
-		int i, err = 0;
 
-		for (i = 0; i < GPON_DDM_A2H_LEN; i++) {
-			int b = bosa_i2c_read8(0x51, GPON_DDM_A2H_BASE + i);
-
-			err |= b < 0;
-			raw[i] = b < 0 ? 0 : b & 0xff;
-		}
-		if (gpon_ddm_a2h_decode(raw, err, &d) != GPON_DDM_OK)
+		/* a zero power word is no measurement: keep the previous level */
+		if (bosa_a2h_read(&d) != GPON_DDM_OK || !d.rx_pwr || !d.tx_pwr)
 			return false;
 		anig_rx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.rx_pwr));
 		anig_tx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.tx_pwr));
@@ -2272,6 +2280,40 @@ static s32 bosa_tx_power_cdbm(void)
 	/* word(0.1uW) = (avg*slope*10)>>8 + (offset*10>>5); slope=2022, offset=0 here. */
 	word = bosa_tx_word_calc(sum, n, bosa_cal.tx_slope, bosa_cal.tx_offset);
 	return bosa_code_to_cdbm(word);
+}
+
+/* One ANI-G self-test reading (the OLT's `show ont-optical`), in the units the
+ * OMCI core takes. What this module cannot produce stays out of @v->have. */
+static void luna_selftest_read(struct gpon_optic_reading *v)
+{
+	struct gpon_ddm_a2h d;
+	s32 t;
+	u32 bias;
+
+	memset(v, 0, sizeof(*v));
+	if (bosa_gn_identified || bosa_not_8290b) {
+		if (bosa_a2h_read(&d) == GPON_DDM_OK)
+			gpon_optic_from_a2h(v, &d);
+		return;
+	}
+	if (!bosa_regs_live())
+		return;
+	v->rx_cdbm = bosa_rx_power_cdbm();
+	if (v->rx_cdbm != BOSA_RX_CDBM_NA)
+		v->have |= GPON_OPTIC_RX;
+	v->tx_cdbm = bosa_tx_power_cdbm();
+	if (v->tx_cdbm != INT_MIN)
+		v->have |= GPON_OPTIC_TX;
+	t = bosa_temp_dc();
+	if (t != INT_MIN) {
+		v->temp_256 = (s16)(t * 256 / 10);
+		v->have |= GPON_OPTIC_TEMP;
+	}
+	bias = bosa_bias_ua();		/* 0 = a failed read (bosa_bias_ua_calc) */
+	if (bias) {
+		v->bias_2ua = bias / 2;
+		v->have |= GPON_OPTIC_BIAS;
+	}
 }
 
 /* Power up the RTL8290B optical receiver so its signal-detect ...
@@ -6306,6 +6348,48 @@ static int luna_omci_send(const u8 *msg, int n)
 	return ret;
 }
 
+/* The ANI-G self-test reading: taken by the optical worker, where the I2C may
+ * sleep, and sent from the OMCI service, the one context that transmits. */
+static struct gpon_optic_reading luna_selftest;
+static bool luna_selftest_taken;
+
+static bool luna_selftest_owed(void)
+{
+	unsigned long flags;
+	bool owed;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	owed = luna_omci.onu && omci_onu_selftest_pending(luna_omci.onu) &&
+	       !luna_selftest_taken;
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	return owed;
+}
+
+static void luna_selftest_hand_over(const struct gpon_optic_reading *v)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	luna_selftest = *v;
+	luna_selftest_taken = true;
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+}
+
+static void luna_omci_report_selftest(void)
+{
+	u8 msg[OMCI_LEN];
+	unsigned long flags;
+	int n = 0;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (luna_selftest_taken && luna_omci.onu)
+		n = omci_onu_selftest_result(luna_omci.onu, &luna_selftest, msg);
+	luna_selftest_taken = false;
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	if (n && luna_omci_send(msg, n))
+		pr_warn_ratelimited("luna-gpon: ANI-G Test Result not sent (OMCI TX error)\n");
+}
+
 /* Timer consumer serializes alarm TX with Get All Alarms resynchronization. */
 static void luna_omci_report_alarm(void)
 {
@@ -6916,6 +7000,7 @@ out:
 static void luna_omci_service(void)
 {
 	luna_omci_poll();
+	luna_omci_report_selftest();
 	luna_data_reconcile();
 	if (!(luna_ploam.ticks % LUNA_OMCI_ALARM_TICKS))
 		luna_omci_report_alarm();
@@ -8026,6 +8111,12 @@ static void gpon_optical_work_fn(struct work_struct *w)
 			if (gpon_optical_cache_poll())
 				rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);
 			optical_next = jiffies + msecs_to_jiffies(3000);
+		}
+		if (luna_selftest_owed()) {
+			struct gpon_optic_reading v;
+
+			luna_selftest_read(&v);
+			luna_selftest_hand_over(&v);
 		}
 	}
 	mutex_unlock(&bosa_lock);

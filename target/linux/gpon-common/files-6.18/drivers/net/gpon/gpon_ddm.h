@@ -83,6 +83,40 @@ static inline int gpon_ddm_a2h_decode(const u8 *raw, int io_err,
 	return d->status;
 }
 
+/* One optic reading in physical units, from whatever monitor the module has.
+ * A value whose bit is clear in @have was not read: it is never a number. */
+#define GPON_OPTIC_VCC	0x01
+#define GPON_OPTIC_RX	0x02
+#define GPON_OPTIC_TX	0x04
+#define GPON_OPTIC_BIAS	0x08
+#define GPON_OPTIC_TEMP	0x10
+
+struct gpon_optic_reading {
+	u8	have;		/* GPON_OPTIC_* */
+	u16	vcc_100uv;
+	s32	rx_cdbm;
+	s32	tx_cdbm;
+	u16	bias_2ua;
+	s16	temp_256;	/* 1/256 degC */
+};
+
+/* A decoded A2h sample as a reading. A zero power word is no measurement:
+ * gpon_ddm_uw10_to_cdbm() leaves that zero to its caller. */
+static inline void gpon_optic_from_a2h(struct gpon_optic_reading *r,
+				       const struct gpon_ddm_a2h *d)
+{
+	r->have = GPON_OPTIC_VCC | GPON_OPTIC_BIAS | GPON_OPTIC_TEMP;
+	r->vcc_100uv = d->vcc;
+	r->bias_2ua = d->bias;
+	r->temp_256 = (s16)d->temp;
+	r->rx_cdbm = d->rx_pwr ? gpon_ddm_uw10_to_cdbm(d->rx_pwr) : 0;
+	r->tx_cdbm = d->tx_pwr ? gpon_ddm_uw10_to_cdbm(d->tx_pwr) : 0;
+	if (d->rx_pwr)
+		r->have |= GPON_OPTIC_RX;
+	if (d->tx_pwr)
+		r->have |= GPON_OPTIC_TX;
+}
+
 /* Temperature in deci-degrees C (s16, 1/256 degC), the unit /proc/gpon and
  * the suite read.  Truncates toward zero. */
 static inline s32 gpon_ddm_temp_dc(u16 raw)

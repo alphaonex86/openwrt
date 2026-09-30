@@ -365,7 +365,8 @@ struct rtl9602c_eth {
 	u32		dbg_rearm;	/* soft TxFDP re-arms (publish + watchdog) */
 	struct work_struct recover_work;
 	bool		closing;	/* gate recover_work vs ndo_stop teardown */
-	bool		fabric_up;	/* switch + datapath tables built (first open) */
+	bool		hw_up;		/* rings + DMA live from the first open on: the OMCC
+					 * and gpon0 ride them whatever eth0's state */
 	bool		in_recovery;	/* GMAC block may be power-gated: /proc
 					 * diag must not touch its MMIO (bus abort) */
 	u32		dbg_tx_recover;	/* completed GMAC power-cycle recoveries */
@@ -1384,6 +1385,11 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 			/* The switch CPU port prepends a 2-byte offset word ahead of ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 74. */
 			skb_pull(skb, RX_CPU_PREFIX);
+			if (!netif_running(rdev)) {
+				rdev->stats.rx_dropped++;
+				dev_kfree_skb_any(skb);
+				goto rx_rearm;
+			}
 			skb->protocol = eth_type_trans(skb, rdev);
 			rdev->stats.rx_packets++;
 			rdev->stats.rx_bytes += len;
@@ -1394,6 +1400,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 			else
 				netif_rx(skb);
 		}
+rx_rearm:
 		/* hand the slot back to HW with the buffer secured above */
 		luna_rx_arm(ep->rx_ring, ep->rx_skb, ep->rx_buf_dma, i,
 			    RX_RING_SIZE, RX_BUF_SIZE, fresh, fresh_dma);
@@ -1766,7 +1773,7 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 	unsigned int i;
 	bool use_rst = !!recover_rst;	/* snapshot: param is runtime-writable */
 
-	if (ep->closing || !netif_running(ndev))
+	if (ep->closing || !ep->hw_up)
 		return;
 
 	luna_gpon_nic_reset_begin();
@@ -1973,9 +1980,9 @@ static int rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 	return 0;
 }
 
-static int rtl9602c_eth_open(struct net_device *ndev)
+static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 {
-	struct rtl9602c_eth *ep = netdev_priv(ndev);
+	struct net_device *ndev = ep->ndev;
 	u32 desnum;
 	int ret;
 
@@ -1993,32 +2000,28 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 	if (gmac_reset) {
 		/* Stock-faithful cold start (the TX-park fix): halt the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 93. */
-		bool first = !ep->fabric_up;
-
 		rtl9602c_hw_stop(ep);
 		rtl9602c_ipsel_cycle();
 		/* re-establish the GMAC<->switch sync the reset tore down (the
 		 * catch-22 breaker) -- and it is the FABRIC, so a failure is not
 		 * something to carry on past. */
-		if (first) {
-			ret = rtl9602c_uboot_swcore_bringup(ep);
-			if (ret)
-				goto fail;
-			/* Faithful full stock-equivalent datapath init, in stock ...
-			 * dev/MEASURED-rtl9602c_eth.c.md sec 135. */
-			rtl9602c_datapath_tables_init();
-		}
+		ret = rtl9602c_uboot_swcore_bringup(ep);
+		if (ret)
+			goto fail;
+		/* Faithful full stock-equivalent datapath init, in stock ...
+		 * dev/MEASURED-rtl9602c_eth.c.md sec 135. */
+		rtl9602c_datapath_tables_init();
 		rtl9602c_hw_program(ep);
 		rtl9602c_tx_align(ep);	/* fresh engine: CDO=0 -> rot 0 */
 		/* SAME-BOARD DIFF FIX (stock-WORKING vs ours-BROKEN): the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 94. */
-		if (first && ipmux_soc) {
+		if (ipmux_soc) {
 			void __iomem *s100 = (void __iomem *)0xb8000100ul;
 			void __iomem *s104 = (void __iomem *)0xb8000104ul;
 			writel(readl(s100) | BIT(8), s100);	/* 0x18000100 bit8 -> stock */
 			writel(readl(s104) | BIT(2), s104);	/* 0x18000104 bit2 -> stock */
 		}
-		if (first && ipmux_neteng) {
+		if (ipmux_neteng) {
 			/* network-engine / IP-mux page 0x18001000 (KSEG1 0xb8001000). RMW the exact
 			 * same-board-diff bits to stock-WORKING values (don't clobber dynamic bits):
 			 *   0x18001000: set bit19 (stock 0x10281e6f vs mine 0x10201e6f)
@@ -2031,9 +2034,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		/* Re-establish the FULL PON US/DS-NIC datapath against the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 95. */
 		gpon_pbo_init();
-		/* Only the fabric is once: the GMAC reset and its PBO re-init stay
-		 * paired on every open. dev/MEASURED-rtl9602c_eth.c.md sec 96. */
-		ep->fabric_up = true;
+		/* Once per boot: ndo_stop never takes this down. sec 96. */
 		goto hw_ready;
 	}
 
@@ -2113,8 +2114,7 @@ hw_ready:
 	mod_timer(&ep->poll_timer,
 		  jiffies + ((ep->irq > 0) ? REKICK_INTERVAL : POLL_INTERVAL));
 
-	netif_carrier_on(ndev);
-	netif_start_queue(ndev);
+	ep->hw_up = true;
 	luna_gpon_nic_reset_end();
 	return 0;
 
@@ -2137,39 +2137,28 @@ fail:
 	return ret;
 }
 
-static int rtl9602c_eth_stop(struct net_device *ndev)
+static int rtl9602c_eth_open(struct net_device *ndev)
 {
 	struct rtl9602c_eth *ep = netdev_priv(ndev);
+	int ret;
 
-	/* Fence the stall recovery FIRST: a mid-flight recover_work owns
-	 * napi/timer state (it disables and re-enables them); cancelling before
-	 * we touch either avoids a double napi_disable deadlock. After the
-	 * cancel, the rekick's closing guard prevents any re-schedule. */
-	ep->closing = true;
-	cancel_work_sync(&ep->recover_work);
+	if (!ep->hw_up) {
+		ret = rtl9602c_eth_hw_start(ep);
+		if (ret)
+			return ret;
+	}
+	netif_carrier_on(ndev);
+	netif_start_queue(ndev);
+	return 0;
+}
 
+/* The GMAC keeps running: the DS/US OMCI and gpon0 ride its rings, and an OLT
+ * gives up on an ONU whose OMCI stops (the laptop X111W, 2026-09-30, O5 reached
+ * between preinit's close and netifd's open). */
+static int rtl9602c_eth_stop(struct net_device *ndev)
+{
 	netif_stop_queue(ndev);
 	netif_carrier_off(ndev);
-	/* Mask the GMAC IRQs before teardown so a late TX/RX completion cannot
-	 * touch freed rings; free_irq must precede napi_disable so a racing ISR
-	 * cannot napi_schedule a disabled context. */
-	iowrite16(ioread16(ep->base + R_IMR) & ~IMR_RX_BITS, ep->base + R_IMR);
-	ep_wr(ep, R_IMR0, ep_rd(ep, R_IMR0) & ~IMR0_TX_BITS);
-	if (ep->irq > 0)
-		free_irq(ep->irq, ep);
-	napi_disable(&ep->napi);
-	timer_delete_sync(&ep->poll_timer);
-	ep_wr(ep, R_IO_CMD, 0);		/* stop DMA */
-	/* Barrier vs the GPON driver's OMCI injects (they run off a foreign
-	 * timer): any inject already inside tx_lock finishes before we free the
-	 * rings; later ones see closing/NULL under the lock and bail. */
-	{
-		unsigned long flags;
-
-		spin_lock_irqsave(&ep->tx_lock, flags);
-		spin_unlock_irqrestore(&ep->tx_lock, flags);
-	}
-	rtl9602c_eth_free_rings(ep);
 	return 0;
 }
 

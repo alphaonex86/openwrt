@@ -2558,6 +2558,31 @@ static void cg_uni_apply_work(struct work_struct *work)
 	mutex_unlock(&cg->sn_lock);
 }
 
+/* The OLT's `show ont-optical` is an ANI-G self test: answer it with the
+ * optic's own reading. This work may sleep, so the I2C read happens here. */
+static void cg_selftest_answer(struct cortina_gpon *cg)
+{
+	struct gpon_optic_reading v = { 0 };
+	struct gpon_ddm_a2h d;
+	u8 frame[OMCI_LEN];
+	bool owed;
+	int n = 0;
+
+	spin_lock_bh(&cg->omci_lock);
+	owed = cg->omci_active && omci_onu_selftest_pending(cg->omci);
+	spin_unlock_bh(&cg->omci_lock);
+	if (!owed)
+		return;
+	if (cg_bosa_ddm_read(cg->dev, &d) == GPON_DDM_OK)
+		gpon_optic_from_a2h(&v, &d);
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci_active)
+		n = omci_onu_selftest_result(cg->omci, &v, frame);
+	spin_unlock_bh(&cg->omci_lock);
+	if (n && cg_omci_tx(cg, frame))
+		dev_warn_ratelimited(cg->dev, "ANI-G Test Result not sent (OMCI TX error)\n");
+}
+
 static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
 {
 	struct omci_accepted accepted = { .kind = OMCI_ACCEPT_NONE };
@@ -2584,6 +2609,7 @@ static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
 		cg_sched(cg, &cg->veip_avc_work, 31 * HZ);
 	if (n == OMCI_LEN)
 		cg_omci_tx(cg, resp);
+	cg_selftest_answer(cg);
 	if (unlikely(cg_omci_trace))
 		cg_omci_trace_one(cg, pdu, OMCI_LEN, resp, n);
 #ifdef CONFIG_GPON_OLT_DIAG

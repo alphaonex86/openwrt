@@ -59,6 +59,7 @@
 					 * default arm.  Unfalsifiable on the
 					 * wire; only a build-time constant
 					 * extractor catches it. */
+#define OMCI_MT_TEST_RESULT	0x1b	/* 27 -- ONU-initiated, after a Test */
 
 /* Result codes (G.988 Table 11.2.2-2): the assigned set is the dense 0..7 plus
  * 9 — 8 and anything above 9 is unassigned and must never be sent. */
@@ -80,6 +81,7 @@
 
 /* Owned by the ME-model layer; the message layer only holds a pointer. */
 struct omci_onu;
+struct gpon_optic_reading;
 
 enum omci_accept_kind {
 	OMCI_ACCEPT_NONE,
@@ -148,6 +150,13 @@ void omci_onu_alarm_sent(struct omci_onu *o, const u8 *sent);
 /* How many alarm-bearing ME instances are asserting right now — what
  * Get-all-alarms must report.  It answered a constant 0 before. */
 u16 omci_alarm_count(const struct omci_onu *o);
+
+/* ANI-G self test (Test code 7). The core ACKs the Test and records it; the
+ * shell reads the optic in a context that may sleep and hands the reading to
+ * omci_onu_selftest_result(), which builds the Test Result. */
+bool omci_onu_selftest_pending(const struct omci_onu *o);
+int omci_onu_selftest_result(struct omci_onu *o,
+			     const struct gpon_optic_reading *v, u8 *out);
 
 /* The general autonomous-notification emitter behind the VEIP one above.
  * ★ EXPORTED 2026-09-01 FOR A SECOND CALLER, so nobody deletes it as unused:

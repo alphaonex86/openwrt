@@ -5,6 +5,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 
+#include "gpon_ddm.h"
 #include "gpon_omci_core.h"
 #include "gpon_omci_me.h"	/* struct omci_onu + the ME model / dynamic store */
 #include "gpon_omci_mic.h"
@@ -229,12 +230,12 @@ int omci_resp_fmt(const struct omci_onu *o, bool armed, u32 tx, u32 tx_fail,
 	return scnprintf(out, sz,
 			 "ds_omci_rx     = %u (short=%u)\n"
 			 "omci_resp      = %s tx=%u fail=%u ds_crc ok=%u bad=%u"
-			 "  mds=%u store=%u avc=%u unhandled=%u dup_replay=%u ext=%u no_ack=%u\n"
+			 "  mds=%u store=%u avc=%u unhandled=%u dup_replay=%u ext=%u no_ack=%u selftest=%u\n"
 			 "omci_rx_bad_mic: %u (DS frames discarded on an invalid MIC)\n",
 			 o->rx_total, o->rx_runt, armed ? "armed" : "off", tx, tx_fail,
 			 o->mic_conv_ok, o->mic_conv_bad, o->mds, o->store_n,
 			 o->avc_count, o->unhandled, o->dup_replay, o->rx_extended,
-			 o->no_ack, o->rx_bad_mic);
+			 o->no_ack, o->selftest_sent, o->rx_bad_mic);
 }
 
 int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
@@ -399,6 +400,16 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		break;
 	}
 	case OMCI_MT_TEST:
+		/* An OLT reads the ONU's optical levels from the self test's
+		 * RESULT; an ACK alone shows as no signal (-30 dBm on the G24W,
+		 * 2026-09-30). The shell owes the result. */
+		if (class_id == OMCI_ME_ANI_G && msg[8] == 7) {
+			o->selftest_pending = true;
+			o->selftest_tci = ((u16)msg[0] << 8) | msg[1];
+			o->selftest_inst = inst;
+		}
+		resp[8] = OMCI_RC_OK;
+		break;
 	case OMCI_MT_SYNC_TIME:
 	case OMCI_MT_REBOOT:		/* ACK, do NOT actually reboot */
 	case OMCI_MT_START_SW_DL:
@@ -518,6 +529,59 @@ void omci_onu_alarm_sent(struct omci_onu *o, const u8 *sent)
 	o->alarm_told = ((u16)sent[8] << 8) | sent[9];
 	o->alarm_seq = sent[39];
 	o->alarm_emitted++;
+}
+
+bool omci_onu_selftest_pending(const struct omci_onu *o)
+{
+	return o && o->selftest_pending;
+}
+
+/* G.988 0.002 dB in dBuW: (dBm + 30) * 500, saturated to the 16-bit field. */
+static u16 omci_cdbm_to_dbuw_field(s32 cdbm)
+{
+	s32 v = (cdbm + 3000) * 5;
+
+	if (cdbm > 3553)
+		v = 32767;
+	else if (cdbm < -9553)
+		v = -32768;
+	return (u16)v;
+}
+
+static void omci_tlv(u8 *p, u8 type, u16 value)
+{
+	p[0] = type;
+	omci_put_be16(p + 1, value);
+}
+
+int omci_onu_selftest_result(struct omci_onu *o,
+			     const struct gpon_optic_reading *v, u8 *out)
+{
+	u8 *c = out + 8;
+
+	if (!o || !v || !out || !o->selftest_pending)
+		return 0;
+	memset(out, 0, OMCI_LEN);
+	omci_put_be16(out, o->selftest_tci);
+	out[2] = OMCI_MT_TEST_RESULT;
+	out[3] = 0x0a;
+	omci_put_be16(out + 4, OMCI_ME_ANI_G);
+	omci_put_be16(out + 6, o->selftest_inst);
+	/* stock's layout: each TLV at a fixed offset, an unread one left zero */
+	if (v->have & GPON_OPTIC_VCC)
+		omci_tlv(c, 1, v->vcc_100uv / 200);
+	if (v->have & GPON_OPTIC_RX)
+		omci_tlv(c + 3, 3, omci_cdbm_to_dbuw_field(v->rx_cdbm));
+	if (v->have & GPON_OPTIC_TX)
+		omci_tlv(c + 6, 5, omci_cdbm_to_dbuw_field(v->tx_cdbm));
+	if (v->have & GPON_OPTIC_BIAS)
+		omci_tlv(c + 9, 9, v->bias_2ua);
+	if (v->have & GPON_OPTIC_TEMP)
+		omci_tlv(c + 12, 12, (u16)v->temp_256);
+	omci_finalize(out);
+	o->selftest_pending = false;
+	o->selftest_sent++;
+	return OMCI_LEN;
 }
 
 /* Synchronous peers without a fallible transport. Drivers use prepare/sent. */

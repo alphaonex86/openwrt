@@ -195,6 +195,11 @@ struct omci_onu {
 	u16	anig_tx_level;
 	bool	anig_live;
 	u8	anig_threshold[4];	/* RX low/high, TX low/high */
+	/* ANI-G self test acknowledged and not yet answered with its result */
+	bool	selftest_pending;
+	u16	selftest_tci;
+	u16	selftest_inst;
+	u32	selftest_sent;
 };
 
 /* The static ANI-G optical levels served until (and after a failed) DDM read:

@@ -62,7 +62,11 @@ define Device/hsgq_x100dg
   DEVICE_DTS := rtl9601d_x100dg
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9601d
-  IMAGES :=
+  # 32 MB of RAM cannot unpack a 10 MB initramfs: the dev loop boots the squashfs pair
+  # from RAM through phram instead (no size check: RAM only, not the 8 MB flash layout).
+  IMAGES := kernel.bin rootfs.bin
+  IMAGE/kernel.bin := append-kernel
+  IMAGE/rootfs.bin := append-rootfs
   DEVICE_PACKAGES := -iw
 endef
 TARGET_DEVICES += hsgq_x100dg

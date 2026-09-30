@@ -208,7 +208,7 @@ laser_from_unit() {
 		return 0
 	}
 	for key in laser_bias laser_mod; do
-		val=$(echo "$out" | sed -n "s/^$key=//p")
+		val=$(echo "$out" | sed -n "s/^${key}_dac=//p")	# the full 12-bit DAC code
 		{ [ -n "$val" ] && echo "$val" > "$LASER_PARAM_DIR/$key"; } || {
 			log "could not hand $key='$val' to the driver; not activating GPON"
 			return 1

@@ -429,6 +429,7 @@ struct luna_eth {
 	int			tx_dumped;
 
 	/* CPU-side OMCI (OMCC) -- dev/MEASURED-luna_eth.c.md sec 14. */
+	bool			hw_up;		/* rings + DMA live from the first open on */
 	bool			closing;
 	bool			omci_trap_on;	/* armed at Configure_Port-ID */
 	unsigned int		omci_sid;	/* the OMCC stream id the OLT gave us */
@@ -1633,6 +1634,9 @@ static int eth_rx(struct luna_eth *ep, int budget)
 			if (skb->len >= 2 * ETH_ALEN &&
 			    ether_addr_equal(skb->data + ETH_ALEN, rdev->dev_addr)) {
 				dev_kfree_skb_any(skb);
+			} else if (!netif_running(rdev)) {
+				rdev->stats.rx_dropped++;
+				dev_kfree_skb_any(skb);
 			} else {
 				/* NAPI poll context: use the receive path, not netif_rx. */
 				skb->protocol = eth_type_trans(skb, rdev);
@@ -1886,9 +1890,9 @@ static int eth_set_mac_address(struct net_device *ndev, void *addr)
 }
 
 /* ---- open / stop ---------------------------------------------------------- */
-static int eth_open(struct net_device *ndev)
+static int eth_hw_start(struct luna_eth *ep)
 {
-	struct luna_eth *ep = netdev_priv(ndev);
+	struct net_device *ndev = ep->ndev;
 	int ret;
 
 	ret = eth_alloc_rings(ep);
@@ -1925,8 +1929,6 @@ static int eth_open(struct net_device *ndev)
 	if (diag_ms && diag_count > 0)
 		mod_timer(&ep->diag, jiffies + msecs_to_jiffies(diag_ms));
 
-	netif_start_queue(ndev);
-	netif_carrier_on(ndev);
 	/* The resurvey knob gets its subject only once the bring-up that gives
 	 * the reading a meaning has finished, and under the window's own lock,
 	 * which is what keeps a concurrent writer out of a half-built state. */
@@ -1935,6 +1937,7 @@ static int eth_open(struct net_device *ndev)
 	mutex_unlock(&luna_gphy_lock);
 	netdev_info(ndev, "up: irq=%d rx_prefix=%d backstop=%ums copper_phy=%d rtl8221b=%d\n",
 		    ep->irq, rx_prefix, backstop_ms, copper_phy, rtl8221b_phy);
+	ep->hw_up = true;
 	luna_gpon_nic_reset_end();
 	return 0;
 
@@ -1957,34 +1960,30 @@ fail:
 	return ret;
 }
 
+static int eth_open(struct net_device *ndev)
+{
+	struct luna_eth *ep = netdev_priv(ndev);
+	int ret;
+
+	if (!ep->hw_up) {
+		ret = eth_hw_start(ep);
+		if (ret)
+			return ret;
+	}
+	netif_start_queue(ndev);
+	netif_carrier_on(ndev);
+	return 0;
+}
+
+/* The MAC keeps running: DS OMCI and the WAN netdev ride its rings, and an OLT
+ * gives up on an ONU whose OMCI stops while eth0 is down (rtl9602c_eth sec 96). */
 static int eth_stop(struct net_device *ndev)
 {
 	struct luna_eth *ep = netdev_priv(ndev);
 
-	unsigned long flags;
-
 	netif_stop_queue(ndev);
 	netif_carrier_off(ndev);
 	luna_flow_stop(ep);
-	/* Close the door on the OMCI injector BEFORE anything is torn ...
-	 * dev/MEASURED-luna_eth.c.md sec 67. */
-	spin_lock_irqsave(&ep->tx_lock, flags);
-	ep->closing = true;
-	spin_unlock_irqrestore(&ep->tx_lock, flags);
-	timer_delete_sync(&ep->diag);
-	/* the timer is the only thing that arms this, and it is stopped */
-	cancel_work_sync(&ep->diag_work);
-	/* Withdraw the diagnostic's subject while the interface is down, so it
-	 * cannot report on a stopped port.  This is NOT the lifetime guarantee:
-	 * that is the devres action registered at probe, which runs in the
-	 * actual cleanup whether or not ndo_stop was ever reached. */
-	luna_eth_survey_withdraw(ep);
-	timer_delete_sync(&ep->backstop);
-	napi_disable(&ep->napi);
-	if (ep->irq > 0)
-		free_irq(ep->irq, ndev);
-	eth_hw_stop(ep);
-	eth_free_rings(ep);
 	return 0;
 }
 

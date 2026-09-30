@@ -7000,8 +7000,8 @@ out:
 static void luna_omci_service(void)
 {
 	luna_omci_poll();
-	luna_omci_report_selftest();
 	luna_data_reconcile();
+	luna_omci_report_selftest();
 	if (!(luna_ploam.ticks % LUNA_OMCI_ALARM_TICKS))
 		luna_omci_report_alarm();
 }

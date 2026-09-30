@@ -245,7 +245,7 @@ static int luna_nor_probe(struct platform_device *pdev)
 	nor->mtd.priv = nor;
 	nor->mtd.dev.parent = &pdev->dev;
 	nor->mtd._read = luna_nor_read;
-	if (!ret && !(sr & SR_BP)) {
+	if (IS_ENABLED(CONFIG_MTD_LUNA_NOR_WRITE) && !ret && !(sr & SR_BP)) {
 		nor->mtd.type = MTD_NORFLASH;
 		nor->mtd.flags = MTD_CAP_NORFLASH;
 		nor->mtd._write = luna_nor_write;

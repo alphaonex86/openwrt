@@ -837,14 +837,14 @@ config KERNEL_PRINTK_TIME
 	bool "Enable printk timestamps"
 	default y
 
-config KERNEL_MTD_LUNA_NOR
-	bool "Luna SPI-NOR write driver (luna_nor)"
+config KERNEL_MTD_LUNA_NOR_WRITE
+	bool "Luna SPI-NOR erase/program (off = read-only flash)"
 	depends on TARGET_realtek_luna
 	default y
 	help
-	  Erase/program the Luna SPI-NOR so settings persist on flash. A bench unit
-	  booted from RAM turns it off: with no writable MTD nothing can format its
-	  vendor bank (build-openwrt.py variant "ram").
+	  A bench unit booted from RAM over a vendor bank turns it off: the flash
+	  stays readable (the unit's identity) and nothing can write it
+	  (build-openwrt.py variant "ram").
 
 config KERNEL_MEM_ALLOC_PROFILING
 	bool "Track kernel allocation sites in /proc/allocinfo"

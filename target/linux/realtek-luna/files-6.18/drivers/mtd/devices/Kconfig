@@ -59,6 +59,15 @@ config MTD_LUNA_NOR
 	  controller's memory-mapped window, erased and programmed through its
 	  PIO registers, so an OpenWrt overlay can live on it.
 
+config MTD_LUNA_NOR_WRITE
+	bool "Erase and program the Luna SPI-NOR"
+	depends on MTD_LUNA_NOR
+	default y
+	help
+	  Off, the flash is registered read-only: its partitions (and the unit's
+	  identity in them) stay readable and nothing can be written, which is what a
+	  bench unit booted from RAM over a vendor bank needs.
+
 config MTD_DATAFLASH
 	tristate "Support for AT45xxx DataFlash"
 	depends on SPI_MASTER

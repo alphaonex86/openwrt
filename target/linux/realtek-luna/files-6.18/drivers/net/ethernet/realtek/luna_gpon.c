@@ -4110,6 +4110,13 @@ void gpon_pbo_init(void)
 	bool keep_pool = READ_ONCE(luna_activation_ready) &&
 		luna_ploam.state == GPON_O5_OPERATION;
 
+	/* Exported like datapath_tables_init, and reached from the NIC's open on a
+	 * board whose DT disables the GPON: X100DG 2026-09-30, NULL ponip_base,
+	 * Oops at pi_hwio_rd inside rtl9602c_eth_open. */
+	if (!ponip_base) {
+		pr_warn_once("luna-gpon: gpon_pbo_init called before this driver probed (ponip_base is NULL) -- skipped\n");
+		return;
+	}
 	luna_data_suspend();
 	/* O5 GEM requests still consume these pools while the GMAC is reset. */
 	if (!keep_pool) {

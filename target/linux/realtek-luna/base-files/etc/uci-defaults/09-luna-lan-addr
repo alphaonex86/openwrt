@@ -84,6 +84,13 @@ lanly,g24w)
 	uci -q commit network
 	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.13 (the shipped default 192.168.1.1 belongs to another bench)"
 	;;
+hsgq,x100dg)
+	# bench onu6. Declared ONU_LAN_IP = 192.168.1.16, the address its stock
+	# firmware holds too (persisted 2026-09-27).
+	uci -q set network.lan.ipaddr='192.168.1.16'
+	uci -q commit network
+	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.16"
+	;;
 vsol,v2801rgw)
 	# bench onu5. Declared ONU_LAN_IP = 192.168.1.15, the address its stock
 	# firmware holds too (persisted 2026-09-29).

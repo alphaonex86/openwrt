@@ -41,13 +41,68 @@
 		};
 	};
 
-	/delete-node/ ethernet@18012000;
-	/delete-node/ flash@14000000;
 	/delete-node/ watchdog@18003260;
 };
 
-/* First diagnostic boot: GPON2's splitter is shared and this unit's laser
- * calibration is not read yet -- no laser is keyed. */
-&gpon {
-	status = "disabled";
+/* The GE jack is switch port 1: the vendor SDK gives the RTL9601D sub-types
+ * port 0 = none, port 1 = GE (its HGU/SFU port table), the X111W's GE port. */
+
+/* Its own 8 MiB SPI-NOR, from its own U-Boot mtdparts, READ-ONLY through the
+ * memory-mapped window: the provisioning reads this unit's identity and laser
+ * calibration from "config", and nothing here can write the flash. */
+&spi_nor {
+	reg = <0x14000000 0x800000>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "boot";
+			reg = <0x000000 0x040000>;
+			read-only;
+		};
+		partition@40000 {
+			label = "env";
+			reg = <0x040000 0x002000>;
+			read-only;
+		};
+		partition@42000 {
+			label = "env2";
+			reg = <0x042000 0x002000>;
+			read-only;
+		};
+		partition@44000 {
+			label = "config";
+			reg = <0x044000 0x03c000>;
+			read-only;
+		};
+		partition@80000 {
+			label = "k0";
+			reg = <0x080000 0x14c000>;
+			read-only;
+		};
+		partition@1cc000 {
+			label = "r0";
+			reg = <0x1cc000 0x274000>;
+			read-only;
+		};
+		partition@440000 {
+			label = "k1";
+			reg = <0x440000 0x14c000>;
+			read-only;
+		};
+		partition@58c000 {
+			label = "r1";
+			reg = <0x58c000 0x274000>;
+			read-only;
+		};
+	};
 };
+
+/* The GPON stays ENABLED: the NIC's open re-runs the PON buffer init and the
+ * switch fabric is programmed by this driver, so without it there is no LAN
+ * (2026-09-30: Oops in rtl9602c_eth_open). A first boot holds the FSM at O1
+ * with luna_gpon.gpon_hold=1 until this unit's own laser calibration (its
+ * config partition, read above) is proven handed to the driver. */

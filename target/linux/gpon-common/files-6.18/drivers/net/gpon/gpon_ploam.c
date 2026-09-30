@@ -158,7 +158,10 @@ static void apply_boh(struct gpon_ploam *o, bool ranged)
 
 	/* ★ FOLLOW-UP P4, DISCHARGED 2026-09-02. This read boh_len = ...
 	 * dev/MEASURED-gpon_ploam.c.md sec 8. */
-	want = t3 ? (unsigned int)rep + t3 + 3 : GPON_PLOAM_BOH_LEN;
+	/* stock's length (gpon_res.c): the Type-1+2 preamble rides in front of
+	 * the Type-3 bytes. Without it an OLT that sends Extended_Burst_Length
+	 * gets a short preamble at O5, reads no burst and deactivates (LOAi). */
+	want = t3 ? (unsigned int)rep + t3 + 3 + o->boh_t12 : GPON_PLOAM_BOH_LEN;
 	if (want > GPON_PLOAM_BOH_MAX_LEN) {
 		u8 dmp[2] = { guard, t3 };
 
@@ -321,6 +324,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 				(((u32)d[8] << 8) | d[9]) * 32 * 8 : 0;
 
 			o->boh_guard    = d[0];
+			o->boh_t12      = (u8)(((unsigned int)d[1] + d[2]) / 8);
 			o->boh_ptn      = d[3];
 			o->boh_delim[0] = d[4];
 			o->boh_delim[1] = d[5];

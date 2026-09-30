@@ -27,6 +27,27 @@ static int xtal_cap = -1;
 module_param(xtal_cap, int, 0644);
 MODULE_PARM_DESC(xtal_cap, "RTL8192F crystal load-cap trim 0..0x3f (<0 = use EFUSE/board-cal value)");
 
+/* THIS unit's factory WiFi cal, from its own flash MIB (HW_WLAN0_*), as stock's
+ * driver reads it: gpon_provision hands it over before the radio starts and
+ * hw_init applies it over the board table. Byte arrays: the MIB's hex bytes. */
+static u8 unit_cck_a[CHANNEL_MAX_NUMBER_2G], unit_cck_b[CHANNEL_MAX_NUMBER_2G];
+static u8 unit_ht40_a[CHANNEL_MAX_NUMBER_2G], unit_ht40_b[CHANNEL_MAX_NUMBER_2G];
+static unsigned int unit_cck_a_n, unit_cck_b_n, unit_ht40_a_n, unit_ht40_b_n;
+static int unit_thermal = -1, unit_xcap = -1, unit_reg_domain = -1;
+module_param_array(unit_cck_a, byte, &unit_cck_a_n, 0644);
+module_param_array(unit_cck_b, byte, &unit_cck_b_n, 0644);
+module_param_array(unit_ht40_a, byte, &unit_ht40_a_n, 0644);
+module_param_array(unit_ht40_b, byte, &unit_ht40_b_n, 0644);
+module_param(unit_thermal, int, 0644);
+module_param(unit_xcap, int, 0644);
+module_param(unit_reg_domain, int, 0644);
+MODULE_PARM_DESC(unit_cck_a, "this unit's HW_WLAN0_TX_POWER_CCK_A, 14 bytes (all unit_* or none)");
+MODULE_PARM_DESC(unit_thermal, "this unit's HW_WLAN0_11N_THER");
+MODULE_PARM_DESC(unit_xcap, "this unit's HW_WLAN0_11N_XCAP");
+MODULE_PARM_DESC(unit_reg_domain, "this unit's HW_WLAN0_REG_DOMAIN");
+
+static void _rtl92fe_apply_unit_cal(struct ieee80211_hw *hw);
+
 /* ★★ A BISECT KNOB, NOT A CONFIG KNOB (2026-09-28). The G24W's own stock differs from
  * ours in the beacon block (BCN_CTRL 0x5c vs 0x1f, BCN_CTRL_1, DRVERLYINT 5 vs 10 TU,
  * ATIMWND, BCN_MAX_ERR, RXTSF offsets, TBTT hold); the X111W runs ours clean. `pokes`
@@ -1522,6 +1543,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	u8 tmp_u1b, u1byte;
 
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD, " Rtl8192FE hw init\n");
+	_rtl92fe_apply_unit_cal(hw);
 	rtlpriv->rtlhal.being_init_adapter = true;
 	rtlpriv->intf_ops->disable_aspm(hw);
 
@@ -2419,8 +2441,9 @@ struct rtl92fe_board_cal {
 
 static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
 	.compat = "realtek,rtl9602c", .board = "X111W",
-	/* = this unit's ELAN_MAC_ADDR in its own flash MIB. */
-	.mac = { 0x98, 0xc7, 0xa4, 0x32, 0x82, 0xae },
+	/* NO MAC: every X111W wore the lab unit's 98:c7:a4:32:82:ae (2026-09-30).
+	 * The BSSID is the unit's own (uci); the numbers below are the lab
+	 * unit's, a model fallback until gpon_provision hands over unit_*. */
 	.cck_a = { 0x27, 0x27, 0x27, 0x28, 0x28, 0x28, 0x28,
 		   0x28, 0x28, 0x29, 0x29, 0x29, 0x29, 0x29 },
 	.cck_b = { 0x26, 0x26, 0x26, 0x28, 0x28, 0x28, 0x28,
@@ -2438,7 +2461,7 @@ static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
 /* LANLY G24W (RTL9603CVD). READ FROM THIS UNIT'S OWN FLASH ... -- dev/MEASURED-hw.c.md sec 26. */
 static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 	.compat = "realtek,rtl9603cvd", .board = "G24W",
-	.mac = { 0x5c, 0x19, 0x23, 0xb3, 0xce, 0x90 },
+	/* NO MAC, as the X111W: a unit MAC compiled in is every unit's MAC. */
 	.cck_a = { 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c,
 		   0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c, 0x2c },
 	.cck_b = { 0x2f, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f, 0x2f,
@@ -2551,6 +2574,35 @@ static void _rtl92fe_apply_board_cal(struct ieee80211_hw *hw,
 		efu->txpwrlevel_cck[RF90_PATH_A][0],
 		efu->txpwrlevel_ht40_1s[RF90_PATH_A][0],
 		efu->eeprom_regulatory);
+}
+
+/* The unit's own cal, when gpon_provision handed over all of it. Runs at every
+ * hw_init: the radio starts after provisioning, and a restart keeps it. */
+static void _rtl92fe_apply_unit_cal(struct ieee80211_hw *hw)
+{
+	const struct rtl92fe_board_cal *model = _rtl92fe_board_cal_for_this_board();
+	struct rtl92fe_board_cal cal = { .board = "this unit's flash MIB" };
+
+	if (unit_cck_a_n != CHANNEL_MAX_NUMBER_2G ||
+	    unit_cck_b_n != CHANNEL_MAX_NUMBER_2G ||
+	    unit_ht40_a_n != CHANNEL_MAX_NUMBER_2G ||
+	    unit_ht40_b_n != CHANNEL_MAX_NUMBER_2G ||
+	    unit_thermal < 0 || unit_thermal > 0xff ||
+	    unit_xcap < 0 || unit_xcap > 0xff ||
+	    unit_reg_domain < 0 || unit_reg_domain > 0xff) {
+		pr_warn_once("rtl8192fe: no complete per-unit cal (unit_* parameters) -- tx-power and crystal trim are the board table's, another unit's\n");
+		return;
+	}
+	memcpy(cal.mac, rtl_efuse(rtl_priv(hw))->dev_addr, ETH_ALEN);
+	memcpy(cal.cck_a, unit_cck_a, sizeof(cal.cck_a));
+	memcpy(cal.cck_b, unit_cck_b, sizeof(cal.cck_b));
+	memcpy(cal.ht40_1s_a, unit_ht40_a, sizeof(cal.ht40_1s_a));
+	memcpy(cal.ht40_1s_b, unit_ht40_b, sizeof(cal.ht40_1s_b));
+	cal.thermalmeter = unit_thermal;
+	cal.crystalcap = unit_xcap;
+	cal.reg_domain = unit_reg_domain;
+	cal.pa_type = model ? model->pa_type : 0;
+	_rtl92fe_apply_board_cal(hw, &cal);
 }
 
 void rtl92fe_read_eeprom_info(struct ieee80211_hw *hw)

@@ -11,6 +11,7 @@
  *
  *   HW (lastgood_hs.xml): ELAN_MAC_ADDR WLAN_MAC_ADDR GPON_SN OUI
  *                         PON_VENDOR_ID GPON_ONU_MODEL MAC_KEY HW_HWVER
+ *                         HW_WLAN0_* (the WiFi cal: TX power, THER, XCAP, REG_DOMAIN)
  *   SW (lastgood.xml):    LOID LOID_PASSWD GPON_PLOAM_PASSWD OMCI_OLT_MODE
  *                         OMCI_SW_VER1 OMCI_SW_VER2 OMCI_VENDOR_PRODUCT_CODE
  * The *_bak and *_mp_hs2 (manufacturing-default) variants are never read.
@@ -446,6 +447,13 @@ static const struct map MAP[] = {
 	{ "vendor_id",     F_HW, "PON_VENDOR_ID",     0 },
 	{ "model",         F_HW, "GPON_ONU_MODEL",    0 },
 	{ "hw_ver",        F_HW, "HW_HWVER",          0 },
+	{ "wlan_cck_a",    F_HW, "HW_WLAN0_TX_POWER_CCK_A",     0 },
+	{ "wlan_cck_b",    F_HW, "HW_WLAN0_TX_POWER_CCK_B",     0 },
+	{ "wlan_ht40_a",   F_HW, "HW_WLAN0_TX_POWER_HT40_1S_A", 0 },
+	{ "wlan_ht40_b",   F_HW, "HW_WLAN0_TX_POWER_HT40_1S_B", 0 },
+	{ "wlan_thermal",  F_HW, "HW_WLAN0_11N_THER",           0 },
+	{ "wlan_xcap",     F_HW, "HW_WLAN0_11N_XCAP",           0 },
+	{ "wlan_reg_domain", F_HW, "HW_WLAN0_REG_DOMAIN",       0 },
 	{ "mac_key",       F_HW, "MAC_KEY",           0 },
 	{ "loid",          F_SW,    "LOID",              0 },
 	{ "loid_passwd",   F_SW,    "LOID_PASSWD",       0 },
@@ -784,6 +792,8 @@ int main(int argc, char **argv)
 	if (a >= argc) {
 		fprintf(stderr, "usage: rtk_factory [-p part] <mac|wlan_mac|sn|oui|"
 			"vendor_id|model|hw_ver|mac_key|loid|loid_passwd|ploam_passwd|"
+			"wlan_cck_a|wlan_cck_b|wlan_ht40_a|wlan_ht40_b|wlan_thermal|"
+			"wlan_xcap|wlan_reg_domain|"
 			"olt_mode|sw_ver1|sw_ver2|product_code|"
 			"optical_cal|laser_cal|bosa_cal <outfile>>\n");
 		return 2;

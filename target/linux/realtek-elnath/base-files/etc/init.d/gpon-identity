@@ -100,6 +100,11 @@ BOSA_CAL_DST=/lib/firmware/rtkbosa_k.bin
 # staging bugs were caught. Nothing reassigns them here.
 GPON_PROC=/proc/gpon
 CFG_VOLUME=ubi0:ubi_Config
+# The OMCI identity stock's omci_app takes from the MIB, as <name>:<MIB key>;
+# <name> is also the UCI key gpon.identity.<name> and the driver's "id" field.
+OMCI_ID_KEYS="vendor_id:PON_VENDOR_ID hw_ver:HW_HWVER model:GPON_ONU_MODEL
+sw_ver1:OMCI_SW_VER1 sw_ver2:OMCI_SW_VER2 product_code:OMCI_VENDOR_PRODUCT_CODE
+loid:LOID loid_passwd:LOID_PASSWD"
 
 # START=11 runs BEFORE /etc/init.d/log, so syslog may not be listening yet:
 # mirror every message into the kernel ring too, where it lands next to the
@@ -142,7 +147,7 @@ stage_bosa_cal() {
 # fallback was applied); non-zero = TRANSIENT, ask again later.
 try_set() {
 	local mnt="/tmp/.gpon_identity"
-	local sn="" mac="" pwd="" src="" mounted=0 cal=1
+	local sn="" mac="" pwd="" src="" mounted=0 cal=1 ident="" key name val
 
 	[ -e "$GPON_PROC" ] || {
 		say "no $GPON_PROC - the cortina-gpon driver has not probed yet; will retry" err
@@ -180,6 +185,13 @@ try_set() {
 		sn=$(printf '%s\n' "$xml" | sed -n 's/^SN=//p' | head -n1)
 		mac=$(printf '%s\n' "$xml" | sed -n 's/^MAC=//p' | head -n1)
 		pwd=$(printf '%s\n' "$xml" | sed -n 's/^PWD=//p' | head -n1)
+		# A key missing from both files keeps the driver's build default.
+		for key in $OMCI_ID_KEYS; do
+			val=$(sed -n "s/.*Name=\"${key#*:}\"[^V]*Value=\"\([^\"]*\)\".*/\1/p" \
+				"$mnt/config_hs.xml" "$mnt/config.xml" 2>/dev/null | head -n1)
+			ident="$ident${key%%:*} $val
+"
+		done
 		# ⚠ STAGE IT EVERY TIME, from this board's own volume. Trusting
 		#   a file already at the destination because it is non-empty
 		#   meant a stale or truncated one was never replaced, so a unit
@@ -231,6 +243,16 @@ try_set() {
 	pwd=$(uci -q get gpon.identity.ploam_passwd || echo "$pwd")
 	[ -z "$pwd" ] || echo "password $pwd" > "$GPON_PROC" 2>/dev/null ||
 		say "the driver refused PLOAM password (1..10 printable characters)" err
+
+	# The OMCI identity, LuCI/UCI first, also before the serial.
+	for key in $OMCI_ID_KEYS; do
+		name=${key%%:*}
+		val=$(uci -q get "gpon.identity.$name" ||
+			printf '%s' "$ident" | sed -n "s/^$name //p")
+		[ -n "$val" ] || continue
+		echo "id $name $val" > "$GPON_PROC" 2>/dev/null ||
+			say "the driver refused OMCI $name '$val'" err
+	done
 
 	if echo "sn $sn" > "$GPON_PROC" 2>/dev/null; then
 		say "GPON serial number $sn from $src" "" always

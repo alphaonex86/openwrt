@@ -5978,6 +5978,9 @@ static struct {
 	u8 seed;
 	u32 queued, overflow, closed, accepted, resets, tx_errors, tx_sent;
 } luna_omci;
+/* the provisioned OMCI identity, under luna_omci_lock (see onu_omci_id) */
+static struct omci_identity luna_omci_id;
+static bool luna_omci_id_set;
 static bool luna_data_admitted;
 static struct {
 	struct gpon_data_armed armed;
@@ -6281,6 +6284,8 @@ int luna_omci_attach(struct omci_onu *onu, void *cookie, u8 seed,
 		rc = -EBUSY;
 	} else {
 		omci_onu_init(onu, gpon_sn_bytes, seed);
+		if (luna_omci_id_set)
+			onu->id = luna_omci_id;
 		luna_omci_declare_uni_panel(onu);
 		luna_omci.onu = onu;
 		luna_omci.cookie = cookie;
@@ -6747,6 +6752,49 @@ int gpon_install_data_gem(void)
 		pi_packed_get(PI_PON_SIDVALID, GPON_DATA_FLOW, 1));
 	return 0;
 }
+
+/* The OMCI identity stock's omci_app takes from the unit's MIB; gpon_provision
+ * writes each one here before the serial.  luna_omci_id is what attach seeds a
+ * model with; the charp only answers reads of the parameter. */
+static char *onu_omci_id[OMCI_ID_FIELDS];
+
+static int onu_omci_id_param_set(const char *val, const struct kernel_param *kp)
+{
+	enum omci_id_field f = (char **)kp->arg - onu_omci_id;
+	unsigned long flags;
+	int ret;
+
+	if (!omci_id_set_str(NULL, f, val))
+		return -EINVAL;
+	ret = param_set_charp(val, kp);
+	if (ret)
+		return ret;
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (!luna_omci_id_set)
+		omci_id_default(&luna_omci_id);
+	luna_omci_id_set = true;
+	omci_id_set_str(&luna_omci_id, f, val);
+	if (luna_omci.onu)
+		luna_omci.onu->id = luna_omci_id;
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	return 0;
+}
+static const struct kernel_param_ops onu_omci_id_ops = {
+	.set = onu_omci_id_param_set,
+	.get = param_get_charp,
+};
+#define LUNA_OMCI_ID_PARAM(name, f)					\
+	module_param_cb(onu_##name, &onu_omci_id_ops, &onu_omci_id[f], 0644); \
+	MODULE_PARM_DESC(onu_##name, "OMCI identity " #name			\
+			 " (the unit's MIB value; unset = the build default)")
+LUNA_OMCI_ID_PARAM(vendor_id, OMCI_ID_VENDOR);
+LUNA_OMCI_ID_PARAM(hw_ver, OMCI_ID_HW_VERSION);
+LUNA_OMCI_ID_PARAM(sw_ver1, OMCI_ID_SW_VERSION0);
+LUNA_OMCI_ID_PARAM(sw_ver2, OMCI_ID_SW_VERSION1);
+LUNA_OMCI_ID_PARAM(model, OMCI_ID_EQUIPMENT);
+LUNA_OMCI_ID_PARAM(product_code, OMCI_ID_PRODUCT_CODE);
+LUNA_OMCI_ID_PARAM(loid, OMCI_ID_LOID);
+LUNA_OMCI_ID_PARAM(loid_passwd, OMCI_ID_LOID_PASSWD);
 
 
 /* Bind an OLT-assigned Alloc-ID to a T-CONT in the GTC alloc ...

@@ -73,6 +73,7 @@ typedef uint32_t u32;
 /* One upstream GTC frame in bits (G.984.3: 19440 octets at 1.24416 Gbit/s).  A
  * specification constant, not a register. */
 #define GPON_PLOAM_EQD_FRAME_LEN	(19440 * 8)
+#define GPON_PLOAM_PASSWORD_LEN	10
 
 /* Activation admission is shared by native and op-table FSMs. A failed
  * management T-CONT installation leaves O3 with the assigned ONU-ID already
@@ -284,6 +285,7 @@ struct gpon_ploam {
 	void *sh;			/* opaque shell handle passed to every op */
 	/* --- identity ----------------------------------------------------- */
 	u8 sn[8];			/* G.984.3 ONU-SN: 4-byte ID + 4-byte serial */
+	u8 password[GPON_PLOAM_PASSWORD_LEN];	/* G.984.3 Password, zero-padded */
 	u8 onu_id;			/* 0xff = unassigned                         */
 	bool sn_changed;		/* SN was (re)provisioned -> must re-range   */
 	/* --- activation state --------------------------------------------- */
@@ -380,6 +382,8 @@ gpon_ploam_init(struct gpon_ploam *o, const struct gpon_ploam_ops *ops,
  * HERE: "XPON12345678" -> 8 wire bytes is gpon_sn_parse() in gpon_sn.c, one
  * implementation for every family and for x86. */
 void gpon_ploam_set_sn(struct gpon_ploam *o, const u8 sn[8]);
+int gpon_ploam_password_parse(const char *s, u8 out[GPON_PLOAM_PASSWORD_LEN]);
+void gpon_ploam_set_password(struct gpon_ploam *o, const u8 pwd[GPON_PLOAM_PASSWORD_LEN]);
 
 /* The OMCI layer saw the OLT's ME 268 (GEM-CTP) Create for ...
  * dev/MEASURED-gpon_ploam.h.md sec 12. */

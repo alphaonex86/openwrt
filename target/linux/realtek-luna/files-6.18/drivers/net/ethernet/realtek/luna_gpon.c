@@ -186,6 +186,37 @@ static const struct kernel_param_ops onu_sn_ops = {
 };
 module_param_cb(onu_sn, &onu_sn_ops, &onu_sn, 0644);
 MODULE_PARM_DESC(onu_sn, "ONU serial number (G.984.3 ONU-SN): 4 ASCII ID chars + 8 hex digits");
+
+/* The G.984.3 Password stock sends: the unit's own MIB value, which gpon_provision writes
+ * here, else stock's default (operator 2026-09-30: "mandar lo mismo que mandaria stock").
+ * The FSM timer is the only writer of the core copy. */
+static char *onu_password = "1234567890";
+static u8 luna_pwd[GPON_PLOAM_PASSWORD_LEN];
+static bool luna_pwd_dirty;
+static DEFINE_SPINLOCK(luna_pwd_lock);
+
+static int onu_password_set(const char *val, const struct kernel_param *kp)
+{
+	u8 pwd[GPON_PLOAM_PASSWORD_LEN];
+	int ret;
+
+	if (gpon_ploam_password_parse(val, pwd))
+		return -EINVAL;
+	ret = param_set_charp(val, kp);
+	if (ret)
+		return ret;
+	spin_lock_bh(&luna_pwd_lock);
+	memcpy(luna_pwd, pwd, sizeof(pwd));
+	luna_pwd_dirty = true;
+	spin_unlock_bh(&luna_pwd_lock);
+	return 0;
+}
+static const struct kernel_param_ops onu_password_ops = {
+	.set = onu_password_set,
+	.get = param_get_charp,
+};
+module_param_cb(onu_password, &onu_password_ops, &onu_password, 0644);
+MODULE_PARM_DESC(onu_password, "G.984.3 PLOAM Password: up to 10 printable characters, sent zero-padded (default: stock's 1234567890)");
 /* Invalidate unused alloc-CAM entries with the stock CLEAN operation before
  * management activation. Keep the existing parameter name for compatibility;
  * Alloc-ID 0xfff is assignable and cannot serve as an invalid entry value. */
@@ -7835,6 +7866,12 @@ static void gpon_fsm_poll(struct timer_list *t)
 	int guard = 0;
 
 	gpon_fsm_ticks++;
+	spin_lock(&luna_pwd_lock);
+	if (luna_pwd_dirty) {
+		gpon_ploam_set_password(&luna_ploam, luna_pwd);
+		luna_pwd_dirty = false;
+	}
+	spin_unlock(&luna_pwd_lock);
 	{
 		unsigned long now = jiffies;
 
@@ -8782,6 +8819,13 @@ skip_bosa_init:
 		       missing);
 		return -EINVAL;
 	}
+	spin_lock_bh(&luna_pwd_lock);
+	if (gpon_ploam_password_parse(onu_password, luna_pwd))
+		pr_warn("luna-gpon: onu_password '%s' is not a G.984.3 password; sending an empty one\n",
+			onu_password);
+	gpon_ploam_set_password(&luna_ploam, luna_pwd);
+	luna_pwd_dirty = false;
+	spin_unlock_bh(&luna_pwd_lock);
 	if (gpon_sn_is_set(gpon_sn_bytes))
 		pr_info("luna-gpon: PLOAM FSM start, SN '%s' = %*phN\n",
 			onu_sn, 8, gpon_sn_bytes);

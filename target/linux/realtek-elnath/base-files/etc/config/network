@@ -5,7 +5,7 @@ config interface 'loopback'
 	option netmask '255.0.0.0'
 
 config globals 'globals'
-	option ula_prefix 'fdca:9607::/48'
+	option ula_prefix 'auto'
 
 # M3d: LAN = br-lan bridging eth0 (Cortina-NI port0) with the WiFi APs
 # (wlan0 2.4G + wlan1 5G join via wifi-iface network 'lan'), mirroring the

@@ -5,6 +5,7 @@
 #include <linux/errno.h>
 
 #include "gpon_sn.h"
+#include "gpon_common.h"
 
 #include "cortina_gpon_logic.h"
 
@@ -74,4 +75,20 @@ bool cg_link_down_transition(u8 last, u8 state)
 	       (last == CG_STATE_POPUP && state != CG_STATE_OPERATION &&
 		state != CG_STATE_RANGING) ||
 	       state == CG_STATE_ESTOP;
+}
+
+bool cg_dwell_step(struct cg_dwell *d, u8 cg_state, u32 now_ms)
+{
+	u8 state = cg_state + 1;	/* the MAC numbers O1..O7 from 0 */
+
+	if (state != d->state) {
+		d->state = state;
+		d->since_ms = now_ms;
+		return false;
+	}
+	if (!gpon_dwell_expired(state, (now_ms - d->since_ms) / GPON_DWELL_TICK_MS,
+				GPON_DWELL_TO1_TICKS))
+		return false;
+	d->state = 0;	/* the next reading starts a new episode */
+	return true;
 }

@@ -40,4 +40,12 @@ void cg_pdc_map_entry(u32 idx, u32 omcc_gems, u32 *d0, u32 *d1);
 void cg_puc_pvtbl_words(u32 tcont, bool ena, u32 *d0, u32 *d1, u32 *d2);
 bool cg_link_down_transition(u8 last, u8 state);
 
+/* The core's dwell rule applied to the MAC's own FSM, which nothing else times.
+ * cg_dwell_step() -> true when the silicon has held O3/O4 past it. */
+struct cg_dwell {
+	u8 state;
+	u32 since_ms;
+};
+bool cg_dwell_step(struct cg_dwell *d, u8 cg_state, u32 now_ms);
+
 #endif /* _CORTINA_GPON_LOGIC_H */

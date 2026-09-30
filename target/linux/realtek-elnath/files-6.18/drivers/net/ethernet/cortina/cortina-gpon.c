@@ -30,6 +30,7 @@
 #include "cortina-gpon-bosa.h"
 #include "cortina-gpon-ddm.h"	/* SFF-8472 A2h optical decode (functional core) */
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
+#include "gpon_common.h"	/* the dwell rule the supervisor applies */
 #include "gpon_range_gate.h"	/* may this ONU transmit, and what to change */
 #include "gpon_hwaddr.h"	/* the common station-address ladder */
 #include "cortina-access.h"	/* the ONE indirect transaction */
@@ -509,6 +510,7 @@ struct cortina_gpon {
 	struct delayed_work coldstart_work;	/* stuck-O1 US-lock-miss recovery */
 	int coldstart_tries;		/* re-rolls THIS stuck episode (reset on leaving O1) */
 	u32 coldstart_rolls;		/* total re-rolls this power-on (/proc visibility) */
+	struct cg_dwell dwell;		/* the MAC FSM's current state and since when */
 	u32 omci_tx;			/* US OMCI responses enqueued to the NI */
 	u32 omci_tx_fail;		/* NI TX rejected (ring/scratch busy) */
 	u32 omci_ds_crc_ok;		/* DS MIC self-check (first PDUs only) */
@@ -1388,6 +1390,30 @@ static void cg_mac_intr_arm(struct cortina_gpon *cg)
  * dev/MEASURED-cortina-gpon.c.md sec 73. */
 #define CG_O5_SUPERVISOR_SECS	30
 static void cg_optic_poll(struct cortina_gpon *cg);
+
+/* re-run the whole proven bring-up = a fresh cold roll of the metastable
+ * gearbox/framer + a clean SN/ranging re-arm.  Each attempt is
+ * internally bounded (SerDes lock poll <=1 s, activate DS-wait <=8 s). */
+static u32 cg_now_ms(void)
+{
+	return jiffies_to_msecs(jiffies);
+}
+
+static void cg_reroll(struct cortina_gpon *cg)
+{
+	cg_ingress_stop(cg);
+	cg_datapath_reset(cg);
+	cg_glb_reset(cg);
+	cg_psds_init(cg);
+	cg_mac_intr_arm(cg);	/* the GTC reset cleared the MAC int enables */
+	/* sn_lock so a serial arriving mid-re-roll cannot be half-applied.
+	 * ⚠ BOTH DIRECTIONS: the first cut cleared `activated` on failure and never set
+	 * it again, so one failed roll made every later SUCCESSFUL one read as not
+	 * activated. */
+	cg_mac_activate(cg, true, NULL);	/* same identity, retained MIB */
+	cg_ingress_start(cg);
+}
+
 static void cg_coldstart_work(struct work_struct *work)
 {
 	struct cortina_gpon *cg = container_of(to_delayed_work(work),
@@ -1395,7 +1421,7 @@ static void cg_coldstart_work(struct work_struct *work)
 	u32 onu, rgb8;
 
 	u8 state;
-	bool ds_locked;
+	bool ds_locked, dwell_over;
 
 	mutex_lock(&cg->sn_lock);
 	/* ★ THE GUARD IS INSIDE THE LOCK, and that is the point: read before taking
@@ -1416,9 +1442,19 @@ static void cg_coldstart_work(struct work_struct *work)
 	rgb8 = readl(cg->pon + CG_PSDS_RGB8);
 	state = CG_ONU_STATE(onu);
 	ds_locked = cg_psds_ds_locked(rgb8);
+	dwell_over = cg_dwell_step(&cg->dwell, state, cg_now_ms());
 
 	if (state != 0) {			/* left O1: ranging is progressing */
 		cg->coldstart_tries = 0;	/* fresh episode = fresh fast budget */
+		if (dwell_over) {
+			cg->coldstart_rolls++;
+			dev_warn(cg->dev, "O%u held past the dwell rule (O3 %u ms, O4 %u ms) - re-roll #%u\n",
+				 state + 1, GPON_DWELL_O3_TICKS * GPON_DWELL_TICK_MS,
+				 GPON_DWELL_TO1_TICKS * GPON_DWELL_TICK_MS, cg->coldstart_rolls);
+			cg_reroll(cg);
+			cg_sched(cg, &cg->coldstart_work, 5 * HZ);
+			goto out;
+		}
 		if (state != CG_STATE_OPERATION) {
 			cg_sched(cg, &cg->coldstart_work, 5 * HZ);
 			goto out;
@@ -1466,21 +1502,8 @@ static void cg_coldstart_work(struct work_struct *work)
 		 "cold-start stuck O1, DS locked but no PLOAM (onu=0x%08x rgb8=0x%08x us=0x%08x t3=0x%08x) - full SerDes re-roll #%u\n",
 		 onu, rgb8, cg_mac_rd(cg, CG_REG_US), cg_mac_rd(cg, CG_REG_T3_PREAMBLE),
 		 cg->coldstart_rolls);
-	/* re-run the whole proven bring-up = a fresh cold roll of the metastable
-	 * gearbox/framer + a clean SN/ranging re-arm.  Each attempt is
-	 * internally bounded (SerDes lock poll <=1 s, activate DS-wait <=8 s),
-	 * so the cadence below bounds the retry RATE; nothing bounds the count. */
-	cg_ingress_stop(cg);
-	cg_datapath_reset(cg);
-	cg_glb_reset(cg);
-	cg_psds_init(cg);
-	cg_mac_intr_arm(cg);	/* the GTC reset cleared the MAC int enables */
-	/* sn_lock so a serial arriving mid-re-roll cannot be half-applied.
-	 * ⚠ BOTH DIRECTIONS: the first cut cleared `activated` on failure and never set
-	 * it again, so one failed roll made every later SUCCESSFUL one read as not
-	 * activated. */
-	cg_mac_activate(cg, true, NULL);	/* same identity, retained MIB */
-	cg_ingress_start(cg);
+	/* the cadence below bounds the retry RATE; nothing bounds the count */
+	cg_reroll(cg);
 	cg_sched(cg, &cg->coldstart_work,
 			      cg->coldstart_tries >= CG_COLD_FAST_TRIES ?
 			      60 * HZ : 16 * HZ);out:

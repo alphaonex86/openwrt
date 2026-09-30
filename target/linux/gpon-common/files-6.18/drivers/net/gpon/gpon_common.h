@@ -43,6 +43,19 @@ enum gpon_ostate {
 	GPON_O7_EMERGENCY	= 7,	/* emergency stop (SN disabled)      */
 };
 
+/* The dwell rule, whoever runs the FSM (our core on Luna, the MAC silicon on Cortina): a state
+ * held this many ticks without progress goes back to O1.  O3: an SN nobody hears
+ * (MEASURED-gpon_ploam.c.md sec 47); O4: G.984.3 TO1, stock's 10 s (sec 48). */
+#define GPON_DWELL_TICK_MS	10
+#define GPON_DWELL_O3_TICKS	3000
+#define GPON_DWELL_TO1_TICKS	1000
+
+static inline bool gpon_dwell_expired(int state, u32 held_ticks, u32 to1_ticks)
+{
+	return (state == GPON_O3_SERIAL && held_ticks > GPON_DWELL_O3_TICKS) ||
+	       (state == GPON_O4_RANGING && to1_ticks && held_ticks > to1_ticks);
+}
+
 /* ME 268 (GEM port network CTP) "direction", as it arrives in a Set-by-Create.
  * ★ G.988 clause 9.2.3 is the authority and 00-COMMON-LAYER-PLAN.md §3 has US
  *   and DS SWAPPED — a wrong name in the CONTRACT is a defect this project has

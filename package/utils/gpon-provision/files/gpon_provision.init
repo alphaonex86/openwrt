@@ -10,6 +10,7 @@ USE_PROCD=1
 RTK=/usr/sbin/rtk_factory
 ENVFILE=/var/run/gpon.env
 BOSA_CAL_DST=/lib/firmware/rtkbosa_k.bin
+LASER_PARAM_DIR=/sys/module/luna_gpon/parameters
 GPON_SN_PATHS="/sys/module/luna_gpon/parameters/onu_sn
 /sys/module/gpon_luna/parameters/onu_sn
 /sys/module/gpon_rtl9602c/parameters/onu_sn
@@ -196,6 +197,26 @@ provision() {
 
 }
 
+# RTL8290B: THIS unit's laser currents, handed to the driver before the serial
+# that starts ranging -- two units on one image never share a calibration. A unit
+# with no rtl8290b.data (a GN25L95 part, staged below) keeps the driver's default.
+laser_from_unit() {
+	local part="$1" out key val
+	[ -w "$LASER_PARAM_DIR/laser_bias" ] || return 0
+	out=$("$RTK" -p "$part" laser_cal 2>/dev/null) || {
+		log "no RTL8290B laser calibration on '$part'"
+		return 0
+	}
+	for key in laser_bias laser_mod; do
+		val=$(echo "$out" | sed -n "s/^$key=//p")
+		{ [ -n "$val" ] && echo "$val" > "$LASER_PARAM_DIR/$key"; } || {
+			log "could not hand $key='$val' to the driver; not activating GPON"
+			return 1
+		}
+	done
+	log "laser from this unit: $(echo $out)"
+}
+
 # A failed stage must not leave older bytes available to request_firmware.
 # RTL8290B does not use this GN25L95 file; the physical probe in the driver
 # decides whether its absence prevents activation.
@@ -226,6 +247,8 @@ try_identity() {
 		}
 		log "GN25L95 calibration unavailable; activation requires a physical RTL8290B or a later successful retry"
 	fi
+
+	laser_from_unit "$part" || return 1
 
 	for p in $GPON_SN_PATHS; do
 		[ -w "$p" ] || continue

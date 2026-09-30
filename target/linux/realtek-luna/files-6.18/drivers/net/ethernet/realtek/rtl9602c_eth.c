@@ -11,7 +11,7 @@
 #include <linux/of_net.h>	/* of_get_mac_address() -- the DT rung of the ladder */
 #include <linux/io.h>
 #include <linux/mii.h>	/* BMCR_* -- the standard MII bit names */
-#include <linux/interrupt.h>	/* request_irq/free_irq, irqreturn_t, IRQF_SHARED */
+#include <linux/interrupt.h>	/* request_irq, irqreturn_t, IRQF_SHARED */
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/proc_fs.h>

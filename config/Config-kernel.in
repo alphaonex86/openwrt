@@ -837,6 +837,27 @@ config KERNEL_PRINTK_TIME
 	bool "Enable printk timestamps"
 	default y
 
+config KERNEL_CFG80211
+	bool "WiFi configuration API (cfg80211) in the kernel"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  A board with no radio turns it off (operator: "desactivar todo lo
+	  relacionado wifi si el equipo no tiene wifi"); mac80211 and every WiFi
+	  driver built into the kernel depend on it.
+
+config KERNEL_MAC80211
+	bool "IEEE 802.11 stack (mac80211) in the kernel"
+	depends on TARGET_realtek_luna
+	default y
+
+config KERNEL_PCI
+	bool "PCI in the kernel"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  A board whose SoC has no PCIe port turns it off.
+
 config KERNEL_MTD_LUNA_NOR_WRITE
 	bool "Luna SPI-NOR erase/program (off = read-only flash)"
 	depends on TARGET_realtek_luna

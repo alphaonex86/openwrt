@@ -7706,6 +7706,45 @@ static void luna_bwcap_arm(void)
 	gpon_wr(GPON_BWMAP_CTRL, GPON_BWMAP_CAP_EN | LUNA_BWCAP_FRAMES);
 }
 
+/* DEBUG (CONFIG_GPON_PLOAM_DIAG): the first N ticks of every O5, one line per
+ * tick -- what the upstream did with the grants the GTC accepted. Built for an
+ * OLT we cannot see: "grants accepted, nothing sent" (2026-09-30, production
+ * OLT). gpon_rd only: pi_rd hangs this context. */
+static uint o5_window_ticks;
+module_param(o5_window_ticks, uint, 0644);
+MODULE_PARM_DESC(o5_window_ticks, "DEBUG: log the upstream every FSM tick for the first N ticks of each O5 (0 = off)");
+
+static void luna_bwcap_arm(void);
+
+static void luna_o5_window_sample(void)
+{
+	unsigned int i, n = 0, pl = 0;
+	u32 first0 = 0, first1 = 0;
+
+	for (i = 0; i < GPON_BWMAP_ENTRIES; i++) {
+		u32 w0 = gpon_rd(BWMAP_DATA(2 * i));
+
+		if (!(w0 & GPON_BWMAP_ENT_VALID))
+			continue;
+		if (!n++) {
+			first0 = w0;
+			first1 = gpon_rd(BWMAP_DATA(2 * i + 1));
+		}
+		if (w0 & GPON_BWMAP_ENT_PLOAMU)
+			pl++;
+	}
+	luna_bwcap_arm();
+	pr_info("luna-gpon: o5win +%ums grants=%u ploamu=%u first=%08x/%08x | us_intr dlt=%x sts=%x | ploam_ind=%03x cpu_tx=%08x auto_tx=%08x | gem_byte=%u dbru=%u idle16=%u | eqd=%08x boh=%03x sstart=%u\n",
+		(gpon_fsm_ticks - gpon_o5_entry_tick) * GPON_FSM_TICK_MS, n, pl,
+		first0, first1,
+		gpon_rd(GPON_GTC_US_INTR_DLT), gpon_rd(GPON_GTC_US_INTR_STS),
+		gpon_rd(GPON_GTC_US_PLOAM_IND) & 0x7ffu,
+		gpon_us_misc_cnt(2), gpon_us_misc_cnt(3),
+		gpon_us_misc_cnt(4), gpon_us_misc_cnt(1), gpon_rd(TCONT_IDLE_STAT(16)),
+		gpon_rd(GPON_GTC_US_EQD), gpon_rd(GPON_GTC_US_BOH_CFG) & 0xfffu,
+		gpon_rd(GPON_GTC_US_PROC_MODE) & 1u);
+}
+
 /* Empty the capture into the accumulator.  Does not re-arm. */
 static void luna_bwcap_harvest(void)
 {
@@ -8021,6 +8060,10 @@ drain_downstream:
 		pr_info("luna-gpon: O5 stable %u ticks -> VLAN_FILTER off (LAN access open)\n",
 			gpon_fsm_ticks - gpon_o5_entry_tick);
 	}
+	if (IS_ENABLED(CONFIG_GPON_PLOAM_DIAG) && o5_window_ticks &&
+	    gpon_fsm_state == 5 && gpon_o5_entry_tick &&
+	    gpon_fsm_ticks - gpon_o5_entry_tick < o5_window_ticks)
+		luna_o5_window_sample();
 	if (trace && gpon_fsm_state == 5 && (gpon_fsm_ticks % 150) == 0)
 		/* rxsid/ustx/dirty were REMOVED from this fast O5 print: pi_rd in this
 		 * context reproducibly HANGS the poll right after OMCC install (two boots

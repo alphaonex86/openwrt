@@ -99,6 +99,37 @@ struct omci_mib_row {
 /* The auto-instantiated T-CONT range in the static MIB. */
 #define OMCI_TCONT_COUNT 12
 
+/* What this UNIT tells the OLT it is.  A production OLT may match any of these
+ * against its provisioning (equipment ID -> ONT type, LOID -> subscriber), so
+ * they are per unit, from the unit's own factory MIB exactly like stock's
+ * omci_app (runomci.sh: `mib get` of the key named on each line).  Every
+ * member is zero-padded to its G.988 wire size; `zeros` must stay LAST. */
+struct omci_identity {
+	u8 vendor_id[4];	/* ONU-G #1, Circuit-Pack #5   PON_VENDOR_ID */
+	u8 onu_g_version[14];	/* ONU-G #2                    HW_HWVER */
+	u8 sw_bank0_version[14];/* SW-image 0 #1, C-Pack #4    OMCI_SW_VER1 */
+	u8 sw_bank1_version[14];/* SW-image 1 #1               OMCI_SW_VER2 */
+	u8 equipment_id[20];	/* ONU2-G #1                   GPON_ONU_MODEL */
+	u8 product_code[2];	/* ONU2-G #3, big-endian       OMCI_VENDOR_PRODUCT_CODE */
+	u8 loid[24];		/* ONU-G #10, CTC LoID #2      LOID */
+	u8 loid_passwd[12];	/* ONU-G #11, CTC LoID #3      LOID_PASSWD */
+	u8 operator_id[4];	/* CTC LoID #1 */
+	u8 zeros[25];		/* all-zero source, == its longest consumer */
+};
+
+/* The members a unit provisions (operator_id and zeros are not identity). */
+enum omci_id_field {
+	OMCI_ID_VENDOR,
+	OMCI_ID_HW_VERSION,
+	OMCI_ID_SW_VERSION0,
+	OMCI_ID_SW_VERSION1,
+	OMCI_ID_EQUIPMENT,
+	OMCI_ID_PRODUCT_CODE,
+	OMCI_ID_LOID,
+	OMCI_ID_LOID_PASSWD,
+	OMCI_ID_FIELDS
+};
+
 /* How many instances of ONE administratively-controlled UNI class this model
  * carries.  MEASURED in the two boards' own captured stock MIBs: ME 11 has 4
  * rows on the G24W and 4 on the X400AXF, ME 264 has 6 and 5. */
@@ -119,6 +150,7 @@ struct omci_uni_inv {
 
 struct omci_onu {
 	u8	sn[8];			/* PLOAM serial number (vendor+VSSN) */
+	struct omci_identity	id;	/* survives omci_onu_reinit() */
 	u8	mds;			/* ME 2 attr 1: MIB-Data-Sync */
 	/* The two UNI inventories. ⚠ EACH WAS A SINGLE u8 FOR ONE ...
 	 * dev/MEASURED-gpon_omci_me.h.md sec 4. */
@@ -230,6 +262,12 @@ static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
 	for (i = 0; i < 8; i++)
 		o->sn[i] = sn[i];
 }
+
+/* Provision one identity member from @len bytes, zero-padded to its wire size.
+ * Refused (false, member unchanged) when @len exceeds it, or is not exactly 2
+ * for the product code.  Until provisioned a member serves the build default. */
+bool omci_onu_set_id(struct omci_onu *o, enum omci_id_field f,
+		     const u8 *val, unsigned int len);
 
 /* ME class IDs presented in the MIB upload (G.988 + the HSGQ ...
  * dev/MEASURED-gpon_omci_me.h.md sec 24. */

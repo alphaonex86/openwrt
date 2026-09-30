@@ -103,29 +103,10 @@ void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst)
 }
 
 /* ME attribute model ---- Constant attribute bytes live in ...
- * dev/MEASURED-gpon_omci_me.c.md sec 4. */
-struct omci_identity {
-	/* vendor ID — ONU-G #1, Circuit-Pack #5.  The OLT recognizes HSGQ
-	 * ONUs; "XPON" was rejected. */
-	u8 vendor_id[4];
-	/* ONU-G #2 version, zero-padded to 14 */
-	u8 onu_g_version[14];
-	/* SW-image bank 0 (active) version — also Circuit-Pack #4 */
-	u8 sw_bank0_version[14];
-	/* SW-image bank 1 version */
-	u8 sw_bank1_version[14];
-	/* ONU2-G #1 equipment ID, zero-padded to 20 */
-	u8 equipment_id[20];
-	/* logical ONU ID — ONU-G #10, CTC LoID #2, zero-padded to 24 */
-	u8 loid[24];
-	/* CTC #1 operation ID, zero-padded to 4 */
-	u8 operator_id[4];
-	/* all-zero source: SW-image #5 product code (25) and #6 hash ...
-	 * dev/MEASURED-gpon_omci_me.c.md sec 5. */
-	u8 zeros[25];
-};
-
-static const struct omci_identity omci_id = {
+ * dev/MEASURED-gpon_omci_me.c.md sec 4. struct omci_identity is in the header:
+ * each ONU carries its own copy, seeded from this build default. */
+static const struct omci_identity omci_id_default = {
+	/* The HSGQ-G008 OLT recognizes HSGQ ONUs; "XPON" was rejected. */
 	.vendor_id	  = { 'H', 'S', 'G', 'Q' },
 	.onu_g_version	  = { '0', '2', 'A', '5', 'B', '1' },
 	.sw_bank0_version = { 'M', '2', '2', '5', '-',
@@ -134,6 +115,7 @@ static const struct omci_identity omci_id = {
 			      '2', '6', '0', '5', '1', '5' },
 	.equipment_id	  = { 'H', 'S', 'G', 'Q', '-',
 			      'X', '4', '1', '1', 'A', 'X', 'F' },
+	.product_code	  = { 0x00, 0x31 },
 	.loid		  = { 'u', 's', 'e', 'r' },
 	.operator_id	  = { 'C', 'T', 'C' },
 	/* .zeros and the tails above are 0 by omission — C zero-fills what a
@@ -153,13 +135,15 @@ OMCI_ID_ASSERT(onu_g_version, 14);	/* ONU-G #2 */
 OMCI_ID_ASSERT(sw_bank0_version, 14);	/* SW-image #1 / Circuit-Pack #4 */
 OMCI_ID_ASSERT(sw_bank1_version, 14);	/* SW-image #1, bank 1 */
 OMCI_ID_ASSERT(equipment_id, 20);	/* ONU2-G #1 */
+OMCI_ID_ASSERT(product_code, 2);	/* ONU2-G #3 */
 OMCI_ID_ASSERT(loid, 24);		/* ONU-G #10 / CTC LoID #2 */
+OMCI_ID_ASSERT(loid_passwd, 12);	/* ONU-G #11 / CTC LoID #3 */
 OMCI_ID_ASSERT(operator_id, 4);		/* CTC #1 */
 OMCI_ID_ASSERT(zeros, 25);		/* == its longest consumer, VEIP #3 */
 /* every member is a u8 array, so equality here also proves no padding crept
- * in: the pool is the same 119 wire-facing bytes the flat array held */
-_Static_assert(sizeof(struct omci_identity) == 119,
-	       "omci_identity is not the 119-byte pool the OLT reads");
+ * in: the flat 119-byte pool plus product code (2) and LoID password (12) */
+_Static_assert(sizeof(struct omci_identity) == 133,
+	       "omci_identity is not the 133-byte pool the OLT reads");
 
 /* Where a descriptor row takes its value bytes from. */
 enum omci_attr_src {
@@ -239,7 +223,7 @@ struct omci_attr {
 #define A_ID(cls, n, member)	AT(cls, n, OMCI_ID_SIZEOF(member),	\
 				   OMCI_SRC_ID,				\
 				   offsetof(struct omci_identity, member))
-/* @sz octets of zeros, served from omci_id.zeros (@sz <= 25 — see the
+/* @sz octets of zeros, served from the zeros member (@sz <= 25 — see the
  * zeros member: a larger ask reads off the end, and only the x86 sweep
  * plus ASan police that bound) */
 #define A_ZERO(cls, n, sz)	AT(cls, n, sz, OMCI_SRC_ID,		\
@@ -268,7 +252,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(256,  8,  1, 0x00),			/* #8  Op state */
 	A_C(256,  9,  1, 0x00),			/* #9  Survival time */
 	A_ID(256, 10, loid),			/* #10 Logical ONU ID */
-	A_ZERO(256, 11, 12),			/* #11 Logical password */
+	A_ID(256, 11, loid_passwd),		/* #11 Logical password */
 	A_C(256, 12,  1, 0x00),			/* #12 Credentials status */
 	A_C(256, 13,  2, 0x0000),		/* #13 Ext TC-layer options */
 	A_C(256, 14,  1, 0x01),			/* #14 ONT state */
@@ -279,7 +263,7 @@ static const struct omci_attr omci_attrs[] = {
 						 * BASELINE only — devid 0x0b is
 						 * not served, and the two must
 						 * stay consistent */
-	A_C(257,  3,  2, 0x0031),		/* #3  Vendor product code */
+	A_ID(257,  3, product_code),		/* #3  Vendor product code */
 	A_C(257,  4,  1, 0x01),			/* #4  Security capability */
 	A_C(257,  5,  1, 0x01),			/* #5  Security mode */
 	A_C(257,  6,  2, 0x0060),		/* #6  Total priority queues */
@@ -575,7 +559,7 @@ static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
 	A_ID(65530, 1, operator_id),		/* #1  Operation ID */
 	A_ID(65530, 2, loid),			/* #2  LoID */
-	A_ZERO(65530, 3, 12),			/* #3  Password ("" but MUST be
+	A_ID(65530, 3, loid_passwd),		/* #3  Password (MUST be
 						 * servable, proven) */
 	A_C(65530, 4,  1, 0x01),		/* #4  Auth status = success */
 
@@ -781,6 +765,34 @@ static void omci_anig_alarms_refresh(struct omci_onu *o)
 	o->alarm_inst = 0x8001;
 	o->alarm_active = (o->alarm_active & ~(OMCI_ANIG_RX_LOW |
 		OMCI_ANIG_RX_HIGH | OMCI_ANIG_TX_LOW | OMCI_ANIG_TX_HIGH)) | bits;
+}
+
+#define OMCI_ID_FIELD(member) \
+	{ offsetof(struct omci_identity, member), OMCI_ID_SIZEOF(member) }
+static const struct { u8 off, size; } omci_id_fields[OMCI_ID_FIELDS] = {
+	[OMCI_ID_VENDOR]	= OMCI_ID_FIELD(vendor_id),
+	[OMCI_ID_HW_VERSION]	= OMCI_ID_FIELD(onu_g_version),
+	[OMCI_ID_SW_VERSION0]	= OMCI_ID_FIELD(sw_bank0_version),
+	[OMCI_ID_SW_VERSION1]	= OMCI_ID_FIELD(sw_bank1_version),
+	[OMCI_ID_EQUIPMENT]	= OMCI_ID_FIELD(equipment_id),
+	[OMCI_ID_PRODUCT_CODE]	= OMCI_ID_FIELD(product_code),
+	[OMCI_ID_LOID]		= OMCI_ID_FIELD(loid),
+	[OMCI_ID_LOID_PASSWD]	= OMCI_ID_FIELD(loid_passwd),
+};
+
+bool omci_onu_set_id(struct omci_onu *o, enum omci_id_field f,
+		     const u8 *val, unsigned int len)
+{
+	u8 *dst;
+
+	if ((unsigned int)f >= OMCI_ID_FIELDS || len > omci_id_fields[f].size ||
+	    (f == OMCI_ID_PRODUCT_CODE && len != 2))
+		return false;
+	dst = (u8 *)&o->id + omci_id_fields[f].off;
+	memset(dst, 0, omci_id_fields[f].size);
+	if (len)
+		memcpy(dst, val, len);
+	return true;
 }
 
 void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level)
@@ -1010,11 +1022,11 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 	case OMCI_SRC_TBL:
 		/* A table attribute read as a scalar. G.988 reads one with ...
 		 * dev/MEASURED-gpon_omci_me.c.md sec 27. */
-		return a->size <= OMCI_ID_SIZEOF(zeros) ? omci_id.zeros : NULL;
+		return a->size <= OMCI_ID_SIZEOF(zeros) ? o->id.zeros : NULL;
 	case OMCI_SRC_CNT:
 		return NULL;		/* could not ask -- never a zero */
 	case OMCI_SRC_ID:
-		return (const u8 *)&omci_id + a->v;
+		return (const u8 *)&o->id + a->v;
 	case OMCI_SRC_SN:
 		return o->sn;
 	case OMCI_SRC_MDS:
@@ -1043,8 +1055,8 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 			break;
 		}
 		case OMCI_DYN_SW_VER:
-			return inst ? omci_id.sw_bank1_version :
-				      omci_id.sw_bank0_version;
+			return inst ? o->id.sw_bank1_version :
+				      o->id.sw_bank0_version;
 		case OMCI_DYN_SW_FLAG:
 			val = inst ? 0 : 1;
 			break;
@@ -1401,6 +1413,7 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	 * dev/MEASURED-gpon_omci_me.c.md sec 34. */
 	memset(o, 0, sizeof(*o));
 	memcpy(o->sn, sn, 8);
+	o->id = omci_id_default;
 	omci_me_reset_values(o);
 	o->mds = mds_seed;
 	/* Seed the ANI-G optical levels with the static fallback: a ...
@@ -1433,6 +1446,7 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	/* Safe to read: @o is LIVE here by this function's contract, which is
 	 * the whole reason it is not the same function as omci_onu_init(). */
 	struct omci_uni_inv pptp = o->pptp_eth_uni, unig = o->uni_g;
+	struct omci_identity id = o->id;	/* the unit's, not the session's */
 	u8 cap[OMCI_UNI_MAX], type[OMCI_UNI_MAX];
 
 	memcpy(cap, o->uni_g_mgmt_cap, sizeof(cap));
@@ -1440,6 +1454,7 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	 *   identity change does not turn an FE port into a GE one. */
 	memcpy(type, o->uni_type, sizeof(type));
 	omci_onu_init(o, sn, mds_seed);
+	o->id = id;
 	/* ⚠ UNCONDITIONALLY, INCLUDING WITH BOTH LISTS EMPTY.  Guarding this on
 	 * "something was declared" made a board that legally declares no UNI at
 	 * all come back with the default 0x0101 on both classes -- an instance

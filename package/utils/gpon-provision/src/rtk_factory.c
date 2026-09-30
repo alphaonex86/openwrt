@@ -10,8 +10,9 @@
  * self-provision an entire fleet; the factory partition is only ever read.
  *
  *   HW (lastgood_hs.xml): ELAN_MAC_ADDR WLAN_MAC_ADDR GPON_SN OUI
- *                         PON_VENDOR_ID GPON_ONU_MODEL MAC_KEY
+ *                         PON_VENDOR_ID GPON_ONU_MODEL MAC_KEY HW_HWVER
  *   SW (lastgood.xml):    LOID LOID_PASSWD GPON_PLOAM_PASSWD OMCI_OLT_MODE
+ *                         OMCI_SW_VER1 OMCI_SW_VER2 OMCI_VENDOR_PRODUCT_CODE
  * The *_bak and *_mp_hs2 (manufacturing-default) variants are never read.
  *
  * JFFS2 facts (big-endian on this MIPS target): node header = {u16 magic 0x1985,
@@ -444,11 +445,15 @@ static const struct map MAP[] = {
 	{ "oui",           F_HW, "OUI",               0 },
 	{ "vendor_id",     F_HW, "PON_VENDOR_ID",     0 },
 	{ "model",         F_HW, "GPON_ONU_MODEL",    0 },
+	{ "hw_ver",        F_HW, "HW_HWVER",          0 },
 	{ "mac_key",       F_HW, "MAC_KEY",           0 },
 	{ "loid",          F_SW,    "LOID",              0 },
 	{ "loid_passwd",   F_SW,    "LOID_PASSWD",       0 },
 	{ "ploam_passwd",  F_SW,    "GPON_PLOAM_PASSWD", 0 },
 	{ "olt_mode",      F_SW,    "OMCI_OLT_MODE",     0 },
+	{ "sw_ver1",       F_SW,    "OMCI_SW_VER1",      0 },
+	{ "sw_ver2",       F_SW,    "OMCI_SW_VER2",      0 },
+	{ "product_code",  F_SW,    "OMCI_VENDOR_PRODUCT_CODE", 0 },
 	{ NULL, F_HW, NULL, 0 }
 };
 
@@ -778,7 +783,8 @@ int main(int argc, char **argv)
 	if (argc >= 3 && !strcmp(argv[1], "-p")) { part = argv[2]; a = 3; }
 	if (a >= argc) {
 		fprintf(stderr, "usage: rtk_factory [-p part] <mac|wlan_mac|sn|oui|"
-			"vendor_id|model|mac_key|loid|loid_passwd|ploam_passwd|olt_mode|"
+			"vendor_id|model|hw_ver|mac_key|loid|loid_passwd|ploam_passwd|"
+			"olt_mode|sw_ver1|sw_ver2|product_code|"
 			"optical_cal|laser_cal|bosa_cal <outfile>>\n");
 		return 2;
 	}

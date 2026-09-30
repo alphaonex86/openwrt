@@ -69,6 +69,15 @@
 
 &spi_nor {
 	/*
+	 * Read through the memory-mapped window as before, and erase/program
+	 * through the controller's PIO block, so the OpenWrt overlay
+	 * (rootfs_data, carved out of r0) persists. Everything outside our own
+	 * bank 0 stays read-only.
+	 */
+	compatible = "realtek,luna-spi-nor";
+	reg = <0x14000000 0x1000000>, <0x18001200 0x10>;
+
+	/*
 	 * The UNI panel this board presents over OMCI, MEASURED from its own
 	 * stock firmware (omcicli mib get 11/264, 2026-09-12, archived under
 	 * results/RTL9602C/HSGQ/X111W/uni-runtime-20260912/).
@@ -110,14 +119,17 @@
 		partition@40000 {
 			label = "env";
 			reg = <0x040000 0x002000>;	/* 8K */
+			read-only;
 		};
 		partition@42000 {
 			label = "env2";
 			reg = <0x042000 0x002000>;	/* 8K */
+			read-only;
 		};
 		partition@44000 {
 			label = "config";
 			reg = <0x044000 0x03c000>;	/* 240K (jffs2) */
+			read-only;
 		};
 		partition@80000 {
 			label = "k0";
@@ -144,10 +156,12 @@
 		partition@840000 {
 			label = "k1";
 			reg = <0x840000 0x300000>;	/* 3M kernel bank 1 */
+			read-only;
 		};
 		partition@b40000 {
 			label = "r1";
 			reg = <0xb40000 0x4c0000>;	/* 4864K rootfs bank 1 */
+			read-only;
 		};
 	};
 };

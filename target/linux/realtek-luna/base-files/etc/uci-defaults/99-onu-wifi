@@ -7,13 +7,28 @@
 
 # Authoritative per-board MAC/SN from this unit's own flash (same source as the
 # GPON identity), with a netdev fallback.
-MAC=$(/usr/sbin/rtk_factory -p config mac 2>/dev/null | tr 'A-F' 'a-f')
+MAC=$(/usr/sbin/rtk_factory -p config mac 2>/dev/null)
 [ -n "$MAC" ] || MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
+MAC=$(echo "$MAC" | tr 'A-F' 'a-f')
 SN=$(/usr/sbin/rtk_factory -p config sn 2>/dev/null)
 
+# A MAC every unit carries is no identity -- none, the family placeholders, a
+# group address. Such a unit gets a locally administered one from what else is
+# its own (its GPON serial, else this boot), never a literal shared by the fleet.
+case "$MAC" in
+??:??:??:??:??:??) ;;
+*) MAC="" ;;
+esac
+case "$MAC" in
+""|00:e0:4c:86:70:01|00:e0:4c:07:68:02|00:00:00:00:00:00|?[13579bdf]:*)
+	H=$(printf '%s' "${SN:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)}" | sha256sum | cut -c1-10)
+	MAC="02:$(echo "$H" | sed 's/\(..\)/\1:/g; s/:$//')"
+	logger -t onu-wifi "no factory MAC: WiFi identity $MAC derived from ${SN:-this boot}"
+	;;
+esac
+
 # SSID = ONU-<last 3 MAC octets> (e.g. 98:c7:a4:32:82:ae -> ONU-3282AE).
-SUFFIX=$(echo "$MAC" | awk -F: 'NF>=6 { printf "%s%s%s", toupper($4), toupper($5), toupper($6) }')
-[ -n "$SUFFIX" ] || SUFFIX="000000"
+SUFFIX=$(echo "$MAC" | awk -F: '{ printf "%s%s%s", toupper($4), toupper($5), toupper($6) }')
 SSID="ONU-$SUFFIX"
 
 # Per-board-unique default PSK (>=8 chars). Operator overrides via provisioning.

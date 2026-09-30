@@ -55,3 +55,14 @@ define Device/vsol_v2801rgw
   DEVICE_PACKAGES :=
 endef
 TARGET_DEVICES += vsol_v2801rgw
+
+define Device/hsgq_x100dg
+  DEVICE_VENDOR := HSGQ
+  DEVICE_MODEL := X100DG
+  DEVICE_DTS := rtl9601d_x100dg
+  DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
+  SOC := rtl9601d
+  IMAGES :=
+  DEVICE_PACKAGES := -iw
+endef
+TARGET_DEVICES += hsgq_x100dg

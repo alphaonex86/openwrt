@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/dts-v1/;
+
+#include "rtl9602c.dtsi"
+
+/* The RTL9601D runs the RTL9602C platform map: its own stock kernel (k1, Linux
+ * 2.6.30.9) programs the same UART, INTC, timer, watchdog, UMSAR and NIC blocks
+ * and never the PCIe host block, hence no "realtek,rtl9602c" root compatible
+ * (pcie-luna keys on it).  dev/ONU-X100DG.md, 2026-09-30. */
+/ {
+	model = "HSGQ X100DG (RTL9601D, console bring-up)";
+	compatible = "hsgq,x100dg", "realtek,rtl9601d";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* Own stock map: two spans, the holes after each are unexplained. */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x016ff000>, <0x01800000 0x006ff000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		stock-reserved@16ff000 {
+			no-map;
+			reg = <0x016ff000 0x00101000>;
+		};
+
+		stock-reserved@1eff000 {
+			no-map;
+			reg = <0x01eff000 0x00101000>;
+		};
+	};
+
+	/delete-node/ ethernet@18012000;
+	/delete-node/ flash@14000000;
+	/delete-node/ watchdog@18003260;
+};
+
+/* First diagnostic boot: GPON2's splitter is shared and this unit's laser
+ * calibration is not read yet -- no laser is keyed. */
+&gpon {
+	status = "disabled";
+};

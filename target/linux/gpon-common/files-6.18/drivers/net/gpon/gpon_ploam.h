@@ -123,6 +123,7 @@ enum gpon_ploam_ev {
 	 * dev/MEASURED-gpon_ploam.h.md sec 3. */
 	GPON_PLOAM_EV_EARLY_DWELL,
 	GPON_PLOAM_EV_KEEP_LOCK_GIVEUP,	/* a = ticks since the keep-lock DEACT, b = state */
+	GPON_PLOAM_EV_O3_UNHEARD,	/* a = ticks at O3, b = SN offers so far  */
 };
 
 /* The imperative shell: every entry is a SIDE EFFECT the core ...

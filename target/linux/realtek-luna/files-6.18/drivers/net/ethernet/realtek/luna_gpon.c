@@ -7558,6 +7558,7 @@ static const char * const luna_ev_name[] = {
 	[GPON_PLOAM_EV_O5_WATCHDOG]	= "O5_WATCHDOG",
 	[GPON_PLOAM_EV_LOS_RERANGE]	= "LOS_RERANGE",
 	[GPON_PLOAM_EV_KEEP_LOCK_GIVEUP] = "KEEP_LOCK_GIVEUP",
+	[GPON_PLOAM_EV_O3_UNHEARD]	= "O3_UNHEARD",
 };
 
 /* The events that DECIDE activation, and therefore speak whatever `trace` says.
@@ -7569,6 +7570,7 @@ static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
 	case GPON_PLOAM_EV_DEACT:
 	case GPON_PLOAM_EV_DEACT_KEEP_LOCK:
 	case GPON_PLOAM_EV_KEEP_LOCK_GIVEUP:
+	case GPON_PLOAM_EV_O3_UNHEARD:
 	case GPON_PLOAM_EV_DISABLE_SN:
 	case GPON_PLOAM_EV_RANGING_TIME:
 	case GPON_PLOAM_EV_ONU_ID:

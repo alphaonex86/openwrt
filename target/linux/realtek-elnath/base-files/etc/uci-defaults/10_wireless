@@ -98,8 +98,20 @@ IFS="$oldifs"
 # fallback scheme (per-board, derived at runtime - never hardcoded)
 [ "${#mac}" = "12" ] || mac=$(cat /sys/class/net/eth0/address 2>/dev/null | tr -d :)
 mac=$(echo "$mac" | tr 'A-F' 'a-f')
+# A MAC every unit carries is no identity -- none, the family placeholders, a
+# group address. Such a unit gets a locally administered one from this boot,
+# never a literal shared by the fleet.
+case "$mac" in
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+*) mac="" ;;
+esac
+case "$mac" in
+""|00e04c867001|00e04c076802|000000000000|?[13579bdf]*)
+	mac="02$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | sha256sum | cut -c1-10)"
+	logger -t 10_wireless "no factory MAC: WiFi identity $mac derived from this boot"
+	;;
+esac
 suffix="${mac#??????}"
-[ "${#suffix}" = "6" ] || suffix="000000"
 [ "${#key_2g}" -ge 8 ] || key_2g="12345678"
 [ "${#key_5g}" -ge 8 ] || key_5g="12345678"
 # ONE SSID + ONE key on BOTH bands so a phone band-steers 2.4G<->5G as a

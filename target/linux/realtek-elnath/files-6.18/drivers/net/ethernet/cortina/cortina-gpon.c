@@ -31,6 +31,7 @@
 #include "cortina-gpon-ddm.h"	/* SFF-8472 A2h optical decode (functional core) */
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
 #include "gpon_common.h"	/* the dwell rule the supervisor applies */
+#include "gpon_ploam.h"	/* gpon_ploam_password_parse() */
 #include "gpon_range_gate.h"	/* may this ONU transmit, and what to change */
 #include "gpon_hwaddr.h"	/* the common station-address ladder */
 #include "cortina-access.h"	/* the ONE indirect transaction */
@@ -152,6 +153,9 @@
 #define CG_REG_SIGNAL		0x010	/* SF/SD BER alarm thresholds */
 #define CG_REG_VENDOR		0x014	/* vendor-id (ASCII "XPON") */
 #define CG_REG_VENDOR_SPEC	0x018	/* vendor-specific serial number */
+#define CG_REG_PWD0		0x01c	/* G.984.3 Password octets 0-1, bits 15:0 */
+#define CG_REG_PWD1		0x020	/* octets 2-5 */
+#define CG_REG_PWD2		0x024	/* octets 6-9 */
 #define CG_REG_ALARM		0x09c	/* hdr 0x7c: LOS/LOF alarm bits (live levels) */
 
 /* Interrupt block: header 0x84..0xa8 -> SILICON 0xa4..0xc8 ...
@@ -537,6 +541,7 @@ struct cortina_gpon {
 	 * dev/MEASURED-cortina-gpon.c.md sec 124. */
 	struct mutex sn_lock;		/* activation, queued control, watchdog and AVC */
 	u8 sn[8];			/* wire order: 4 ASCII vendor-id + 4 VSSN bytes */
+	u8 password[GPON_PLOAM_PASSWORD_LEN];	/* G.984.3 Password, zero-padded */
 	enum cg_sn_src sn_src;
 	bool activated;			/* cg_mac_activate() has run at least once */
 	struct delayed_work sn_wait_work;	/* bounded wait for the board's serial */
@@ -710,6 +715,9 @@ MODULE_PARM_DESC(activate, "program the SN + start GPON ranging once the serial 
 
 static char *cg_sn_param;
 module_param_named(sn, cg_sn_param, charp, 0444);
+/* The Password stock sends when the unit's own value is not given (operator 2026-09-30). */
+static char *cg_password_param = "1234567890";
+module_param_named(onu_password, cg_password_param, charp, 0444);
 MODULE_PARM_DESC(sn, "GPON serial number override, \"VVVVHHHHHHHH\" (4 ASCII vendor-id chars + 8 hex VSSN digits). Bring-up/A-B use ONLY: the shipping path is the board's own config volume pushed in by /etc/init.d/gpon-identity, so never bake a serial number into an image's bootargs");
 
 static bool cg_do_bosa_init = true;
@@ -1045,6 +1053,15 @@ static void cg_puc_cnt_work(struct work_struct *work)
 static void cg_ingress_stop(struct cortina_gpon *cg);
 static void cg_transport_down(struct cortina_gpon *cg);
 
+/* The Password the MAC answers Request_Password with: octets 0-1 in bits 15:0 of the first
+ * word, then 2-5 and 6-9 in wire order. */
+static void cg_password_write(struct cortina_gpon *cg)
+{
+	writel((cg->password[0] << 8) | cg->password[1], cg->mac + CG_REG_PWD0);
+	writel(cg_sn_word(cg->password + 2), cg->mac + CG_REG_PWD1);
+	writel(cg_sn_word(cg->password + 6), cg->mac + CG_REG_PWD2);
+}
+
 static int cg_mac_activate(struct cortina_gpon *cg, bool identity_changed,
 			   bool *armed)
 {
@@ -1113,6 +1130,7 @@ static int cg_mac_activate(struct cortina_gpon *cg, bool identity_changed,
 	 * responder is armed with, so the PLOAM and OMCI identities cannot drift. */
 	writel(cg_sn_word(cg->sn), mac + CG_REG_VENDOR);	/* 4 ASCII vendor-id chars */
 	writel(cg_sn_word(cg->sn + 4), mac + CG_REG_VENDOR_SPEC);	/* 4 VSSN bytes */
+	cg_password_write(cg);
 	/* datapath: gpon_ds.max_packet_size (bits 29:16) = 0x3FFF */
 	v = readl(mac + CG_REG_GPON_DS);
 	v = (v & ~(0x3fffu << 16)) | (0x3fffu << 16);
@@ -1124,7 +1142,7 @@ static int cg_mac_activate(struct cortina_gpon *cg, bool identity_changed,
 	 * burst.  Vendor __gpon_datapath_init runs aal_puc_init right after the
 	 * PDC.  Isolated to the PON+0x8000 sub-block; safe pre-range. */
 	cg_puc_init(cg);
-	/* password / AES keys: deferred (not needed to range) */
+	/* AES keys: deferred (not needed to range) */
 
 	/* Wait for the downstream to lock (RGB8 bit15 BER_NOTIFY) before enabling
 	 * ranging, so the FSM sees a live downstream at the moment en is asserted. */
@@ -3347,6 +3365,17 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 
 		return ret ? ret : len;
 	}
+	if (strncmp(p, "password ", 9) == 0) {
+		u8 pwd[GPON_PLOAM_PASSWORD_LEN];
+
+		if (gpon_ploam_password_parse(strim(p + 9), pwd))
+			return -EINVAL;
+		mutex_lock(&cg->sn_lock);
+		memcpy(cg->password, pwd, sizeof(pwd));
+		cg_password_write(cg);
+		mutex_unlock(&cg->sn_lock);
+		return len;
+	}
 	/* One-shot full BOSA register dump to dmesg (cold-state ...
 	 * dev/MEASURED-cortina-gpon.c.md sec 116. */
 	if (strcmp(p, "bosa dump") == 0) {
@@ -3484,6 +3513,9 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 			if (cg_do_intr)
 				cg_intr_setup(cg, pdev);
 
+			if (gpon_ploam_password_parse(cg_password_param, cg->password))
+				dev_warn(dev, "onu_password '%s' is not a G.984.3 password; sending an empty one\n",
+					 cg_password_param);
 			if (cg_activate) {
 				/* The identity gate. Ranging announces the ONU's serial ...
 				 * dev/MEASURED-cortina-gpon.c.md sec 120. */

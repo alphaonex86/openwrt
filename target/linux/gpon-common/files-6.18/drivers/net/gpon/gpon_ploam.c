@@ -84,7 +84,7 @@ static int send_password(struct gpon_ploam *o)
 
 	p[0] = o->onu_id;		/* our assigned ONU-ID — see FOLLOW-UP P6 */
 	p[1] = PLM_US_PASSWORD;		/* 0x02 */
-	/* p[2..11] = the 10-octet password, all zero = empty */
+	memcpy(&p[2], o->password, sizeof(o->password));
 	for (i = 0; i < 3; i++)
 		ploam_tx(o, PLM_US_QUEUE_URG, p);
 	return 3;
@@ -525,9 +525,9 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	case PLM_DS_REQUEST_PASSWORD:
 		/* GROUND TRUTH: without the reply the OLT stalls at O5 spamming
-		 * this and deactivates us with LOAi. The OLT is SN-authenticated
-		 * so the value is ignored, but the message is required to
-		 * advance activation. Broadcast is accepted, like stock. */
+		 * this and deactivates us with LOAi. The lab OLT ignores the value;
+		 * a production OLT deactivated a zero one (field X111W, 2026-09-30).
+		 * Broadcast is accepted, like stock. */
 		if (onu_id == o->onu_id || onu_id == 0xff) {
 			send_password(o);
 			ev(o, GPON_PLOAM_EV_REQ_PW, 0, 0);
@@ -808,6 +808,25 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
 
 /* Identity and lifecycle. ★★ THE SERIAL-NUMBER CODEC IS NOT ...
  * dev/MEASURED-gpon_ploam.c.md sec 35. */
+
+/* Up to 10 printable octets (one trailing newline tolerated), zero-padded. -> 0 | -1 */
+int gpon_ploam_password_parse(const char *s, u8 out[GPON_PLOAM_PASSWORD_LEN])
+{
+	unsigned int i;
+
+	memset(out, 0, GPON_PLOAM_PASSWORD_LEN);
+	for (i = 0; s && s[i] && !(s[i] == '\n' && !s[i + 1]); i++) {
+		if (i == GPON_PLOAM_PASSWORD_LEN || s[i] < 0x20 || s[i] > 0x7e)
+			return -1;
+		out[i] = (u8)s[i];
+	}
+	return s ? 0 : -1;
+}
+
+void gpon_ploam_set_password(struct gpon_ploam *o, const u8 pwd[GPON_PLOAM_PASSWORD_LEN])
+{
+	memcpy(o->password, pwd, sizeof(o->password));
+}
 
 void gpon_ploam_set_sn(struct gpon_ploam *o, const u8 sn[8])
 {

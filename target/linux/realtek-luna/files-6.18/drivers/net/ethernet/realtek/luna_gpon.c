@@ -8105,6 +8105,19 @@ static void gpon_apply_identity_change(void)
 	gpon_ploam_sn_changed(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
 }
 
+/* Ahead of the activation gate: a board whose activation never becomes ready kept
+ * VLAN_FILTER on and its LAN dark (X100DG, 2026-10-01). */
+static void luna_lan_keep_open_poll(void)
+{
+	if (!lan_keep_open)
+		return;
+	sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> LAN open, every state */
+	if (!gpon_vlan_lan_open) {
+		gpon_vlan_lan_open = true;
+		pr_info("luna-gpon: lan_keep_open -> VLAN_FILTER off (LAN access open)\n");
+	}
+}
+
 static void gpon_fsm_poll(struct timer_list *t)
 {
 	int guard = 0;
@@ -8124,6 +8137,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 		luna_poll_prev_jiffies = now;
 	}
 	luna_bwcap_poll();
+	luna_lan_keep_open_poll();
 	if (!READ_ONCE(luna_activation_ready))
 		goto drain_downstream;
 	/* The PERIODIC half of the FSM is the core's, as the ...
@@ -8202,13 +8216,7 @@ drain_downstream:
 
 	/* Hybrid LAN/VLAN: clear VLAN_FILTER so the LAN ports forward ...
 	 * dev/MEASURED-luna_gpon.c.md sec 250. */
-	if (lan_keep_open) {
-		sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> LAN open, every state */
-		if (!gpon_vlan_lan_open) {
-			gpon_vlan_lan_open = true;
-			pr_info("luna-gpon: lan_keep_open -> VLAN_FILTER off (LAN access open)\n");
-		}
-	} else if (gpon_fsm_state == 5 && !gpon_vlan_lan_open && vlan_lan_o5_ticks &&
+	if (!lan_keep_open && gpon_fsm_state == 5 && !gpon_vlan_lan_open && vlan_lan_o5_ticks &&
 		   gpon_o5_entry_tick && (gpon_fsm_ticks - gpon_o5_entry_tick) > vlan_lan_o5_ticks) {
 		/* legacy O5-gated: keep filtering through ranging and config-apply, then
 		 * clear once O5 has held. Re-armed on any drop below O5. */

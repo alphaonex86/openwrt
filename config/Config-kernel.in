@@ -858,6 +858,37 @@ config KERNEL_PCI
 	help
 	  A board whose SoC has no PCIe port turns it off.
 
+config KERNEL_BPF_SYSCALL
+	bool "eBPF system call (bpf())"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  A board that loads no eBPF program turns it off: kernel/bpf is 572 kB
+	  of the 32 MB X100DG's kernel.
+
+config KERNEL_BPF_JIT
+	bool "BPF JIT compiler"
+	depends on TARGET_realtek_luna
+	default y
+
+config KERNEL_LOG_BUF_SHIFT
+	int "Kernel log ring size, as 2^N bytes"
+	depends on TARGET_realtek_luna
+	range 12 25
+	default 17
+	help
+	  The printk ring and its static index arrays scale together: 17 costs
+	  528 kB of static RAM (measured on the X100DG).
+
+config KERNEL_JFFS2_LZMA
+	bool "JFFS2 LZMA compression"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Its compressor is allocated at init (284 kB vmalloc on the X100DG)
+	  whether or not JFFS2 is mounted; the vendor config partition read so
+	  far (X100DG mtd3) holds zlib and uncompressed nodes, never LZMA.
+
 config KERNEL_MTD_LUNA_NOR_WRITE
 	bool "Luna SPI-NOR erase/program (off = read-only flash)"
 	depends on TARGET_realtek_luna

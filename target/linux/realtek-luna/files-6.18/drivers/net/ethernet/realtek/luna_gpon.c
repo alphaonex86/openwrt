@@ -7741,6 +7741,9 @@ static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
 	case GPON_PLOAM_EV_LOS_RERANGE:
 	case GPON_PLOAM_EV_SN_REPROVISIONED:
 	case GPON_PLOAM_EV_UNHANDLED:
+	/* a few per registration, and the identity an OLT may refuse us on */
+	case GPON_PLOAM_EV_REQ_PW:
+	case GPON_PLOAM_EV_REQ_KEY:
 		return true;
 	default:
 		return false;

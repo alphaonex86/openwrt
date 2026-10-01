@@ -51,6 +51,7 @@ typedef uint32_t u32;
 
 /* Was a bare 0x04 literal in the Luna driver, commented "US_NOMESSAGE". */
 #define PLM_US_NO_MESSAGE		0x04
+#define PLM_US_REI			0x08	/* Remote_Error_Indication (BER interval) */
 
 #define PLM_US_QUEUE_SN			0x6	/* US_PLOAM_IND[10:8] auto-SN queue */
 #define PLM_US_QUEUE_URG		0x1	/* US_PLOAM_IND[10:8] urgent queue (ACKs) */
@@ -189,6 +190,10 @@ struct gpon_ploam_ops {
 	void (*install_data_gem)(void *sh, u16 gem);
 	/* Report the WAN-egress (VEIP) operational state up to the OLT. */
 	void (*omci_report_oper_up)(void *sh);
+	/* Optional: the DS BIP block-error count REI reports (stock reads a
+	 * clear-on-read counter once per interval). <0 = could not ask: that REI
+	 * is skipped, never sent as 0. NULL = this family sends no REI. */
+	int  (*ds_bip_errors)(void *sh, u32 *count);
 	/* --- diagnostics: NEVER load-bearing, NULL is always legal. */
 	void (*trace)(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b);
 	/* ONE datum the FSM received and could not place. Same ...
@@ -351,6 +356,10 @@ struct gpon_ploam {
 	u32 ds_bcast[GPON_PLOAM_TYPE_SLOTS];
 	u32 ds_other;			/* addressed to another ONU-ID               */
 	u32 us_queued[GPON_PLOAM_TYPE_SLOTS];
+	/* REI: armed by BER_Interval, sent by gpon_ploam_poll_rei() at O5. */
+	u32 rei_interval_ms;		/* 0 = disarmed                              */
+	u32 rei_due_ms;
+	u8  rei_seq;			/* 4-bit sequence, as stock                  */
 };
 
 static inline void gpon_ploam_data_alloc_note(struct gpon_ploam *o,
@@ -426,5 +435,6 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark, u32 now_ms);
 int gpon_ploam_poll_sn_reoffer(struct gpon_ploam *o, u32 now_ms);
 int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms);
+int gpon_ploam_poll_rei(struct gpon_ploam *o, u32 now_ms);
 
 #endif /* GPON_PLOAM_H */

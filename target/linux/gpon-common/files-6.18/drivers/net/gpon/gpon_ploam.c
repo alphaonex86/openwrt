@@ -236,6 +236,8 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		ev(o, GPON_PLOAM_EV_STATE, o->state, st);
 	if (prev != st)
 		o->los_run = 0;		/* fresh LOS debounce on every transition */
+	if (prev != st && st != GPON_O5_OPERATION)
+		o->rei_interval_ms = 0;	/* the next activation sets its own */
 	o->state = st;
 
 	/* ★ The EARLY clock, armed AFTER the state is really set -- ...
@@ -598,8 +600,14 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		/* BER_interval: the OLT configures the upstream BER reporting ...
 		 * dev/MEASURED-gpon_ploam.c.md sec 44. */
 		if (onu_id == o->onu_id || onu_id == 0xff) {
+			u32 frames = ((u32)d[0] << 24) | ((u32)d[1] << 16) |
+				     ((u32)d[2] << 8) | d[3];
+
 			send_ack(o, m);
 			ev(o, GPON_PLOAM_EV_ACK, type, 0);
+			o->rei_interval_ms = frames / 8;	/* 125 us frames */
+			o->rei_due_ms = now_ms + o->rei_interval_ms;
+			o->rei_seq = 0;
 		}
 		break;
 
@@ -822,6 +830,32 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
 		ploam_tx(o, PLM_US_QUEUE_NOMSG, nomsg);
 	}
 	return (int)(o->tx_total - tx0);
+}
+
+/* Remote_Error_Indication, as stock: every BER interval at O5, the DS BIP
+ * block-error count big-endian in octets 3..6 and a 4-bit sequence in octet 7.
+ * A late poll sends one REI, never a catch-up burst. */
+int gpon_ploam_poll_rei(struct gpon_ploam *o, u32 now_ms)
+{
+	u8 p[GPON_PLOAM_US_LEN] = { 0 };
+	u32 bip;
+
+	if (o->state != GPON_O5_OPERATION || !o->rei_interval_ms ||
+	    ms_after(o->rei_due_ms, now_ms))
+		return 0;
+	o->rei_due_ms = now_ms + o->rei_interval_ms;
+	if (!o->ops->ds_bip_errors || o->ops->ds_bip_errors(o->sh, &bip))
+		return 0;
+	p[0] = o->onu_id;
+	p[1] = PLM_US_REI;
+	p[2] = (u8)(bip >> 24);
+	p[3] = (u8)(bip >> 16);
+	p[4] = (u8)(bip >> 8);
+	p[5] = (u8)bip;
+	p[6] = o->rei_seq;
+	o->rei_seq = (o->rei_seq + 1) & 0xf;
+	ploam_tx(o, PLM_US_QUEUE_URG, p);
+	return 1;
 }
 
 /* Identity and lifecycle. ★★ THE SERIAL-NUMBER CODEC IS NOT ...

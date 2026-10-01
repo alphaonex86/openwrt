@@ -7651,6 +7651,13 @@ static void luna_op_omci_report_oper_up(void *sh)
 	rtl9602c_eth_omci_report_oper_up();
 }
 
+static int luna_op_ds_bip_errors(void *sh, u32 *count)
+{
+	(void)sh;
+	*count = gpon_rd(GPON_GTC_DS_MISC_CNTR_BIP_ERR_BLK);	/* REI is its one reader */
+	return 0;
+}
+
 static void luna_op_analog_relock(void *sh)
 {
 	(void)sh;
@@ -7992,6 +7999,7 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.aes_arm_switch	= luna_op_aes_arm_switch,
 	.rng		= luna_op_rng,
 	.omci_report_oper_up = luna_op_omci_report_oper_up,
+	.ds_bip_errors = luna_op_ds_bip_errors,
 	.analog_relock	= luna_op_analog_relock,
 	.o3_feed_reset	= luna_op_o3_feed_reset,
 	.aes_stage_key	= luna_op_aes_stage_key,
@@ -8230,6 +8238,7 @@ drain_downstream:
 	/* Periodic O5 upstream-PLOAM keepalive. Once ranged the FSM ...
 	 * dev/MEASURED-luna_gpon.c.md sec 252. */
 	gpon_ploam_poll_keepalive(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
+	gpon_ploam_poll_rei(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
 
 	/* Runtime DS-CDR-wedge recovery -- the stock link-state-check ...
 	 * dev/MEASURED-luna_gpon.c.md sec 253. */

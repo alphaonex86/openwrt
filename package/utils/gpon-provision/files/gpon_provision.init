@@ -30,17 +30,6 @@ WIFI_CAL_DIR=/sys/module/rtl8192fe/parameters
 
 log() { logger -t gpon_provision "$@"; }
 
-# Locally-administered fallback MAC, derived from the SoC id, when no factory MAC
-# is present (per CLAUDE.md: surface that provisioning is missing on this unit).
-derive_laa() {
-	local cid="$1" h
-	[ -n "$cid" ] || cid=$(sed -n 's/.*[Ss]erial.*: *//p' /proc/cpuinfo | head -n1)
-	[ -n "$cid" ] || cid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
-	h=$(printf '%s' "$cid" | md5sum | cut -c1-10)
-	printf '02:%s:%s:%s:%s:%s\n' "${h%????????}" "$(echo $h | cut -c3-4)" \
-		"$(echo $h | cut -c5-6)" "$(echo $h | cut -c7-8)" "$(echo $h | cut -c9-10)"
-}
-
 apply_mac() {
 	local ifname="$1" mac="$2"
 	[ -n "$mac" ] || return 1
@@ -110,8 +99,8 @@ provision() {
 			mac="$cur"
 			log "no factory MAC on '$part' - keeping $base's existing $mac (boot-parameter or driver-chosen); PROVISIONING MISSING on this unit"
 		else
-			mac=$(derive_laa "$sn")
-			log "NO factory MAC on '$part' - using LAA $mac derived from ${sn:-this boot}; PROVISIONING MISSING on this unit"
+			# No identity from any source: none is invented (operator, 2026-10-01).
+			log "NO factory MAC on '$part' and $base holds none of its own - no MAC is invented; PROVISIONING MISSING on this unit"
 		fi
 	fi
 

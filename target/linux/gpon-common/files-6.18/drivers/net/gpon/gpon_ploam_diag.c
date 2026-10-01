@@ -134,3 +134,35 @@ int gpon_bwcap_diag_format(char *out, size_t sz, enum gpon_ploam_diag_point p,
 	}
 	return pos;
 }
+
+/* One quiet line of the core's per-type PLOAM accounting: only the non-zero
+ * types, in hex, "1f+" for the shared last slot. -> bytes written. */
+static void types_u32(char *out, size_t sz, int *pos, const char *label,
+		      const u32 *v)
+{
+	unsigned int t;
+
+	if ((size_t)*pos < sz)
+		*pos += scnprintf(out + *pos, sz - *pos, " %s", label);
+	for (t = 0; t < GPON_PLOAM_TYPE_SLOTS && (size_t)*pos < sz; t++)
+		if (v[t])
+			*pos += scnprintf(out + *pos, sz - *pos, " %02x%s:%u", t,
+					  t == GPON_PLOAM_TYPE_SLOTS - 1 ? "+" : "", v[t]);
+}
+
+int gpon_ploam_types_format(char *out, size_t sz, const struct gpon_ploam *o)
+{
+	int pos;
+
+	if (!out || !sz)
+		return 0;
+	pos = scnprintf(out, sz, "ploam-types");
+	if (!o)
+		return pos + ((size_t)pos < sz ? scnprintf(out + pos, sz - pos, " n/a") : 0);
+	types_u32(out, sz, &pos, "ds_own", o->ds_own);
+	types_u32(out, sz, &pos, "| ds_bcast", o->ds_bcast);
+	if ((size_t)pos < sz)
+		pos += scnprintf(out + pos, sz - pos, " | ds_other %u |", o->ds_other);
+	types_u32(out, sz, &pos, "us_queued", o->us_queued);
+	return pos;
+}

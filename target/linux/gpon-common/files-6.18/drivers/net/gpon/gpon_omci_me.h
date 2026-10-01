@@ -134,7 +134,7 @@ struct omci_slot {
 #define OMCI_SLOT_MAX 8
 
 /* ME 134 IP host config data instances a board declares. */
-#define OMCI_IP_HOST_MAX 4
+#define OMCI_IP_HOST_MAX 8
 
 /* What this UNIT tells the OLT it is.  A production OLT may match any of these
  * against its provisioning (equipment ID -> ONT type, LOID -> subscriber), so

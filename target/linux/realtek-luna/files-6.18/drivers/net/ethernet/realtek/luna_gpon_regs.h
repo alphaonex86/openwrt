@@ -400,6 +400,7 @@
  * bypasses nothing (gpon_rd is not relocated), but an unnamed address in a
  * /proc label is a reader sent to a register nobody can look up. */
 #define GPON_GTC_DS_PPS_CTRL		0x01050
+#define GPON_GTC_DS_MISC_CNTR_BIP_ERR_BLK	0x01180	/* DS BIP block errors; every Luna die's stock map */
 #define GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT	0x0119c
 #define GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL	0x011a0
 #define GPON_GTC_DS_MISC_CNTR_BWM_FAIL	0x011a4

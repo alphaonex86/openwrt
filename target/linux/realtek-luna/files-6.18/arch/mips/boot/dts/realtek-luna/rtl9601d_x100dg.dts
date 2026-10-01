@@ -52,6 +52,24 @@
 		realtek,tx-disable-gpio = <13>;	/* stock europa_drv TXDIS_PIN=13 */
 		realtek,tx-power-gpio = <0>;	/* stock europa_drv TXPWR_PIN=0 */
 	};
+
+	/* The OMCI panel the OLT counts, from this unit's stock MIB (omci_panel.py
+	 * over its gpon-oracle 2026-10-01): without it the OLT read 5 differences. */
+	omci-uni {
+		ethernet-uni-instances = /bits/ 16 <0x0101>;
+		ethernet-uni-ports = /bits/ 8 <1>;
+		ethernet-uni-types = /bits/ 8 <47>;
+		uni-g-instances = /bits/ 16 <0x0101 0x0601>;
+		uni-g-management-capability = /bits/ 8 <1 0>;
+		circuit-packs = /bits/ 16 <
+			0x0101 47 1 8 0 0
+			0x0106 48 1 8 0 0
+			0x0180 248 1 128 16 16>;
+		ip-host-instances = /bits/ 16 <0x0000 0x0001 0x0002>;
+		ip-host-wan-mac = /bits/ 8 <0 0 0>;
+		onu-capacity = /bits/ 16 <16 128 16 64>;
+		downstream-queue-ports = /bits/ 16 <0x0101 0x0601>;
+	};
 };
 
 /* The GE jack is switch port 1: the vendor SDK gives the RTL9601D sub-types

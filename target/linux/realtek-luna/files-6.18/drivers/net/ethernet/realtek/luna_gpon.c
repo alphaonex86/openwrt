@@ -6269,13 +6269,21 @@ module_param_cb(uni_test, &luna_uni_test_ops, NULL, 0200);
 MODULE_PARM_DESC(uni_test, "TEMPORARY board diagnostic: write \"<instance-hex> <0|1>\" to inject a local ME 11 administrative-state Set through the real OMCI queue, or \"show\" to log the declared UNI inventory (instance, administrative state, switch port, pending) taken under the lifetime owner");
 #endif /* CONFIG_GPON_OMCI_DIAG */
 
+static const void *luna_of_prop(void *np, const char *name, int *len)
+{
+	const void *p = of_get_property(np, name, len);
+
+	if (!p)
+		*len = -1;
+	return p;
+}
+
 static void luna_omci_declare_uni_panel(struct omci_onu *onu)
 {
 	struct device_node *np = of_find_node_by_path("/omci-uni");
-	const void *pptp, *unig, *cap, *ports, *type, *packs, *ihost, *ihmac;
+	const void *pptp, *unig, *cap, *ports, *type;
 	int pptp_len = -1, type_len = -1, unig_len = -1, cap_len = -1, ports_len = -1;
-	int packs_len = -1, ihost_len = -1, ihmac_len = -1, pots_len = -1;
-	const void *pots;
+	const char *what;
 	const char *why = "";
 	enum omci_uni_decl decl;
 
@@ -6310,22 +6318,10 @@ static void luna_omci_declare_uni_panel(struct omci_onu *onu)
 				ports_len, pptp_len / 2);
 		}
 	}
-	/* After the panel: the downstream queues are numbered per UNI. */
-	packs = of_get_property(np, "circuit-packs", &packs_len);
-	if (omci_onu_declare_slots_be(onu, packs, packs ? packs_len : -1, &why) ==
-	    OMCI_UNI_DECL_BAD)
-		pr_err("luna-gpon: /omci-uni circuit-packs REFUSED: %s -- keeping the single-slot default\n",
-		       why);
-	ihost = of_get_property(np, "ip-host-instances", &ihost_len);
-	ihmac = of_get_property(np, "ip-host-wan-mac", &ihmac_len);
-	if (omci_onu_declare_ip_hosts_be(onu, ihost, ihost ? ihost_len : -1,
-					 ihmac, ihmac ? ihmac_len : -1, &why) ==
-	    OMCI_UNI_DECL_BAD)
-		pr_err("luna-gpon: /omci-uni ip-host REFUSED: %s -- no ME 134\n", why);
-	pots = of_get_property(np, "pots-uni-instances", &pots_len);
-	if (omci_onu_declare_pots_be(onu, pots, pots ? pots_len : -1, &why) ==
-	    OMCI_UNI_DECL_BAD)
-		pr_err("luna-gpon: /omci-uni pots-uni-instances REFUSED: %s -- no ME 53\n", why);
+	what = omci_onu_declare_equipment(onu, luna_of_prop, np, &why);
+	if (what)
+		pr_err("luna-gpon: /omci-uni %s REFUSED: %s -- that part keeps its default\n",
+		       what, why);
 	of_node_put(np);
 }
 

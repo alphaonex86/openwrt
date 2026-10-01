@@ -322,8 +322,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	/* Surface any downstream PLOAM that is not the repetitive broadcast
 	 * acquisition traffic, so activation progress is visible. */
 	o->last_ds_type = type;
-	if (o->cfg->trace && type != PLM_DS_UPSTREAM_OVERHEAD &&
-	    type != PLM_DS_EXT_BURST_LENGTH)
+	if (o->cfg->trace && !gpon_ploam_ds_repetitive(type))
 		ev(o, GPON_PLOAM_EV_DS, onu_id, type);
 
 	/* ★★★ NO DEFINED SERIAL, NO PARTICIPATION -- AND IT IS THE ...

@@ -57,6 +57,19 @@ typedef uint32_t u32;
 #define PLM_US_QUEUE_URG		0x1	/* US_PLOAM_IND[10:8] urgent queue (ACKs) */
 #define PLM_US_QUEUE_NOMSG		0x7	/* US_PLOAM_IND[10:8] HW auto-No_message slot */
 
+/* The broadcast acquisition traffic the OLT repeats every few frames: what a
+ * trace or a capture leaves out to keep the conversation readable. */
+static inline bool gpon_ploam_ds_repetitive(u8 type)
+{
+	return type == PLM_DS_UPSTREAM_OVERHEAD || type == PLM_DS_EXT_BURST_LENGTH;
+}
+
+/* Ours: the Serial_Number re-offered every second while unregistered. */
+static inline bool gpon_ploam_us_repetitive(u8 type)
+{
+	return type == PLM_US_SERIAL_NUMBER;
+}
+
 /* A DS PLOAM is 13 bytes ([0]=ONU-ID [1]=type [2..11]=data ...
  * dev/MEASURED-gpon_ploam.h.md sec 13. */
 #ifndef GPON_PLOAM_DS_LEN

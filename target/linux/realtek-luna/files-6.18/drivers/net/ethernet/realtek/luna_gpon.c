@@ -137,6 +137,26 @@ static bool gpon_sn_changed;		/* SN (re)provisioned -> FSM must re-range */
 static struct gpon_ploam luna_ploam;
 static u8 gpon_sn_bytes[8];		/* defined here for the same reason */
 
+#ifdef CONFIG_GPON_OLT_DIAG
+/* The PLOAM half of the far end's conversation: the OMCI ring's codec and
+ * clock, in a ring of its own because the OMCI burst alone overflows that one. */
+static struct gpon_olt_capture luna_ploam_cap;
+static DEFINE_SPINLOCK(luna_ploam_cap_lock);
+
+static void luna_ploam_capture(enum gpon_olt_dir dir, const u8 *m, unsigned int len)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_ploam_cap_lock, flags);
+	gpon_olt_capture_add(&luna_ploam_cap, div_u64(ktime_get_boottime_ns(), 1000),
+			     (u8)luna_ploam.state, dir, m, len);
+	spin_unlock_irqrestore(&luna_ploam_cap_lock, flags);
+}
+#else
+static inline void luna_ploam_capture(enum gpon_olt_dir dir, const u8 *m,
+				      unsigned int len) { }
+#endif
+
 static int onu_sn_set(const char *val, const struct kernel_param *kp)
 {
 	u8 parsed[8];
@@ -5736,6 +5756,8 @@ static void gpon_send_cpu_ploam(u8 queue, const u8 m[12])
 
 	ind |= GPON_US_PLM_ENQ;			/* ENQ 0->1 edge: transmit */
 	gpon_wr(GPON_GTC_US_PLOAM_IND, ind);
+	if (!gpon_ploam_us_repetitive(m[1]))
+		luna_ploam_capture(GPON_OLT_US, m, GPON_PLOAM_US_LEN);
 
 	/* DBG (ploam_tx_dbg): did the HW actually TRANSMIT this CPU ...
 	 * dev/MEASURED-luna_gpon.c.md sec 315. */
@@ -6644,16 +6666,17 @@ static void luna_data_alloc_changed(void *sh, u16 alloc, bool assigned)
  * /proc/oltcap never holds it across a whole dump. */
 static struct gpon_olt_capture luna_olt_cap;
 
-static int oltcap_proc_show(struct seq_file *s, void *v)
+static int olt_capture_show(struct seq_file *s, struct gpon_olt_capture *c,
+			    spinlock_t *lock)
 {
 	char line[160];
 	unsigned int i, n;
 	unsigned long flags;
 
-	spin_lock_irqsave(&luna_omci_lock, flags);
-	n = gpon_olt_capture_count(&luna_olt_cap);
-	gpon_olt_diag_header(&luna_olt_cap, line, sizeof(line));
-	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	spin_lock_irqsave(lock, flags);
+	n = gpon_olt_capture_count(c);
+	gpon_olt_diag_header(c, line, sizeof(line));
+	spin_unlock_irqrestore(lock, flags);
 	seq_printf(s, "%s\n", line);
 	for (i = 0; i < n; i++) {
 		/* zero-initialised so a NULL fetch can never leave an uninitialised
@@ -6661,17 +6684,27 @@ static int oltcap_proc_show(struct seq_file *s, void *v)
 		struct gpon_olt_rec r = { 0 };
 		const struct gpon_olt_rec *p;
 
-		spin_lock_irqsave(&luna_omci_lock, flags);
-		p = gpon_olt_capture_at(&luna_olt_cap, i);
+		spin_lock_irqsave(lock, flags);
+		p = gpon_olt_capture_at(c, i);
 		if (p)
 			r = *p;
-		spin_unlock_irqrestore(&luna_omci_lock, flags);
+		spin_unlock_irqrestore(lock, flags);
 		if (!p)
 			break;
 		if (gpon_olt_diag_line(&r, line, sizeof(line)))
 			seq_printf(s, "%s\n", line);
 	}
 	return 0;
+}
+
+static int oltcap_proc_show(struct seq_file *s, void *v)
+{
+	return olt_capture_show(s, &luna_olt_cap, &luna_omci_lock);
+}
+
+static int ploamcap_proc_show(struct seq_file *s, void *v)
+{
+	return olt_capture_show(s, &luna_ploam_cap, &luna_ploam_cap_lock);
 }
 #endif /* CONFIG_GPON_OLT_DIAG */
 
@@ -8017,7 +8050,7 @@ static void gpon_fsm_handle(const u8 *m)
 	/* Surface any DS PLOAM that is not the repetitive broadcast acquisition
 	 * traffic, so activation progress is visible. */
 	gpon_last_ds_type = type;
-	if (trace && type != PLM_DS_UPSTREAM_OVERHEAD && type != PLM_DS_EXT_BURST_LENGTH)
+	if (trace && !gpon_ploam_ds_repetitive(type))
 		pr_info_ratelimited("luna-gpon: DS PLOAM onu_id=0x%02x type=0x%02x d=%*phN\n",
 				    onu_id, type, 8, d);
 
@@ -8037,6 +8070,8 @@ static void gpon_fsm_handle(const u8 *m)
 
 	/* Ticks x 10, NOT the wall clock, and the more accurate clock ...
 	 * dev/MEASURED-luna_gpon.c.md sec 326. */
+	if (!gpon_ploam_ds_repetitive(type))
+		luna_ploam_capture(GPON_OLT_DS, m, GPON_PLOAM_DS_LEN);
 	gpon_ploam_ds(&luna_ploam, m, GPON_PLOAM_DS_LEN,
 		      gpon_fsm_ticks * GPON_FSM_TICK_MS);
 }
@@ -8919,6 +8954,7 @@ skip_bosa_init:
 	proc_create_single("swdump", 0444, NULL, swdump_proc_show);
 #ifdef CONFIG_GPON_OLT_DIAG
 	proc_create_single("oltcap", 0444, NULL, oltcap_proc_show);
+	proc_create_single("ploamcap", 0444, NULL, ploamcap_proc_show);
 #endif
 
 	/* Upstream burst CONFIG + laser-enable timing. The GTC MAC ...
@@ -9091,6 +9127,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	remove_proc_entry("swdump", NULL);
 #ifdef CONFIG_GPON_OLT_DIAG
 	remove_proc_entry("oltcap", NULL);
+	remove_proc_entry("ploamcap", NULL);
 #endif
 	if (ponip_base)
 		iounmap(ponip_base);

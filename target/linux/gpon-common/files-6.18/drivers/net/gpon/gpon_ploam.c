@@ -48,6 +48,12 @@ static void unsup(const struct gpon_ploam *o, const char *kind,
 			d, len);
 }
 
+/* The per-type counter slot of a PLOAM type: the last slot holds every type >= it. */
+static inline unsigned int ploam_slot(u8 type)
+{
+	return type < GPON_PLOAM_TYPE_SLOTS ? type : GPON_PLOAM_TYPE_SLOTS - 1;
+}
+
 /* The single point every upstream PLOAM leaves through. `queue` selects the
  * US_PLOAM_IND queue and is load-bearing: urgent (0x1) pre-empts the auto-SN
  * burst (0x6), which is what gets an Acknowledge out before the OLT raises
@@ -57,6 +63,7 @@ static void ploam_tx(struct gpon_ploam *o, u8 queue,
 {
 	o->ops->ploam_tx(o->sh, queue, m);
 	o->tx_total++;
+	o->us_queued[ploam_slot(m[1])]++;
 }
 
 /* Upstream message builders. Pure byte assembly; the hardware ...
@@ -302,6 +309,13 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	onu_id = m[0];
 	type   = m[1];
 	d      = &m[2];			/* 10 data octets */
+
+	if (onu_id == GPON_PLOAM_ONU_ID_BROADCAST)
+		o->ds_bcast[ploam_slot(type)]++;
+	else if (onu_id == o->onu_id)
+		o->ds_own[ploam_slot(type)]++;
+	else
+		o->ds_other++;
 
 	/* Surface any downstream PLOAM that is not the repetitive broadcast
 	 * acquisition traffic, so activation progress is visible. */

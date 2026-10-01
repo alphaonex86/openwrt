@@ -194,6 +194,7 @@ MODULE_PARM_DESC(onu_sn, "ONU serial number (G.984.3 ONU-SN): 4 ASCII ID chars +
 static char *onu_password = "1234567890";
 static u8 luna_pwd[GPON_PLOAM_PASSWORD_LEN];
 static bool luna_pwd_dirty;
+static u32 luna_us_ploam_full_drops;	/* urgent PLOAMs refused on a full queue */
 static DEFINE_SPINLOCK(luna_pwd_lock);
 
 static int onu_password_set(const char *val, const struct kernel_param *kp)
@@ -5001,6 +5002,14 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 	seq_printf(s, "onu_state:   O%u (%s)\n", state,
 		   state < ARRAY_SIZE(gpon_onu_state_name) &&
 		   gpon_onu_state_name[state] ? gpon_onu_state_name[state] : "?");
+#ifdef CONFIG_GPON_PLOAM_DIAG
+	{	/* every DS PLOAM by type/addressing, every US one queued: no printk */
+		char types[320];
+
+		gpon_ploam_types_format(types, sizeof(types), &luna_ploam);
+		seq_printf(s, "%s | us_full_drops %u\n", types, luna_us_ploam_full_drops);
+	}
+#endif
 	/* fiber: one-glance fibre-pull / optical recovery verdict. ...
 	 * dev/MEASURED-luna_gpon.c.md sec 300. */
 	{
@@ -5687,7 +5696,7 @@ static bool gpon_sn_differs(const char *s)
  * dev/MEASURED-luna_gpon.c.md sec 191. */
 static void gpon_send_cpu_ploam(u8 queue, const u8 m[12])
 {
-	u32 ind;
+	u32 ind, full = queue == PLM_US_QUEUE_URG ? GPON_US_PLM_URG_FULL : 0;
 	int i;
 
 	if (!READ_ONCE(luna_activation_ready))
@@ -5705,6 +5714,18 @@ static void gpon_send_cpu_ploam(u8 queue, const u8 m[12])
 	ind &= ~((0x7u << GPON_US_PLM_TYPE_SHIFT) | GPON_US_PLM_ENQ);
 	ind |= ((u32)queue << GPON_US_PLM_TYPE_SHIFT);		/* select queue, ENQ=0 */
 	gpon_wr(GPON_GTC_US_PLOAM_IND, ind);
+
+	/* Never write a FULL queue, as stock refuses (RT_ERR_GPON_PLOAM_QUEUE_FULL):
+	 * the single data buffer would overwrite the message still waiting for a
+	 * PLOAMu grant. Give the grants a bounded spell to drain it, else drop. */
+	for (i = 0; full && (gpon_rd(GPON_GTC_US_PLOAM_IND) & full) && i < 400; i++)
+		udelay(5);
+	if (full && (gpon_rd(GPON_GTC_US_PLOAM_IND) & full)) {
+		luna_us_ploam_full_drops++;
+		pr_warn_ratelimited("luna-gpon: US PLOAM queue %u still full after 2 ms: type 0x%02x dropped\n",
+				    queue, m[1]);
+		return;
+	}
 
 	for (i = 0; i < 6; i++)
 		gpon_wr(GPON_GTC_US_PLOAM_DATA + i * 4,

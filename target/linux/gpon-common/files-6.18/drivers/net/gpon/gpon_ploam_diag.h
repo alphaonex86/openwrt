@@ -86,5 +86,8 @@ const char *gpon_ploam_diag_point_name(enum gpon_ploam_diag_point p);
  * dev/MEASURED-gpon_ploam_diag.h.md sec 6. */
 int gpon_ploam_diag_format(char *out, size_t sz, enum gpon_ploam_diag_point p,
 			   u32 t_ms, u8 ostate, const struct gpon_ploam_diag *d);
+/* The core's per-type PLOAM counters (struct gpon_ploam ds_own/ds_bcast/
+ * ds_other/us_queued) as one line, no printk: what a quiet boot can be asked. */
+int gpon_ploam_types_format(char *out, size_t sz, const struct gpon_ploam *o);
 
 #endif /* GPON_PLOAM_DIAG_H */

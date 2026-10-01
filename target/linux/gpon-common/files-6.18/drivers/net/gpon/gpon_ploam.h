@@ -60,6 +60,7 @@ typedef uint32_t u32;
  * dev/MEASURED-gpon_ploam.h.md sec 13. */
 #ifndef GPON_PLOAM_DS_LEN
 #define GPON_PLOAM_DS_LEN		13u
+#define GPON_PLOAM_TYPE_SLOTS		32u	/* per-type counters; the last slot is ">= 31" */
 #endif
 #ifndef GPON_PLOAM_US_LEN
 #define GPON_PLOAM_US_LEN		12u
@@ -343,6 +344,13 @@ struct gpon_ploam {
 	u32 ds_rx;			/* DS PLOAMs dispatched (DS-lock liveness)   */
 	u32 tx_total;			/* US PLOAMs emitted (all queues)            */
 	u8  last_ds_type;		/* last DS PLOAM type seen                   */
+	/* Quiet per-type accounting since init, never printed here (the PLOAM_DIAG
+	 * shells show it): every DS PLOAM by type and addressing, every US PLOAM
+	 * queued by type. Types >= GPON_PLOAM_TYPE_SLOTS share the last slot. */
+	u32 ds_own[GPON_PLOAM_TYPE_SLOTS];
+	u32 ds_bcast[GPON_PLOAM_TYPE_SLOTS];
+	u32 ds_other;			/* addressed to another ONU-ID               */
+	u32 us_queued[GPON_PLOAM_TYPE_SLOTS];
 };
 
 static inline void gpon_ploam_data_alloc_note(struct gpon_ploam *o,

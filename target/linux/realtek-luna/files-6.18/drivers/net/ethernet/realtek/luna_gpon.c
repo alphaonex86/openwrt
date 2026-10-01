@@ -41,6 +41,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/of.h>
+#include <linux/of_address.h>	/* of_address_to_resource: the board's reserved PBO pools */
 #include "gpon_gem_diag.h"
 #include "gpon_olt_diag.h"	/* the far-end capture: replayed off the board */
 #include "luna_gpon_nic.h"
@@ -352,8 +353,10 @@ static const struct gpon_swc_map gpon_swc_9602c = {
 	/* ★ REGISTERED, NOT LEFT TO THE COMPILER (2026-09-14, ...
 	 * dev/MEASURED-luna_gpon.c.md sec 274. */
 	.alloc_idx_swap = false,	/* the logical T-CONT permutation is the RTL9603CVD's alone */
-	.ds_dsc_cfg = 0, .ds_dscrunout = 0,	/* DRAM-order DS words: .ds_dram_order is 0 here, so they are never written */
-	.ds_fc_config = 0,		/* likewise -- gated on ds_dram_order at the write site */
+	/* The DS DRAM-pool words both 9602C-family stocks run (X111W and X100DG,
+	 * read 2026-09-30); written only for a board whose DT reserves a DS pool. */
+	.ds_dsc_cfg = 0x1fff001fu, .ds_dscrunout = 0x1fb8001eu,
+	.ds_fc_config = 0x1f321f52u,
 	.pi_moves = NULL,		/* no PON-IP relocation table for this die */
 	.omcc_flow = GPON_OMCC_FLOW_9602C,
 	.ds_dram_order = 0,	/* SRAM-only DS, as this chip's stock does */
@@ -1104,6 +1107,9 @@ MODULE_PARM_DESC(optical_poll, "1=periodic ANI-G DDM optical poll; 0=off default
 /* bosa_i2c_restore_pad: optional cleanup — return bus-0's SoC ...
  * dev/MEASURED-luna_gpon.c.md sec 48. */
 static bool bosa_i2c_restore_pad;
+/* The I2C bus the BOSA hangs on, from DT (/pon-optics realtek,i2c-bus): 1 on
+ * the X100DG, whose stock loads its BOSA driver with I2C_PORT=1. */
+static unsigned int bosa_i2c_bus;
 module_param(bosa_i2c_restore_pad, bool, 0644);
 MODULE_PARM_DESC(bosa_i2c_restore_pad, "restore SOC_IO_MODE_EN[13]=0 (optical-SD pad) after each BOSA I2C transaction (default 0; optic_los works without it)");
 /* lan_keep_open: LAN management must be reachable INDEPENDENT ...
@@ -1673,12 +1679,12 @@ static int i2c_wait_done(u32 ind_cmd, u32 *cmd_out)
 static int bosa_i2c_read8(u8 slave, u8 reg)
 {
 	u32 cfg, pad_off = SOC_IO_MODE_EN;	/* per-chip: gpon_swc_map */
-	u32 i2c_bus0 = IO_I2C_EN_BUS0;
-	/* Was a per-chip ternary here; the +4 is now in gpon_swc_map, so the
-	 * write path gets it too. */
-	u32 ind_adr = I2C_IND_ADR;
-	u32 ind_cmd = I2C_IND_CMD;
-	u32 ind_rd  = I2C_IND_RD;
+	u32 bus_off = bosa_i2c_bus * I2C_BUS_STRIDE;
+	u32 i2c_pad = IO_I2C_EN_BUS0 + bosa_i2c_bus;
+	u32 cfg_off = I2C_CONFIG0 + bus_off;
+	u32 ind_adr = I2C_IND_ADR + bus_off;
+	u32 ind_cmd = I2C_IND_CMD + bus_off;
+	u32 ind_rd  = I2C_IND_RD + bus_off;
 	int ret;
 
 	lockdep_assert_held(&bosa_lock);
@@ -1686,17 +1692,17 @@ static int bosa_i2c_read8(u8 slave, u8 reg)
 	/* Route I2C bus 0 to its pads. I2C_EN is a 2-bit field (one bit per bus)
 	 * whose position MOVES: [14:13] on the 9602C/9607C, [12:11] on the
 	 * 9603CVD. Writing bit 13 on a 9603CVD hits SLIC_ISI_EN, not I2C. */
-	sw_field(pad_off, i2c_bus0, i2c_bus0, 1);
+	sw_field(pad_off, i2c_pad, i2c_pad, 1);
 
 	/* CONFIG: slave addr, 8-bit reg-addr + 8-bit data, the existing divider. Preserve the
 	 * electrical bits (open-drain / mode / delays) already programmed. */
-	cfg = sw_rd(I2C_CONFIG0);
+	cfg = sw_rd(cfg_off);
 	cfg &= ~((((1u << 7) - 1) << I2C_CFG_DEV_ID_LSB) |
 		 (0x3u << I2C_CFG_AW_LSB) | (0x3u << I2C_CFG_DW_LSB) |
 		 (0x3ffu << I2C_CFG_CLKDIV_LSB));
 	cfg |= ((u32)(slave & 0x7f) << I2C_CFG_DEV_ID_LSB) |
 	       (I2C_CLKDIV_50K << I2C_CFG_CLKDIV_LSB);
-	sw_wr(I2C_CONFIG0, cfg);
+	sw_wr(cfg_off, cfg);
 
 	sw_wr(ind_adr, reg);
 	sw_wr(ind_cmd, I2C_CMD_EN);			/* RW_EN=0 -> read */
@@ -1708,7 +1714,7 @@ static int bosa_i2c_read8(u8 slave, u8 reg)
 	/* Reconnect the shared optical-SD pad so optic_los stays live (see
 	 * bosa_i2c_restore_pad). */
 	if (bosa_i2c_restore_pad)
-		sw_field(pad_off, i2c_bus0, i2c_bus0, 0);
+		sw_field(pad_off, i2c_pad, i2c_pad, 0);
 	return ret;
 }
 
@@ -1910,32 +1916,33 @@ static void gpon_optical_work_fn(struct work_struct *w);
  * dev/MEASURED-luna_gpon.c.md sec 79. */
 static int bosa_i2c_write_raw(u8 slave, u8 reg, u8 val)
 {
-	u32 cfg;
+	u32 cfg, bus_off = bosa_i2c_bus * I2C_BUS_STRIDE;
 	int ret;
 
 
 	lockdep_assert_held(&bosa_lock);
 
-	sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0, IO_I2C_EN_BUS0, 1);
+	sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0 + bosa_i2c_bus, IO_I2C_EN_BUS0 + bosa_i2c_bus, 1);
 
-	cfg = sw_rd(I2C_CONFIG0);
+	cfg = sw_rd(I2C_CONFIG0 + bus_off);
 	cfg &= ~((((1u << 7) - 1) << I2C_CFG_DEV_ID_LSB) |
 		 (0x3u << I2C_CFG_AW_LSB) | (0x3u << I2C_CFG_DW_LSB) |
 		 (0x3ffu << I2C_CFG_CLKDIV_LSB));
 	cfg |= ((u32)(slave & 0x7f) << I2C_CFG_DEV_ID_LSB) |
 	       (I2C_CLKDIV_50K << I2C_CFG_CLKDIV_LSB);
-	sw_wr(I2C_CONFIG0, cfg);
+	sw_wr(I2C_CONFIG0 + bus_off, cfg);
 
-	sw_wr(I2C_IND_ADR, reg);
-	sw_wr(I2C_IND_WD, val);
-	sw_wr(I2C_IND_CMD, I2C_CMD_EN | I2C_CMD_RW_WR);
+	sw_wr(I2C_IND_ADR + bus_off, reg);
+	sw_wr(I2C_IND_WD + bus_off, val);
+	sw_wr(I2C_IND_CMD + bus_off, I2C_CMD_EN | I2C_CMD_RW_WR);
 
-	ret = i2c_wait_done(I2C_IND_CMD, NULL);
+	ret = i2c_wait_done(I2C_IND_CMD + bus_off, NULL);
 
 	/* Reconnect the shared optical-SD pad so optic_los stays live (see
 	 * bosa_i2c_restore_pad). */
 	if (bosa_i2c_restore_pad)
-		sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0, IO_I2C_EN_BUS0, 0);
+		sw_field(SOC_IO_MODE_EN, IO_I2C_EN_BUS0 + bosa_i2c_bus,
+			 IO_I2C_EN_BUS0 + bosa_i2c_bus, 0);
 	return ret;
 }
 
@@ -4105,6 +4112,33 @@ EXPORT_SYMBOL(rtl9602c_datapath_tables_init);
 
 /* Configure the PON packet datapath (PON-IP) for GPON before ...
  * dev/MEASURED-luna_gpon.c.md sec 142. */
+/* The US and DS packet pools may be RESERVED by the board (DT memory-region,
+ * US then DS) instead of allocated: the 32 MB X100DG's stock keeps both at the
+ * two holes of its memory map (MSTBASE_US 0x01eff000, MSTBASE_DS 0x016ff000,
+ * read on stock 2026-09-30), and taking 1-2 MB from its 19 MB starved it. */
+static u32 pbo_region[2];
+
+static void luna_pbo_regions_from_dt(struct device_node *np)
+{
+	struct resource r;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		struct device_node *rn = of_parse_phandle(np, "memory-region", i);
+
+		if (rn && !of_address_to_resource(rn, 0, &r) &&
+		    resource_size(&r) >= (PAGE_SIZE << PI_US_DRAM_ORDER))
+			pbo_region[i] = (u32)r.start;
+		else if (rn)
+			pr_err("luna-gpon: memory-region %d is not a %lu-byte pool -- allocating instead\n",
+			       i, PAGE_SIZE << PI_US_DRAM_ORDER);
+		of_node_put(rn);
+	}
+	if (pbo_region[0] || pbo_region[1])
+		pr_info("luna-gpon: PBO pools from DT: US 0x%08x DS 0x%08x\n",
+			pbo_region[0], pbo_region[1]);
+}
+
 void gpon_pbo_init(void)
 {
 	bool keep_pool = READ_ONCE(luna_activation_ready) &&
@@ -4131,9 +4165,11 @@ void gpon_pbo_init(void)
 		{
 			static unsigned long us_pool;
 
-			if (!us_pool)
+			if (!us_pool && !pbo_region[0])
 				us_pool = __get_free_pages(GFP_KERNEL, PI_US_DRAM_ORDER);
-			if (us_pool)
+			if (pbo_region[0])
+				pi_wr(PI_IP_MSTBASE_US, pbo_region[0]);
+			else if (us_pool)
 				pi_wr(PI_IP_MSTBASE_US,
 				      (u32)virt_to_phys((void *)us_pool));
 			else
@@ -4145,7 +4181,7 @@ void gpon_pbo_init(void)
 		pi_field(PI_DSCRUNOUT_US, 28, 16, PI_US_DRAM_RUNOUT);	/* DRAM runout (0x1f58) */
 		/* The DS twin. A chip that declares no DS pool keeps the SRAM-only words
 		 * this driver has always written -- same fields, same values, same order. */
-		if (!swc->ds_dram_order) {
+		if (!swc->ds_dram_order && !pbo_region[1]) {
 			pi_field(PI_PON_DSC_CFG_DS, 12, 0, PI_DS_SRAM_NO);
 			pi_field(PI_PON_DSC_CFG_DS, 28, 16, PI_DS_SRAM_NO);
 			pi_field(PI_DSCRUNOUT_DS, 12, 0, PI_DS_SRAM_RUNOUT);
@@ -4153,10 +4189,10 @@ void gpon_pbo_init(void)
 		} else {
 			static unsigned long ds_pool;
 
-			if (!ds_pool)
+			if (!ds_pool && !pbo_region[1])
 				ds_pool = __get_free_pages(GFP_KERNEL, swc->ds_dram_order);
-			if (ds_pool) {
-				pi_wr(PI_IP_MSTBASE_DS,
+			if (pbo_region[1] || ds_pool) {
+				pi_wr(PI_IP_MSTBASE_DS, pbo_region[1] ? pbo_region[1] :
 				      (u32)virt_to_phys((void *)ds_pool));
 				pi_wr(PI_PON_DSC_CFG_DS, swc->ds_dsc_cfg);
 				pi_wr(PI_DSCRUNOUT_DS, swc->ds_dscrunout);
@@ -4195,7 +4231,7 @@ void gpon_pbo_init(void)
 	/* DS flow-control thresholds: on the SRAM-only geometry they are 2/22
 	 * pages; a chip running the DRAM pool needs its own stock's scale, or the
 	 * PBO sits permanently over-threshold against an 8192-page pool. */
-	if (swc->ds_dram_order && swc->ds_fc_config)
+	if ((swc->ds_dram_order || pbo_region[1]) && swc->ds_fc_config)
 		pi_wr(PI_PON_FC_CONFIG_DS, swc->ds_fc_config);
 	else {
 		pi_field(PI_PON_FC_CONFIG_DS, 12, 0, 22);
@@ -8286,9 +8322,15 @@ static void __init luna_laser_gpio_from_dt(void)
 		laser_tx_dis_gpio = (int)v;
 	if (!of_property_read_u32(np, "realtek,tx-power-gpio", &v))
 		laser_tx_pwr_gpio = (int)v;
+	if (!of_property_read_u32(np, "realtek,i2c-bus", &v)) {
+		if (v <= 1)
+			bosa_i2c_bus = v;
+		else
+			pr_err("luna-gpon: /pon-optics realtek,i2c-bus=%u: this die has buses 0 and 1 -- keeping 0\n", v);
+	}
 	of_node_put(np);
-	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d\n",
-		laser_tx_dis_gpio, laser_tx_pwr_gpio);
+	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d i2c-bus=%u\n",
+		laser_tx_dis_gpio, laser_tx_pwr_gpio, bosa_i2c_bus);
 }
 
 /* Set level before enabling output to avoid a TX_DISABLE glitch. */
@@ -8439,6 +8481,8 @@ static int __init rtl9602c_gpon_init(void)
 		bool declared = np != NULL;
 		bool on = declared && of_device_is_available(np);
 
+		if (on)
+			luna_pbo_regions_from_dt(np);
 		of_node_put(np);
 		if (!on) {
 			pr_info("luna-gpon: this board's device tree %s the GPON (realtek,luna-gpon) -- nothing touched\n",

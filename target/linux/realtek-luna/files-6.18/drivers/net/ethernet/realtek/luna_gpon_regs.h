@@ -183,7 +183,11 @@
 #define   SDS_FIB_SDS_SDET	BIT(17)		/* SDS-level optical sig-detect */
 
 #define I2C_CONFIG0		0x23004		/* bus0, +I2C_BUS_STRIDE/bus   */
-#define   I2C_BUS_STRIDE	0x20u		/* CONFIG/IND block, per bus   */
+/* The CONFIG and IND registers are two-entry arrays with a 32-BIT array offset
+ * in the 9602C, 9603CVD and 9607C chipdefs, so bus 1 is the NEXT WORD. Stock
+ * X100DG (BOSA on bus 1) shows it live: 0xb4/0xbc/0xc4/0xcc carry its last
+ * transfer and 0x23008 = 0x0235001e (slave 0x54) -- 2026-09-30. It was 0x20. */
+#define   I2C_BUS_STRIDE	0x4u		/* CONFIG/IND block, per bus   */
 #define   I2C_CFG_DEV_ID_LSB	14
 #define   I2C_CFG_AW_LSB	12
 #define   I2C_CFG_DW_LSB	10

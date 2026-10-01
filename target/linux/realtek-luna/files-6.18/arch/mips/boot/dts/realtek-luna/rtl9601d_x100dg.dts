@@ -19,7 +19,7 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-	/* Own stock map: two spans, the holes after each are unexplained. */
+	/* Own stock map: two spans; the hole after each is a PON packet pool. */
 	memory@0 {
 		device_type = "memory";
 		reg = <0x00000000 0x016ff000>, <0x01800000 0x006ff000>;
@@ -30,22 +30,36 @@
 		#size-cells = <1>;
 		ranges;
 
-		stock-reserved@16ff000 {
+		/* The two holes are stock's PON packet pools (its live PON-IP
+		 * registers: MSTBASE_DS 0x016ff000, MSTBASE_US 0x01eff000). */
+		pbo_ds: stock-reserved@16ff000 {
 			no-map;
 			reg = <0x016ff000 0x00101000>;
 		};
 
-		stock-reserved@1eff000 {
+		pbo_us: stock-reserved@1eff000 {
 			no-map;
 			reg = <0x01eff000 0x00101000>;
 		};
 	};
 
 	/delete-node/ watchdog@18003260;
+
+	/* Its BOSA is on I2C bus 1: stock loads europa_drv with I2C_PORT=1, and its
+	 * live registers show bus 1's config (slave 0x54) and indirect block in use. */
+	pon-optics {
+		realtek,i2c-bus = <1>;
+	};
 };
 
 /* The GE jack is switch port 1: the vendor SDK gives the RTL9601D sub-types
  * port 0 = none, port 1 = GE (its HGU/SFU port table), the X111W's GE port. */
+
+/* Stock's own ring: its boot prints RX[256,...]. 1024 buffers (~2.4 MB) do not
+ * fit this board's 19 MB (2026-09-30: MemAvailable 2148 kB just before eth0). */
+&nic {
+	realtek,rx-ring-entries = <256>;
+};
 
 /* Its own 8 MiB SPI-NOR, from its own U-Boot mtdparts, READ-ONLY through the
  * memory-mapped window: the provisioning reads this unit's identity and laser
@@ -99,6 +113,11 @@
 			read-only;
 		};
 	};
+};
+
+/* US then DS, as luna_gpon reads them. */
+&gpon {
+	memory-region = <&pbo_us>, <&pbo_ds>;
 };
 
 /* The GPON stays ENABLED: the NIC's open re-runs the PON buffer init and the

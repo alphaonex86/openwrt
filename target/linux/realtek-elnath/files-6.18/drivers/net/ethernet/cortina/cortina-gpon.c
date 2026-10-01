@@ -3405,10 +3405,11 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 		spin_unlock_bh(&cg->omci_lock);
 		return len;
 	}
-	if (strncmp(p, "password ", 9) == 0) {
+	/* `password` alone is the empty password (strim ate its space): ten zero octets */
+	if (strncmp(p, "password ", 9) == 0 || strcmp(p, "password") == 0) {
 		u8 pwd[GPON_PLOAM_PASSWORD_LEN];
 
-		if (gpon_ploam_password_parse(strim(p + 9), pwd))
+		if (gpon_ploam_password_parse(p[8] ? strim(p + 9) : "", pwd))
 			return -EINVAL;
 		mutex_lock(&cg->sn_lock);
 		memcpy(cg->password, pwd, sizeof(pwd));

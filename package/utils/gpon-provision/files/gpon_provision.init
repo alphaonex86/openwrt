@@ -231,18 +231,24 @@ laser_from_unit() {
 # A failed stage must not leave older bytes available to request_firmware.
 # RTL8290B does not use this GN25L95 file; the physical probe in the driver
 # decides whether its absence prevents activation.
-# The PLOAM password stock sends: LuCI/UCI first, else this unit's factory MIB; with neither the
-# driver keeps stock's default. Written before the serial, whose write starts ranging.
+# The PLOAM password stock sends: LuCI/UCI first, else this unit's factory MIB, where an
+# EMPTY value is sent as ten zero octets as stock does; only a MIB without the key (or a
+# non-factory source) keeps the driver's default. Written before the serial, whose write
+# starts ranging. The newline is what lets an empty value reach the driver at all.
 set_password() {
 	local part="$1" source pw p
 	config_get source identity source factory
 	config_get pw identity ploam_passwd
-	[ -n "$pw" ] || [ "$source" != factory ] || pw=$("$RTK" -p "$part" ploam_passwd 2>/dev/null)
-	[ -n "$pw" ] || return 0
+	if [ -z "$pw" ]; then
+		[ "$source" = factory ] && pw=$("$RTK" -p "$part" ploam_passwd 2>/dev/null) || {
+			log "no PLOAM password in this unit's MIB - the driver keeps its default"
+			return 0
+		}
+	fi
 	for p in $GPON_PWD_PATHS; do
 		[ -w "$p" ] || continue
-		printf '%s' "$pw" > "$p" && { log "PLOAM password handed to the driver"; return 0; }
-		log "PLOAM password refused by the driver (1..10 printable characters)"
+		printf '%s\n' "$pw" > "$p" && { log "PLOAM password handed to the driver"; return 0; }
+		log "PLOAM password refused by the driver (0..10 printable characters)"
 		return 0
 	done
 }

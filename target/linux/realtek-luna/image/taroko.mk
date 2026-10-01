@@ -67,6 +67,7 @@ define Device/hsgq_x100dg
   IMAGES := kernel.bin rootfs.bin
   IMAGE/kernel.bin := append-kernel
   IMAGE/rootfs.bin := append-rootfs
-  DEVICE_PACKAGES := -iw
+  # gpon-provision: its SN, MAC and RTL8290B laser cal come from its own config partition.
+  DEVICE_PACKAGES := -iw gpon-provision
 endef
 TARGET_DEVICES += hsgq_x100dg

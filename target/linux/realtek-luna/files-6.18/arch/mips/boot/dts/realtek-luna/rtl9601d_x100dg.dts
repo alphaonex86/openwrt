@@ -61,6 +61,7 @@
  * fit this board's 19 MB (2026-09-30: MemAvailable 2148 kB just before eth0). */
 &nic {
 	realtek,rx-ring-entries = <256>;
+	realtek,wan-mac-offset = <1>;	/* stock nas0_0 is LAN+1 (98:c7:a4:29:a2:8f) */
 };
 
 /* Its own 8 MiB SPI-NOR, from its own U-Boot mtdparts, READ-ONLY through the

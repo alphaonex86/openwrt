@@ -2677,6 +2677,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			RX_RING_SIZE);
 		return -EINVAL;
 	}
+	/* The board's own WAN MAC offset from its stock (X100DG: LAN+1). */
+	of_property_read_u32(dev->of_node, "realtek,wan-mac-offset", &wan_mac_offset);
 
 	/* Switch core (best-effort; minimal L2 flood enabled at open). */
 	ep->swm = &rtl9602c_sw_map;

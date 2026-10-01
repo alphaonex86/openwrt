@@ -192,6 +192,13 @@ enum omci_attr_dyn {
 	OMCI_DYN_TS_TCONT,	/* ME 278 #1: T-CONT pointer == the instance */
 	OMCI_DYN_ANIG_RX,	/* ME 263 #10: live RX optical level */
 	OMCI_DYN_ANIG_TX,	/* ME 263 #14: live TX optical level */
+	/* ME 5 / ME 6, from the declared slot of that instance */
+	OMCI_DYN_SLOT_TYPE,
+	OMCI_DYN_SLOT_PORTS,
+	OMCI_DYN_SLOT_TBUF,
+	OMCI_DYN_SLOT_PRIQ,
+	OMCI_DYN_SLOT_SCHED,
+	OMCI_DYN_IP_HOST_MAC,	/* ME 134 #2: the WAN MAC, where declared */
 };
 
 /* One modelled attribute. Rows of the same class are ...
@@ -278,18 +285,25 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(257, 13,  2, 0x003b),		/* #13 QoS config flexibility */
 	A_C(257, 14,  2, 0x0001),		/* #14 Priority-queue scale */
 
-	/* ---- ME 5 Cardholder (inst 0x0101) ---- */
-	A_C(5, 1, 1, 47),			/* #1  Actual type = Eth UNI */
-	A_C(5, 2, 1, 47),			/* #2  Expected type */
-	A_C(5, 3, 1, 1),			/* #3  Expected port count */
+	/* ---- ME 5 Cardholder, one per declared slot ---- */
+	A_D(5, 1, 1, OMCI_DYN_SLOT_TYPE),	/* #1  Actual type */
+	A_D(5, 2, 1, OMCI_DYN_SLOT_TYPE),	/* #2  Expected type */
+	A_D(5, 3, 1, OMCI_DYN_SLOT_PORTS),	/* #3  Expected port count */
 
-	/* ---- ME 6 Circuit-Pack (inst 0x0101) ---- */
-	A_C(6,  1,  1, 47),			/* #1  Type */
-	A_C(6,  2,  1, 1),			/* #2  Number of ports */
+	/* ---- ME 6 Circuit-Pack, one per declared slot ---- */
+	A_D(6,  1,  1, OMCI_DYN_SLOT_TYPE),	/* #1  Type */
+	A_D(6,  2,  1, OMCI_DYN_SLOT_PORTS),	/* #2  Number of ports */
 	A_SN(6, 3),				/* #3  Serial number */
 	A_ID(6,  4, sw_bank0_version),		/* #4  Version */
 	A_ID(6,  5, vendor_id),			/* #5  Vendor ID */
-	A_C(6, 12,  1, 8),			/* #12 Total priority queues */
+	A_CW(6,  6,  1, 0),			/* #6  Admin state */
+	A_C(6,  7,  1, 0),			/* #7  Op state */
+	A_CW(6,  8,  1, 0),			/* #8  Bridged/IP ind */
+	A_CW(6, 10,  1, 0),			/* #10 Card configuration */
+	A_D(6, 11,  1, OMCI_DYN_SLOT_TBUF),	/* #11 Total T-CONT buffers */
+	A_D(6, 12,  1, OMCI_DYN_SLOT_PRIQ),	/* #12 Total priority queues */
+	A_D(6, 13,  1, OMCI_DYN_SLOT_SCHED),	/* #13 Total traffic schedulers */
+	A_CW(6, 14,  4, 0),			/* #14 Power shed override */
 
 	/* ---- ME 7 Software-Image, banks 0 (active) + 1 ---- */
 	A_D(7, 1, 14, OMCI_DYN_SW_VER),		/* #1  Version */
@@ -319,6 +333,41 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(11, 13, 1, 0),			/* #13 ARC interval */
 	A_CW(11, 14, 1, 0),			/* #14 PPPoE filter */
 	A_CW(11, 15, 1, 0),			/* #15 Power control */
+
+	/* ---- ME 53 PPTP POTS UNI, one per declared instance: what stock
+	 * reports for a port no phone is wired to ---- */
+	A_CW(53,  1, 1, 0),			/* #1  Admin state */
+	A_CW(53,  2, 2, 0),			/* #2  Interworking TP pointer */
+	A_CW(53,  3, 1, 0),			/* #3  ARC */
+	A_CW(53,  4, 1, 0),			/* #4  ARC interval */
+	A_CW(53,  5, 1, 0),			/* #5  Impedance */
+	A_CW(53,  6, 1, 0),			/* #6  Transmission path */
+	A_CW(53,  7, 1, 0),			/* #7  Rx gain */
+	A_CW(53,  8, 1, 0),			/* #8  Tx gain */
+	A_C(53,  9, 1, 0),			/* #9  Op state */
+	A_C(53, 10, 1, 0),			/* #10 Hook state */
+	A_CW(53, 11, 2, 0),			/* #11 POTS holdover time */
+	A_CW(53, 12, 1, 0),			/* #12 Nominal feed voltage */
+
+	/* ---- ME 134 IP host config data, one per declared instance.  The
+	 * current-address group (#9..#13) reads 0: stock mirrors the live WAN
+	 * lease there, which this model does not know. ---- */
+	A_CW(134,  1, 1, 0),			/* #1  IP options */
+	A_D(134,  2, 6, OMCI_DYN_IP_HOST_MAC),	/* #2  MAC address */
+	A_ZERO(134, 3, 25),			/* #3  ONU identifier */
+	A_CW(134,  4, 4, 0),			/* #4  IP address */
+	A_CW(134,  5, 4, 0),			/* #5  Mask */
+	A_CW(134,  6, 4, 0),			/* #6  Gateway */
+	A_CW(134,  7, 4, 0),			/* #7  Primary DNS */
+	A_CW(134,  8, 4, 0),			/* #8  Secondary DNS */
+	A_C(134,  9, 4, 0),			/* #9  Current address */
+	A_C(134, 10, 4, 0),			/* #10 Current mask */
+	A_C(134, 11, 4, 0),			/* #11 Current gateway */
+	A_C(134, 12, 4, 0),			/* #12 Current primary DNS */
+	A_C(134, 13, 4, 0),			/* #13 Current secondary DNS */
+	A_ZERO(134, 14, 25),			/* #14 Domain name */
+	A_ZERO(134, 15, 25),			/* #15 Host name */
+	A_CW(134, 16, 2, 0),			/* #16 Relay agent options */
 
 	/* ============ THE WAN SERVICE SPINE (G.988 clause 9.3) ============
 	 * Every row's WIDTH and ACCESS below is EXTRACTED from the board's own
@@ -708,6 +757,17 @@ static void omci_uni_install(struct omci_uni_inv *inv, const u16 *inst, u8 n)
 	inv->n = n;
 }
 
+/* Does a Get validate the instance?  Every mutable class, and the classes
+ * whose instances a board declares: equipment, queues, IP hosts, POTS. */
+bool omci_get_checks_inst(u16 class_id)
+{
+	return omci_me_mutable(class_id) || class_id == OMCI_ME_CARDHOLDER ||
+	       class_id == OMCI_ME_CIRCUIT_PACK ||
+	       class_id == OMCI_ME_PRIORITY_QUEUE ||
+	       class_id == OMCI_ME_IP_HOST ||
+	       class_id == OMCI_ME_PPTP_POTS_UNI;
+}
+
 /* Only these classes have a verified mutable layout in this model. Other
  * classes retain their existing compatibility handling in the message layer. */
 bool omci_me_mutable(u16 class_id)
@@ -1049,6 +1109,75 @@ bool omci_class_modelled(u16 class_id)
 
 /* The bytes of one attribute.  Integers are big-endian, right-aligned in
  * @size octets; @scratch must hold 4 bytes. */
+static const struct omci_slot *omci_slot_find(const struct omci_onu *o,
+					      u16 inst)
+{
+	u8 i;
+
+	for (i = 0; i < o->slots_n; i++)
+		if (o->slots[i].inst == inst)
+			return &o->slots[i];
+	return NULL;
+}
+
+static int omci_ip_host_index(const struct omci_onu *o, u16 inst)
+{
+	int i;
+
+	for (i = 0; i < o->ip_host_n; i++)
+		if (o->ip_host[i] == inst)
+			return i;
+	return -1;
+}
+
+static u8 omci_slot_value(const struct omci_slot *s, u16 dyn)
+{
+	switch (dyn) {
+	case OMCI_DYN_SLOT_TYPE:
+		return s->type;
+	case OMCI_DYN_SLOT_PORTS:
+		return s->ports;
+	case OMCI_DYN_SLOT_TBUF:
+		return s->tcont_buf;
+	case OMCI_DYN_SLOT_PRIQ:
+		return s->priq;
+	default:		/* OMCI_DYN_SLOT_SCHED */
+		return s->scheds;
+	}
+}
+
+/* How many ME 277 queues the slots promise, downstream and upstream. */
+static void omci_slot_queues(const struct omci_slot *slot, u8 n,
+			     unsigned int *ds, unsigned int *us)
+{
+	u8 i;
+
+	*ds = 0;
+	*us = 0;
+	for (i = 0; i < n; i++) {
+		if (slot[i].tcont_buf)
+			*us += slot[i].priq;
+		else
+			*ds += slot[i].priq;
+	}
+}
+
+/* ME 277 #6 as stock numbers its queues: blocks of 8 counting DOWN (queue 0
+ * -> priority 7).  Downstream block b is the b-th Ethernet UNI, then the VEIP;
+ * upstream queue 0x8000 + 8t + p belongs to T-CONT 0x8000 + t. */
+static u32 omci_pq_related_port(const struct omci_onu *o, u16 inst)
+{
+	u16 block = (u16)((inst & 0x7fff) / 8), port;
+
+	if (inst & 0x8000)
+		port = (u16)(0x8000 + block);
+	else if (block < o->pptp_eth_uni.n)
+		port = o->pptp_eth_uni.inst[block];
+	else
+		port = OMCI_VEIP_INST;
+	return ((u32)port << 16) | (7u - (inst & 7));
+}
+
 static const u8 *omci_attr_bytes(struct omci_onu *o,
 				 const struct omci_attr *a, u16 inst,
 				 u8 *scratch)
@@ -1110,8 +1239,29 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 				o->tcont_alloc[inst - 0x8000] : 0x00ff;
 			break;
 		case OMCI_DYN_PQ_PORT:
-			val = ((u32)0x0101 << 16) | (7u - (inst & 7));
+			val = omci_pq_related_port(o, inst);
 			break;
+		case OMCI_DYN_IP_HOST_MAC: {
+			int i = omci_ip_host_index(o, inst);
+
+			if (i < 0)
+				return NULL;
+			if (!o->ip_host_mac[i])
+				return o->id.zeros;
+			return o->wan_mac_set ? o->wan_mac : NULL;
+		}
+		case OMCI_DYN_SLOT_TYPE:
+		case OMCI_DYN_SLOT_PORTS:
+		case OMCI_DYN_SLOT_TBUF:
+		case OMCI_DYN_SLOT_PRIQ:
+		case OMCI_DYN_SLOT_SCHED: {
+			const struct omci_slot *slot = omci_slot_find(o, inst);
+
+			if (!slot)
+				return NULL;
+			val = omci_slot_value(slot, a->v);
+			break;
+		}
 		case OMCI_DYN_ANIG_RX:
 			val = o->anig_rx_level;
 			break;
@@ -1183,6 +1333,7 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 static void omci_build_mib(struct omci_onu *o)
 {
 	u16 n = 0, dropped = 0;
+	unsigned int ds_q, us_q;
 	u16 i;
 
 #define ROW(c, ins, m) do {						\
@@ -1220,13 +1371,28 @@ static void omci_build_mib(struct omci_onu *o)
 				    OMCI_ATTR_BIT(12) | OMCI_ATTR_BIT(13) |
 				    OMCI_ATTR_BIT(14));
 
-	ROW(OMCI_ME_CARDHOLDER, 0x0101, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-					OMCI_ATTR_BIT(3));
+	/* Per slot: ME 5 (#1..#3), then ME 6 A = #1..#4 = 24B and
+	 * B = #5(4) + #6..#8, #10..#13 (7x1) + #14(4) = 15B. */
+	for (i = 0; i < o->slots_n; i++) {
+		u16 slot = o->slots[i].inst;
 
-	/* ME 6 Circuit-Pack: A = #1..#4 = 24B, B = #5(4)+#12(1) = 5B. */
-	ROW(OMCI_ME_CIRCUIT_PACK, 0x0101, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-					  OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4));
-	ROW(OMCI_ME_CIRCUIT_PACK, 0x0101, OMCI_ATTR_BIT(5) | OMCI_ATTR_BIT(12));
+		ROW(OMCI_ME_CARDHOLDER, slot, OMCI_ATTR_BIT(1) |
+					      OMCI_ATTR_BIT(2) |
+					      OMCI_ATTR_BIT(3));
+		ROW(OMCI_ME_CIRCUIT_PACK, slot, OMCI_ATTR_BIT(1) |
+						OMCI_ATTR_BIT(2) |
+						OMCI_ATTR_BIT(3) |
+						OMCI_ATTR_BIT(4));
+		ROW(OMCI_ME_CIRCUIT_PACK, slot, OMCI_ATTR_BIT(5) |
+						OMCI_ATTR_BIT(6) |
+						OMCI_ATTR_BIT(7) |
+						OMCI_ATTR_BIT(8) |
+						OMCI_ATTR_BIT(10) |
+						OMCI_ATTR_BIT(11) |
+						OMCI_ATTR_BIT(12) |
+						OMCI_ATTR_BIT(13) |
+						OMCI_ATTR_BIT(14));
+	}
 
 	/* ME 7 Software-Image x2 banks: A = ver+committed+active+valid = 17B,
 	 * B = hash(16). */
@@ -1255,7 +1421,32 @@ static void omci_build_mib(struct omci_onu *o)
 					  OMCI_ATTR_BIT(13) | OMCI_ATTR_BIT(14) |
 					  OMCI_ATTR_BIT(15));
 
+	/* ME 53 PPTP POTS UNI: #1..#12 = 14B. */
+	for (i = 0; i < o->pots_uni_n; i++)
+		ROW(OMCI_ME_PPTP_POTS_UNI, o->pots_uni[i],
+		    OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) | OMCI_ATTR_BIT(3) |
+		    OMCI_ATTR_BIT(4) | OMCI_ATTR_BIT(5) | OMCI_ATTR_BIT(6) |
+		    OMCI_ATTR_BIT(7) | OMCI_ATTR_BIT(8) | OMCI_ATTR_BIT(9) |
+		    OMCI_ATTR_BIT(10) | OMCI_ATTR_BIT(11) | OMCI_ATTR_BIT(12));
+
 	ROW(OMCI_ME_OLT_G, 0x0000, 0x0000);
+
+	/* ME 134 IP host config data: A = #1 + #2 + #4..#7 = 23B, #3 = 25B,
+	 * C = #8..#13 = 24B, #14 = 25B, #15 = 25B, #16 = 2B. */
+	for (i = 0; i < o->ip_host_n; i++) {
+		u16 ih = o->ip_host[i];
+
+		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
+					 OMCI_ATTR_BIT(4) | OMCI_ATTR_BIT(5) |
+					 OMCI_ATTR_BIT(6) | OMCI_ATTR_BIT(7));
+		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(3));
+		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(8) | OMCI_ATTR_BIT(9) |
+					 OMCI_ATTR_BIT(10) | OMCI_ATTR_BIT(11) |
+					 OMCI_ATTR_BIT(12) | OMCI_ATTR_BIT(13));
+		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(14));
+		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(15));
+		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(16));
+	}
 
 	/* ME 263 ANI-G: A = #1..#9 = 11B, B = #10..#16 = 10B. */
 	ROW(OMCI_ME_ANI_G, 0x8001, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
@@ -1282,10 +1473,13 @@ static void omci_build_mib(struct omci_onu *o)
 				   OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
 				   OMCI_ATTR_BIT(5));
 
-	/* ME 277 Priority-Queue: only the single UNI's 8 queues. The ...
-	 * dev/MEASURED-gpon_omci_me.c.md sec 30. */
-	for (i = 0; i < 8; i++)
-		ROW(OMCI_ME_PRIORITY_QUEUE, i, OMCI_ATTR_BIT(1) |
+	/* ME 277 Priority-Queue: the queues the slots promise, downstream from
+	 * 0 and upstream from 0x8000 (the old single-UNI cap of 8: ...
+	 * dev/MEASURED-gpon_omci_me.c.md sec 30). */
+	omci_slot_queues(o->slots, o->slots_n, &ds_q, &us_q);
+	for (i = 0; i < ds_q + us_q; i++)
+		ROW(OMCI_ME_PRIORITY_QUEUE, i < ds_q ? i : 0x8000 + i - ds_q,
+					       OMCI_ATTR_BIT(1) |
 					       OMCI_ATTR_BIT(2) |
 					       OMCI_ATTR_BIT(3) |
 					       OMCI_ATTR_BIT(4) |
@@ -1303,9 +1497,9 @@ static void omci_build_mib(struct omci_onu *o)
 
 	/* ★★ THE OTHER HALF OF THE #3/#4 CORRECTION ABOVE, AND IT WAS ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 31. */
-	ROW(OMCI_ME_VEIP, 0x0601, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				  OMCI_ATTR_BIT(4));
-	ROW(OMCI_ME_VEIP, 0x0601, OMCI_ATTR_BIT(3));
+	ROW(OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
+					  OMCI_ATTR_BIT(4));
+	ROW(OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_ATTR_BIT(3));
 
 	/* ME 65530 (CTC LoID authentication) is deliberately NOT ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 32. */
@@ -1347,6 +1541,39 @@ bool omci_onu_declare_unis(struct omci_onu *o,
 		o->uni_g = was_unig;
 		memcpy(o->uni_g_mgmt_cap, was_cap, sizeof(was_cap));
 		memcpy(o->uni_type, was_type, sizeof(was_type));
+		omci_build_mib(o);
+		return false;
+	}
+	return true;
+}
+
+bool omci_onu_declare_slots(struct omci_onu *o, const struct omci_slot *slot,
+			    u8 n)
+{
+	struct omci_slot was[OMCI_SLOT_MAX];
+	unsigned int ds, us;
+	u8 was_n = o->slots_n, i, j;
+
+	if (!n || n > OMCI_SLOT_MAX || !slot)
+		return false;
+	for (i = 0; i < n; i++) {
+		if (!slot[i].inst)
+			return false;
+		for (j = 0; j < i; j++)
+			if (slot[j].inst == slot[i].inst)
+				return false;
+	}
+	omci_slot_queues(slot, n, &ds, &us);
+	if (ds % 8 || ds / 8 > o->pptp_eth_uni.n + 1u ||
+	    us % 8 || us > 8u * OMCI_TCONT_COUNT)
+		return false;
+	memcpy(was, o->slots, sizeof(was));
+	memcpy(o->slots, slot, n * sizeof(*slot));
+	o->slots_n = n;
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		memcpy(o->slots, was, sizeof(was));
+		o->slots_n = was_n;
 		omci_build_mib(o);
 		return false;
 	}
@@ -1452,6 +1679,144 @@ enum omci_uni_decl omci_onu_declare_unis_be(struct omci_onu *o,
 	return OMCI_UNI_DECL_OK;
 }
 
+/* One plain Ethernet pack with its 8 downstream queues: what this model
+ * carried before a board could declare its slots. */
+static const struct omci_slot omci_slot_default = {
+	.inst = 0x0101, .type = OMCI_UNI_TYPE_DEFAULT, .ports = 1, .priq = 8,
+};
+
+#define OMCI_SLOT_BE_FIELDS 6
+
+enum omci_uni_decl omci_onu_declare_slots_be(struct omci_onu *o,
+					     const void *be, int len,
+					     const char **why)
+{
+	struct omci_slot slot[OMCI_SLOT_MAX];
+	u16 v[OMCI_SLOT_BE_FIELDS];
+	const u8 *b = be;
+	const char *unused;
+	int i, f, n;
+
+	if (!why)
+		why = &unused;
+	if (len < 0) {
+		*why = "no slots declared";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!b || !len || len % (2 * OMCI_SLOT_BE_FIELDS) ||
+	    len > 2 * OMCI_SLOT_BE_FIELDS * OMCI_SLOT_MAX) {
+		*why = "the slot list is not 1..8 sextuples of 16-bit cells";
+		return OMCI_UNI_DECL_BAD;
+	}
+	n = len / (2 * OMCI_SLOT_BE_FIELDS);
+	for (i = 0; i < n; i++) {
+		for (f = 0; f < OMCI_SLOT_BE_FIELDS; f++, b += 2)
+			v[f] = (u16)((b[0] << 8) | b[1]);
+		for (f = 1; f < OMCI_SLOT_BE_FIELDS; f++)
+			if (v[f] > 0xff) {
+				*why = "a slot value wider than its one-octet attribute";
+				return OMCI_UNI_DECL_BAD;
+			}
+		slot[i] = (struct omci_slot){ .inst = v[0], .type = (u8)v[1],
+			.ports = (u8)v[2], .priq = (u8)v[3],
+			.tcont_buf = (u8)v[4], .scheds = (u8)v[5] };
+	}
+	if (!omci_onu_declare_slots(o, slot, (u8)n)) {
+		*why = "a zero or duplicate instance, queues the model cannot number, or more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
+enum omci_uni_decl omci_onu_declare_ip_hosts_be(struct omci_onu *o,
+						const void *inst_be, int inst_len,
+						const void *mac, int mac_len,
+						const char **why)
+{
+	u16 inst[OMCI_IP_HOST_MAX], was[OMCI_IP_HOST_MAX];
+	u8 was_mac[OMCI_IP_HOST_MAX], was_n = o->ip_host_n;
+	const u8 *b = inst_be;
+	const char *unused;
+	int i, j, n;
+
+	if (!why)
+		why = &unused;
+	if (inst_len < 0 && mac_len < 0) {
+		*why = "no IP hosts declared";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	n = inst_len / 2;
+	if (!b || inst_len <= 0 || (inst_len & 1) || n > OMCI_IP_HOST_MAX ||
+	    !mac || mac_len != n) {
+		*why = "the IP-host list is not 1..4 16-bit instances with one MAC flag each";
+		return OMCI_UNI_DECL_BAD;
+	}
+	for (i = 0; i < n; i++) {
+		inst[i] = (u16)((b[2 * i] << 8) | b[2 * i + 1]);
+		for (j = 0; j < i; j++)
+			if (inst[j] == inst[i]) {
+				*why = "a duplicate IP-host instance";
+				return OMCI_UNI_DECL_BAD;
+			}
+	}
+	memcpy(was, o->ip_host, sizeof(was));
+	memcpy(was_mac, o->ip_host_mac, sizeof(was_mac));
+	memcpy(o->ip_host, inst, n * sizeof(*inst));
+	memcpy(o->ip_host_mac, mac, n);
+	o->ip_host_n = (u8)n;
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		memcpy(o->ip_host, was, sizeof(was));
+		memcpy(o->ip_host_mac, was_mac, sizeof(was_mac));
+		o->ip_host_n = was_n;
+		omci_build_mib(o);
+		*why = "more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
+enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
+					    int len, const char **why)
+{
+	u16 inst[OMCI_UNI_MAX], was[OMCI_UNI_MAX];
+	u8 n = 0, was_n = o->pots_uni_n;
+	const char *unused;
+
+	if (!why)
+		why = &unused;
+	if (len < 0) {
+		*why = "no POTS UNIs declared";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!len || !omci_uni_decode_list(be, len, inst, &n) ||
+	    !omci_uni_list_ok(inst, n)) {
+		*why = "the POTS-UNI list is not 1..8 distinct non-zero 16-bit instances";
+		return OMCI_UNI_DECL_BAD;
+	}
+	memcpy(was, o->pots_uni, sizeof(was));
+	memcpy(o->pots_uni, inst, n * sizeof(*inst));
+	o->pots_uni_n = n;
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		memcpy(o->pots_uni, was, sizeof(was));
+		o->pots_uni_n = was_n;
+		omci_build_mib(o);
+		*why = "more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
+void omci_onu_set_wan_mac(struct omci_onu *o, const u8 mac[6])
+{
+	memcpy(o->wan_mac, mac, sizeof(o->wan_mac));
+	o->wan_mac_set = true;
+}
+
 void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 {
 	/* ⚠ THIS READS NOTHING OUT OF @o. It is a COLD init: callers ...
@@ -1467,6 +1832,8 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->mds_adapt_reads = OMCI_MDS_ADAPT_READS;
 	o->anig_rx_level = OMCI_ANIG_RX_FALLBACK;
 	o->anig_tx_level = OMCI_ANIG_TX_FALLBACK;
+	o->slots[0] = omci_slot_default;
+	o->slots_n = 1;
 	omci_onu_declare_unis(o, omci_uni_default, NULL, 1,
 			      omci_uni_default, NULL, 1);
 }
@@ -1492,14 +1859,36 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	 * the whole reason it is not the same function as omci_onu_init(). */
 	struct omci_uni_inv pptp = o->pptp_eth_uni, unig = o->uni_g;
 	struct omci_identity id = o->id;	/* the unit's, not the session's */
+	struct omci_slot slots[OMCI_SLOT_MAX];
+	u8 slots_n = o->slots_n;
+	u16 ip_host[OMCI_IP_HOST_MAX];
+	u8 ip_host_mac[OMCI_IP_HOST_MAX], ip_host_n = o->ip_host_n;
+	u16 pots_uni[OMCI_UNI_MAX];
+	u8 pots_uni_n = o->pots_uni_n;
+	u8 wan_mac[6];
+	bool wan_mac_set = o->wan_mac_set;
 	u8 cap[OMCI_UNI_MAX], type[OMCI_UNI_MAX];
 
 	memcpy(cap, o->uni_g_mgmt_cap, sizeof(cap));
 	/* ★ THE TYPE IS CARRIED TOO.  It is the panel's, not the session's: an
 	 *   identity change does not turn an FE port into a GE one. */
 	memcpy(type, o->uni_type, sizeof(type));
+	memcpy(slots, o->slots, sizeof(slots));
+	memcpy(ip_host, o->ip_host, sizeof(ip_host));
+	memcpy(ip_host_mac, o->ip_host_mac, sizeof(ip_host_mac));
+	memcpy(pots_uni, o->pots_uni, sizeof(pots_uni));
+	memcpy(wan_mac, o->wan_mac, sizeof(wan_mac));
 	omci_onu_init(o, sn, mds_seed);
 	o->id = id;
+	memcpy(o->slots, slots, sizeof(slots));
+	o->slots_n = slots_n;
+	memcpy(o->ip_host, ip_host, sizeof(ip_host));
+	memcpy(o->ip_host_mac, ip_host_mac, sizeof(ip_host_mac));
+	o->ip_host_n = ip_host_n;
+	memcpy(o->pots_uni, pots_uni, sizeof(pots_uni));
+	o->pots_uni_n = pots_uni_n;
+	memcpy(o->wan_mac, wan_mac, sizeof(wan_mac));
+	o->wan_mac_set = wan_mac_set;
 	/* ⚠ UNCONDITIONALLY, INCLUDING WITH BOTH LISTS EMPTY.  Guarding this on
 	 * "something was declared" made a board that legally declares no UNI at
 	 * all come back with the default 0x0101 on both classes -- an instance

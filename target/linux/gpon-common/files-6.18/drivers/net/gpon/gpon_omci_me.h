@@ -90,7 +90,8 @@ struct omci_mib_row {
 /* Overridable for the same reason as OMCI_STORE_MAX above. */
 #ifndef OMCI_MIB_ROWS_MAX
 #if defined(CONFIG_LUNA_GPON) || defined(CONFIG_LUNA_GPON_MODULE)
-#define OMCI_MIB_ROWS_MAX 200
+/* stock X111W's slots and queues (24 DS + 96 US ME 277) need ~200 rows */
+#define OMCI_MIB_ROWS_MAX 256
 #else
 #define OMCI_MIB_ROWS_MAX 72
 #endif
@@ -98,6 +99,27 @@ struct omci_mib_row {
 
 /* The auto-instantiated T-CONT range in the static MIB. */
 #define OMCI_TCONT_COUNT 12
+
+/* The one VEIP every board's model carries. */
+#define OMCI_VEIP_INST 0x0601
+
+/* One equipment slot, as the board's own stock reports it: a cardholder (ME 5)
+ * and its circuit pack (ME 6).  The OLT counts the board's Ethernet and POTS
+ * ports from these, and its priority queues from the ME 277 rows they promise:
+ * a pack with T-CONT buffers is the upstream side, so its queues are the
+ * upstream ones.  Nothing here is computed from a model name. */
+struct omci_slot {
+	u16	inst;
+	u8	type;		/* G.988 plug-in unit type */
+	u8	ports;
+	u8	priq;		/* ME 6 #12 */
+	u8	tcont_buf;	/* ME 6 #11 */
+	u8	scheds;		/* ME 6 #13 */
+};
+#define OMCI_SLOT_MAX 8
+
+/* ME 134 IP host config data instances a board declares. */
+#define OMCI_IP_HOST_MAX 4
 
 /* What this UNIT tells the OLT it is.  A production OLT may match any of these
  * against its provisioning (equipment ID -> ONT type, LOID -> subscriber), so
@@ -162,6 +184,17 @@ struct omci_onu {
 	/* ★ ME 11 #1/#2, PER INSTANCE. Expected and Sensed type are ...
 	 * dev/MEASURED-gpon_omci_me.h.md sec 6. */
 	u8	uni_type[OMCI_UNI_MAX];
+	/* the equipment slots; survives omci_onu_reinit() like the panel */
+	struct omci_slot	slots[OMCI_SLOT_MAX];
+	u8	slots_n;
+	/* ME 134 instances, and which report the WAN MAC (stock's do) */
+	u16	ip_host[OMCI_IP_HOST_MAX];
+	u8	ip_host_mac[OMCI_IP_HOST_MAX];
+	u8	ip_host_n;
+	u16	pots_uni[OMCI_UNI_MAX];	/* ME 53, as stock reports them */
+	u8	pots_uni_n;
+	u8	wan_mac[6];		/* the WAN netdev's, set by the shell */
+	bool	wan_mac_set;		/* unset: ME 134 #2 is not answered */
 	/* MIB-Upload rows the row table had no room for.  ⚠ THE BUILDER DROPS
 	 * THEM SILENTLY, and a dropped row is an instance the OLT never learns
 	 * exists and therefore never provisions -- a whole subscriber port
@@ -331,6 +364,8 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * the ME 47 frame in stock; only the
 					 * DSCP half gets a command of its own */
 #define OMCI_ME_OLT_G		131
+#define OMCI_ME_IP_HOST		134
+#define OMCI_ME_PPTP_POTS_UNI	53
 #define OMCI_ME_ONU_G		256
 #define OMCI_ME_ONU2_G		257
 #define OMCI_ME_TCONT		262
@@ -408,6 +443,35 @@ enum omci_uni_decl omci_onu_declare_unis_be(struct omci_onu *o,
 					    const void *cap, int cap_len,
 					    const char **why);
 
+/* Declare the board's equipment slots.  Refused, with nothing changed, on a
+ * zero or duplicate instance, on queues the model cannot number (downstream:
+ * blocks of 8, one per Ethernet UNI then the VEIP; upstream: 8 per T-CONT),
+ * or on rows that do not fit. */
+bool omci_onu_declare_slots(struct omci_onu *o, const struct omci_slot *slot,
+			    u8 n);
+
+/* The same out of a DT blob of big-endian 16-bit sextuples
+ * <instance type ports priority-queues tcont-buffers schedulers>. */
+enum omci_uni_decl omci_onu_declare_slots_be(struct omci_onu *o,
+					     const void *be, int len,
+					     const char **why);
+
+/* Declare the board's ME 134 instances: @mac[i] non-zero means that one
+ * reports the WAN MAC.  Refused, nothing changed, on a zero-length, oversized
+ * or duplicate list, a flag list of another length, or rows that do not fit. */
+enum omci_uni_decl omci_onu_declare_ip_hosts_be(struct omci_onu *o,
+						const void *inst_be, int inst_len,
+						const void *mac, int mac_len,
+						const char **why);
+
+/* Declare the board's ME 53 PPTP POTS UNI instances (big-endian 16-bit list).
+ * Refused, nothing changed, on an empty, oversized, zero or duplicate list. */
+enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
+					    int len, const char **why);
+
+/* The WAN netdev's MAC, which ME 134 reports; the shell keeps it current. */
+void omci_onu_set_wan_mac(struct omci_onu *o, const u8 mac[6]);
+
 /* The inventory slot holding @inst, or NULL when this board has no such
  * instance.  Answers on the FULL u16. */
 int omci_uni_slot(const struct omci_uni_inv *inv, u16 inst);
@@ -456,6 +520,7 @@ void omci_store_merge(struct omci_me_inst *e, const u8 *val, int vlen);
 bool omci_store_create(struct omci_onu *o, u16 class_id, u16 inst,
 		       const u8 *body, unsigned int blen);
 bool omci_me_mutable(u16 class_id);
+bool omci_get_checks_inst(u16 class_id);
 /* octets of DENSE attribute body this class's descriptor rows describe, 0 when
  * its Create body is kept opaque */
 u8 omci_me_dense_len(u16 class_id);

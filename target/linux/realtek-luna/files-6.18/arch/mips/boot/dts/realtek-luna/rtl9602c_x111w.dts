@@ -65,17 +65,6 @@
 			console-size = <0x00010000>;	/*  64 KiB rolling console */
 		};
 	};
-};
-
-&spi_nor {
-	/*
-	 * Read through the memory-mapped window as before, and erase/program
-	 * through the controller's PIO block, so the OpenWrt overlay
-	 * (rootfs_data, carved out of r0) persists. Everything outside our own
-	 * bank 0 stays read-only.
-	 */
-	compatible = "realtek,luna-spi-nor";
-	reg = <0x14000000 0x1000000>, <0x18001200 0x10>;
 
 	/*
 	 * The UNI panel this board presents over OMCI, MEASURED from its own
@@ -103,7 +92,35 @@
 		ethernet-uni-types = /bits/ 8 <47 24>;
 		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0202 0x0602>;
 		uni-g-management-capability = /bits/ 8 <1 1 2 0>;
+		/* The equipment slots stock's ME 5/6 report (2026-09-30), from
+		 * which the OLT counts 2 Ethernet and 1 POTS port and 24/96
+		 * priority queues: instance, plug-in type, ports, priority
+		 * queues, T-CONT buffers, schedulers. */
+		circuit-packs = /bits/ 16 <
+			0x0101  47 1  8  0  0
+			0x0102  32 1  0  0  0
+			0x0104  24 1  8  0  0
+			0x0106  48 1  8  0  0
+			0x010b  38 1  0  0  0
+			0x0180 248 1 96 12 12>;
+		/* ME 134 IP host config data, as stock reports it: three
+		 * instances, the first two carrying the WAN MAC. */
+		ip-host-instances = /bits/ 16 <0x0000 0x0001 0x0002>;
+		ip-host-wan-mac = /bits/ 8 <1 1 0>;
+		/* ME 53: stock reports one POTS UNI, and the OLT counts it. */
+		pots-uni-instances = /bits/ 16 <0x0201>;
 	};
+};
+
+&spi_nor {
+	/*
+	 * Read through the memory-mapped window as before, and erase/program
+	 * through the controller's PIO block, so the OpenWrt overlay
+	 * (rootfs_data, carved out of r0) persists. Everything outside our own
+	 * bank 0 stays read-only.
+	 */
+	compatible = "realtek,luna-spi-nor";
+	reg = <0x14000000 0x1000000>, <0x18001200 0x10>;
 
 	partitions {
 		compatible = "fixed-partitions";

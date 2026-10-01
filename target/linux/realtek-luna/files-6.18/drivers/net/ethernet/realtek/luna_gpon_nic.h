@@ -19,6 +19,8 @@ void luna_omci_detach(void *cookie);
 int luna_omci_enqueue(void *cookie, const u8 *msg, unsigned int len);
 void luna_omci_set_sn(const u8 sn[8]);
 void luna_omci_set_optical(u16 rx, u16 tx);
+/* The WAN netdev's MAC, reported in ME 134: call wherever it is set. */
+void luna_omci_set_wan_mac(const u8 *mac);
 void luna_omci_rx_errors(u32 *bad_mic, u32 *runt);
 void luna_omci_report_oper_up(void);
 bool luna_gpon_data_ready(void);

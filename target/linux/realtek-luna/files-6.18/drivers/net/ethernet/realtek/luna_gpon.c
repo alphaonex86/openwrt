@@ -6272,8 +6272,10 @@ MODULE_PARM_DESC(uni_test, "TEMPORARY board diagnostic: write \"<instance-hex> <
 static void luna_omci_declare_uni_panel(struct omci_onu *onu)
 {
 	struct device_node *np = of_find_node_by_path("/omci-uni");
-	const void *pptp, *unig, *cap, *ports, *type;
+	const void *pptp, *unig, *cap, *ports, *type, *packs, *ihost, *ihmac;
 	int pptp_len = -1, type_len = -1, unig_len = -1, cap_len = -1, ports_len = -1;
+	int packs_len = -1, ihost_len = -1, ihmac_len = -1, pots_len = -1;
+	const void *pots;
 	const char *why = "";
 	enum omci_uni_decl decl;
 
@@ -6308,8 +6310,42 @@ static void luna_omci_declare_uni_panel(struct omci_onu *onu)
 				ports_len, pptp_len / 2);
 		}
 	}
+	/* After the panel: the downstream queues are numbered per UNI. */
+	packs = of_get_property(np, "circuit-packs", &packs_len);
+	if (omci_onu_declare_slots_be(onu, packs, packs ? packs_len : -1, &why) ==
+	    OMCI_UNI_DECL_BAD)
+		pr_err("luna-gpon: /omci-uni circuit-packs REFUSED: %s -- keeping the single-slot default\n",
+		       why);
+	ihost = of_get_property(np, "ip-host-instances", &ihost_len);
+	ihmac = of_get_property(np, "ip-host-wan-mac", &ihmac_len);
+	if (omci_onu_declare_ip_hosts_be(onu, ihost, ihost ? ihost_len : -1,
+					 ihmac, ihmac ? ihmac_len : -1, &why) ==
+	    OMCI_UNI_DECL_BAD)
+		pr_err("luna-gpon: /omci-uni ip-host REFUSED: %s -- no ME 134\n", why);
+	pots = of_get_property(np, "pots-uni-instances", &pots_len);
+	if (omci_onu_declare_pots_be(onu, pots, pots ? pots_len : -1, &why) ==
+	    OMCI_UNI_DECL_BAD)
+		pr_err("luna-gpon: /omci-uni pots-uni-instances REFUSED: %s -- no ME 53\n", why);
 	of_node_put(np);
 }
+
+/* The WAN MAC as last set by the NIC, so a model attached later starts
+ * with it. */
+static u8 luna_omci_wan_mac[ETH_ALEN];
+static bool luna_omci_wan_mac_set;
+
+void luna_omci_set_wan_mac(const u8 *mac)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	memcpy(luna_omci_wan_mac, mac, ETH_ALEN);
+	luna_omci_wan_mac_set = true;
+	if (luna_omci.onu)
+		omci_onu_set_wan_mac(luna_omci.onu, mac);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+}
+EXPORT_SYMBOL(luna_omci_set_wan_mac);
 
 int luna_omci_attach(struct omci_onu *onu, void *cookie, u8 seed,
 		    int (*tx)(void *, const u8 *, unsigned int),
@@ -6329,6 +6365,8 @@ int luna_omci_attach(struct omci_onu *onu, void *cookie, u8 seed,
 		omci_onu_init(onu, gpon_sn_bytes, seed);
 		if (luna_omci_id_set)
 			onu->id = luna_omci_id;
+		if (luna_omci_wan_mac_set)
+			omci_onu_set_wan_mac(onu, luna_omci_wan_mac);
 		luna_omci_declare_uni_panel(onu);
 		luna_omci.onu = onu;
 		luna_omci.cookie = cookie;

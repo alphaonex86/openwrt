@@ -1885,6 +1885,7 @@ static int eth_set_mac_address(struct net_device *ndev, void *addr)
 
 		luna_eth_wan_hwaddr(ep, wmac);
 		eth_hw_addr_set(ep->wan_ndev, wmac);
+		luna_omci_set_wan_mac(wmac);
 	}
 	return 0;
 }
@@ -2027,6 +2028,7 @@ static int luna_eth_wan_open(struct net_device *ndev)
 	if (is_valid_ether_addr(ep->ndev->dev_addr)) {
 		luna_eth_wan_hwaddr(ep, wmac);
 		eth_hw_addr_set(ndev, wmac);
+		luna_omci_set_wan_mac(wmac);
 	}
 	netif_carrier_on(ndev);
 	netif_start_queue(ndev);
@@ -2080,6 +2082,7 @@ static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
 	}
 	luna_eth_wan_hwaddr(ep, wmac);
 	eth_hw_addr_set(wan, wmac);
+	luna_omci_set_wan_mac(wmac);
 	netif_carrier_off(wan);
 	if (devm_register_netdev(dev, wan)) {
 		dev_warn(dev, "gpon0 (WAN) register failed; no WAN datapath\n");

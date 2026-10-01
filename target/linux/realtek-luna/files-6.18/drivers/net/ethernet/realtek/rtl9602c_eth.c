@@ -798,6 +798,7 @@ static int rtl9602c_eth_set_mac_address(struct net_device *ndev, void *p)
 
 		rtl9602c_wan_mac(wmac, ndev->dev_addr);
 		eth_hw_addr_set(ep->wan_ndev, wmac);
+		luna_omci_set_wan_mac(wmac);
 	}
 	return 0;
 }
@@ -1079,6 +1080,7 @@ static int rtl9602c_eth_wan_open(struct net_device *ndev)
 
 		rtl9602c_wan_mac(wmac, ep->ndev->dev_addr);
 		eth_hw_addr_set(ndev, wmac);
+		luna_omci_set_wan_mac(wmac);
 	}
 	/* RX/TX rings + NAPI are owned by eth0 (shared HW); open just enables the queue and
 	 * holds carrier up so netifd runs the DHCP client. */
@@ -2817,6 +2819,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			 * changes once rtk_factory provisions the real board MAC onto eth0. */
 			rtl9602c_wan_mac(wmac, ndev->dev_addr);
 			eth_hw_addr_set(wan, wmac);
+			luna_omci_set_wan_mac(wmac);
 			netif_carrier_off(wan);
 			if (devm_register_netdev(dev, wan) == 0)
 				ep->wan_ndev = wan;

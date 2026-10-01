@@ -62,7 +62,7 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	u16 rmask = 0, known = 0, unsup, failed;
 	u8 rc;
 
-	if (omci_me_mutable(class_id) && !omci_inst_exists(o, class_id, inst))
+	if (omci_get_checks_inst(class_id) && !omci_inst_exists(o, class_id, inst))
 		return OMCI_RC_UNKNOWN_INST;
 	rc = omci_me_fill(o, class_id, inst, mask, resp + 11, resp + 36,
 			  &rmask, &known);

@@ -64,10 +64,11 @@ static inline bool gpon_ploam_ds_repetitive(u8 type)
 	return type == PLM_DS_UPSTREAM_OVERHEAD || type == PLM_DS_EXT_BURST_LENGTH;
 }
 
-/* Ours: the Serial_Number re-offered every second while unregistered. */
+/* Ours: the Serial_Number re-offered every second while unregistered, and the
+ * REI of every BER interval (its count is us_queued[PLM_US_REI]). */
 static inline bool gpon_ploam_us_repetitive(u8 type)
 {
-	return type == PLM_US_SERIAL_NUMBER;
+	return type == PLM_US_SERIAL_NUMBER || type == PLM_US_REI;
 }
 
 /* A DS PLOAM is 13 bytes ([0]=ONU-ID [1]=type [2..11]=data ...

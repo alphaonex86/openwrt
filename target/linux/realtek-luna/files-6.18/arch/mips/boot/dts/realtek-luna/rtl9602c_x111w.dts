@@ -66,6 +66,12 @@
 		};
 	};
 
+	/* Board C's pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
+	pon-optics {
+		realtek,gpio-pads = <0x40202006 0x00000819 0x40002006 0xdbff1246
+				     0x00000819 0x000037e5>;
+	};
+
 	/*
 	 * The UNI panel this board presents over OMCI, MEASURED from its own
 	 * stock firmware (omcicli mib get 11/264, 2026-09-12, archived under

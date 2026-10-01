@@ -49,6 +49,8 @@
 	 * live registers show bus 1's config (slave 0x54) and indirect block in use. */
 	pon-optics {
 		realtek,i2c-bus = <1>;
+		realtek,tx-disable-gpio = <13>;	/* stock europa_drv TXDIS_PIN=13 */
+		realtek,tx-power-gpio = <0>;	/* stock europa_drv TXPWR_PIN=0 */
 	};
 };
 

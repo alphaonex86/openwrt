@@ -326,8 +326,6 @@
  * OPTIC_LOS_SIG reads "loss" even with real light. Releasing GPIO 13 (function
  * disabled) routes the pad to the optical-SD input.
  */
-#define SOC_IO_GPIO_EN_W0	0x40202006u	/* enable GPIO 1,2,13,21,30    */
-#define SOC_IO_GPIO_EN_W1	0x00000819u	/* enable GPIO 32,35,36,43     */
 
 /*
  * Front-panel LED controller (SWCORE window). Each panel LED has an index whose
@@ -368,10 +366,6 @@
 #define GPIO_DATA_ABCD		0x0c
 #define GPIO_DIR_EFGH		0x24
 #define GPIO_DATA_EFGH		0x28
-#define GPIO_GOLD_DIR_ABCD	0x40002006u	/* 1,2,13,30 out; 21 in        */
-#define GPIO_GOLD_DATA_ABCD	0xdbff1246u
-#define GPIO_GOLD_DIR_EFGH	0x00000819u
-#define GPIO_GOLD_DATA_EFGH	0x000037e5u
 
 #define PONIP_PHYS_BASE		0x1bf00000u
 #define PONIP_REG_SIZE		0x00010000u	/* covers up to IO_CMD_1_DS     */

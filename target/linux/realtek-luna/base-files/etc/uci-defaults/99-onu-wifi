@@ -5,17 +5,16 @@
 # "WiFi defaults". The PSK below is a per-board-unique DEFAULT derived from
 # MAC+SN; the operator should override it from provisioning.
 
-# Authoritative per-board MAC/SN from this unit's own flash (same source as the
-# GPON identity), with a netdev fallback.
-MAC=$(/usr/sbin/rtk_factory -p config mac 2>/dev/null)
-[ -n "$MAC" ] || MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
-MAC=$(echo "$MAC" | tr 'A-F' 'a-f')
+# This unit's MAC in the order every identity consumer uses (unit_mac: the factory
+# partition, else the flasher's boot parameter) -- never eth0, which without a
+# pin holds the driver's random.
+. /lib/functions/onu-identity.sh
+unit_mac && MAC=$UNIT_MAC || MAC=""
 SN=$(/usr/sbin/rtk_factory -p config sn 2>/dev/null)
 
 # A MAC every unit carries is no identity -- none, the family placeholders, a
 # group address. Such a unit gets a locally administered one from what else is
 # its own (its GPON serial, else this boot), never a literal shared by the fleet.
-. /lib/functions/onu-identity.sh
 unit_mac_valid "$MAC" || {
 	H=$(printf '%s' "${SN:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)}" | sha256sum | cut -c1-10)
 	MAC="02:$(echo "$H" | sed 's/\(..\)/\1:/g; s/:$//')"

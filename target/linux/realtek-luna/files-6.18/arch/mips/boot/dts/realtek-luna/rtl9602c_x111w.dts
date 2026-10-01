@@ -109,6 +109,10 @@
 		ip-host-wan-mac = /bits/ 8 <1 1 0>;
 		/* ME 53: stock reports one POTS UNI, and the OLT counts it. */
 		pots-uni-instances = /bits/ 16 <0x0201>;
+		/* ANI-G #2 and ONU2-G #6/#7/#9 as stock declares them, and its
+		 * downstream queue blocks in order. */
+		onu-capacity = /bits/ 16 <12 96 12 64>;
+		downstream-queue-ports = /bits/ 16 <0x0101 0x0102 0x0601>;
 	};
 };
 

@@ -87,18 +87,33 @@ struct omci_mib_row {
 	u16	mask;
 };
 
-/* Overridable for the same reason as OMCI_STORE_MAX above. */
+/* Overridable for the same reason as OMCI_STORE_MAX above.  A board that
+ * uploads stock's queue set needs ~400 rows (X400AXF: 40 DS + 240 US queues,
+ * 30 T-CONTs and schedulers); 6 octets a row. */
 #ifndef OMCI_MIB_ROWS_MAX
-#if defined(CONFIG_LUNA_GPON) || defined(CONFIG_LUNA_GPON_MODULE)
-/* stock X111W's slots and queues (24 DS + 96 US ME 277) need ~200 rows */
-#define OMCI_MIB_ROWS_MAX 256
-#else
-#define OMCI_MIB_ROWS_MAX 72
-#endif
+#define OMCI_MIB_ROWS_MAX 512
 #endif
 
-/* The auto-instantiated T-CONT range in the static MIB. */
+/* The auto-instantiated T-CONT range: the default count, and the most a board
+ * may declare (its stock's ANI-G #2). */
 #define OMCI_TCONT_COUNT 12
+#define OMCI_TCONT_MAX 32
+/* Downstream priority-queue blocks a board may declare, 8 queues each. */
+#define OMCI_DSQ_MAX 8
+
+/* The capacity the OLT reads, as the board's stock declares it: T-CONTs (ME
+ * 262 rows, ANI-G #2), schedulers (ME 278 rows, ONU2-G #7), ONU2-G #6 and
+ * #9, and the priority queues: 8 per downstream port in dsq_port order, and 8
+ * per T-CONT upstream when usq is set. */
+struct omci_capacity {
+	u8	tcont_n;
+	u8	sched_n;
+	u16	onu2g_pq;
+	u16	gem_ports;
+	u16	dsq_port[OMCI_DSQ_MAX];
+	u8	dsq_n;
+	bool	usq;
+};
 
 /* The one VEIP every board's model carries. */
 #define OMCI_VEIP_INST 0x0601
@@ -200,8 +215,9 @@ struct omci_onu {
 	 * exists and therefore never provisions -- a whole subscriber port
 	 * missing, with every message on the wire succeeding. */
 	u16	rows_dropped;
-	u16	tcont_alloc[OMCI_TCONT_COUNT];
-	u16	tcont_alloc_written;	/* accepted attr-1 Set, not a boot default */
+	u16	tcont_alloc[OMCI_TCONT_MAX];
+	u32	tcont_alloc_written;	/* accepted attr-1 Set, not a boot default */
+	struct omci_capacity	cap;	/* survives omci_onu_reinit() */
 	/* ⚠ THE ADAPTIVE MDS WALK's state.  It lived in the Luna shell and was
 	 * DELETED by the 2026-08-27 responder deduplication (836b76be01) --
 	 * deleted, not moved -- so omci_mds_provisionable_test has been RED on
@@ -451,7 +467,8 @@ bool omci_onu_declare_slots(struct omci_onu *o, const struct omci_slot *slot,
 			    u8 n);
 
 /* The same out of a DT blob of big-endian 16-bit sextuples
- * <instance type ports priority-queues tcont-buffers schedulers>. */
+ * <instance type ports priority-queues tcont-buffers schedulers>; an empty
+ * blob declares a board with no circuit pack at all. */
 enum omci_uni_decl omci_onu_declare_slots_be(struct omci_onu *o,
 					     const void *be, int len,
 					     const char **why);
@@ -464,10 +481,30 @@ enum omci_uni_decl omci_onu_declare_ip_hosts_be(struct omci_onu *o,
 						const void *mac, int mac_len,
 						const char **why);
 
+/* Declare the board's capacity and queues: @cap is <T-CONTs ONU2-G-#6
+ * schedulers GEM-ports> as big-endian 16-bit cells, @dsq the downstream
+ * queue ports in block order.  Either may be absent (len < 0).  Refused, with
+ * nothing changed, on a count the model cannot hold or rows that do not fit. */
+enum omci_uni_decl omci_onu_declare_queues_be(struct omci_onu *o,
+					      const void *cap, int cap_len,
+					      const void *dsq, int dsq_len,
+					      const char **why);
+
 /* Declare the board's ME 53 PPTP POTS UNI instances (big-endian 16-bit list).
  * Refused, nothing changed, on an empty, oversized, zero or duplicate list. */
 enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
 					    int len, const char **why);
+
+/* How a shell hands the core one property of its board description: its
+ * bytes, or NULL with *len = -1 when the board does not declare it. */
+typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
+
+/* Declare everything of the board's equipment beside its UNIs: circuit-packs,
+ * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity and
+ * downstream-queue-ports.  Each is applied on its own; -> the first property
+ * refused (its reason in @why), or NULL when none was. */
+const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
+				       void *ctx, const char **why);
 
 /* The WAN netdev's MAC, which ME 134 reports; the shell keeps it current. */
 void omci_onu_set_wan_mac(struct omci_onu *o, const u8 mac[6]);

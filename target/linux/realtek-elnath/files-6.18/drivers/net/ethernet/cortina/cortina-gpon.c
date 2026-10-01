@@ -1756,12 +1756,21 @@ static void cg_data_armed(const struct cortina_gpon *cg,
 static u8 cg_uni_port[OMCI_UNI_MAX];
 static u8 cg_uni_port_n;
 
+static const void *cg_of_prop(void *np, const char *name, int *len)
+{
+	const void *p = of_get_property(np, name, len);
+
+	if (!p)
+		*len = -1;
+	return p;
+}
+
 static void cg_omci_declare_uni_panel(struct omci_onu *onu, struct device *dev)
 {
 	struct device_node *np = of_find_node_by_path("/omci-uni");
 	const void *pptp, *unig, *cap, *ports, *type;
 	int pptp_len = -1, type_len = -1, unig_len = -1, cap_len = -1, ports_len = -1;
-	const char *why = "";
+	const char *why = "", *what;
 	enum omci_uni_decl decl;
 
 	if (!np)
@@ -1799,6 +1808,10 @@ static void cg_omci_declare_uni_panel(struct omci_onu *onu, struct device *dev)
 				 ports_len, pptp_len / 2);
 		}
 	}
+	what = omci_onu_declare_equipment(onu, cg_of_prop, np, &why);
+	if (what)
+		dev_err(dev, "/omci-uni %s REFUSED: %s -- that part keeps its default\n",
+			what, why);
 	of_node_put(np);
 }
 

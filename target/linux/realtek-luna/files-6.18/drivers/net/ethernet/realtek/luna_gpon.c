@@ -8386,6 +8386,10 @@ static void __init rtl9602c_sc_ldo_init(void)
  * dev/MEASURED-luna_gpon.c.md sec 255. */
 static int laser_tx_dis_gpio = -1;	/* from DT; -1 = this board has none */
 static int laser_tx_pwr_gpio = -1;
+/* Board pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. A board
+ * that declares none keeps its bootloader's pads (the X100DG's I2C bus 1, 2026-10-01). */
+static u32 board_gpio_pads[6];
+static bool board_gpio_pads_set;
 
 static void gpon_optical_work_fn(struct work_struct *w)
 {
@@ -8445,6 +8449,8 @@ static void __init luna_laser_gpio_from_dt(void)
 		laser_tx_dis_gpio = (int)v;
 	if (!of_property_read_u32(np, "realtek,tx-power-gpio", &v))
 		laser_tx_pwr_gpio = (int)v;
+	board_gpio_pads_set = !of_property_read_u32_array(np, "realtek,gpio-pads",
+							   board_gpio_pads, 6);
 	if (!of_property_read_u32(np, "realtek,i2c-bus", &v)) {
 		if (v <= 1)
 			bosa_i2c_bus = v;
@@ -8452,8 +8458,9 @@ static void __init luna_laser_gpio_from_dt(void)
 			pr_err("luna-gpon: /pon-optics realtek,i2c-bus=%u: this die has buses 0 and 1 -- keeping 0\n", v);
 	}
 	of_node_put(np);
-	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d i2c-bus=%u\n",
-		laser_tx_dis_gpio, laser_tx_pwr_gpio, bosa_i2c_bus);
+	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d i2c-bus=%u gpio-pads=%s\n",
+		laser_tx_dis_gpio, laser_tx_pwr_gpio, bosa_i2c_bus,
+		board_gpio_pads_set ? "declared" : "none (bootloader's kept)");
 }
 
 /* Set level before enabling output to avoid a TX_DISABLE glitch. */
@@ -8710,17 +8717,17 @@ static int __init rtl9602c_gpon_init(void)
 
 	/* The GPIO pad routing is Board C's, and its register MOVED. ...
 	 * dev/MEASURED-luna_gpon.c.md sec 259. */
-	if (!is_9607c && !is_9603cvd) {
-		sw_wr(SOC_IO_GPIO_EN, SOC_IO_GPIO_EN_W0);
-		sw_wr(SOC_IO_GPIO_EN + 4, SOC_IO_GPIO_EN_W1);
+	if (board_gpio_pads_set && SOC_IO_GPIO_EN) {
+		sw_wr(SOC_IO_GPIO_EN, board_gpio_pads[0]);
+		sw_wr(SOC_IO_GPIO_EN + 4, board_gpio_pads[1]);
 		{
 			void __iomem *gpio = ioremap(GPIO_PHYS_BASE, GPIO_REG_SIZE);
 
 			if (gpio) {
-				iowrite32(GPIO_GOLD_DIR_ABCD,  gpio + GPIO_DIR_ABCD);
-				iowrite32(GPIO_GOLD_DATA_ABCD, gpio + GPIO_DATA_ABCD);
-				iowrite32(GPIO_GOLD_DIR_EFGH,  gpio + GPIO_DIR_EFGH);
-				iowrite32(GPIO_GOLD_DATA_EFGH, gpio + GPIO_DATA_EFGH);
+				iowrite32(board_gpio_pads[2], gpio + GPIO_DIR_ABCD);
+				iowrite32(board_gpio_pads[3], gpio + GPIO_DATA_ABCD);
+				iowrite32(board_gpio_pads[4], gpio + GPIO_DIR_EFGH);
+				iowrite32(board_gpio_pads[5], gpio + GPIO_DATA_EFGH);
 				(void)ioread32(gpio + GPIO_DIR_ABCD);	/* post writes */
 				iounmap(gpio);
 			}
@@ -8745,7 +8752,7 @@ static int __init rtl9602c_gpon_init(void)
 		pr_info("luna-gpon: GPIO optical-SD pad recipe skipped (%s: %s)\n",
 			swc->chip,
 			is_9603cvd ? "recipe exists but gpio_pad_9603cvd=0"
-				   : "not Board C's pinout");
+				   : "this board declares no realtek,gpio-pads");
 	}
 
 	/* The panel-LED block is Board C's and is gated off on the ...

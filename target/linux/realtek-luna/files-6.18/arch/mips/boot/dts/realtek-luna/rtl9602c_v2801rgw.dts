@@ -40,6 +40,13 @@
 	/delete-node/ ethernet@18012000;
 	/delete-node/ flash@14000000;
 	/delete-node/ watchdog@18003260;
+
+	/* The X111W's pad routing, which this board has run with so far:
+	 * IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
+	pon-optics {
+		realtek,gpio-pads = <0x40202006 0x00000819 0x40002006 0xdbff1246
+				     0x00000819 0x000037e5>;
+	};
 };
 
 /* First diagnostic boot: this unit shares GPON2's splitter with two boards

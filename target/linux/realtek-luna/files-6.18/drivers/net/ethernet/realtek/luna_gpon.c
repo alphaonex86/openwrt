@@ -238,7 +238,7 @@ static const struct kernel_param_ops onu_password_ops = {
 	.get = param_get_charp,
 };
 module_param_cb(onu_password, &onu_password_ops, &onu_password, 0644);
-MODULE_PARM_DESC(onu_password, "G.984.3 PLOAM Password: up to 10 printable characters, sent zero-padded (default: stock's 1234567890)");
+MODULE_PARM_DESC(onu_password, "G.984.3 PLOAM Password: up to 10 printable characters, or the 20 hex digits a vendor MIB may store, sent zero-padded (default: stock's 1234567890)");
 /* Invalidate unused alloc-CAM entries with the stock CLEAN operation before
  * management activation. Keep the existing parameter name for compatibility;
  * Alloc-ID 0xfff is assignable and cannot serve as an invalid entry value. */

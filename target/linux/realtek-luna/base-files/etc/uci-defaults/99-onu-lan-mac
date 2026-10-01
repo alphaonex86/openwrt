@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pin the LAN bridge to THIS UNIT's own MAC, from the boot parameter.
+# Pin the LAN bridge to THIS UNIT's own MAC (onu-identity.sh unit_mac).
 #
 # ★★★ WHY. MEASURED 2026-08-25 on the G24W: the driver announces
 #   "MAC 5c:19:23:b3:ce:90 taken from the `mac=` boot parameter" at probe --
@@ -11,18 +11,18 @@
 #   something else, and the suite refused the whole campaign with
 #   "board identity: WRONG BOARD".
 #
-# ★ THE VALUE IS NOT SPELLED HERE. It comes from the kernel command line,
-#   which is where this product's per-unit MAC is delivered, and else from the
-#   unit's own vendor config partition: a unit whose boot environment lost its
-#   parameters (the vendor firmware rewrote it, 2026-09-30) keeps its identity.
-#   No board fact in this file, so it is correct for every board on this target.
+# ★ THE VALUE IS NOT SPELLED HERE. It comes from the unit's own vendor config
+#   partition, else from a flasher's boot parameter: a unit whose boot
+#   environment lost its parameters (the vendor firmware rewrote it,
+#   2026-09-30) keeps its identity. No board fact in this file, so it is
+#   correct for every board on this target.
 #
 # ★ IT RUNS LAST (99-) DELIBERATELY: the address is written by something that
 #   runs after the early defaults, so pinning it early would be overwritten.
 #
-# ★ AND IT DOES NOTHING WHEN IT HAS NOTHING. No `mac=` parameter, or one that
-#   is not a valid unicast address, means we do not know this unit's MAC --
-#   and inventing one is exactly the failure being repaired. Absent is absent.
+# ★ AND IT DOES NOTHING WHEN IT HAS NOTHING. Neither source holding a valid
+#   unicast address means we do not know this unit's MAC -- and inventing one
+#   is exactly the failure being repaired. Absent is absent.
 
 # ⚠ THE MODULE NAME IS NOT THE SAME ON EVERY BOARD OF THIS TARGET, and this
 #   line carried ONE board's spelling for three days.  `rtl960x_eth` is the
@@ -35,18 +35,18 @@
 #   is the same defect twice.
 #
 # ★ SO THE MODULE IS MATCHED, NOT SPELLED: any `<module>.mac=` on the command
-#   line.  The VALUE still comes from the kernel command line and no address is
-#   spelled here, so this stays correct for every board on this target -- which
-#   is the property the original comment claims and this now actually has.
+#   line (onu-identity.sh cmdline_mac, shared with gpon_provision and the WiFi
+#   defaults).
+#
+# ★★ THE ORDER IS unit_mac()'s: the factory partition FIRST, then the boot
+#   parameter (operator, 2026-10-01). This script used to take the boot
+#   parameter first while gpon_provision took the partition first; it runs
+#   after gpon_provision, so a pin that differed from the MIB won (MEASURED
+#   2026-10-01 on the G24W: eth0 5c:19:23:b3:ce:90 from the MIB, br-lan and the
+#   LAN 02:00:00:00:13:13 from the boot parameter).
 . /lib/functions/onu-identity.sh
-cmd=$(sed -n 's/.*[ \t][A-Za-z0-9_]\{1,\}\.mac=\([0-9A-Fa-f:]\{17\}\).*/\1/p' /proc/cmdline | tr 'A-F' 'a-f')
-if unit_mac_valid "$cmd"; then
-	lc=$cmd src="the mac= boot parameter"
-else
-	fac=$(/usr/sbin/rtk_factory -p config mac 2>/dev/null | tr 'A-F' 'a-f')
-	unit_mac_valid "$fac" || exit 0
-	lc=$fac src="this unit's factory config partition"
-fi
+unit_mac || exit 0
+lc=$UNIT_MAC src=$UNIT_MAC_SRC
 
 for i in $(seq 0 7); do
 	name=$(uci -q get "network.@device[$i].name") || break

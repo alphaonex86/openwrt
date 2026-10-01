@@ -129,6 +129,18 @@
 		ethernet-uni-types = /bits/ 8 <24 24 24 47>;
 		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0401 0x0601 0x0801>;
 		uni-g-management-capability = /bits/ 8 <1 1 1 1 0 1>;
+		/* What else the OLT counts, from this board's own stock MIB
+		 * (stock_gpon_oracle 2026-10-01, omci_panel.py). */
+		circuit-packs = /bits/ 16 <
+			0x0101  24 3  24  0  0
+			0x0104  47 1   8  0  0
+			0x0106  48 1   8  0  0
+			0x0108  40 1   0  0  0
+			0x0180 248 1 127 16 16>;
+		ip-host-instances = /bits/ 16 <0x0000 0x0001 0x0002 0x0003 0x0004 0x0005>;
+		ip-host-wan-mac = /bits/ 8 <1 1 1 1 1 1>;
+		onu-capacity = /bits/ 16 <16 127 16 127>;
+		downstream-queue-ports = /bits/ 16 <0x0401 0x0101 0x0102 0x0103 0x0601>;
 	};
 
 	pon-optics {

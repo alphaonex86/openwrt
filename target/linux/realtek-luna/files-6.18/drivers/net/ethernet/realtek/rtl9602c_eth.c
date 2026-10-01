@@ -339,6 +339,7 @@ struct rtl9602c_eth {
 	struct sk_buff	*rx_skb[RX_RING_SIZE];
 	dma_addr_t	rx_buf_dma[RX_RING_SIZE];
 	unsigned int	rx_head;
+	unsigned int	rx_n;		/* RX ring entries in use, <= RX_RING_SIZE (DT) */
 
 	struct tx_desc	*tx_ring;
 	dma_addr_t	tx_ring_dma;
@@ -808,7 +809,7 @@ static int rtl9602c_eth_set_mac_address(struct net_device *ndev, void *p)
 static int rtl9602c_eth_refill(struct rtl9602c_eth *ep, unsigned int idx)
 {
 	return luna_rx_refill(ep->ndev, ep->dev, ep->rx_ring, ep->rx_skb,
-				 ep->rx_buf_dma, idx, RX_RING_SIZE, RX_BUF_SIZE);
+				 ep->rx_buf_dma, idx, ep->rx_n, RX_BUF_SIZE);
 }
 
 /* ===== M2: G.988 OMCI responder + upstream OMCC TX ...
@@ -1305,8 +1306,8 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 		fresh = luna_rx_alloc(ndev, ep->dev, RX_BUF_SIZE, &fresh_dma);
 		if (!fresh) {
 			ndev->stats.rx_dropped++;
-			luna_rx_rearm(ep->rx_ring, i, RX_RING_SIZE, RX_BUF_SIZE);
-			ep->rx_head = (i + 1) % RX_RING_SIZE;
+			luna_rx_rearm(ep->rx_ring, i, ep->rx_n, RX_BUF_SIZE);
+			ep->rx_head = (i + 1) % ep->rx_n;
 			rx_done++;
 			continue;
 		}
@@ -1404,8 +1405,8 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 rx_rearm:
 		/* hand the slot back to HW with the buffer secured above */
 		luna_rx_arm(ep->rx_ring, ep->rx_skb, ep->rx_buf_dma, i,
-			    RX_RING_SIZE, RX_BUF_SIZE, fresh, fresh_dma);
-		ep->rx_head = (i + 1) % RX_RING_SIZE;
+			    ep->rx_n, RX_BUF_SIZE, fresh, fresh_dma);
+		ep->rx_head = (i + 1) % ep->rx_n;
 		rx_done++;
 	}
 	return rx_done;
@@ -1537,7 +1538,7 @@ static void rtl9602c_eth_poll(struct timer_list *t)
 	unsigned long flags;
 
 	ep->dbg_poll++;
-	rtl9602c_eth_rx(ep, RX_RING_SIZE, false);	/* timer callback, NOT napi->poll */
+	rtl9602c_eth_rx(ep, ep->rx_n, false);	/* timer callback, NOT napi->poll */
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);	/* under tx_lock (races the OMCI inject's locked reclaim on shared ring 0) */
 	rtl9602c_eth_omci_reclaim(ep);
@@ -1551,7 +1552,7 @@ static int rtl9602c_eth_alloc_rings(struct rtl9602c_eth *ep)
 	unsigned int i;
 
 	ep->rx_ring = dma_alloc_coherent(ep->dev,
-			RX_RING_SIZE * sizeof(struct rx_desc),
+			ep->rx_n * sizeof(struct rx_desc),
 			&ep->rx_ring_dma, GFP_KERNEL);
 	ep->tx_ring = dma_alloc_coherent(ep->dev,
 			TX_RING_SIZE * sizeof(struct tx_desc),
@@ -1589,7 +1590,7 @@ static int rtl9602c_eth_alloc_rings(struct rtl9602c_eth *ep)
 		ep->dummy_ring[i].opts1 = (i == DUMMY_RING_SIZE - 1) ? D_EOR : 0;
 		ep->dummy_ring[i].opts2 = 0;
 	}
-	for (i = 0; i < RX_RING_SIZE; i++) {
+	for (i = 0; i < ep->rx_n; i++) {
 		if (rtl9602c_eth_refill(ep, i))
 			return -ENOMEM;
 	}
@@ -1600,7 +1601,7 @@ static void rtl9602c_eth_free_rings(struct rtl9602c_eth *ep)
 {
 	unsigned int i;
 
-	for (i = 0; i < RX_RING_SIZE; i++) {
+	for (i = 0; i < ep->rx_n; i++) {
 		if (ep->rx_skb[i]) {
 			dma_unmap_single(ep->dev, ep->rx_buf_dma[i],
 					 RX_BUF_SIZE, DMA_FROM_DEVICE);
@@ -1625,7 +1626,7 @@ static void rtl9602c_eth_free_rings(struct rtl9602c_eth *ep)
 		}
 	}
 	if (ep->rx_ring)
-		dma_free_coherent(ep->dev, RX_RING_SIZE * sizeof(struct rx_desc),
+		dma_free_coherent(ep->dev, ep->rx_n * sizeof(struct rx_desc),
 				  ep->rx_ring, ep->rx_ring_dma);
 	if (ep->tx_ring)
 		dma_free_coherent(ep->dev, TX_RING_SIZE * sizeof(struct tx_desc),
@@ -1732,9 +1733,9 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		iowrite16(0, ep->base + R_TxCDO(k));
 	}
 	ep_wr(ep, R_RxFDP, ep->rx_ring_dma | DMA_BUS_WINDOW);
-	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
+	desnum = luna_gmac_rxdesnum_pack(ep->rx_n, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(RX_RING_SIZE));
+	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rx_n));
 	for (k = 0; k < 7; k++)		/* every RX class -> ring 0 */
 		ep_wr(ep, R_RRING_ROUTING1 + k * 4, 0);
 
@@ -1838,9 +1839,9 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 		ep->tx_ring[i].opts1 = (i == TX_RING_SIZE - 1) ? D_EOR : 0;
 	for (i = 0; i < OTX_RING_SIZE; i++)
 		ep->otx_ring[i].opts1 = (i == OTX_RING_SIZE - 1) ? D_EOR : 0;
-	for (i = 0; i < RX_RING_SIZE; i++)
+	for (i = 0; i < ep->rx_n; i++)
 		ep->rx_ring[i].opts1 = D_OWN | RX_BUF_SIZE |
-				       ((i == RX_RING_SIZE - 1) ? D_EOR : 0);
+				       ((i == ep->rx_n - 1) ? D_EOR : 0);
 	ep->rx_head = 0;
 	wmb();				/* ring state before the engine restart */
 	rtl9602c_hw_program(ep);
@@ -2065,9 +2066,9 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 	}
 	ep_wr(ep, R_RxFDP, ep->rx_ring_dma | DMA_BUS_WINDOW);
 	/* RX ring0 size + flow-control thresholds (GMAC field packing). */
-	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
+	desnum = luna_gmac_rxdesnum_pack(ep->rx_n, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
-	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(RX_RING_SIZE));
+	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rx_n));
 	/* (Reverted: a prior experiment pointed rings 1-5 at ring 0's ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 101. */
 	ep_wr(ep, R_RCR, 0x0000000E);
@@ -2342,7 +2343,7 @@ static int rtl9602c_ethdump_show(struct seq_file *m, void *v)
 		return 0;
 	}
 
-	for (i = 0; i < RX_RING_SIZE; i++) {
+	for (i = 0; i < ep->rx_n; i++) {
 		if (ep->rx_ring[i].opts1 & D_OWN)
 			own++;
 		else
@@ -2664,6 +2665,16 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ep->base))
 		return PTR_ERR(ep->base);
+
+	/* A board may run a shorter RX ring than the family's stock 1024: the
+	 * 32 MB X100DG's own stock runs 256, and 1024 buffers do not fit it. */
+	ep->rx_n = RX_RING_SIZE;
+	if (!of_property_read_u32(dev->of_node, "realtek,rx-ring-entries", &ep->rx_n) &&
+	    (ep->rx_n < 64 || ep->rx_n > RX_RING_SIZE)) {
+		dev_err(dev, "realtek,rx-ring-entries %u is outside 64..%u\n", ep->rx_n,
+			RX_RING_SIZE);
+		return -EINVAL;
+	}
 
 	/* Switch core (best-effort; minimal L2 flood enabled at open). */
 	ep->swm = &rtl9602c_sw_map;

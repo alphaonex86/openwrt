@@ -4559,6 +4559,11 @@ static int pidump_proc_show(struct seq_file *s, void *v)
 /* Switch-core + GMAC + SerDes + GTC dump (the GMAC0->switch->US-NIC handoff path that is
  * OUTSIDE PON-IP space). Same "0xADDR VAL" format as stock_dump_good.txt for direct diff.
  * 0x1bxxxxxx regs come via swcore_base (sw_rd); GMAC 0x18012/0x18013 via a local ioremap. */
+static bool swdump_is_pcie(u32 phys)
+{
+	return phys >= 0x18b00000u && phys < 0x18c00000u;
+}
+
 static int swdump_proc_show(struct seq_file *s, void *v)
 {
 	static const u32 sw[][2] = {		/* offsets into swcore_base (phys 0x1b000000) */
@@ -4713,12 +4718,16 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 	};
 	const u32 (*xsw)[2] = NULL, (*xgt)[2] = NULL;
 	int nxsw = 0, nxgt = 0;
+	bool no_pcie;
 	u32 off, a, val;
 	int r;
 
 	/* The per-die extras, selected by the SAME pointer every other per-chip
 	 * fact in this driver comes from.  Any other die keeps NULL/0 and dumps
 	 * exactly what it dumped before. */
+	/* The RTL9601D has no PCIe host block: a read of 0x18b00720 hangs its bus
+	 * until the watchdog resets it (measured on its stock, 2026-10-01). */
+	no_pcie = of_machine_is_compatible("realtek,rtl9601d");
 	if (swc == &gpon_swc_9603cvd) {
 		xsw = xsw9603;
 		nxsw = (int)ARRAY_SIZE(xsw9603);
@@ -4732,7 +4741,8 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		seq_printf(s, "#cover 0x%08x 0x%08x\n",
 			   0x1b000000u + sw[r][0], 0x1b000000u + sw[r][1]);
 	for (r = 0; r < (int)ARRAY_SIZE(gm); r++)
-		seq_printf(s, "#cover 0x%08x 0x%08x\n", gm[r][0], gm[r][1]);
+		if (!(no_pcie && swdump_is_pcie(gm[r][0])))
+			seq_printf(s, "#cover 0x%08x 0x%08x\n", gm[r][0], gm[r][1]);
 	for (r = 0; r < (int)ARRAY_SIZE(gt); r++)
 		seq_printf(s, "#cover 0x%08x 0x%08x\n",
 			   0x1b700000u + gt[r][0], 0x1b700000u + gt[r][1]);
@@ -4771,8 +4781,11 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 				seq_printf(s, "0x%08x %08x\n", 0x1b000000u + off, val);
 		}
 	for (r = 0; r < (int)ARRAY_SIZE(gm); r++) {
-		void __iomem *b = ioremap(gm[r][0], gm[r][1] - gm[r][0] + 4);
+		void __iomem *b;
 
+		if (no_pcie && swdump_is_pcie(gm[r][0]))
+			continue;
+		b = ioremap(gm[r][0], gm[r][1] - gm[r][0] + 4);
 		if (!b)
 			continue;
 		for (a = gm[r][0]; a <= gm[r][1]; a += 4) {

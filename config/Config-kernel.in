@@ -889,6 +889,13 @@ config KERNEL_JFFS2_LZMA
 	  whether or not JFFS2 is mounted; the vendor config partition read so
 	  far (X100DG mtd3) holds zlib and uncompressed nodes, never LZMA.
 
+config KERNEL_SLUB_TINY
+	bool "SLUB for a minimal memory footprint"
+	depends on TARGET_realtek_luna && !KERNEL_SLUB_DEBUG
+	help
+	  For 16-32 MB boards: no per-CPU partial lists and no slab sysfs
+	  (/sys/kernel/slab was 3764 of the X100DG's 7419 kernfs nodes).
+
 config KERNEL_MTD_LUNA_NOR_WRITE
 	bool "Luna SPI-NOR erase/program (off = read-only flash)"
 	depends on TARGET_realtek_luna

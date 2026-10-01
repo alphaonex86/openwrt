@@ -148,7 +148,7 @@ stage_bosa_cal() {
 # fallback was applied); non-zero = TRANSIENT, ask again later.
 try_set() {
 	local mnt="/tmp/.gpon_identity"
-	local sn="" mac="" pwd="" src="" mounted=0 cal=1 ident="" key name val
+	local sn="" mac="" pwd="" pwd_seen=0 upwd="" src="" mounted=0 cal=1 ident="" key name val
 
 	[ -e "$GPON_PROC" ] || {
 		say "no $GPON_PROC - the cortina-gpon driver has not probed yet; will retry" err
@@ -176,7 +176,6 @@ try_set() {
 		if ! xml=$(sed -n \
 			-e 's/.*Name="GPON_SN"[^V]*Value="\([^"]\{12\}\)".*/SN=\1/p' \
 			-e 's/.*Name="ELAN_MAC_ADDR"[^V]*Value="\([0-9a-fA-F]\{12\}\)".*/MAC=\1/p' \
-			-e 's/.*Name="GPON_PLOAM_PASSWD"[^V]*Value="\([^"]\{1,10\}\)".*/PWD=\1/p' \
 			"$mnt/config_hs.xml" 2>/dev/null); then
 			umount "$mnt"
 			rmdir "$mnt" 2>/dev/null
@@ -185,7 +184,10 @@ try_set() {
 		fi
 		sn=$(printf '%s\n' "$xml" | sed -n 's/^SN=//p' | head -n1)
 		mac=$(printf '%s\n' "$xml" | sed -n 's/^MAC=//p' | head -n1)
-		pwd=$(printf '%s\n' "$xml" | sed -n 's/^PWD=//p' | head -n1)
+		# The password key lives in either file (the X400AXF keeps it in config.xml).
+		pwd=$(sed -n 's/.*Name="GPON_PLOAM_PASSWD"[^V]*Value="\([^"]\{0,10\}\)".*/PWD=\1/p' \
+			"$mnt/config_hs.xml" "$mnt/config.xml" 2>/dev/null | head -n1)
+		case "$pwd" in PWD=*) pwd_seen=1; pwd=${pwd#PWD=} ;; *) pwd= ;; esac
 		# A key missing from both files keeps the driver's build default.
 		for key in $OMCI_ID_KEYS; do
 			val=$(sed -n "s/.*Name=\"${key#*:}\"[^V]*Value=\"\([^\"]*\)\".*/\1/p" \
@@ -239,11 +241,19 @@ try_set() {
 		return 1
 	}
 
-	# The PLOAM password stock sends (LuCI/UCI first, else this unit's MIB; with neither the
-	# driver keeps stock's default), before the serial whose write starts ranging.
-	pwd=$(uci -q get gpon.identity.ploam_passwd || echo "$pwd")
-	[ -z "$pwd" ] || echo "password $pwd" > "$GPON_PROC" 2>/dev/null ||
-		say "the driver refused PLOAM password (1..10 printable characters)" err
+	# The PLOAM password stock sends, before the serial whose write starts ranging:
+	# LuCI/UCI first, else this unit's MIB, where an EMPTY value is sent as ten zero
+	# octets as stock does; only a MIB without the key keeps the driver's default.
+	if upwd=$(uci -q get gpon.identity.ploam_passwd) && [ -n "$upwd" ]; then
+		pwd=$upwd
+		pwd_seen=1
+	fi
+	if [ "$pwd_seen" = 0 ]; then
+		say "this unit's MIB carries no GPON_PLOAM_PASSWD - the driver keeps its default"
+	else
+		echo "password $pwd" > "$GPON_PROC" 2>/dev/null ||
+			say "the driver refused PLOAM password (0..10 printable characters)" err
+	fi
 
 	# The OMCI identity, LuCI/UCI first, also before the serial; the software
 	# version is ours (owrt_version), never the vendor's MIB.

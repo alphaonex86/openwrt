@@ -4,7 +4,7 @@
 #include "rtl9602c.dtsi"
 
 / {
-	model = "VSOL V2801RGW (RTL9602C, console bring-up)";
+	model = "VSOL V2801RGW (RTL9602C, LAN bring-up)";
 	compatible = "vsol,v2801rgw", "realtek,rtl9602c";
 
 	aliases {
@@ -37,7 +37,6 @@
 		};
 	};
 
-	/delete-node/ ethernet@18012000;
 	/delete-node/ flash@14000000;
 	/delete-node/ watchdog@18003260;
 

@@ -99,18 +99,19 @@
 		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0202 0x0602>;
 		uni-g-management-capability = /bits/ 8 <1 1 2 0>;
 		/* The equipment slots stock's ME 5/6 report, from which the OLT
-		 * counts 2 Ethernet and 1 POTS port and 24/128 priority queues:
+		 * counts 2 Ethernet and 1 POTS port and 24/96 priority queues:
 		 * instance, plug-in type, ports, priority queues, T-CONT
-		 * buffers, schedulers.  The PON pack's 128/16/16 is the field
-		 * X111W's stock M225-260618 on a production OLT (2026-10-02);
-		 * the lab unit's M225-260515 reported 96/12/12. */
+		 * buffers, schedulers.  The PON pack's counts are the board
+		 * default; a unit's own stock counts arrive in
+		 * luna_gpon.onu_capacity (lab M225-260515 12/96/12, field
+		 * M225-260618 16/128/16). */
 		circuit-packs = /bits/ 16 <
 			0x0101  47 1  8  0  0
 			0x0102  32 1  0  0  0
 			0x0104  24 1  8  0  0
 			0x0106  48 1  8  0  0
 			0x010b  38 1  0  0  0
-			0x0180 248 1 128 16 16>;
+			0x0180 248 1 96 12 12>;
 		/* ME 134 IP host config data, as stock reports it: three
 		 * instances, the first two carrying the WAN MAC. */
 		ip-host-instances = /bits/ 16 <0x0000 0x0001 0x0002>;
@@ -119,13 +120,20 @@
 		pots-uni-instances = /bits/ 16 <0x0201>;
 		/* ANI-G #2 and ONU2-G #6/#7/#9 as stock declares them, and its
 		 * downstream queue blocks in order. */
-		onu-capacity = /bits/ 16 <16 128 16 64>;
+		onu-capacity = /bits/ 16 <12 96 12 64>;
 		downstream-queue-ports = /bits/ 16 <0x0101 0x0102 0x0601>;
-		/* Further single MEs stock's MIB upload reports, <class instance>:
-		 * PPTP LCT UNI, ONU power shedding, VoIP config data, VoIP line
-		 * status of the POTS port, TR-069 server of the VEIP (field X111W,
-		 * production OLT, 2026-10-02). */
-		extra-me-instances = /bits/ 16 <83 0  133 0  138 0  141 0x0201  340 0x0601>;
+		/* Further MEs stock's MIB upload reports, <class instance> (field
+		 * X111W, production OLT, 2026-10-02): PPTP LCT UNI, ONU power
+		 * shedding, VoIP config data, VoIP line status of the POTS port,
+		 * TR-069 server of the VEIP; then the vendor MEs: extended ONU-G,
+		 * WLAN profile, loop detection per Ethernet UNI, 350, 373, SNTP,
+		 * ONU support, FiberHome ONU, WLAN common and security per SSID,
+		 * extended ONU-G, MAC per PPTP, capability declaration. */
+		extra-me-instances = /bits/ 16 <83 0  133 0  138 0  141 0x0201  340 0x0601
+			247 0  252 0  253 0x0101  253 0x0102  350 0  373 0  65294 0
+			65352 0  65363 0  65385 0  65385 1  65385 2  65385 3
+			65386 0  65386 1  65386 2  65386 3  65408 0
+			65417 0  65417 1  65417 2  65427 0xff80>;
 	};
 };
 

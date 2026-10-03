@@ -6080,6 +6080,8 @@ static struct {
 /* the provisioned OMCI identity, under luna_omci_lock (see onu_omci_id) */
 static struct omci_identity luna_omci_id;
 static bool luna_omci_id_set;
+/* this unit's own stock T-CONT/queue/scheduler counts (see onu_capacity) */
+static char *onu_capacity = "";
 static bool luna_data_admitted;
 static struct {
 	struct gpon_data_armed armed;
@@ -6381,6 +6383,17 @@ static void luna_omci_declare_uni_panel(struct omci_onu *onu)
 	of_node_put(np);
 }
 
+/* The unit's own counts over the board's, under luna_omci_lock. */
+static void luna_omci_unit_capacity(struct omci_onu *onu)
+{
+	const char *why = "";
+
+	if (omci_onu_declare_unit_capacity(onu, onu_capacity, &why) ==
+	    OMCI_UNI_DECL_BAD)
+		pr_err("luna-gpon: onu_capacity '%s' REFUSED: %s -- the board's counts stay\n",
+		       onu_capacity, why);
+}
+
 /* The WAN MAC as last set by the NIC, so a model attached later starts
  * with it. */
 static u8 luna_omci_wan_mac[ETH_ALEN];
@@ -6420,6 +6433,7 @@ int luna_omci_attach(struct omci_onu *onu, void *cookie, u8 seed,
 		if (luna_omci_wan_mac_set)
 			omci_onu_set_wan_mac(onu, luna_omci_wan_mac);
 		luna_omci_declare_uni_panel(onu);
+		luna_omci_unit_capacity(onu);
 		luna_omci.onu = onu;
 		luna_omci.cookie = cookie;
 		luna_omci.tx = tx;
@@ -6939,6 +6953,34 @@ LUNA_OMCI_ID_PARAM(model, OMCI_ID_EQUIPMENT);
 LUNA_OMCI_ID_PARAM(product_code, OMCI_ID_PRODUCT_CODE);
 LUNA_OMCI_ID_PARAM(loid, OMCI_ID_LOID);
 LUNA_OMCI_ID_PARAM(loid_passwd, OMCI_ID_LOID_PASSWD);
+
+/* Two units of one board may run stocks that announce different counts, so
+ * the unit's own arrives here, pinned beside its serial in its boot
+ * arguments: luna_gpon.onu_capacity=<T-CONTs>,<queues>,<schedulers>. */
+static int onu_capacity_param_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned long flags;
+	const char *why;
+	int ret;
+
+	if (omci_onu_declare_unit_capacity(NULL, val, &why) == OMCI_UNI_DECL_BAD)
+		return -EINVAL;
+	ret = param_set_charp(val, kp);
+	if (ret)
+		return ret;
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (luna_omci.onu)
+		luna_omci_unit_capacity(luna_omci.onu);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	return 0;
+}
+static const struct kernel_param_ops onu_capacity_ops = {
+	.set = onu_capacity_param_set,
+	.get = param_get_charp,
+};
+module_param_cb(onu_capacity, &onu_capacity_ops, &onu_capacity, 0644);
+MODULE_PARM_DESC(onu_capacity, "this unit's stock T-CONTs,priority queues,schedulers "
+		 "(unset = the board's onu-capacity)");
 
 
 /* Bind an OLT-assigned Alloc-ID to a T-CONT in the GTC alloc ...

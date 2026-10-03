@@ -165,17 +165,35 @@ enum omci_attr_src {
 	OMCI_SRC_ANIG_THRESHOLD,
 	OMCI_SRC_TEXT,		/* v = enum omci_text */
 	OMCI_SRC_OLT_G,		/* v = offset into o->olt_g, OLT-writable */
+	OMCI_SRC_INST0,		/* one octet: v >> 8 on instance 0, else v & 0xff */
 };
 
 /* Constant octet strings stock serves, zero-padded. */
 enum omci_text {
 	OMCI_TEXT_SPACES,	/* an equipment ID nobody set: 20 spaces */
 	OMCI_TEXT_ZERO_DIGIT,	/* a version or address nobody set: "0" */
+	/* the vendor MEs' own defaults, as stock's plugins and upload hold them */
+	OMCI_TEXT_TWO,		/* ME 65363 #2 configuration version */
+	OMCI_TEXT_WEP_KEY,	/* ME 65386 #6..#9: a WEP key nobody set */
+	OMCI_TEXT_EXT_ONU_G7,	/* ME 65408 #7  (mib_ExtendedOnuG) */
+	OMCI_TEXT_EXT_ONU_G9,	/* ME 65408 #9  region */
+	OMCI_TEXT_EXT_ONU_G10,	/* ME 65408 #10 a masked password */
+	OMCI_TEXT_EXT_ONU_G12,	/* ME 65408 #12 */
+	OMCI_TEXT_HW_CAP,	/* ME 65427 #2 capability declaration */
+	OMCI_TEXT_P2Q_CAP,	/* ME 350 #14 */
 };
 
-static const u8 omci_text[][25] = {
+static const u8 omci_text[][26] = {
 	[OMCI_TEXT_SPACES]	= "                    ",
 	[OMCI_TEXT_ZERO_DIGIT]	= "0",
+	[OMCI_TEXT_TWO]		= "2",
+	[OMCI_TEXT_WEP_KEY]	= "0000000000",
+	[OMCI_TEXT_EXT_ONU_G7]	= "12D7",
+	[OMCI_TEXT_EXT_ONU_G9]	= "CHINA",
+	[OMCI_TEXT_EXT_ONU_G10]	= "****************",
+	[OMCI_TEXT_EXT_ONU_G12]	= "EeAa",
+	[OMCI_TEXT_HW_CAP]	= "RSQQQSQSQSSSSQQS",
+	[OMCI_TEXT_P2Q_CAP]	= "\x01\x08",
 };
 
 /* Where an OMCI_SRC_TBL write goes. */
@@ -216,6 +234,7 @@ enum omci_attr_dyn {
 	OMCI_DYN_ONU2G_PQ,	/* ONU2-G #6 */
 	OMCI_DYN_SCHED_N,	/* ONU2-G #7 */
 	OMCI_DYN_GEM_N,		/* ONU2-G #9 */
+	OMCI_DYN_WAN_MAC,	/* the WAN netdev's MAC, could-not-ask until set */
 };
 
 /* One modelled attribute. Rows of the same class are ...
@@ -267,6 +286,11 @@ struct omci_attr {
 	{ (cls), (v), (n), (sz), (src), (acc) | OMCI_ACCESS_HIDDEN }
 #define A_TXT(cls, n, sz, which)	{ (cls), (which), (n), (sz), OMCI_SRC_TEXT, 0 }
 #define A_OLTG(n, off, sz)	{ OMCI_ME_OLT_G, (off), (n), (sz), OMCI_SRC_OLT_G, 3 }
+#define A_INST0(cls, n, first, rest) \
+	{ (cls), ((first) << 8) | (rest), (n), 1, OMCI_SRC_INST0, 0 }
+/* @sz octets of a unit identity member from its start */
+#define A_IDN(cls, n, sz, member)	AT(cls, n, sz, OMCI_SRC_ID,	\
+					   offsetof(struct omci_identity, member))
 
 static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 2 ONU-Data (inst 0) ---- */
@@ -686,6 +710,156 @@ static const struct omci_attr omci_attrs[] = {
 	A_ZERO(329, 3, 25),			/* #3  Interdomain name */
 	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
 	A_C(329, 5,  2, 0x0000),		/* #5  IANA assigned port */
+
+	/* ==== VENDOR MEs a board declares (extra-me-instances), as the field
+	 * X111W's stock uploads them (production OLT, 2026-10-02).  Widths are
+	 * its own plugins' (OMCI-simulate/me_attr_table.py on M225-260618; ME
+	 * 65294 from the G24W and X100DG stocks, whose X111W plugin has no
+	 * table to decode); values are the plugins' defaults.  The subscriber's
+	 * WiFi names and keys are NOT served here: zeros. ==== */
+	/* ---- ME 247 extended ONU-G (mib_ExtendedOnuGZTE) ---- */
+	A_C(247, 1, 2, 0),
+	A_C(247, 2, 2, 0),
+	A_IDN(247, 3, 14, equipment_id),	/* #3  Version: the model name */
+	A_C(247, 4, 2, 0),
+	A_C(247, 5, 2, 0),
+	A_C(247, 6, 2, 0),
+	A_C(247, 7, 2, 0),
+	A_C(247, 8, 2, 0),
+	A_C(247, 9, 2, 0),
+	A_C(247, 10, 2, 0),
+	A_C(247, 11, 2, 0),
+	A_C(247, 12, 2, 0),
+	A_C(247, 13, 2, 0),
+	A_C(247, 14, 2, 0),
+	A_C(247, 15, 2, 0),
+	A_C(247, 16, 1, 0),			/* #16 Reset default */
+	/* ---- ME 252 WLAN profile (mib_WlanCfgProfile) ---- */
+	A_C(252, 1, 1, 0),			/* #1  WLAN type */
+	A_C(252, 2, 1, 1),			/* #2  2.4 GHz admin */
+	A_C(252, 3, 1, 6),			/* #3  2.4 GHz encryption */
+	A_ZERO(252, 4, 24),			/* #4  2.4 GHz SSID: not served */
+	A_ZERO(252, 5, 24),			/* #5  2.4 GHz key: never served */
+	A_C(252, 6, 1, 0),			/* #6  5 GHz admin */
+	A_C(252, 7, 1, 0),			/* #7  5 GHz encryption */
+	A_TXT(252, 8, 24, OMCI_TEXT_ZERO_DIGIT),	/* #8  5 GHz SSID */
+	A_TXT(252, 9, 24, OMCI_TEXT_ZERO_DIGIT),	/* #9  5 GHz key */
+	A_C(252, 10, 1, 0),			/* #10 Commit */
+	/* ---- ME 253 loop detection, per Ethernet UNI (mib_LoopDetect) ---- */
+	A_CW(253, 1, 1, 0),			/* #1  Admin state */
+	A_CW(253, 2, 1, 0),			/* #2  ARC */
+	A_CW(253, 3, 1, 0),			/* #3  ARC interval */
+	A_CW(253, 4, 1, 0),			/* #4  Loop detection config */
+	/* ---- ME 350 (mib_Me350) ---- */
+	A_C(350, 1, 1, 0),			/* #1  Flow mapping mode */
+	A_C(350, 2, 1, 2),			/* #2  Traffic management */
+	A_C(350, 3, 1, 1),			/* #3  Flow CAR */
+	A_C(350, 4, 1, 2),			/* #4  ONT transparent */
+	A_C(350, 5, 2, 0),			/* #5  Current MAC number */
+	A_C(350, 6, 4, 0),			/* #6  MAC age time */
+	A_C(350, 7, 2, 0x0200),
+	A_C(350, 8, 2, 0),
+	A_C(350, 9, 2, 0),
+	A_C(350, 10, 2, 0),
+	A_C(350, 11, 2, 0),
+	A_C(350, 12, 2, 0),
+	A_C(350, 13, 4, 0),
+	A_TXT(350, 14, 4, OMCI_TEXT_P2Q_CAP),	/* #14 P2Q capability */
+	A_ZERO(350, 15, 6),			/* #15 P2Q map */
+	A_TXT(350, 16, 4, OMCI_TEXT_SPACES),	/* #16 four spaces */
+	/* ---- ME 373 (mib_Me373) ---- */
+	A_C(373, 1, 1, 1),
+	A_C(373, 2, 1, 1),
+	A_C(373, 3, 1, 0),
+	A_C(373, 4, 1, 0),
+	A_C(373, 5, 1, 1),
+	A_C(373, 6, 1, 1),
+	A_C(373, 7, 1, 1),
+	A_C(373, 8, 1, 1),
+	A_C(373, 9, 2, 0xff80),
+	A_C(373, 10, 2, 0x8000),
+	A_C(373, 11, 2, 0xe000),
+	A_C(373, 12, 2, 0xc000),
+	A_C(373, 13, 1, 1),
+	/* ---- ME 65294 SNTP (mib_MeZteSntp) ---- */
+	A_CW(65294, 1, 2, 0),			/* #1  Time zone */
+	A_CW(65294, 2, 4, 0),			/* #2  Master server */
+	A_CW(65294, 3, 4, 0),			/* #3  Slave server */
+	A_CW(65294, 4, 4, 0),			/* #4  Interval */
+	A_CW(65294, 5, 1, 0),
+	A_CW(65294, 6, 1, 0),
+	/* ---- ME 65352 ONU support (mib_hsg_onu_support) ---- */
+	A_ZERO(65352, 1, 16),
+	/* ---- ME 65363 ONU (mib_FHOnu) ---- */
+	A_C(65363, 1, 1, 0x5e),			/* #1  OMCI flag */
+	A_TXT(65363, 2, 12, OMCI_TEXT_TWO),	/* #2  Configuration version */
+	A_C(65363, 3, 2, 0),			/* #3  OLT number */
+	A_C(65363, 4, 2, 0),			/* #4  PON number */
+	A_C(65363, 5, 2, 0),			/* #5  ONU number */
+	A_D(65363, 6, 6, OMCI_DYN_WAN_MAC),	/* #6  ONU MAC */
+	A_C(65363, 7, 2, 0),			/* #7  Sub-version */
+	A_C(65363, 8, 1, 0x5e),			/* #8  VoIP mode */
+	A_C(65363, 9, 1, 0),			/* #9  T-CONT mode */
+	A_C(65363, 10, 1, 0),			/* #10 Upgrade mode */
+	A_ID(65363, 11, equipment_id),		/* #11 Equipment ID */
+	A_C(65363, 12, 4, 0),			/* #12 Special ability */
+	A_ZERO(65363, 13, 24),			/* #13 Version info: stock's own build */
+	A_C(65363, 14, 2, 0),			/* #14 Telnet */
+	/* ---- ME 65385 WLAN common, per SSID (mib_WlanCommonCfg) ---- */
+	A_C(65385, 1, 1, 4),			/* #1  Mode */
+	A_C(65385, 2, 1, 0),			/* #2  Channel */
+	A_ZERO(65385, 3, 24),			/* #3  SSID: not served */
+	A_C(65385, 4, 1, 1),			/* #4  Bandwidth */
+	A_C(65385, 5, 1, 0),			/* #5  Rate */
+	A_C(65385, 6, 2, 1),			/* #6  Guard interval */
+	A_C(65385, 7, 2, 100),			/* #7  Beacon interval */
+	A_C(65385, 8, 2, 1),			/* #8  DTIM interval */
+	A_C(65385, 9, 1, 0),			/* #9  AP isolation */
+	A_C(65385, 10, 1, 0),			/* #10 Hidden SSID */
+	A_C(65385, 11, 1, 1),			/* #11 SSID enable */
+	A_INST0(65385, 12, 1, 0),		/* #12 Enable: the first SSID */
+	/* ---- ME 65386 WLAN security, per SSID (mib_WlanSecurityCfg) ---- */
+	A_INST0(65386, 1, 4, 0),		/* #1  Security mode */
+	A_ZERO(65386, 2, 24),			/* #2  Shared key: never served */
+	A_C(65386, 3, 1, 2),			/* #3  WEP authentication */
+	A_C(65386, 4, 1, 0),			/* #4  WEP key bits */
+	A_C(65386, 5, 1, 0),			/* #5  Key index */
+	A_TXT(65386, 6, 26, OMCI_TEXT_WEP_KEY),	/* #6..#9 WEP keys */
+	A_TXT(65386, 7, 26, OMCI_TEXT_WEP_KEY),
+	A_TXT(65386, 8, 26, OMCI_TEXT_WEP_KEY),
+	A_TXT(65386, 9, 26, OMCI_TEXT_WEP_KEY),
+	A_INST0(65386, 10, 2, 1),		/* #10 WPA encryption */
+	/* ---- ME 65408 extended ONU-G (mib_ExtendedOnuG) ---- */
+	A_C(65408, 1, 1, 0),			/* #1  Reset default */
+	A_C(65408, 2, 1, 1),
+	A_C(65408, 3, 1, 0x3d),
+	A_C(65408, 4, 1, 3),
+	A_C(65408, 5, 2, 0x3800),
+	A_C(65408, 6, 4, 0),
+	A_TXT(65408, 7, 16, OMCI_TEXT_EXT_ONU_G7),
+	A_C(65408, 8, 1, 0),
+	A_TXT(65408, 9, 24, OMCI_TEXT_EXT_ONU_G9),
+	A_TXT(65408, 10, 16, OMCI_TEXT_EXT_ONU_G10),
+	A_C(65408, 11, 1, 0),
+	A_TXT(65408, 12, 25, OMCI_TEXT_EXT_ONU_G12),
+	A_C(65408, 13, 1, 0),
+	A_C(65408, 14, 1, 0),
+	A_C(65408, 15, 4, 0x13),
+	A_C(65408, 16, 4, 0),
+	/* ---- ME 65417 MAC per PPTP (mib_mac_pptp) ---- */
+	A_C(65417, 1, 1, 0),
+	A_ZERO(65417, 2, 25),
+	A_ZERO(65417, 3, 25),
+	A_ZERO(65417, 4, 25),
+	A_ZERO(65417, 5, 25),
+	A_ZERO(65417, 6, 25),
+	A_ZERO(65417, 7, 25),
+	A_C(65417, 8, 1, 0),
+	/* ---- ME 65427 proprietary capability (mib_HwProprietaryCapabilityDeclare) */
+	A_C(65427, 1, 2, 0xffff),
+	A_TXT(65427, 2, 16, OMCI_TEXT_HW_CAP),
+	A_C(65427, 3, 1, 0x90),
+	A_C(65427, 4, 1, 0x6f),
 
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
 	A_ID(65530, 1, operator_id),		/* #1  Operation ID */
@@ -1216,11 +1390,21 @@ bool omci_class_modelled(u16 class_id)
 	return omci_me_find(class_id) || omci_vendor_class(class_id);
 }
 
-/* A vendor-reserved class with no descriptor of ours: the OLT may address it,
- * and we hold none of its attributes. */
-bool omci_vendor_unmodelled(u16 class_id)
+static bool omci_row_listed(const struct omci_onu *o, u16 class_id, u16 inst)
 {
-	return !omci_me_find(class_id) && omci_vendor_class(class_id);
+	u16 i;
+
+	for (i = 0; i < o->nrows; i++)
+		if (o->rows[i].class_id == class_id && o->rows[i].inst == inst)
+			return true;
+	return false;
+}
+
+bool omci_vendor_absent(const struct omci_onu *o, u16 class_id, u16 inst)
+{
+	/* CTC LoID authentication: served by Get, never uploaded, as stock's */
+	return omci_vendor_class(class_id) && class_id != OMCI_ME_CTC_LOID_AUTH &&
+	       !omci_row_listed(o, class_id, inst);
 }
 
 /* The bytes of one attribute.  Integers are big-endian, right-aligned in
@@ -1287,6 +1471,9 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		return o->anig_threshold + a->v;
 	case OMCI_SRC_TEXT:
 		return omci_text[a->v];
+	case OMCI_SRC_INST0:
+		val = inst ? (a->v & 0xff) : (a->v >> 8);
+		break;
 	case OMCI_SRC_OLT_G:
 		return o->olt_g + a->v;
 	case OMCI_SRC_STORE: {
@@ -1376,6 +1563,8 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 			val = omci_slot_value(slot, a->v);
 			break;
 		}
+		case OMCI_DYN_WAN_MAC:
+			return o->wan_mac_set ? o->wan_mac : NULL;
 		case OMCI_DYN_ANIG_RX:
 			val = o->anig_rx_level;
 			break;
@@ -1467,9 +1656,8 @@ static const struct {
 	u16 class_id, inst;
 	u8 from;
 } omci_mib_classes[] = {
+	/* in class order, so the sort below has little to move */
 	{ OMCI_ME_ONU_DATA, 0, OMCI_MI_ONE },
-	{ OMCI_ME_ONU_G, 0, OMCI_MI_ONE },
-	{ OMCI_ME_ONU2_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_CARDHOLDER, 0, OMCI_MI_SLOTS },
 	{ OMCI_ME_CIRCUIT_PACK, 0, OMCI_MI_SLOTS },
 	{ OMCI_ME_SW_IMAGE, 0, OMCI_MI_ONE },
@@ -1478,8 +1666,10 @@ static const struct {
 	{ OMCI_ME_PPTP_POTS_UNI, 0, OMCI_MI_POTS },
 	{ OMCI_ME_OLT_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_IP_HOST, 0, OMCI_MI_IP_HOST },
-	{ OMCI_ME_ANI_G, 0x8001, OMCI_MI_ONE },
+	{ OMCI_ME_ONU_G, 0, OMCI_MI_ONE },
+	{ OMCI_ME_ONU2_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_TCONT, 0, OMCI_MI_TCONT },
+	{ OMCI_ME_ANI_G, 0x8001, OMCI_MI_ONE },
 	{ OMCI_ME_UNI_G, 0, OMCI_MI_UNI_G },
 	{ OMCI_ME_PRIORITY_QUEUE, 0, OMCI_MI_QUEUE },
 	{ OMCI_ME_TRAFFIC_SCHED, 0, OMCI_MI_SCHED },
@@ -1931,6 +2121,67 @@ enum omci_uni_decl omci_onu_declare_queues_be(struct omci_onu *o,
 	return OMCI_UNI_DECL_OK;
 }
 
+/* One decimal cell of a unit capacity, up to @max. -> the next cell or NULL. */
+static const char *omci_cap_cell(const char *s, unsigned int max, unsigned int *v)
+{
+	unsigned int n = 0, digits = 0;
+
+	for (; *s >= '0' && *s <= '9'; s++, digits++) {
+		n = n * 10 + (unsigned int)(*s - '0');
+		if (n > max)
+			return NULL;
+	}
+	*v = n;
+	return digits ? s : NULL;
+}
+
+enum omci_uni_decl omci_onu_declare_unit_capacity(struct omci_onu *o,
+						  const char *s, const char **why)
+{
+	struct omci_capacity was_cap;
+	struct omci_slot was_slots[OMCI_SLOT_MAX];
+	unsigned int tconts, pq, scheds, i;
+	const char *unused;
+
+	if (!why)
+		why = &unused;
+	if (!s || !*s || *s == '\n') {
+		*why = "no unit capacity";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	s = omci_cap_cell(s, OMCI_TCONT_MAX, &tconts);
+	s = s && *s == ',' ? omci_cap_cell(s + 1, 255, &pq) : NULL;
+	s = s && *s == ',' ? omci_cap_cell(s + 1, OMCI_TCONT_MAX, &scheds) : NULL;
+	if (!s || (*s && *s != '\n') || !tconts || !scheds) {
+		*why = "the unit capacity is not <T-CONTs 1..32>,<priority queues 0..255>,<schedulers 1..32>";
+		return OMCI_UNI_DECL_BAD;
+	}
+	if (!o)
+		return OMCI_UNI_DECL_OK;
+	was_cap = o->cap;
+	memcpy(was_slots, o->slots, sizeof(was_slots));
+	o->cap.tcont_n = (u8)tconts;
+	o->cap.onu2g_pq = (u16)pq;
+	o->cap.sched_n = (u8)scheds;
+	/* the pack that holds the T-CONT buffers is the upstream side */
+	for (i = 0; i < o->slots_n; i++)
+		if (o->slots[i].tcont_buf) {
+			o->slots[i].tcont_buf = (u8)tconts;
+			o->slots[i].priq = (u8)pq;
+			o->slots[i].scheds = (u8)scheds;
+		}
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		o->cap = was_cap;
+		memcpy(o->slots, was_slots, sizeof(was_slots));
+		omci_build_mib(o);
+		*why = "more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
 enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
 					    int len, const char **why)
 {
@@ -1964,15 +2215,6 @@ enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
 	return OMCI_UNI_DECL_OK;
 }
 
-static bool omci_row_listed(const struct omci_onu *o, u16 class_id, u16 inst)
-{
-	u16 i;
-
-	for (i = 0; i < o->nrows; i++)
-		if (o->rows[i].class_id == class_id && o->rows[i].inst == inst)
-			return true;
-	return false;
-}
 
 enum omci_uni_decl omci_onu_declare_extra_me_be(struct omci_onu *o,
 						const void *be, int len,

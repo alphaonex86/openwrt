@@ -133,7 +133,7 @@ struct omci_slot {
 #define OMCI_IP_HOST_MAX 8
 
 /* Further single MEs a board's stock reports, as (class, instance) pairs. */
-#define OMCI_EXTRA_ME_MAX 8
+#define OMCI_EXTRA_ME_MAX 32
 
 /* ME 131 OLT-G as the OLT last wrote it: vendor (4), equipment ID (20),
  * version (14), time of day (14). */
@@ -514,6 +514,16 @@ enum omci_uni_decl omci_onu_declare_extra_me_be(struct omci_onu *o,
 						const void *be, int len,
 						const char **why);
 
+/* THIS UNIT's T-CONT, priority-queue and scheduler counts, as its own stock
+ * declares them: "<T-CONTs>,<priority queues>,<schedulers>" in decimal.  Two
+ * units of one board may run stocks that differ here (X111W: M225-260515
+ * 12,96,12 and M225-260618 16,128,16), so it is the unit's fact, handed in
+ * the way its serial is, and it overrides the board's onu-capacity counts and
+ * the pack holding the T-CONT buffers.  @o NULL only validates.  Refused,
+ * nothing changed, on a malformed string or rows that do not fit. */
+enum omci_uni_decl omci_onu_declare_unit_capacity(struct omci_onu *o,
+						  const char *s, const char **why);
+
 /* How a shell hands the core one property of its board description: its
  * bytes, or NULL with *len = -1 when the board does not declare it. */
 typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
@@ -594,8 +604,10 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 /* does the model carry this class at all (descriptor row or vendor range)? */
 bool omci_class_modelled(u16 class_id);
 
-/* a vendor-reserved class we carry no descriptor for? */
-bool omci_vendor_unmodelled(u16 class_id);
+/* a vendor-reserved (class, inst) this board does not upload?  Its stock
+ * exposes only the vendor MEs it uploads, and answers any other with result 0
+ * and every mask zero. */
+bool omci_vendor_absent(const struct omci_onu *o, u16 class_id, u16 inst);
 
 /* is (class, inst) a MIB instance this ONU holds? */
 bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst);

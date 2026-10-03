@@ -64,6 +64,12 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 
 	if (omci_get_checks_inst(class_id) && !omci_inst_exists(o, class_id, inst))
 		return OMCI_RC_UNKNOWN_INST;
+	if (omci_vendor_absent(o, class_id, inst)) {
+		/* stock's answer to a vendor ME it does not expose: result 0,
+		 * every mask zero (field X111W, production OLT, 2026-10-02) */
+		memset(resp + 9, 0, 31);
+		return OMCI_RC_OK;
+	}
 	rc = omci_me_fill(o, class_id, inst, mask, resp + 11, resp + 36,
 			  &rmask, &known);
 
@@ -87,14 +93,6 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		known = mask;
 	}
 
-	if (rc == OMCI_RC_OK && omci_vendor_unmodelled(class_id)) {
-		/* stock's answer to a vendor class it does not expose: result 0,
-		 * every mask zero (field X111W, production OLT, 2026-10-02) */
-		omci_put_be16(resp + 9, 0);
-		omci_put_be16(resp + 36, 0);
-		omci_put_be16(resp + 38, 0);
-		return OMCI_RC_OK;
-	}
 	omci_put_be16(resp + 9, rmask);
 	unsup = (u16)(mask & ~known);
 	failed = (u16)(mask & known & ~rmask);

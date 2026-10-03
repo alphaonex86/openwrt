@@ -14,7 +14,9 @@ CPU_TYPE:=mips32
 # the subtarget so a `make defconfig` cannot silently drop the flag (it did once).
 # Complete fix = a `-mfix-lexra` gcc div-fusion (TODO). Do NOT add this to the
 # interaptiv subtarget (interAptiv core, unaffected).
-CFLAGS:=-Os -pipe -mno-branch-likely -mips32 -mtune=mips32 -fno-schedule-insns2
+# -mfix-rlx (toolchain/gcc 990-mips-fix-rlx.patch): an RLX branch whose delay slot
+# is a three-operand mul writing the branch's register decides on the mul result.
+CFLAGS:=-Os -pipe -mno-branch-likely -mips32 -mtune=mips32 -fno-schedule-insns2 -mfix-rlx
 
 # THE SUBTARGET IS THE CORE, AND THE NAME NOW SAYS SO.  A part belongs here when
 # its own boot banner and /proc/cpuinfo say RLX / Taroko -- nothing about its

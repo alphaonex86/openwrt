@@ -150,7 +150,7 @@ static void build_nomsg(u8 m[GPON_PLOAM_US_LEN])
 
 /* Burst overhead and equalization delay: the two computations ...
  * dev/MEASURED-gpon_ploam.c.md sec 7. */
-static void apply_boh(struct gpon_ploam *o, bool ranged)
+static u32 apply_boh(struct gpon_ploam *o, bool ranged)
 {
 	u8 oh[GPON_PLOAM_BOH_LEN];
 	u8 guard = o->boh_guard;
@@ -193,7 +193,7 @@ static void apply_boh(struct gpon_ploam *o, bool ranged)
 
 	cfg_word = (u32)(((size - 4) & 0xf) << 8) | (boh_len & 0xffu);
 	o->ops->boh_write(o->sh, cfg_word, oh, size);
-	ev(o, GPON_PLOAM_EV_BOH, ranged ? 1 : 0, cfg_word);
+	return cfg_word;	/* the caller emits GPON_PLOAM_EV_BOH, outside any HW window */
 }
 
 /* Upstream equalization delay, from luna_gpon.c:7012-6026. ...
@@ -270,16 +270,6 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		}
 		o->o5_entry_tick = o->ticks ? o->ticks : 1;
 		o->avc_sent = 0;	/* re-report oper-up on each online */
-
-		/* Re-apply the O5 packed-burst gate cluster and re-arm the ...
-		 * dev/MEASURED-gpon_ploam.c.md sec 11. */
-		if (o->cfg->o5_rearm_burst_gate) {
-			u8 nomsg[GPON_PLOAM_US_LEN];
-
-			o->ops->o5_rearm_burst(o->sh);
-			build_nomsg(nomsg);
-			ploam_tx(o, PLM_US_QUEUE_NOMSG, nomsg);
-		}
 	} else if (st < GPON_O5_OPERATION && prev >= GPON_O5_OPERATION) {
 		o->rerange_start_ms = now_ms ? now_ms : 1;  /* outage timer starts */
 		o->o5_entry_tick = 0;
@@ -344,7 +334,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			o->boh_delim[0] = d[4];
 			o->boh_delim[1] = d[5];
 			o->boh_delim[2] = d[6];
-			apply_boh(o, false);	/* folds in any prior 0x14 t3pre */
+			ev(o, GPON_PLOAM_EV_BOH, 0,
+			   apply_boh(o, false));	/* folds in any prior 0x14 t3pre */
 			set_eqd(o, pre_eqd);
 			set_state(o, GPON_O2_STANDBY, now_ms);
 			set_state(o, GPON_O3_SERIAL, now_ms);
@@ -402,14 +393,43 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 					       o->onu_id, d[0])) {
 			u32 eqd = ((u32)d[1] << 24) | ((u32)d[2] << 16) |
 				  ((u32)d[3] << 8) | d[4];
+			u32 boh;
 
+			/* In O5 a Ranging_Time moves the EqD and nothing else, as
+			 * stock: its FSM handles RX_EQD in O4 only, so the burst
+			 * header and the US-PLOAM flush are never redone under the
+			 * OLT's O5 grants (the production OLT sends three). */
+			if (o->state == GPON_O5_OPERATION) {
+				set_eqd(o, eqd);
+				ev(o, GPON_PLOAM_EV_RANGING_TIME, eqd, 0);
+				break;
+			}
+			/* Re-apply the O5 packed-burst gate cluster and re-arm the ...
+			 * dev/MEASURED-gpon_ploam.c.md sec 11.  Still in O4 (stock
+			 * writes its template before any O5) and ahead of the group
+			 * below, which nothing that may log is allowed into. */
+			if (o->cfg->o5_rearm_burst_gate) {
+				u8 nomsg[GPON_PLOAM_US_LEN];
+
+				o->ops->o5_rearm_burst(o->sh);
+				build_nomsg(nomsg);
+				ploam_tx(o, PLM_US_QUEUE_NOMSG, nomsg);
+			}
 			set_eqd(o, eqd);
-			apply_boh(o, true);	/* switch to the ranged burst */
+			boh = apply_boh(o, true);	/* switch to the ranged burst */
 			/* Flush any pre-ranged-format upstream PLOAM still latched in ...
 			 * dev/MEASURED-gpon_ploam.c.md sec 17. */
 			o->ops->us_ploam_flush(o->sh);
-			ev(o, GPON_PLOAM_EV_RANGING_TIME, eqd, 0);
+			/* Stock's O4 -> O5: EqD, ranged BOH, flush, ONU_STATE, back
+			 * to back, before any event: a trace hook may print to a
+			 * synchronous console, and a GTC left at O4 behind the
+			 * ranged flush answered the production OLT's O5 grants as
+			 * ranging requests (field X111W 2026-10-02: rng_req 51 and
+			 * 88 at the first O5 point, 1 with this order). */
+			o->ops->set_hw_state(o->sh, GPON_O5_OPERATION);
 			set_state(o, GPON_O5_OPERATION, now_ms);
+			ev(o, GPON_PLOAM_EV_BOH, 1, boh);
+			ev(o, GPON_PLOAM_EV_RANGING_TIME, eqd, 0);
 		}
 		break;
 
@@ -464,7 +484,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		o->boh_t3ranged = d[1];		/* applied at the O5 transition */
 		if (o->onu_id == 0xff && o->boh_t3pre != d[0]) {
 			o->boh_t3pre = d[0];
-			apply_boh(o, false);
+			ev(o, GPON_PLOAM_EV_BOH, 0, apply_boh(o, false));
 			ev(o, GPON_PLOAM_EV_EXT_BURST, o->boh_t3pre,
 			   o->boh_t3ranged);
 		}

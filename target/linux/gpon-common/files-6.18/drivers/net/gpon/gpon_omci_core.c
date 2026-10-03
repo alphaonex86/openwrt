@@ -87,6 +87,14 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		known = mask;
 	}
 
+	if (rc == OMCI_RC_OK && omci_vendor_unmodelled(class_id)) {
+		/* stock's answer to a vendor class it does not expose: result 0,
+		 * every mask zero (field X111W, production OLT, 2026-10-02) */
+		omci_put_be16(resp + 9, 0);
+		omci_put_be16(resp + 36, 0);
+		omci_put_be16(resp + 38, 0);
+		return OMCI_RC_OK;
+	}
 	omci_put_be16(resp + 9, rmask);
 	unsup = (u16)(mask & ~known);
 	failed = (u16)(mask & known & ~rmask);

@@ -1111,6 +1111,13 @@ bool omci_class_modelled(u16 class_id)
 	return omci_me_find(class_id) || omci_vendor_class(class_id);
 }
 
+/* A vendor-reserved class with no descriptor of ours: the OLT may address it,
+ * and we hold none of its attributes. */
+bool omci_vendor_unmodelled(u16 class_id)
+{
+	return !omci_me_find(class_id) && omci_vendor_class(class_id);
+}
+
 /* The bytes of one attribute.  Integers are big-endian, right-aligned in
  * @size octets; @scratch must hold 4 bytes. */
 static const struct omci_slot *omci_slot_find(const struct omci_onu *o,

@@ -22,12 +22,8 @@
  * NAMES what it does not support and what did not fit instead of answering
  * success with a short mask and generating OLT re-GET churn; and one policy per
  * vendor-reserved class RANGE instead of a list of the class IDs one OLT asked
- * for.
- *
- * ⚠ realtek-luna does NOT compile this yet: it carries a third, independently
- *   written model in rtl9602c_eth.c on file-scope globals, with a different
- *   identity and a different ME 7 / ME 11 attribute set.  Pointing Luna here
- *   CHANGES LUNA'S EMITTED BYTES, so it needs its own board gate (F1/F2/F3).
+ * for.  That policy is the unit's STOCK answer: result 0, every mask zero
+ * (field X111W on a production OLT, 2026-10-02).
  *   Nothing here was altered to accommodate it.
  *
  * ENDIANNESS: every attribute value is emitted big-endian by explicit byte math
@@ -574,6 +570,9 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 
 /* does the model carry this class at all (descriptor row or vendor range)? */
 bool omci_class_modelled(u16 class_id);
+
+/* a vendor-reserved class we carry no descriptor for? */
+bool omci_vendor_unmodelled(u16 class_id);
 
 /* is (class, inst) a MIB instance this ONU holds? */
 bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst);

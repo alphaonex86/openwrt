@@ -611,6 +611,7 @@ bool omci_vendor_absent(const struct omci_onu *o, u16 class_id, u16 inst);
 
 /* is (class, inst) a MIB instance this ONU holds? */
 bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst);
+bool omci_mib_has_class(struct omci_onu *o, u16 class_id);
 
 /* ★★★ THE WAN SERVICE SPINE — where the OLT said a GEM port ...
  * dev/MEASURED-gpon_omci_me.h.md sec 20. */

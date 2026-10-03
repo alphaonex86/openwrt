@@ -7521,6 +7521,12 @@ static void gpon_fsm_set_state(u8 st)
 	 * leaving br-lan + the WiFi AP stable for LAN+WiFi access. (GPON/WAN off.) */
 	if ((!READ_ONCE(luna_activation_ready) || gpon_hold) && st > 1)
 		return;
+	/* The HW ONU_STATE field uses our 1-based numbers (O1..O5 = 1..5) and
+	 * gates the GTC's auto-SN/ranging transmitter.  Written BEFORE any
+	 * print: the console is synchronous, and a GTC left at O4 behind the
+	 * ranged flush answered the OLT's O5 grants as ranging requests (field
+	 * X111W, production OLT, 2026-10-02). */
+	gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 3, 0, st);
 	if (gpon_fsm_state != st)
 		pr_info("luna-gpon: ONU state O%u -> O%u\n", gpon_fsm_state, st);
 	if (prev != st)
@@ -7548,12 +7554,6 @@ static void gpon_fsm_set_state(u8 st)
 		/* Re-apply the O5 packed-burst gate cluster + re-arm the HW ...
 		 * dev/MEASURED-luna_gpon.c.md sec 231. */
 	}
-	/* The HW ONU_STATE field uses the same 1-based encoding as our state numbers:
-	 * UNKNOWN=0, O1=1, O2=2, O3=3, O4=4, O5=5. So O3 (Serial-Number, where the
-	 * GTC's auto-SN-burst transmitter is gated) = register value 3 = our st.
-	 * Write st. */
-	gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 3, 0, st);
-
 	gpon_led_pon_set(st);
 }
 

@@ -8613,6 +8613,12 @@ static int __init rtl9602c_gpon_init(void)
 
 		if (on)
 			luna_pbo_regions_from_dt(np);
+		/* the board may forbid the laser outright: receive only, nothing
+		 * transmitted into a shared PON, whatever the command line says */
+		if (on && of_property_read_bool(np, "realtek,laser-off")) {
+			laser_off = true;
+			pr_info("luna-gpon: this board's device tree forbids the laser (realtek,laser-off): receive only\n");
+		}
 		of_node_put(np);
 		if (!on) {
 			pr_info("luna-gpon: this board's device tree %s the GPON (realtek,luna-gpon) -- nothing touched\n",

@@ -48,8 +48,9 @@
 	};
 };
 
-/* First diagnostic boot: this unit shares GPON2's splitter with two boards
- * under test, and its optical wiring is unproven -- no laser is keyed. */
+/* This unit shares GPON2's splitter with boards under test and its optical
+ * wiring is unproven: the GPON core runs (its switch set-up and /proc/swdump
+ * with it), but the laser is never keyed -- receive only. */
 &gpon {
-	status = "disabled";
+	realtek,laser-off;
 };

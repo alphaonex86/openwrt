@@ -8432,6 +8432,9 @@ static int laser_tx_pwr_gpio = -1;
  * that declares none keeps its bootloader's pads (the X100DG's I2C bus 1, 2026-10-01). */
 static u32 board_gpio_pads[6];
 static bool board_gpio_pads_set;
+/* from DT: the optical module runs its own laser driver and APC, so arming
+ * needs no host calibration (neither RTL8290B nor GN25L95) */
+static bool optics_self_managed;
 
 static void gpon_optical_work_fn(struct work_struct *w)
 {
@@ -8493,6 +8496,7 @@ static void __init luna_laser_gpio_from_dt(void)
 		laser_tx_pwr_gpio = (int)v;
 	board_gpio_pads_set = !of_property_read_u32_array(np, "realtek,gpio-pads",
 							   board_gpio_pads, 6);
+	optics_self_managed = of_property_read_bool(np, "realtek,optics-self-managed");
 	if (!of_property_read_u32(np, "realtek,i2c-bus", &v)) {
 		if (v <= 1)
 			bosa_i2c_bus = v;
@@ -8500,9 +8504,10 @@ static void __init luna_laser_gpio_from_dt(void)
 			pr_err("luna-gpon: /pon-optics realtek,i2c-bus=%u: this die has buses 0 and 1 -- keeping 0\n", v);
 	}
 	of_node_put(np);
-	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d i2c-bus=%u gpio-pads=%s\n",
+	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d i2c-bus=%u gpio-pads=%s optics=%s\n",
 		laser_tx_dis_gpio, laser_tx_pwr_gpio, bosa_i2c_bus,
-		board_gpio_pads_set ? "declared" : "none (bootloader's kept)");
+		board_gpio_pads_set ? "declared" : "none (bootloader's kept)",
+		optics_self_managed ? "self-managed" : "host-calibrated");
 }
 
 /* Set level before enabling output to avoid a TX_DISABLE glitch. */
@@ -8552,7 +8557,7 @@ static int luna_quiesce_locked(void)
 		timer_delete_sync(&gpon_fsm_timer);
 		cancel_work_sync(&gpon_cdr_reset_work);
 	}
-	gpon_wr_us_protected(GPON_GTC_US_CFG, 0);
+	gpon_wr_us_protected(GPON_GTC_US_CFG, GPON_US_CFG_BEN_POLAR);	/* disarmed, BEN kept inactive */
 	gpon_wr(GPON_GTC_US_PLOAM_CFG, 0);
 	gpon_wr(GPON_GTC_US_PLOAM_IND, 0);
 	gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_UNLOCK);
@@ -8593,6 +8598,8 @@ static int luna_activate_locked(bool identity_changed)
 	if (bosa_regs_live()) {
 		/* Preserve the positive RTL8290B boot path. GN never arms its servo. */
 		ret = bosa_laser_up ? 0 : -ENODEV;
+	} else if (optics_self_managed) {
+		ret = 0;	/* declared by the board: the module calibrates itself */
 	} else {
 		ret = luna_gn_calibrate_locked();
 	}
@@ -9035,7 +9042,12 @@ skip_bosa_init:
 
 	/* Upstream burst CONFIG + laser-enable timing. The GTC MAC ...
 	 * dev/MEASURED-luna_gpon.c.md sec 264. */
-	gpon_wr_us_protected(GPON_GTC_US_CFG, 0);
+	/* Only the burst-enable polarity now (the rest waits for activation): with
+	 * 0 here BEN idled ACTIVE until activation, and a board that cannot reach
+	 * activation kept its laser on -- the V2801RGW jammed GPON2 in O1. */
+	gpon_wr_us_protected(GPON_GTC_US_CFG, GPON_US_CFG_BEN_POLAR);
+	pr_info("luna-gpon: US_CFG burst-enable polarity set at init: 0x%08x\n",
+		gpon_rd(GPON_GTC_US_CFG));
 	if (force_laser)
 		pr_info("luna-gpon: force_laser=1 -> US_CFG.FS_LON set (CW diagnostic)\n");
 	/* US GEM-header PTI vector (not write-protected). Reset is 0, so every US GEM

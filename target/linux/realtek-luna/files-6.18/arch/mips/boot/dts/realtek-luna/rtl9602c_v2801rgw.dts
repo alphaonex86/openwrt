@@ -43,14 +43,22 @@
 	/* The X111W's pad routing, which this board has run with so far:
 	 * IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
 	pon-optics {
+		/* MENTECHOPTO NOG22-D6C-ST: its stock kernel carries no host laser
+		 * calibration at all (no RTL8290B, no GN25L95 symbol) */
+		realtek,optics-self-managed;
 		realtek,gpio-pads = <0x40202006 0x00000819 0x40002006 0xdbff1246
 				     0x00000819 0x000037e5>;
 	};
 };
 
-/* This unit shares GPON2's splitter with boards under test and its optical
- * wiring is unproven: the GPON core runs (its switch set-up and /proc/swdump
- * with it), but the laser is never keyed -- receive only. */
+/* The laser is keyed (operator, 2026-10-03): the module drives it itself
+ * (/pon-optics above) and the GTC's burst-enable gates it, active high as
+ * stock's "burst-enable polarity: high". */
 &gpon {
-	realtek,laser-off;
+};
+
+/* Stock's WAN MAC is LAN+5: the OLT learnt 80:14:a8:87:d0:2d behind this
+ * unit's row while stock ran (2026-09-30). */
+&nic {
+	realtek,wan-mac-offset = <5>;
 };

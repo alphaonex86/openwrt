@@ -112,6 +112,7 @@
 #define GPON_GTC_US_CFG		0x5014		/* [11]LESS_RANDOM [10]IND_NRM_PLM
 						 * [9]PLM_DIS [4]ENA_AUTO_DG
 						 * [3]US_BEN_POLAR [0]SCRM_DIS */
+#define   GPON_US_CFG_BEN_POLAR	BIT(3)	/* burst enable active HIGH, as stock */
 #define   GPON_US_CFG_VAL	0x0c18u		/* online operating value: BEN_POLAR=1,
 						 * scrambler on, PLOAM on (LESS_RANDOM|
 						 * IND_NRM_PLM|ENA_AUTO_DG|US_BEN_POLAR) */

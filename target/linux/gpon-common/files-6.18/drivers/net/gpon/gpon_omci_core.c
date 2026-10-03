@@ -62,7 +62,13 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	u16 rmask = 0, known = 0, unsup, failed;
 	u8 rc;
 
-	if (omci_get_checks_inst(class_id) && !omci_inst_exists(o, class_id, inst))
+	/* An absent instance of a class the MIB holds is 0x05, as stock (the X111W's
+	 * own stock binary and a Huawei stock, 2026-10-03); ME 2 is never uploaded
+	 * and is instance 0 only. */
+	if ((omci_get_checks_inst(class_id) || omci_mib_has_class(o, class_id)) &&
+	    !omci_inst_exists(o, class_id, inst))
+		return OMCI_RC_UNKNOWN_INST;
+	if (class_id == OMCI_ME_ONU_DATA && inst)
 		return OMCI_RC_UNKNOWN_INST;
 	if (omci_vendor_absent(o, class_id, inst)) {
 		/* stock's answer to a vendor ME it does not expose: result 0,

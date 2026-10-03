@@ -2398,6 +2398,20 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	omci_uni_carry_obligations(&o->uni_g, &unig);
 }
 
+/* Does this ONU's MIB hold any instance of the class: an upload row or one the
+ * OLT created?  Then a Get on another instance is answered "unknown instance". */
+bool omci_mib_has_class(struct omci_onu *o, u16 class_id)
+{
+	u16 i;
+
+	if (omci_store_has_class(o, class_id))
+		return true;
+	for (i = 0; i < o->nrows; i++)
+		if (o->rows[i].class_id == class_id)
+			return true;
+	return false;
+}
+
 /* Is (class, inst) a MIB instance this ONU holds?  Three sources: the static
  * auto-instantiated set (== the MIB-Upload rows, which is what the OLT learned
  * from us), any vendor-reserved class (we model no attributes but the OLT is

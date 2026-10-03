@@ -83,11 +83,11 @@ struct omci_mib_row {
 	u16	mask;
 };
 
-/* Overridable for the same reason as OMCI_STORE_MAX above.  A board that
- * uploads stock's queue set needs ~400 rows (X400AXF: 40 DS + 240 US queues,
- * 30 T-CONTs and schedulers); 6 octets a row. */
+/* Overridable for the same reason as OMCI_STORE_MAX above.  Stock uploads a
+ * priority queue in TWO rows, so the X400AXF's 40 DS + 240 US queues alone
+ * take 560, beside its 30 T-CONTs and schedulers; 6 octets a row. */
 #ifndef OMCI_MIB_ROWS_MAX
-#define OMCI_MIB_ROWS_MAX 512
+#define OMCI_MIB_ROWS_MAX 768
 #endif
 
 /* The auto-instantiated T-CONT range: the default count, and the most a board
@@ -131,6 +131,13 @@ struct omci_slot {
 
 /* ME 134 IP host config data instances a board declares. */
 #define OMCI_IP_HOST_MAX 8
+
+/* Further single MEs a board's stock reports, as (class, instance) pairs. */
+#define OMCI_EXTRA_ME_MAX 8
+
+/* ME 131 OLT-G as the OLT last wrote it: vendor (4), equipment ID (20),
+ * version (14), time of day (14). */
+#define OMCI_OLT_G_LEN 52
 
 /* What this UNIT tells the OLT it is.  A production OLT may match any of these
  * against its provisioning (equipment ID -> ONT type, LOID -> subscriber), so
@@ -204,6 +211,9 @@ struct omci_onu {
 	u8	ip_host_n;
 	u16	pots_uni[OMCI_UNI_MAX];	/* ME 53, as stock reports them */
 	u8	pots_uni_n;
+	u16	extra_me[OMCI_EXTRA_ME_MAX][2];	/* class, instance */
+	u8	extra_me_n;
+	u8	olt_g[OMCI_OLT_G_LEN];
 	u8	wan_mac[6];		/* the WAN netdev's, set by the shell */
 	bool	wan_mac_set;		/* unset: ME 134 #2 is not answered */
 	/* MIB-Upload rows the row table had no room for.  ⚠ THE BUILDER DROPS
@@ -378,6 +388,11 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 #define OMCI_ME_OLT_G		131
 #define OMCI_ME_IP_HOST		134
 #define OMCI_ME_PPTP_POTS_UNI	53
+#define OMCI_ME_LCT_UNI		83
+#define OMCI_ME_POWER_SHED	133
+#define OMCI_ME_VOIP_CONFIG	138
+#define OMCI_ME_VOIP_LINE_STATUS 141
+#define OMCI_ME_TR069_SERVER	340
 #define OMCI_ME_ONU_G		256
 #define OMCI_ME_ONU2_G		257
 #define OMCI_ME_TCONT		262
@@ -491,13 +506,21 @@ enum omci_uni_decl omci_onu_declare_queues_be(struct omci_onu *o,
 enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
 					    int len, const char **why);
 
+/* Declare the further single MEs the board's stock reports, as big-endian
+ * 16-bit <class instance> pairs.  Refused, nothing changed, on an odd, empty
+ * or oversized list, a class this model does not carry, or rows that do not
+ * fit. */
+enum omci_uni_decl omci_onu_declare_extra_me_be(struct omci_onu *o,
+						const void *be, int len,
+						const char **why);
+
 /* How a shell hands the core one property of its board description: its
  * bytes, or NULL with *len = -1 when the board does not declare it. */
 typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
 
 /* Declare everything of the board's equipment beside its UNIs: circuit-packs,
- * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity and
- * downstream-queue-ports.  Each is applied on its own; -> the first property
+ * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity,
+ * downstream-queue-ports and extra-me-instances.  Each is applied on its own; -> the first property
  * refused (its reason in @why), or NULL when none was. */
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why);

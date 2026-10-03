@@ -115,7 +115,7 @@ static const struct omci_identity omci_id_default_bytes = {
 			      '2', '6', '0', '5', '1', '5' },
 	.equipment_id	  = { 'H', 'S', 'G', 'Q', '-',
 			      'X', '4', '1', '1', 'A', 'X', 'F' },
-	.product_code	  = { 0x00, 0x31 },
+	.product_code	  = { 0x00, 0x1f },	/* stock's MIB "31", as it reads it */
 	.loid		  = { 'u', 's', 'e', 'r' },
 	.operator_id	  = { 'C', 'T', 'C' },
 	/* .zeros and the tails above are 0 by omission — C zero-fills what a
@@ -163,6 +163,19 @@ enum omci_attr_src {
 	 * A missing counter rendered as 0 is a measurement nobody took. */
 	OMCI_SRC_CNT,
 	OMCI_SRC_ANIG_THRESHOLD,
+	OMCI_SRC_TEXT,		/* v = enum omci_text */
+	OMCI_SRC_OLT_G,		/* v = offset into o->olt_g, OLT-writable */
+};
+
+/* Constant octet strings stock serves, zero-padded. */
+enum omci_text {
+	OMCI_TEXT_SPACES,	/* an equipment ID nobody set: 20 spaces */
+	OMCI_TEXT_ZERO_DIGIT,	/* a version or address nobody set: "0" */
+};
+
+static const u8 omci_text[][25] = {
+	[OMCI_TEXT_SPACES]	= "                    ",
+	[OMCI_TEXT_ZERO_DIGIT]	= "0",
 };
 
 /* Where an OMCI_SRC_TBL write goes. */
@@ -219,6 +232,10 @@ struct omci_attr {
 /* G.988 calls the attribute writable and this ONU has exactly ...
  * dev/MEASURED-gpon_omci_me.c.md sec 9. */
 #define OMCI_ACCESS_WRITE_UNCHANGED	8
+/* Served by a Get and never uploaded: stock's optionType & 0x31A, read out of
+ * its own ME plugins (OMCI-simulate/me_attr_table.py) and identical on four
+ * Luna stocks; the field X111W's upload shows exactly that set. */
+#define OMCI_ACCESS_HIDDEN		16
 
 #define AT(cls, n, sz, s, arg)	{ (cls), (arg), (n), (sz), (s), 0 }
 #define A_ST(cls, n, sz, off, acc) \
@@ -246,6 +263,10 @@ struct omci_attr {
 /* a read-only COUNTER at dense offset @off that nothing feeds: see
  * OMCI_SRC_CNT.  It keeps the dense layout stock's and answers COULD NOT ASK. */
 #define A_CNT(cls, n, sz, off)	{ (cls), (off), (n), (sz), OMCI_SRC_CNT, 1 }
+#define A_HIDE(cls, n, sz, src, v, acc)	\
+	{ (cls), (v), (n), (sz), (src), (acc) | OMCI_ACCESS_HIDDEN }
+#define A_TXT(cls, n, sz, which)	{ (cls), (which), (n), (sz), OMCI_SRC_TEXT, 0 }
+#define A_OLTG(n, off, sz)	{ OMCI_ME_OLT_G, (off), (n), (sz), OMCI_SRC_OLT_G, 3 }
 
 static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 2 ONU-Data (inst 0) ---- */
@@ -261,12 +282,12 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(256,  6,  1, 0x00),			/* #6  Battery backup */
 	A_C(256,  7,  1, 0x00),			/* #7  Admin state */
 	A_C(256,  8,  1, 0x00),			/* #8  Op state */
-	A_C(256,  9,  1, 0x00),			/* #9  Survival time */
+	A_HIDE(256, 9, 1, OMCI_SRC_CONST, 0x00, 0),	/* #9  Survival time */
 	A_ID(256, 10, loid),			/* #10 Logical ONU ID */
 	A_ID(256, 11, loid_passwd),		/* #11 Logical password */
 	A_C(256, 12,  1, 0x00),			/* #12 Credentials status */
-	A_C(256, 13,  2, 0x0000),		/* #13 Ext TC-layer options */
-	A_C(256, 14,  1, 0x01),			/* #14 ONT state */
+	A_HIDE(256, 13, 2, OMCI_SRC_CONST, 0x0000, 0),	/* #13 Ext TC-layer options */
+	A_HIDE(256, 14, 1, OMCI_SRC_CONST, 0x01, 0),	/* #14 ONT state */
 
 	/* ---- ME 257 ONU2-G (inst 0) ---- */
 	A_ID(257,  1, equipment_id),		/* #1  Equipment ID */
@@ -293,6 +314,10 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(5, 1, 1, OMCI_DYN_SLOT_TYPE),	/* #1  Actual type */
 	A_D(5, 2, 1, OMCI_DYN_SLOT_TYPE),	/* #2  Expected type */
 	A_D(5, 3, 1, OMCI_DYN_SLOT_PORTS),	/* #3  Expected port count */
+	A_TXT(5, 4, 20, OMCI_TEXT_SPACES),	/* #4  Expected equipment ID */
+	A_TXT(5, 5, 20, OMCI_TEXT_SPACES),	/* #5  Actual equipment ID */
+	A_CW(5, 8, 1, 0),			/* #8  ARC */
+	A_CW(5, 9, 1, 0),			/* #9  ARC interval */
 
 	/* ---- ME 6 Circuit-Pack, one per declared slot ---- */
 	A_D(6,  1,  1, OMCI_DYN_SLOT_TYPE),	/* #1  Type */
@@ -303,6 +328,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(6,  6,  1, 0),			/* #6  Admin state */
 	A_C(6,  7,  1, 0),			/* #7  Op state */
 	A_CW(6,  8,  1, 0),			/* #8  Bridged/IP ind */
+	A_TXT(6, 9, 20, OMCI_TEXT_SPACES),	/* #9  Equipment ID */
 	A_CW(6, 10,  1, 0),			/* #10 Card configuration */
 	A_D(6, 11,  1, OMCI_DYN_SLOT_TBUF),	/* #11 Total T-CONT buffers */
 	A_D(6, 12,  1, OMCI_DYN_SLOT_PRIQ),	/* #12 Total priority queues */
@@ -316,8 +342,10 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(7, 4,  1, 1),			/* #4  Is valid */
 	/* ⚠ #5 AND #6 WERE ONE ROW UNTIL 2026-08-31: this table ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 10. */
-	A_ZERO(7, 5, 25),			/* #5  Product code */
-	A_ZERO(7, 6, 16),			/* #6  Image hash */
+	A_HIDE(7, 5, 25, OMCI_SRC_ID, offsetof(struct omci_identity, zeros), 0),
+						/* #5  Product code */
+	A_HIDE(7, 6, 16, OMCI_SRC_ID, offsetof(struct omci_identity, zeros), 0),
+						/* #6  Image hash */
 
 	/* ---- ME 11 PPTP Ethernet UNI (inst 0x0101) — THE HGU gate ---- */
 	A_D(11,  1, 1, OMCI_DYN_UNI_EXPECTED),	/* #1  Expected type */
@@ -353,6 +381,41 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(53, 11, 2, 0),			/* #11 POTS holdover time */
 	A_CW(53, 12, 1, 0),			/* #12 Nominal feed voltage */
 
+	/* ---- single MEs a board declares (extra-me-instances), each as the
+	 * field X111W's stock uploads it (production OLT, 2026-10-02) ---- */
+	A_CW(83, 1, 1, 0),			/* LCT UNI #1  Admin state */
+	A_CW(133,  1, 2, 0),			/* power shedding #1 Restore timer */
+	A_CW(133,  2, 2, 0),			/* #2  Data class interval */
+	A_CW(133,  3, 2, 0),			/* #3  Voice class interval */
+	A_CW(133,  4, 2, 0),			/* #4  Video overlay interval */
+	A_CW(133,  5, 2, 0),			/* #5  Video return interval */
+	A_CW(133,  6, 2, 0),			/* #6  DSL class interval */
+	A_CW(133,  7, 2, 0),			/* #7  ATM class interval */
+	A_CW(133,  8, 2, 0),			/* #8  CES class interval */
+	A_CW(133,  9, 2, 0),			/* #9  Frame class interval */
+	A_CW(133, 10, 2, 0),			/* #10 SDH-SONET interval */
+	A_C(133, 11, 2, 0),			/* #11 Shedding status */
+	A_CW(138, 1, 1, 1),			/* VoIP config #1 Available protocols */
+	A_CW(138, 2, 1, 1),			/* #2  Protocol used */
+	A_C(138, 3, 4, 5),			/* #3  Available config methods */
+	A_CW(138, 4, 1, 0),			/* #4  Config method used */
+	A_CW(138, 5, 2, 0xffff),		/* #5  Config address pointer */
+	A_C(138, 6, 1, 0),			/* #6  Config state */
+	A_CW(138, 7, 1, 0),			/* #7  Retrieve profile */
+	A_TXT(138, 8, 25, OMCI_TEXT_ZERO_DIGIT),	/* #8  Profile version */
+	A_C(141, 1, 2, 0),			/* VoIP line status #1 Codec used */
+	A_C(141, 2, 1, 0),			/* #2  Voice server status */
+	A_C(141, 3, 1, 0),			/* #3  Port session type */
+	A_C(141, 4, 2, 0),			/* #4  Call 1 packet period */
+	A_C(141, 5, 2, 0),			/* #5  Call 2 packet period */
+	A_TXT(141, 6, 25, OMCI_TEXT_ZERO_DIGIT),	/* #6  Call 1 destination */
+	A_TXT(141, 7, 25, OMCI_TEXT_ZERO_DIGIT),	/* #7  Call 2 destination */
+	A_C(141, 8, 1, 0),			/* #8  Line state */
+	A_C(141, 9, 1, 0),			/* #9  Emergency call status */
+	A_CW(340, 1, 1, 1),			/* TR-069 server #1 Admin state */
+	A_CW(340, 2, 2, 0xffff),		/* #2  ACS address pointer */
+	A_CW(340, 3, 2, 0xffff),		/* #3  Associated tag */
+
 	/* ---- ME 134 IP host config data, one per declared instance.  The
 	 * current-address group (#9..#13) reads 0: stock mirrors the live WAN
 	 * lease there, which this model does not know. ---- */
@@ -371,7 +434,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(134, 13, 4, 0),			/* #13 Current secondary DNS */
 	A_ZERO(134, 14, 25),			/* #14 Domain name */
 	A_ZERO(134, 15, 25),			/* #15 Host name */
-	A_CW(134, 16, 2, 0),			/* #16 Relay agent options */
+	A_HIDE(134, 16, 2, OMCI_SRC_CONST, 0, OMCI_ACCESS_WRITE_UNCHANGED),
+						/* #16 Relay agent options */
 
 	/* ============ THE WAN SERVICE SPINE (G.988 clause 9.3) ============
 	 * Every row's WIDTH and ACCESS below is EXTRACTED from the board's own
@@ -491,8 +555,11 @@ static const struct omci_attr omci_attrs[] = {
 	A_TBL(171, 8, 24, OMCI_TBL_HELD, 3),
 					/* #8  DSCP -> P-bit map   DscpToPbitMapping */
 
-	/* ---- ME 131 OLT-G: known, no modelled attributes (the OLT Sets it) */
-	A_NO_ATTRS(131),
+	/* ---- ME 131 OLT-G: what the OLT writes, stock's values until it does */
+	A_OLTG(1, 0, 4),			/* #1  OLT vendor ID */
+	A_OLTG(2, 4, 20),			/* #2  Equipment ID */
+	A_OLTG(3, 24, 14),			/* #3  Version */
+	A_OLTG(4, 38, 14),			/* #4  Time of day */
 
 	/* ---- ME 262 T-CONT (inst 0x8000..0x800b) ---- */
 	A_D(262, 1, 2, OMCI_DYN_TCONT_ALLOC),	/* #1  Alloc-ID */
@@ -516,7 +583,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(263, 10, 2, OMCI_DYN_ANIG_RX),	/* #10 RX optical level */
 	{ 263, 0, 11, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
 	{ 263, 1, 12, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
-	A_C(263, 13, 2, 0x0000),		/* #13 ONU response time */
+	A_HIDE(263, 13, 2, OMCI_SRC_CONST, 0x0000, 0),	/* #13 ONU response time */
 	A_D(263, 14, 2, OMCI_DYN_ANIG_TX),	/* #14 TX optical level */
 	{ 263, 2, 15, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
 	{ 263, 3, 16, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
@@ -568,11 +635,21 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(277, 6, 4, OMCI_DYN_PQ_PORT),	/* #6  Related port */
 	A_C(277, 7, 2, 0x0000),			/* #7  Traffic-sched pointer */
 	A_C(277, 8, 1, 1),			/* #8  Weight */
+	/* #9..#16 as stock's own /etc/omci_mib.cfg and its upload give them */
+	A_C(277,  9, 2, 0),			/* #9  Back pressure operation */
+	A_C(277, 10, 4, 0),			/* #10 Back pressure time */
+	A_C(277, 11, 2, 0),			/* #11 Back pressure occur threshold */
+	A_C(277, 12, 2, 0),			/* #12 Back pressure clear threshold */
+	A_ZERO(277, 13, 8),			/* #13 Packet drop thresholds */
+	A_C(277, 14, 2, 0x00ff),		/* #14 Packet drop max_p */
+	A_C(277, 15, 1, 9),			/* #15 Queue drop w_q */
+	A_C(277, 16, 1, 0),			/* #16 Drop precedence colour */
 
 	/* ---- ME 278 Traffic-Scheduler (inst 0x8000..0x800b) ---- */
 	A_D(278, 1, 2, OMCI_DYN_TS_TCONT),	/* #1  T-CONT pointer */
 	A_C(278, 2, 2, 0x0000),			/* #2  Traffic-sched pointer */
-	A_C(278, 3, 1, 1),			/* #3  Policy */
+	A_C(278, 3, 1, 2),			/* #3  Policy: WRR, as stock's
+						 * omci_app creates every one */
 	A_C(278, 4, 1, 0),			/* #4  Priority/weight */
 
 	/* ME 280 GEM traffic descriptor (mib_GemTrafficDescriptor)
@@ -608,6 +685,7 @@ static const struct omci_attr omci_attrs[] = {
 	 * dev/MEASURED-gpon_omci_me.c.md sec 41. */
 	A_ZERO(329, 3, 25),			/* #3  Interdomain name */
 	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
+	A_C(329, 5,  2, 0x0000),		/* #5  IANA assigned port */
 
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
 	A_ID(65530, 1, operator_id),		/* #1  Operation ID */
@@ -769,7 +847,12 @@ bool omci_get_checks_inst(u16 class_id)
 	       class_id == OMCI_ME_CIRCUIT_PACK ||
 	       class_id == OMCI_ME_PRIORITY_QUEUE ||
 	       class_id == OMCI_ME_IP_HOST ||
-	       class_id == OMCI_ME_PPTP_POTS_UNI;
+	       class_id == OMCI_ME_PPTP_POTS_UNI ||
+	       /* a board declares these one by one, so another board has none */
+	       class_id == OMCI_ME_LCT_UNI || class_id == OMCI_ME_POWER_SHED ||
+	       class_id == OMCI_ME_VOIP_CONFIG ||
+	       class_id == OMCI_ME_VOIP_LINE_STATUS ||
+	       class_id == OMCI_ME_TR069_SERVER;
 }
 
 /* Only these classes have a verified mutable layout in this model. Other
@@ -778,6 +861,7 @@ bool omci_me_mutable(u16 class_id)
 {
 	switch (class_id) {
 	case OMCI_ME_ANI_G:
+	case OMCI_ME_OLT_G:
 	case OMCI_ME_GEM_CTP:
 	case OMCI_ME_PPTP_ETH_UNI:
 	case OMCI_ME_TCONT:
@@ -880,23 +964,37 @@ bool omci_id_set(struct omci_identity *id, enum omci_id_field f,
 bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
 		     const char *s)
 {
-	unsigned int len = 0, code = 0;
+	unsigned int len = 0, code = 0, base = 10, digit;
 	u8 be[2];
 
 	while (s[len] && s[len] != '\n')
 		len++;
 	if (f != OMCI_ID_PRODUCT_CODE)
 		return omci_id_set(id, f, (const u8 *)s, len);
-	if (!len || len > 4)
+	/* strtol(s, NULL, 0), as stock's omci_app reads OMCI_VENDOR_PRODUCT_CODE:
+	 * "31" is 0x001f on the field X111W's wire. */
+	if (s[0] == '0' && (s[1] | 0x20) == 'x') {
+		base = 16;
+		s += 2;
+	} else if (s[0] == '0' && len > 1) {
+		base = 8;
+		s++;
+	}
+	if (!*s || *s == '\n')
 		return false;
 	for (; *s && *s != '\n'; s++) {
 		char c = *s;
 
 		if (c >= '0' && c <= '9')
-			code = code << 4 | (unsigned int)(c - '0');
+			digit = (unsigned int)(c - '0');
 		else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f')
-			code = code << 4 | (unsigned int)((c | 0x20) - 'a' + 10);
+			digit = (unsigned int)((c | 0x20) - 'a' + 10);
 		else
+			return false;
+		if (digit >= base)
+			return false;
+		code = code * base + digit;
+		if (code > 0xffff)
 			return false;
 	}
 	be[0] = (u8)(code >> 8);
@@ -924,8 +1022,13 @@ void omci_me_reset_values(struct omci_onu *o)
 	 * everything. */
 	gpon_vlan_model_reset(&o->vlan);
 	o->tcont_alloc_written = 0;
+	/* G.988's unassigned 0x00ff on every T-CONT, as stock's omci_app creates
+	 * them and the field X111W uploads them */
 	for (i = 0; i < OMCI_TCONT_MAX; i++)
-		o->tcont_alloc[i] = i ? 0x00ff : 0x0100;
+		o->tcont_alloc[i] = 0x00ff;
+	memset(o->olt_g, 0, sizeof(o->olt_g));
+	memcpy(o->olt_g + 4, omci_text[OMCI_TEXT_SPACES], 20);
+	o->olt_g[24] = '0';
 	o->anig_threshold[0] = o->anig_threshold[1] = 0xff;
 	o->anig_threshold[2] = o->anig_threshold[3] = 0x81;
 	omci_anig_alarms_refresh(o);
@@ -1008,6 +1111,8 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		return;			/* validated equal to what we serve */
 	if (a->src == OMCI_SRC_STORE)
 		memcpy(e->body + a->v, v, a->size);
+	else if (a->src == OMCI_SRC_OLT_G)
+		memcpy(o->olt_g + a->v, v, a->size);
 	else if (a->src == OMCI_SRC_ANIG_THRESHOLD)
 		o->anig_threshold[a->v] = v[0];
 	else if (a->src == OMCI_SRC_TBL) {
@@ -1180,6 +1285,10 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 	switch (a->src) {
 	case OMCI_SRC_ANIG_THRESHOLD:
 		return o->anig_threshold + a->v;
+	case OMCI_SRC_TEXT:
+		return omci_text[a->v];
+	case OMCI_SRC_OLT_G:
+		return o->olt_g + a->v;
 	case OMCI_SRC_STORE: {
 		struct omci_me_inst *e = omci_store_find(o,
 						      a->class_id, inst);
@@ -1334,184 +1443,169 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	return over ? OMCI_RC_ATTR_FAILED : OMCI_RC_OK;
 }
 
-/* Build the static MIB-Upload row table: every ... -- dev/MEASURED-gpon_omci_me.c.md sec 29. */
+/* Where the instances of one auto-instantiated class come from. */
+enum omci_mi {
+	OMCI_MI_ONE,		/* the single instance named beside it */
+	OMCI_MI_SLOTS,		/* the declared equipment slots */
+	OMCI_MI_PPTP,		/* the declared Ethernet UNIs: THE HGU gate */
+	OMCI_MI_POTS,
+	OMCI_MI_IP_HOST,
+	OMCI_MI_UNI_G,		/* its OWN inventory, not the PPTP list */
+	OMCI_MI_TCONT,		/* 0x8000 + i */
+	OMCI_MI_SCHED,		/* 0x8000 + i */
+	OMCI_MI_QUEUE,		/* 8 per downstream port from 0, then 8 per
+				 * T-CONT from 0x8000 when the board declares
+				 * its capacity */
+	OMCI_MI_EXTRA,		/* the board's further single MEs, any class */
+};
+
+/* Every auto-instantiated ME the OLT reads back.  The OLT counts the ME 11
+ * instances to classify the ONU as HGU, and this is also the ONU's statement
+ * of WHICH instances exist: a Set of one not here (and never created) is
+ * answered 0x05.  ME 65530 is served by Get and never uploaded, as stock. */
+static const struct {
+	u16 class_id, inst;
+	u8 from;
+} omci_mib_classes[] = {
+	{ OMCI_ME_ONU_DATA, 0, OMCI_MI_ONE },
+	{ OMCI_ME_ONU_G, 0, OMCI_MI_ONE },
+	{ OMCI_ME_ONU2_G, 0, OMCI_MI_ONE },
+	{ OMCI_ME_CARDHOLDER, 0, OMCI_MI_SLOTS },
+	{ OMCI_ME_CIRCUIT_PACK, 0, OMCI_MI_SLOTS },
+	{ OMCI_ME_SW_IMAGE, 0, OMCI_MI_ONE },
+	{ OMCI_ME_SW_IMAGE, 1, OMCI_MI_ONE },
+	{ OMCI_ME_PPTP_ETH_UNI, 0, OMCI_MI_PPTP },
+	{ OMCI_ME_PPTP_POTS_UNI, 0, OMCI_MI_POTS },
+	{ OMCI_ME_OLT_G, 0, OMCI_MI_ONE },
+	{ OMCI_ME_IP_HOST, 0, OMCI_MI_IP_HOST },
+	{ OMCI_ME_ANI_G, 0x8001, OMCI_MI_ONE },
+	{ OMCI_ME_TCONT, 0, OMCI_MI_TCONT },
+	{ OMCI_ME_UNI_G, 0, OMCI_MI_UNI_G },
+	{ OMCI_ME_PRIORITY_QUEUE, 0, OMCI_MI_QUEUE },
+	{ OMCI_ME_TRAFFIC_SCHED, 0, OMCI_MI_SCHED },
+	{ OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_MI_ONE },
+	{ 0, 0, OMCI_MI_EXTRA },
+};
+
+static u16 omci_mi_count(const struct omci_onu *o, u8 from)
+{
+	switch (from) {
+	case OMCI_MI_SLOTS:
+		return o->slots_n;
+	case OMCI_MI_PPTP:
+		return o->pptp_eth_uni.n;
+	case OMCI_MI_POTS:
+		return o->pots_uni_n;
+	case OMCI_MI_IP_HOST:
+		return o->ip_host_n;
+	case OMCI_MI_UNI_G:
+		return o->uni_g.n;
+	case OMCI_MI_TCONT:
+		return o->cap.tcont_n;
+	case OMCI_MI_SCHED:
+		return o->cap.sched_n;
+	case OMCI_MI_QUEUE:
+		return (u16)(8 * o->cap.dsq_n + (o->cap.usq ? 8 * o->cap.tcont_n : 0));
+	case OMCI_MI_EXTRA:
+		return o->extra_me_n;
+	default:
+		return 1;
+	}
+}
+
+static u16 omci_mi_inst(const struct omci_onu *o, u8 from, u16 inst, u16 i)
+{
+	u16 ds_q = (u16)(8 * o->cap.dsq_n);
+
+	switch (from) {
+	case OMCI_MI_SLOTS:
+		return o->slots[i].inst;
+	case OMCI_MI_PPTP:
+		return o->pptp_eth_uni.inst[i];
+	case OMCI_MI_POTS:
+		return o->pots_uni[i];
+	case OMCI_MI_IP_HOST:
+		return o->ip_host[i];
+	case OMCI_MI_UNI_G:
+		return o->uni_g.inst[i];
+	case OMCI_MI_TCONT:
+	case OMCI_MI_SCHED:
+		return (u16)(0x8000 + i);
+	case OMCI_MI_QUEUE:
+		return i < ds_q ? i : (u16)(0x8000 + i - ds_q);
+	case OMCI_MI_EXTRA:
+		return o->extra_me[i][1];
+	default:
+		return inst;
+	}
+}
+
+#define OMCI_UPLOAD_VALUE_LEN 26
+
+static void omci_row_add(struct omci_onu *o, u16 class_id, u16 inst, u16 mask)
+{
+	if (o->nrows < OMCI_MIB_ROWS_MAX) {
+		o->rows[o->nrows].class_id = class_id;
+		o->rows[o->nrows].inst = inst;
+		o->rows[o->nrows].mask = mask;
+		o->nrows++;
+	} else {
+		o->rows_dropped++;
+	}
+}
+
+/* Stock's packing of one instance: its uploaded attributes in order, a new row
+ * whenever the next would overflow the 26-octet value area. */
+static void omci_pack_rows(struct omci_onu *o, u16 class_id, u16 inst)
+{
+	const struct omci_attr *a;
+	unsigned int used = 0;
+	u16 mask = 0;
+
+	for (a = omci_me_find(class_id); a && a->class_id == class_id; a++) {
+		if (!a->attr || (a->access & OMCI_ACCESS_HIDDEN))
+			continue;
+		if (mask && used + a->size > OMCI_UPLOAD_VALUE_LEN) {
+			omci_row_add(o, class_id, inst, mask);
+			mask = 0;
+			used = 0;
+		}
+		mask |= (u16)OMCI_ATTR_BIT(a->attr);
+		used += a->size;
+	}
+	if (mask)
+		omci_row_add(o, class_id, inst, mask);
+}
+
+static u32 omci_row_key(const struct omci_mib_row *r)
+{
+	return (u32)r->class_id << 16 | r->inst;
+}
+
+/* Build the static MIB-Upload row table, in stock's order: by class, then by
+ * instance, an instance's rows in attribute order. */
 static void omci_build_mib(struct omci_onu *o)
 {
-	u16 n = 0, dropped = 0;
-	u16 i, ds_q, us_q;
+	unsigned int c;
+	u16 i, j;
 
-#define ROW(c, ins, m) do {						\
-		if (n < OMCI_MIB_ROWS_MAX) {				\
-			o->rows[n].class_id = (c);			\
-			o->rows[n].inst = (ins);			\
-			o->rows[n].mask = (m);				\
-			n++;						\
-		} else {						\
-			dropped++;					\
-		}							\
-	} while (0)
+	o->nrows = 0;
+	o->rows_dropped = 0;
+	for (c = 0; c < sizeof(omci_mib_classes) / sizeof(omci_mib_classes[0]); c++) {
+		u8 from = omci_mib_classes[c].from;
 
-	ROW(OMCI_ME_ONU_DATA, 0x0000, OMCI_ATTR_BIT(1));
-
-	/* ME 256 ONU-G: 14 attrs split by the 26-byte cap:
-	 * A = vid(4)+ver(14)+sn(8) = 26, B = #4..#9 = 6x1, C = LoID(24),
-	 * D = #11(12)+#12(1)+#13(2)+#14(1) = 16. */
-	ROW(OMCI_ME_ONU_G, 0x0000, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				   OMCI_ATTR_BIT(3));
-	ROW(OMCI_ME_ONU_G, 0x0000, OMCI_ATTR_BIT(4) | OMCI_ATTR_BIT(5) |
-				   OMCI_ATTR_BIT(6) | OMCI_ATTR_BIT(7) |
-				   OMCI_ATTR_BIT(8) | OMCI_ATTR_BIT(9));
-	ROW(OMCI_ME_ONU_G, 0x0000, OMCI_ATTR_BIT(10));
-	ROW(OMCI_ME_ONU_G, 0x0000, OMCI_ATTR_BIT(11) | OMCI_ATTR_BIT(12) |
-				   OMCI_ATTR_BIT(13) | OMCI_ATTR_BIT(14));
-
-	/* ME 257 ONT2-G: A = EquipmentID(20), B = all scalars (21B). */
-	ROW(OMCI_ME_ONU2_G, 0x0000, OMCI_ATTR_BIT(1));
-	ROW(OMCI_ME_ONU2_G, 0x0000, OMCI_ATTR_BIT(2) | OMCI_ATTR_BIT(3) |
-				    OMCI_ATTR_BIT(4) | OMCI_ATTR_BIT(5) |
-				    OMCI_ATTR_BIT(6) | OMCI_ATTR_BIT(7) |
-				    OMCI_ATTR_BIT(8) | OMCI_ATTR_BIT(9) |
-				    OMCI_ATTR_BIT(10) | OMCI_ATTR_BIT(11) |
-				    OMCI_ATTR_BIT(12) | OMCI_ATTR_BIT(13) |
-				    OMCI_ATTR_BIT(14));
-
-	/* Per slot: ME 5 (#1..#3), then ME 6 A = #1..#4 = 24B and
-	 * B = #5(4) + #6..#8, #10..#13 (7x1) + #14(4) = 15B. */
-	for (i = 0; i < o->slots_n; i++) {
-		u16 slot = o->slots[i].inst;
-
-		ROW(OMCI_ME_CARDHOLDER, slot, OMCI_ATTR_BIT(1) |
-					      OMCI_ATTR_BIT(2) |
-					      OMCI_ATTR_BIT(3));
-		ROW(OMCI_ME_CIRCUIT_PACK, slot, OMCI_ATTR_BIT(1) |
-						OMCI_ATTR_BIT(2) |
-						OMCI_ATTR_BIT(3) |
-						OMCI_ATTR_BIT(4));
-		ROW(OMCI_ME_CIRCUIT_PACK, slot, OMCI_ATTR_BIT(5) |
-						OMCI_ATTR_BIT(6) |
-						OMCI_ATTR_BIT(7) |
-						OMCI_ATTR_BIT(8) |
-						OMCI_ATTR_BIT(10) |
-						OMCI_ATTR_BIT(11) |
-						OMCI_ATTR_BIT(12) |
-						OMCI_ATTR_BIT(13) |
-						OMCI_ATTR_BIT(14));
+		for (i = 0; i < omci_mi_count(o, from); i++)
+			omci_pack_rows(o, from == OMCI_MI_EXTRA ? o->extra_me[i][0] :
+					  omci_mib_classes[c].class_id,
+				       omci_mi_inst(o, from, omci_mib_classes[c].inst, i));
 	}
+	for (i = 1; i < o->nrows; i++) {
+		struct omci_mib_row r = o->rows[i];
 
-	/* ME 7 Software-Image x2 banks: A = ver+committed+active+valid = 17B,
-	 * B = hash(16). */
-	ROW(OMCI_ME_SW_IMAGE, 0x0000, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				      OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4));
-	/* ★ #6 Image hash (16 octets) is MODELLED and was never uploaded, so an
-	 * OLT walking the MIB never learned it exists.  Its own row, beside #5's:
-	 * 25 and 16 each need one. */
-	ROW(OMCI_ME_SW_IMAGE, 0x0000, OMCI_ATTR_BIT(5));
-	ROW(OMCI_ME_SW_IMAGE, 0x0000, OMCI_ATTR_BIT(6));
-	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				      OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4));
-	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(5));
-	ROW(OMCI_ME_SW_IMAGE, 0x0001, OMCI_ATTR_BIT(6));
-
-	/* ME 11 PPTP Ethernet UNI: #1..#15 = 17B, one row per declared
-	 * instance.  THE HGU GATE. */
-	for (i = 0; i < o->pptp_eth_uni.n; i++)
-		ROW(OMCI_ME_PPTP_ETH_UNI, o->pptp_eth_uni.inst[i],
-					  OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-					  OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
-					  OMCI_ATTR_BIT(5) | OMCI_ATTR_BIT(6) |
-					  OMCI_ATTR_BIT(7) | OMCI_ATTR_BIT(8) |
-					  OMCI_ATTR_BIT(9) | OMCI_ATTR_BIT(10) |
-					  OMCI_ATTR_BIT(11) | OMCI_ATTR_BIT(12) |
-					  OMCI_ATTR_BIT(13) | OMCI_ATTR_BIT(14) |
-					  OMCI_ATTR_BIT(15));
-
-	/* ME 53 PPTP POTS UNI: #1..#12 = 14B. */
-	for (i = 0; i < o->pots_uni_n; i++)
-		ROW(OMCI_ME_PPTP_POTS_UNI, o->pots_uni[i],
-		    OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) | OMCI_ATTR_BIT(3) |
-		    OMCI_ATTR_BIT(4) | OMCI_ATTR_BIT(5) | OMCI_ATTR_BIT(6) |
-		    OMCI_ATTR_BIT(7) | OMCI_ATTR_BIT(8) | OMCI_ATTR_BIT(9) |
-		    OMCI_ATTR_BIT(10) | OMCI_ATTR_BIT(11) | OMCI_ATTR_BIT(12));
-
-	ROW(OMCI_ME_OLT_G, 0x0000, 0x0000);
-
-	/* ME 134 IP host config data: A = #1 + #2 + #4..#7 = 23B, #3 = 25B,
-	 * C = #8..#13 = 24B, #14 = 25B, #15 = 25B, #16 = 2B. */
-	for (i = 0; i < o->ip_host_n; i++) {
-		u16 ih = o->ip_host[i];
-
-		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-					 OMCI_ATTR_BIT(4) | OMCI_ATTR_BIT(5) |
-					 OMCI_ATTR_BIT(6) | OMCI_ATTR_BIT(7));
-		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(3));
-		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(8) | OMCI_ATTR_BIT(9) |
-					 OMCI_ATTR_BIT(10) | OMCI_ATTR_BIT(11) |
-					 OMCI_ATTR_BIT(12) | OMCI_ATTR_BIT(13));
-		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(14));
-		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(15));
-		ROW(OMCI_ME_IP_HOST, ih, OMCI_ATTR_BIT(16));
+		for (j = i; j && omci_row_key(&o->rows[j - 1]) > omci_row_key(&r); j--)
+			o->rows[j] = o->rows[j - 1];
+		o->rows[j] = r;
 	}
-
-	/* ME 263 ANI-G: A = #1..#9 = 11B, B = #10..#16 = 10B. */
-	ROW(OMCI_ME_ANI_G, 0x8001, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				   OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
-				   OMCI_ATTR_BIT(5) | OMCI_ATTR_BIT(6) |
-				   OMCI_ATTR_BIT(7) | OMCI_ATTR_BIT(8) |
-				   OMCI_ATTR_BIT(9));
-	ROW(OMCI_ME_ANI_G, 0x8001, OMCI_ATTR_BIT(10) | OMCI_ATTR_BIT(11) |
-				   OMCI_ATTR_BIT(12) | OMCI_ATTR_BIT(13) |
-				   OMCI_ATTR_BIT(14) | OMCI_ATTR_BIT(15) |
-				   OMCI_ATTR_BIT(16));
-
-	/* ME 262 T-CONT (inst 0x8000 + i): 4B each. */
-	for (i = 0; i < o->cap.tcont_n; i++)
-		ROW(OMCI_ME_TCONT, 0x8000 + i, OMCI_ATTR_BIT(1) |
-					       OMCI_ATTR_BIT(2) |
-					       OMCI_ATTR_BIT(3));
-
-	/* ME 264 UNI-G, one row per declared instance.  Its inventory is its
-	 * OWN: the X400AXF reports a UNI-G the PPTP list does not carry. */
-	for (i = 0; i < o->uni_g.n; i++)
-		ROW(OMCI_ME_UNI_G, o->uni_g.inst[i],
-				   OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-				   OMCI_ATTR_BIT(3) | OMCI_ATTR_BIT(4) |
-				   OMCI_ATTR_BIT(5));
-
-	/* ME 277 Priority-Queue: 8 per declared downstream port from 0, and 8
-	 * per T-CONT from 0x8000 when the board declares its capacity (the old
-	 * single-UNI cap of 8: ... dev/MEASURED-gpon_omci_me.c.md sec 30). */
-	ds_q = (u16)(8 * o->cap.dsq_n);
-	us_q = o->cap.usq ? (u16)(8 * o->cap.tcont_n) : 0;
-	for (i = 0; i < ds_q + us_q; i++)
-		ROW(OMCI_ME_PRIORITY_QUEUE, i < ds_q ? i : 0x8000 + i - ds_q,
-					       OMCI_ATTR_BIT(1) |
-					       OMCI_ATTR_BIT(2) |
-					       OMCI_ATTR_BIT(3) |
-					       OMCI_ATTR_BIT(4) |
-					       OMCI_ATTR_BIT(5) |
-					       OMCI_ATTR_BIT(6) |
-					       OMCI_ATTR_BIT(7) |
-					       OMCI_ATTR_BIT(8));
-
-	/* ME 278 Traffic-Scheduler (inst 0x8000 + i): 6B each. */
-	for (i = 0; i < o->cap.sched_n; i++)
-		ROW(OMCI_ME_TRAFFIC_SCHED, 0x8000 + i, OMCI_ATTR_BIT(1) |
-						       OMCI_ATTR_BIT(2) |
-						       OMCI_ATTR_BIT(3) |
-						       OMCI_ATTR_BIT(4));
-
-	/* ★★ THE OTHER HALF OF THE #3/#4 CORRECTION ABOVE, AND IT WAS ...
-	 * dev/MEASURED-gpon_omci_me.c.md sec 31. */
-	ROW(OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_ATTR_BIT(1) | OMCI_ATTR_BIT(2) |
-					  OMCI_ATTR_BIT(4));
-	ROW(OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_ATTR_BIT(3));
-
-	/* ME 65530 (CTC LoID authentication) is deliberately NOT ...
-	 * dev/MEASURED-gpon_omci_me.c.md sec 32. */
-
-#undef ROW
-	o->nrows = n;
-	o->rows_dropped = dropped;
 }
 
 bool omci_onu_declare_unis(struct omci_onu *o,
@@ -1870,6 +1964,65 @@ enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
 	return OMCI_UNI_DECL_OK;
 }
 
+static bool omci_row_listed(const struct omci_onu *o, u16 class_id, u16 inst)
+{
+	u16 i;
+
+	for (i = 0; i < o->nrows; i++)
+		if (o->rows[i].class_id == class_id && o->rows[i].inst == inst)
+			return true;
+	return false;
+}
+
+enum omci_uni_decl omci_onu_declare_extra_me_be(struct omci_onu *o,
+						const void *be, int len,
+						const char **why)
+{
+	u16 was[OMCI_EXTRA_ME_MAX][2];
+	u8 was_n = o->extra_me_n, n, i;
+	const u8 *b = be;
+	const char *unused;
+
+	if (!why)
+		why = &unused;
+	if (len < 0) {
+		*why = "no further MEs declared";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!b || !len || len % 4 || len > 4 * OMCI_EXTRA_ME_MAX) {
+		*why = "the further MEs are not 1..8 <class instance> pairs";
+		return OMCI_UNI_DECL_BAD;
+	}
+	n = (u8)(len / 4);
+	memcpy(was, o->extra_me, sizeof(was));
+	o->extra_me_n = 0;
+	omci_build_mib(o);
+	for (i = 0; i < n; i++) {
+		u16 c = (u16)((b[4 * i] << 8) | b[4 * i + 1]);
+		u16 inst = (u16)((b[4 * i + 2] << 8) | b[4 * i + 3]);
+
+		if (!omci_me_find(c) || omci_row_listed(o, c, inst)) {
+			o->extra_me_n = was_n;
+			omci_build_mib(o);
+			*why = "a further ME this model does not carry, or one already listed";
+			return OMCI_UNI_DECL_BAD;
+		}
+		o->extra_me[i][0] = c;
+		o->extra_me[i][1] = inst;
+		o->extra_me_n = i + 1;
+		omci_build_mib(o);
+	}
+	if (o->rows_dropped) {
+		memcpy(o->extra_me, was, sizeof(was));
+		o->extra_me_n = was_n;
+		omci_build_mib(o);
+		*why = "more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why)
 {
@@ -1896,6 +2049,9 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	b = prop(ctx, "downstream-queue-ports", &blen);
 	OMCI_DECLARED(omci_onu_declare_queues_be(o, a, alen, b, blen, &reason),
 		      "onu-capacity");
+	a = prop(ctx, "extra-me-instances", &alen);
+	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
+		      "extra-me-instances");
 #undef OMCI_DECLARED
 	return first;
 }
@@ -1960,6 +2116,8 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	u8 ip_host_mac[OMCI_IP_HOST_MAX], ip_host_n = o->ip_host_n;
 	u16 pots_uni[OMCI_UNI_MAX];
 	u8 pots_uni_n = o->pots_uni_n;
+	u16 extra_me[OMCI_EXTRA_ME_MAX][2];
+	u8 extra_me_n = o->extra_me_n;
 	struct omci_capacity capacity = o->cap;
 	u8 wan_mac[6];
 	bool wan_mac_set = o->wan_mac_set;
@@ -1973,6 +2131,7 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	memcpy(ip_host, o->ip_host, sizeof(ip_host));
 	memcpy(ip_host_mac, o->ip_host_mac, sizeof(ip_host_mac));
 	memcpy(pots_uni, o->pots_uni, sizeof(pots_uni));
+	memcpy(extra_me, o->extra_me, sizeof(extra_me));
 	memcpy(wan_mac, o->wan_mac, sizeof(wan_mac));
 	omci_onu_init(o, sn, mds_seed);
 	o->id = id;
@@ -1983,6 +2142,8 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->ip_host_n = ip_host_n;
 	memcpy(o->pots_uni, pots_uni, sizeof(pots_uni));
 	o->pots_uni_n = pots_uni_n;
+	memcpy(o->extra_me, extra_me, sizeof(extra_me));
+	o->extra_me_n = extra_me_n;
 	o->cap = capacity;
 	memcpy(o->wan_mac, wan_mac, sizeof(wan_mac));
 	o->wan_mac_set = wan_mac_set;

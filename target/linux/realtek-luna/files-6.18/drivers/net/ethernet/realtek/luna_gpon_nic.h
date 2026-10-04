@@ -24,6 +24,30 @@ void luna_omci_set_wan_mac(const u8 *mac);
 void luna_omci_rx_errors(u32 *bad_mic, u32 *runt);
 void luna_omci_report_oper_up(void);
 bool luna_gpon_data_ready(void);
+/* The CPU's WAN control frames ride their own flow on the data T-CONT's next queue
+ * (luna_gpon.c ctrl_queue): an offloaded flood fills the data queue, and the PPP LCP
+ * echo replies queued behind it were lost (X100DG, V2801RGW, 2026-10-04). */
+bool luna_gpon_ctrl_flow_ready(void);
+
+/* A WAN frame the session's life depends on: PPPoE discovery, a PPP control protocol
+ * (LCP, PAP, CHAP, IPCP, IPv6CP: protocol >= 0x8000) or ARP -- one 802.1Q tag allowed.
+ * Byte math only: the Luna CPUs are big-endian. */
+static inline bool luna_wan_control_frame(const u8 *d, unsigned int len)
+{
+	unsigned int off = 12;
+	unsigned int type;
+
+	if (len < off + 2)
+		return false;
+	type = (d[off] << 8) | d[off + 1];
+	if (type == 0x8100 && len >= off + 6) {
+		off += 4;
+		type = (d[off] << 8) | d[off + 1];
+	}
+	if (type == 0x0806 || type == 0x8863)
+		return true;
+	return type == 0x8864 && len >= off + 10 && ((d[off + 8] << 8) | d[off + 9]) >= 0x8000;
+}
 void luna_gpon_nic_reset_begin(void);
 void luna_gpon_nic_reset_end(void);
 
@@ -82,6 +106,7 @@ void rtl9602c_datapath_tables_init(void);
  * can only broadcast to an IP-less client) may ride this GEM, not the unicast data GEM.
  * Wire it to its own internal DS flow so broadcast DS de-encapsulates to the CPU/gpon0. */
 #define GPON_MCAST_FLOW	2
+#define GPON_CTRL_FLOW		3
 #define GPON_MCAST_GEM	0xfffu
 
 /* Timer-owned data installation consumes the accepted common OMCI binding. */

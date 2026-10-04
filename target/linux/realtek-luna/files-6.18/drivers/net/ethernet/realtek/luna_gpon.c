@@ -129,6 +129,11 @@ static void luna_omci_identity_reset(const u8 sn[8]);
 static void luna_data_suspend(void);
 static void luna_omci_seq_show(struct seq_file *s);
 static int luna_data_retire(void);
+static bool ctrl_queue = true;
+module_param(ctrl_queue, bool, 0444);
+static bool luna_ctrl_flow_wanted(void);
+MODULE_PARM_DESC(ctrl_queue, "CPU WAN control frames (PPP LCP/auth/IPCP, PPPoE discovery, ARP) on "
+		 "their own flow, the data T-CONT's next queue (default on)");
 static u8 luna_data_qid;
 static bool gpon_sn_changed;		/* SN (re)provisioned -> FSM must re-range */
 
@@ -5873,7 +5878,8 @@ static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
 	/* (1) all-SID classify invalidation pre-pass, so the US-NIC resolves the
 	 * OMCC SID cleanly at the re-latch, as stock does. */
 	for (sid = 0; sid < swc->classify_sid_num; sid++) {
-		if (sid == GPON_OMCC_FLOW || (keep_data && sid == GPON_DATA_FLOW))
+		if (sid == GPON_OMCC_FLOW || (keep_data && (sid == GPON_DATA_FLOW ||
+		    (sid == GPON_CTRL_FLOW && luna_ctrl_flow_wanted()))))
 			continue;
 		pi_packed_set(PI_PON_SIDVALID, sid, 1, 0);
 		pi_packed_set(PI_PON_SID2QID, sid, 7, swc->scratch_phys_qid & 0x7f);
@@ -5892,6 +5898,11 @@ static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
 		pi_packed_set(PI_PON_SID2QID, GPON_DATA_FLOW, 7,
 			      luna_data_qid & 0x7f);
 		pi_packed_set(PI_PON_SIDVALID, GPON_DATA_FLOW, 1, 1);
+		if (luna_ctrl_flow_wanted()) {
+			pi_packed_set(PI_PON_SID2QID, GPON_CTRL_FLOW, 7,
+				      (luna_data_qid + 1) & 0x7f);
+			pi_packed_set(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1, 1);
+		}
 	}
 
 	/* (3) PON-port + CPU-port RX_SPC: accept the sub-64B OMCI frame. Both the
@@ -6094,6 +6105,19 @@ bool luna_gpon_data_ready(void)
 	return READ_ONCE(luna_data_admitted) && READ_ONCE(luna_activation_ready);
 }
 EXPORT_SYMBOL(luna_gpon_data_ready);
+
+/* The control flow exists only beside a dedicated data T-CONT: on the OMCC's queue
+ * there is no second queue of ours to give it. */
+static bool luna_ctrl_flow_wanted(void)
+{
+	return ctrl_queue && !luna_data.armed.rides_omcc && luna_data_qid != GPON_OMCC_PHYS_QID;
+}
+
+bool luna_gpon_ctrl_flow_ready(void)
+{
+	return READ_ONCE(gpon_data_installed) && luna_ctrl_flow_wanted();
+}
+EXPORT_SYMBOL(luna_gpon_ctrl_flow_ready);
 
 /* Process-context NIC reset exclusion. The timer is the sole accepted-OMCI
  * and CAM/scheduler consumer; no model lock is held while waiting for it. */
@@ -6840,6 +6864,14 @@ int gpon_install_data_gem(void)
 	pi_packed_set(PI_PON_SID2QID, GPON_DATA_FLOW, 7, luna_data_qid & 0x7f);
 	pi_packed_set(PI_PON_SIDVALID, GPON_DATA_FLOW, 1, 1);
 	pi_packed_set(PI_PON_SID_Q_MAP_DS, GPON_DATA_FLOW, 2, 0);
+	if (luna_ctrl_flow_wanted()) {
+		if (!gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, GPON_CTRL_FLOW,
+					   gpon_gem_us_port_id(gpon_data_gem_port)))
+			return -ENODEV;
+		pi_packed_set(PI_PON_SID2QID, GPON_CTRL_FLOW, 7, (luna_data_qid + 1) & 0x7f);
+		pi_packed_set(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1, 1);
+		pi_packed_set(PI_PON_SID_Q_MAP_DS, GPON_CTRL_FLOW, 2, 0);
+	}
 
 	/* Multicast/broadcast GEM -> its own flow, BRIDGED and ...
 	 * dev/MEASURED-luna_gpon.c.md sec 215. */
@@ -6862,6 +6894,11 @@ int gpon_install_data_gem(void)
 			pi_packed_set(PI_PON_SID2QID, GPON_DATA_FLOW, 7,
 				      luna_data_qid & 0x7f);
 			pi_packed_set(PI_PON_SIDVALID, GPON_DATA_FLOW, 1, 1);
+			if (luna_ctrl_flow_wanted()) {
+				pi_packed_set(PI_PON_SID2QID, GPON_CTRL_FLOW, 7,
+					      (luna_data_qid + 1) & 0x7f);
+				pi_packed_set(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1, 1);
+			}
 
 			/* Re-force the US-NIC<->GMAC0 internal-MII link UP before the commit edge,
 			 * the symmetric twin of the DS re-force below: the ifup GMAC0 power-cycle
@@ -6900,6 +6937,10 @@ int gpon_install_data_gem(void)
 	rtl9602c_ponmac_modeset_gpon(true);
 	if (pi_packed_get(PI_PON_SIDVALID, GPON_DATA_FLOW, 1) != 1 ||
 	    pi_packed_get(PI_PON_SID2QID, GPON_DATA_FLOW, 7) != (luna_data_qid & 0x7f))
+		return -EIO;
+	if (luna_ctrl_flow_wanted() &&
+	    (pi_packed_get(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1) != 1 ||
+	     pi_packed_get(PI_PON_SID2QID, GPON_CTRL_FLOW, 7) != ((luna_data_qid + 1) & 0x7f)))
 		return -EIO;
 	gpon_data_installed = true;
 	gpon_ploam_set_data_installed(&luna_ploam, true);
@@ -7034,7 +7075,16 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 			pr_err("luna-gpon: qid %u drain-out failed (%d)\n", qid, drain_rc);
 			return drain_rc;
 		}
-		pi_packed_set(PI_PON_SCH_QMAP, tcont, swc->sch_qmap_bits, 0x1);
+		if (ctrl_queue && tcont == GPON_DATA_TCONT) {
+			drain_rc = luna_queue_drain(qid + 1);
+			if (drain_rc < 0) {
+				pr_err("luna-gpon: control qid %u drain-out failed (%d)\n",
+				       qid + 1, drain_rc);
+				return drain_rc;
+			}
+		}
+		pi_packed_set(PI_PON_SCH_QMAP, tcont, swc->sch_qmap_bits,
+			      ctrl_queue && tcont == GPON_DATA_TCONT ? 0x3 : 0x1);
 						/* PON_SCH_QMAP[tcont] = logical-q0; the entry is 32b
 						 * wide on the RTL9602C and 8b on the RTL9603CVD, so
 						 * `base + tcont * 4` was a per-chip fact too. */
@@ -7045,6 +7095,12 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 		 * weight 1 even for a STRICT queue, because a zero-weight queue is skipped
 		 * by the WFQ round. */
 		pi_packed_set(PI_PON_WFQ_WEIGHT, qid, 10, 1);
+		if (ctrl_queue && tcont == GPON_DATA_TCONT) {
+			pi_field(PI_PON_QID_PIR_RATE + (qid + 1) * PI_QID_RATE_STRIDE, 17, 0, 0x3ffff);
+			pi_field(PI_PON_QID_CIR_RATE + (qid + 1) * PI_QID_RATE_STRIDE, 17, 0, 0);
+			pi_packed_set(PI_PON_WFQ_TYPE, qid + 1, 1, 0);
+			pi_packed_set(PI_PON_WFQ_WEIGHT, qid + 1, 10, 1);
+		}
 		/* Re-issue the OMCC classifier's SID-valid bit NOW, after the ...
 		 * dev/MEASURED-luna_gpon.c.md sec 221. */
 		if (sidvalid_last && qid == GPON_OMCC_PHYS_QID) {
@@ -7108,12 +7164,15 @@ static int luna_data_retire(void)
 		luna_omci.tx_fence(luna_omci.cookie);
 	if (luna_data.sid_dirty) {
 		pi_packed_set(PI_PON_SIDVALID, GPON_DATA_FLOW, 1, 0);
-		if (pi_packed_get(PI_PON_SIDVALID, GPON_DATA_FLOW, 1))
+		pi_packed_set(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1, 0);
+		if (pi_packed_get(PI_PON_SIDVALID, GPON_DATA_FLOW, 1) ||
+		    pi_packed_get(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1))
 			return -EIO;
 		luna_data.sid_dirty = false;
 	}
 	if (luna_data.stamp_dirty) {
-		if (!gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, GPON_DATA_FLOW, 0))
+		if (!gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, GPON_DATA_FLOW, 0) ||
+		    !gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, GPON_CTRL_FLOW, 0))
 			return -ENODEV;
 		if (gpon_rd(reg_at(luna_gpon_chip.gtc.gem_us_port_map) +
 			    GPON_DATA_FLOW * luna_gpon_chip.gtc.gem_us_port_stride) & 0xfff)
@@ -7125,14 +7184,18 @@ static int luna_data_retire(void)
 		if (luna_data.armed.rides_omcc || luna_data_qid == GPON_OMCC_PHYS_QID)
 			return -EINVAL;
 		qmap = pi_packed_get(PI_PON_SCH_QMAP, GPON_DATA_TCONT, swc->sch_qmap_bits);
-		/* This owner has one queue. An unexpected member is not ours to
-		 * strand by cleaning the T-CONT allocation after removing our bit. */
-		if (qmap & ~BIT(luna_data_qid % swc->tcont_queue_max))
+		/* This owner has the data queue and the control queue next to it. An
+		 * unexpected member is not ours to strand by cleaning the allocation. */
+		if (qmap & ~(BIT(luna_data_qid % swc->tcont_queue_max) |
+			     BIT((luna_data_qid + 1) % swc->tcont_queue_max)))
 			return -EBUSY;
 		rc = luna_queue_drain(luna_data_qid);
+		if (!rc && (qmap & BIT((luna_data_qid + 1) % swc->tcont_queue_max)))
+			rc = luna_queue_drain(luna_data_qid + 1);
 		if (rc)
 			return rc;
-		qmap &= ~BIT(luna_data_qid % swc->tcont_queue_max);
+		qmap &= ~(BIT(luna_data_qid % swc->tcont_queue_max) |
+			  BIT((luna_data_qid + 1) % swc->tcont_queue_max));
 		pi_packed_set(PI_PON_SCH_QMAP, GPON_DATA_TCONT, swc->sch_qmap_bits, qmap);
 		if (pi_packed_get(PI_PON_SCH_QMAP, GPON_DATA_TCONT, swc->sch_qmap_bits) != qmap)
 			return -EIO;

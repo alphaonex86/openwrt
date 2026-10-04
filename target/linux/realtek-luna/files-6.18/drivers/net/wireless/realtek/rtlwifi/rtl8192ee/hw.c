@@ -1416,6 +1416,12 @@ int rtl92ee_hw_init(struct ieee80211_hw *hw)
 	rtl_write_dword(rtlpriv, REG_SYS_SWR_CTRL1, tmp_u4b);
 
 	rtl92ee_dm_init(hw);
+	/* The crystal trim is otherwise written only by dm.c's tracking, which never runs
+	 * for an AP: the V2801RGW's 0x2c stayed 0 where its stock writes 2 | 2 << 6. */
+	rtl_set_bbreg(hw, REG_MAC_PHY_CTRL, 0xFFF000,
+		      (rtlpriv->efuse.crystalcap & 0x3f) |
+		      ((rtlpriv->efuse.crystalcap & 0x3f) << 6));
+	rtlpriv->dm.crystal_cap = rtlpriv->efuse.crystalcap;
 
 	rtl_write_dword(rtlpriv, 0x4fc, 0);
 
@@ -2091,6 +2097,11 @@ _rtl92ee_read_txpower_info_from_hwpg(struct ieee80211_hw *hw,
 		"eeprom_regulatory = 0x%x\n", efu->eeprom_regulatory);
 }
 
+/* The board's crystal trim when its vendor keeps it outside the efuse (-1: the efuse's). */
+static int rtl92ee_board_xtal = -1;
+module_param_named(xtal, rtl92ee_board_xtal, int, 0444);
+MODULE_PARM_DESC(xtal, "board crystal cap 0..63, overriding the efuse (-1: efuse)");
+
 static void _rtl92ee_read_adapter_info(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -2139,6 +2150,11 @@ static void _rtl92ee_read_adapter_info(struct ieee80211_hw *hw)
 	rtlefuse->crystalcap = hwinfo[EEPROM_XTAL_92E];
 	if (hwinfo[EEPROM_XTAL_92E] == 0xFF)
 		rtlefuse->crystalcap = 0x20;
+	pr_info("rtl8192ee: efuse xtal=0x%02x thermal=0x%02x board option=0x%02x\n",
+		hwinfo[EEPROM_XTAL_92E], hwinfo[EEPROM_THERMAL_METER_92E],
+		hwinfo[EEPROM_RF_BOARD_OPTION_92E]);
+	if (rtl92ee_board_xtal >= 0)
+		rtlefuse->crystalcap = rtl92ee_board_xtal & 0x3f;
 
 	/*antenna diversity*/
 	rtlefuse->antenna_div_type = NO_ANTDIV;

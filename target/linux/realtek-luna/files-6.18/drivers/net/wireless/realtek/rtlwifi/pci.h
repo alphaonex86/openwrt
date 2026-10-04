@@ -20,18 +20,19 @@
  */
 #define RTL_PCI_MAX_RX_COUNT			384/*upstream: 512*/
 
-/* ONE receive request serves every sub-driver built from this file, and it
- * is now the RTL8192FE's own DMA bound rather than upstream's 9100 worst
- * case.  A second PCIe sub-driver would program a descriptor LONGER than
- * this mapping: a hardware write past the end of a DMA mapping, not a
- * dropped frame.  Build one, or raise this.
+/* ONE receive request serves every sub-driver built from this file: 4042 for
+ * the RTL8192FE and the RTL8192EE (both sized to the 3839-byte A-MSDU and
+ * static-asserted against this), upstream's 9100 as soon as a sub-driver
+ * nobody sized here is built -- a shorter mapping than its descriptor would be
+ * a hardware write past the end of it.
  */
-#define RTL_PCI_RX_BUFFER_SIZE			4042
 #if IS_ENABLED(CONFIG_RTL8192CE) || IS_ENABLED(CONFIG_RTL8192SE) || \
     IS_ENABLED(CONFIG_RTL8192DE) || IS_ENABLED(CONFIG_RTL8723AE) || \
     IS_ENABLED(CONFIG_RTL8723BE) || IS_ENABLED(CONFIG_RTL8188EE) || \
-    IS_ENABLED(CONFIG_RTL8192EE) || IS_ENABLED(CONFIG_RTL8821AE)
-#error "RTL_PCI_RX_BUFFER_SIZE is sized for the RTL8192FE alone"
+    IS_ENABLED(CONFIG_RTL8821AE)
+#define RTL_PCI_RX_BUFFER_SIZE			9100
+#else
+#define RTL_PCI_RX_BUFFER_SIZE			4042
 #endif
 #define RTL_PCI_MAX_TX_QUEUE_COUNT		9
 

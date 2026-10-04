@@ -851,6 +851,21 @@ config KERNEL_MAC80211
 	depends on TARGET_realtek_luna
 	default y
 
+config KERNEL_RTL8192EE
+	bool "Realtek RTL8192EE (10ec:818b) PCIe WiFi, mainline rtlwifi driver"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  A board whose radio is an RTL8192EE turns it on (the V2801RGW).
+
+config KERNEL_EXTRA_FIRMWARE
+	string "Firmware files built into the kernel"
+	depends on TARGET_realtek_luna
+	default "rtlwifi/rtl8192fefw.bin regulatory.db regulatory.db.p7s"
+	help
+	  The radio's firmware is built in: the WiFi driver probes before a
+	  flash root filesystem is mounted. A board names its own radio's blob.
+
 config KERNEL_PCI
 	bool "PCI in the kernel"
 	depends on TARGET_realtek_luna

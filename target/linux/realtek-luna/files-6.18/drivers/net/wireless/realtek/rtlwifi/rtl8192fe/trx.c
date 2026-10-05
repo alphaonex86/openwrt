@@ -43,6 +43,7 @@ static bool _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	const u8 *b = (const u8 *)p_drvinfo;
 	u8 page = b[0] & 0x0f;
+	bool valid = page <= 2;
 	s8 rx_pwr_all = -110, rx_pwr;
 	u8 pwdb_all = 0, rf_rx_num = 0, i, max_ss;
 	u32 total_rssi = 0;
@@ -60,7 +61,15 @@ static bool _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 	memset(pstatus->rx_mimo_signalstrength, 0,
 	       sizeof(pstatus->rx_mimo_signalstrength));
 
-	if (page == 0) {
+	/* Reject positive dBm and signed wrap before either RSSI consumer. */
+	if (page == 0)
+		valid = b[1] <= 110;
+	else if (page == 1 || page == 2)
+		for (i = RF90_PATH_A; i < RF6052_MAX_PATH; i++)
+			if (rtlpriv->dm.rfpath_rxenable[i] && b[1 + i] > 110)
+				valid = false;
+
+	if (valid && page == 0) {
 		u8 sq_rpt = b[12];
 
 		rx_pwr_all = (s8)((int)b[1] - 110);
@@ -72,7 +81,7 @@ static bool _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 			pstatus->signalquality = sq;
 			pstatus->rx_mimo_signalquality[0] = sq;
 		}
-	} else if (page == 1 || page == 2) {
+	} else if (valid && (page == 1 || page == 2)) {
 		for (i = RF90_PATH_A; i < RF6052_MAX_PATH; i++) {
 			if (!rtlpriv->dm.rfpath_rxenable[i])
 				continue;
@@ -121,7 +130,7 @@ static bool _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 	else
 		pstatus->signalstrength =
 			(u8)rtl_signal_scale_mapping(hw, total_rssi / rf_rx_num);
-	return page <= 2;
+	return valid;
 }
 
 static bool _rtl92fe_translate_rx_signal_stuff(struct ieee80211_hw *hw,

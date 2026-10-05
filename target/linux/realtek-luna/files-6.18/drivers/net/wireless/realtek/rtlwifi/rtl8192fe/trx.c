@@ -439,9 +439,9 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 						   false, status->rate);
 
 	rx_status->mactime = status->timestamp_low;
-	if (phystatus) {
-		p_drvinfo = (struct rx_fwinfo *)(skb->data +
-						 status->rx_bufshift + 24);
+	if (phystatus && status->rx_drvinfo_size >= 28) {
+		/* SHIFT pads the frame after driver info, not the PHY report. */
+		p_drvinfo = (struct rx_fwinfo *)(skb->data + 24);
 
 		level = _rtl92fe_translate_rx_signal_stuff(hw, skb, status,
 							   pdesc8, p_drvinfo);

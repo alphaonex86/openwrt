@@ -386,6 +386,7 @@ static void rtl92fe_dm_check_rssi_monitor(struct ieee80211_hw *hw)
 	    mac->opmode == NL80211_IFTYPE_ADHOC ||
 	    mac->opmode == NL80211_IFTYPE_MESH_POINT) {
 		/* AP & ADHOC & MESH */
+		rcu_read_lock();
 		spin_lock_bh(&rtlpriv->locks.entry_list_lock);
 		list_for_each_entry(drv_priv, &rtlpriv->entry_list, list) {
 			struct rssi_sta *stat = &drv_priv->rssi_stat;
@@ -395,13 +396,27 @@ static void rtl92fe_dm_check_rssi_monitor(struct ieee80211_hw *hw)
 			if (stat->undec_sm_pwdb > max)
 				max = stat->undec_sm_pwdb;
 
+			if (mac->opmode == NL80211_IFTYPE_AP ||
+			    mac->opmode == NL80211_IFTYPE_ADHOC) {
+				struct ieee80211_sta *sta;
+
+				if (!mac->vif)
+					continue;
+				sta = rtl_find_sta(hw, drv_priv->mac_addr);
+				if (!sta)
+					continue;
+				h2c[0] = sta->aid + 1;
+				h2c[2] = (u8)(stat->undec_sm_pwdb & 0xFF);
+			} else {
+				h2c[0] = ++i;
+				h2c[2] = (u8)(dm->undec_sm_pwdb & 0xFF);
+			}
 			h2c[3] = 0;
-			h2c[2] = (u8)(dm->undec_sm_pwdb & 0xFF);
 			h2c[1] = 0x20;
-			h2c[0] = ++i;
 			rtl92fe_fill_h2c_cmd(hw, H2C_92F_RSSI_REPORT, 4, h2c);
 		}
 		spin_unlock_bh(&rtlpriv->locks.entry_list_lock);
+		rcu_read_unlock();
 
 		if (max != 0) {
 			dm->entry_max_undec_sm_pwdb = max;

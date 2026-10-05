@@ -1,9 +1,11 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
-# Announce a delegated IPv6 prefix on the LAN only if traffic sent from it comes back.
+# Announce a delegated IPv6 prefix on the LAN only once traffic sent from it comes back.
 # An upstream that delegates a prefix but does not route it leaves every LAN client with a
-# dead IPv6 default, and Android reports "no internet" over a working IPv4. Then the LAN
-# keeps its ULA only (ip6class local, never committed); a later probe that passes undoes it.
+# dead IPv6 default, and Android reports "no internet" over a working IPv4. The LAN ships
+# with ip6class 'local' (ULA only); this adds the wan6 class when the probe answers and takes
+# it back when it stops, never committed, so a boot starts unannounced and odhcpd never has
+# a withdrawn prefix to keep advertising for its whole valid lifetime.
 [ "$INTERFACE" = wan6 ] || exit 0
 case "$ACTION" in ifup|ifupdate) ;; *) exit 0 ;; esac
 . /lib/functions/network.sh
@@ -52,15 +54,14 @@ if [ "$verdict" = withdrawn ] && [ -n "$wan_address" ] && answered=$(first_answe
 	why="$why; $answered answers the WAN address $wan_address, so upstream does not route the prefix back"
 fi
 
-current=$(uci -q get "network.$LAN.ip6class")
-case "$verdict:$current" in
-withdrawn:)
-	uci add_list "network.$LAN.ip6class=local" && ubus call network reload ;;
-announced:local)
-	uci -q delete "network.$LAN.ip6class" && ubus call network reload ;;
-withdrawn:local|announced:)
-	;;
-*)
-	why="$why; ip6class '$current' was set by someone else, left alone" ;;
+case " $(uci -q get "network.$LAN.ip6class") " in
+*" wan6 "*) lan_state=announced ;;
+"  ") lan_state=open ;;
+*) lan_state=withheld ;;
+esac
+case "$verdict:$lan_state" in
+announced:withheld) uci add_list "network.$LAN.ip6class=wan6" && ubus call network reload ;;
+withdrawn:announced) uci del_list "network.$LAN.ip6class=wan6" && ubus call network reload ;;
+withdrawn:open) uci add_list "network.$LAN.ip6class=local" && ubus call network reload ;;
 esac
 say "$verdict: $why"

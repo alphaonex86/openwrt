@@ -15,6 +15,7 @@
 #define _RTL9602C_L34_H
 
 #include <linux/types.h>
+#include <linux/if.h>
 #include <linux/bitmap.h>
 #include <linux/mutex.h>
 #include <linux/io.h>
@@ -255,6 +256,8 @@ struct rtl9602c_l34 {
 		u32	sip, dip;
 		u16	sport, dport;
 		u8	proto;
+		u8	ds_leg;			/* the core's leg decision for this key */
+		char	iif[IFNAMSIZ];		/* the ingress the flowtable offered */
 	}		recent_offer[L34_RECENT];
 	u8		offer_n;
 	u32		binds;		/* flowtable blocks this driver accepted	*/

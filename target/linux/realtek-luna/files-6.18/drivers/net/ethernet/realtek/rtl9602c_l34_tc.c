@@ -100,6 +100,8 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		o->sport = k->l4_sport;
 		o->dport = k->l4_dport;
 		o->proto = k->ip_protocol;
+		o->ds_leg = ctx->ds_leg;
+		strscpy(o->iif, ctx->idev ? ctx->idev->name : "-", sizeof(o->iif));
 		ep->l34.offer_n++;
 	}
 	if (ctx->ds_leg || a->nat_is_da) {

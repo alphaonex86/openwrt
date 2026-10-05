@@ -69,6 +69,7 @@ config interface 'lan'
 	option ipaddr '192.168.1.12'
 	option netmask '255.255.255.0'
 	option ip6assign '60'
+	list ip6class 'local'
 
 # WAN = GPON upstream (IPoE/DHCP), pulls 192.168.158.x from the OLT once the ONU
 # activates. Carried on the dedicated UNTAGGED data-GEM netdev gpon0 (the clean-room

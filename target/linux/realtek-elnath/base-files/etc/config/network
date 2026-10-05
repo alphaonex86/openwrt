@@ -24,6 +24,7 @@ config interface 'lan'
 	option ipaddr '192.168.1.11'
 	option netmask '255.255.255.0'
 	option ip6assign '60'
+	list ip6class 'local'
 
 # Stage D: gpon0 = the GPON WAN data path (cortina-gpon). Carrier comes up
 # when the OLT's OMCI provisioning (data T-CONT + GEM) is installed; netifd

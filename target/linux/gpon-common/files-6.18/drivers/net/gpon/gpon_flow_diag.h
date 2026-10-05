@@ -62,9 +62,12 @@ const char *gpon_flow_refusal_name(enum gpon_flow_refusal r);
 struct gpon_flow_tally {
 	u32 n[GPON_FLOW_REF__COUNT];
 	enum gpon_flow_refusal last;
+	int last_iif;		/* the last REFUSED offer's ingress ifindex (0: none) */
+	u8 last_ds_leg;		/* ...and the leg the core decided for it */
 };
 
 void gpon_flow_tally_note(struct gpon_flow_tally *t, enum gpon_flow_refusal r);
+void gpon_flow_tally_leg(struct gpon_flow_tally *t, int iif, bool ds_leg);
 
 /* What only the FAMILY can read: its own offer count and its engine's state.
  * A clear bit is COULD NOT ASK and renders n/a -- never 0, because "0 entries
@@ -96,9 +99,11 @@ int gpon_flow_diag_line(const struct gpon_flow_tally *t,
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
 #define GPON_FLOW_TALLY_FIELD	struct gpon_flow_tally tally;
 #define GPON_FLOW_NOTE(fo, r)	gpon_flow_tally_note(&(fo)->tally, (r))
+#define GPON_FLOW_NOTE_LEG(fo, iif, ds)	gpon_flow_tally_leg(&(fo)->tally, (iif), (ds))
 #else
 #define GPON_FLOW_TALLY_FIELD
 #define GPON_FLOW_NOTE(fo, r)	do { } while (0)
+#define GPON_FLOW_NOTE_LEG(fo, iif, ds)	do { } while (0)
 #endif
 
 #endif /* GPON_FLOW_DIAG_H */

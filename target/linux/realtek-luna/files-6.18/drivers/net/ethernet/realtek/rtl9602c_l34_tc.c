@@ -2,6 +2,7 @@
 /* RTL9602C L34 -> the COMMON TC hardware-offload lifecycle. ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 1. */
 
+#include <linux/if_vlan.h>
 #include <linux/inetdevice.h>	/* in_ifaddr, the WAN address notifier */
 #include <net/flow_offload.h>	/* struct flow_cls_offload, the block cb type */
 #include <net/pkt_cls.h>	/* FLOW_CLS_*, FLOW_BLOCK_*, flow_block_cb_*   */
@@ -32,7 +33,12 @@ struct rtl9602c_l34_priv {
 static bool rtl9602c_l34_is_lan_side(void *sh, struct net_device *dev)
 {
 	/* ★ STRUCTURAL, never a name. This driver registers two ...
-	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 4. */
+	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 4.
+	 * A VLAN upper is on its real device's side: the flowtable offers a tagged
+	 * WAN->LAN leg from gpon0.<vid> when gpon0 itself is not a flowtable device
+	 * (X100DG, 2026-10-05: every such leg was decoded as upstream and refused). */
+	if (dev && is_vlan_dev(dev))
+		dev = vlan_dev_real_dev(dev);
 	return dev && dev->netdev_ops != &rtl9602c_eth_wan_ops;
 }
 

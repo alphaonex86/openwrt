@@ -274,6 +274,7 @@ struct luna_eth_chip {
 	/* ★ A MODEL FACT LIVING IN THE CHIP TABLE, said out loud ...
 	 * dev/MEASURED-luna_eth.c.md sec 6. */
 	u8	wan_mac_offset;
+	u32	cold_phy_status;	/* native cold PHY recipe; 0 keeps the warm path */
 };
 
 /* The RTL9607C entry is this file's previous constants, value for value: the
@@ -311,6 +312,7 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	 * board, and it carries no ISP service.  Copying the G24W's 5 here would
 	 * be one model's answer standing in for another's. */
 	.wan_mac_offset	= 0,
+	.cold_phy_status = 0xb8000044,
 };
 
 /* The RTL9603CVD entry -- every field read from THIS chip's ...
@@ -789,6 +791,101 @@ static int gphy_read(struct luna_eth *ep, unsigned int phyad, unsigned int reg,
 	return rc;
 }
 
+/* The RTL9607C monitor's cold recipe (83c02524 in image 66ef3f7b), also
+ * measured from a NAND cold boot on 2026-10-05. TFTP had hidden this missing
+ * initialization. The done bit belongs LAST, after the patch and MIIM writes. */
+static int eth_copper_cold_init__locked(struct luna_eth *ep)
+{
+	void __iomem *status;
+	u32 disabled, ini;
+	unsigned int p, i;
+	int rc;
+
+	lockdep_assert_held(&luna_gphy_lock);
+	if (!ep->c->cold_phy_status)
+		return 0;
+	status = (void __iomem *)(uintptr_t)ep->c->cold_phy_status;
+	if (readl(status) & BIT(0))
+		return 0;
+	for (i = 0; i < 1000; i++) {
+		if (readl(status) & BIT(1))
+			break;
+		udelay(100);
+	}
+	if (i == 1000) {
+		dev_err(ep->dev, "cold PHY: SoC ready timed out; no PHY writes\n");
+		return -ETIMEDOUT;
+	}
+	rc = gphy_wait(ep);
+	if (rc) {
+		dev_err(ep->dev, "cold PHY: MIIM window busy (%d); no PHY writes\n", rc);
+		return rc;
+	}
+	disabled = (sw_rd(ep, 0x23024) & 0x3f) >> 1;
+	ini = sw_rd(ep, ep->c->cfg_phy_ini);
+	sw_wr(ep, ep->c->cfg_phy_ini, (ini & ~(0x1fu << 10)) | (disabled << 10));
+	if ((sw_rd(ep, ep->c->cfg_phy_ini) & (0x1fu << 10)) != (disabled << 10)) {
+		dev_err(ep->dev, "cold PHY: strap-derived port mask did not take\n");
+		return -EIO;
+	}
+	sw_wr(ep, ep->c->sw_map->gphy_misc, 1);
+	if (!(sw_rd(ep, ep->c->sw_map->gphy_misc) & BIT(0))) {
+		dev_err(ep->dev, "cold PHY: patch flag did not take\n");
+		return -EIO;
+	}
+	msleep(800);
+	p = ep->c->sw_map->cpu_port;
+	sw_wr(ep, SW_FORCE_ABLTY(ep, p), 0x96);
+	sw_wr(ep, SW_ABLTY_FORCE(ep, p), 0xffff);
+	/* Bit 14 is reserved and reads zero on this die. */
+	if ((sw_rd(ep, SW_FORCE_ABLTY(ep, p)) & ABLTY_CPU_FORCE) != 0x96 ||
+	    (sw_rd(ep, SW_ABLTY_FORCE(ep, p)) & ABLTY_CPU_FORCE) != ABLTY_CPU_FORCE) {
+		dev_err(ep->dev, "cold PHY: CPU port force did not take\n");
+		return -EIO;
+	}
+	for (p = 0; p < ep->c->sw_map->n_copper; p++) {
+		u16 bmcr = 0x1140;
+
+		if (disabled & BIT(p))
+			continue;
+		if (luna_uni_port_locked(p))
+			bmcr |= BMCR_PDOWN;
+		rc = gphy_write_ocp__locked(ep, p, gphy_ocp_miim(ep, p, 0), bmcr);
+		if (rc) {
+			dev_err(ep->dev, "cold PHY: port %u write failed (%d); done not published\n", p, rc);
+			return rc;
+		}
+	}
+	sw_wr(ep, ep->c->sw_map->gphy_misc, 1);
+	if (!(sw_rd(ep, ep->c->sw_map->gphy_misc) & BIT(0))) {
+		dev_err(ep->dev, "cold PHY: final patch flag did not take\n");
+		return -EIO;
+	}
+	writel(readl(status) | BIT(0), status);
+	if (!(readl(status) & BIT(0))) {
+		dev_err(ep->dev, "cold PHY: completion bit did not take\n");
+		return -EIO;
+	}
+	/* The cold PHYs expose the programmed BMCR only after completion. */
+	for (p = 0; p < ep->c->sw_map->n_copper; p++) {
+		u16 bmcr, expected = 0x1140 | (luna_uni_port_locked(p) ? BMCR_PDOWN : 0);
+
+		if (disabled & BIT(p))
+			continue;
+		rc = gphy_read_ocp__locked(ep, p, gphy_ocp_miim(ep, p, 0), &bmcr);
+		if (rc) {
+			dev_err(ep->dev, "cold PHY: port %u readback failed after completion (%d)\n", p, rc);
+			return rc;
+		}
+		if (bmcr != expected) {
+			dev_err(ep->dev, "cold PHY: port %u BMCR %04x, expected %04x after completion\n",
+				p, bmcr, expected);
+			return -EIO;
+		}
+	}
+	return 1;
+}
+
 /* No gphy_write() wrapper: its only writer today is the ...
  * dev/MEASURED-luna_eth.c.md sec 26. */
 static int eth_copper_phy_up(struct luna_eth *ep)
@@ -799,6 +896,12 @@ static int eth_copper_phy_up(struct luna_eth *ep)
 	/* ★ ONE ACQUISITION FOR THE WHOLE SEQUENCE, not just the BMCR ...
 	 * dev/MEASURED-luna_eth.c.md sec 59. */
 	mutex_lock(&luna_gphy_lock);
+	rc = eth_copper_cold_init__locked(ep);
+	if (rc) {
+		if (rc > 0)
+			rc = 0;
+		goto out;
+	}
 
 	/* Save CFG_PHY_INI across the GPHY reset and put it back. The ...
 	 * dev/MEASURED-luna_eth.c.md sec 27. */

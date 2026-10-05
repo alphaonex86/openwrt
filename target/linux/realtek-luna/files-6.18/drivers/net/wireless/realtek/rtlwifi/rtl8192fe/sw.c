@@ -248,7 +248,7 @@ static struct rtl_mod_params rtl92fe_mod_params = {
 	.fwctrl_lps = false,
 	.msi_support = true,
 	.dma64 = false,
-	.aspm_support = 1,
+	.aspm_support = 0,
 	.debug_level = 0,
 	.debug_mask = 0,
 };
@@ -375,7 +375,7 @@ MODULE_PARM_DESC(swlps, "Set to 1 to use SW control power save (default 0)\n");
 MODULE_PARM_DESC(fwlps, "Set to 1 to use FW control power save (default 1)\n");
 MODULE_PARM_DESC(msi, "Set to 1 to use MSI interrupts mode (default 1)\n");
 MODULE_PARM_DESC(dma64, "Set to 1 to use DMA 64 (default 0)\n");
-MODULE_PARM_DESC(aspm, "Set to 1 to enable ASPM (default 1)\n");
+MODULE_PARM_DESC(aspm, "Set to 1 to enable ASPM (default 0: stability over energy)\n");
 MODULE_PARM_DESC(debug_level, "Set debug level (0-5) (default 0)");
 MODULE_PARM_DESC(debug_mask, "Set debug mask (default 0)");
 MODULE_PARM_DESC(disable_watchdog, "Set to 1 to disable the watchdog (default 0)\n");

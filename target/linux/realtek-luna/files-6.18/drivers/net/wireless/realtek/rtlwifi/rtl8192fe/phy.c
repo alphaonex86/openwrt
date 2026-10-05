@@ -179,16 +179,15 @@ static u32 _rtl92fe_phy_rf_serial_read(struct ieee80211_hw *hw,
 		pr_err("return all one\n");
 		return 0xFFFFFFFF;
 	}
+	tmplong2 = rtl_get_bbreg(hw, pphyreg->rfhssi_para2, MASKDWORD);
+	tmplong2 &= ~(BLSSIREADADDRESS | BLSSIREADEDGE);
+	tmplong2 |= newoffset << 23;
+	rtl_set_bbreg(hw, pphyreg->rfhssi_para2, MASKDWORD, tmplong2);
 	tmplong = rtl_get_bbreg(hw, RFPGA0_XA_HSSIPARAMETER2, MASKDWORD);
-	if (rfpath == RF90_PATH_A)
-		tmplong2 = tmplong;
-	else
-		tmplong2 = rtl_get_bbreg(hw, pphyreg->rfhssi_para2, MASKDWORD);
-	tmplong2 = (tmplong2 & (~BLSSIREADADDRESS)) |
-		   (newoffset << 23) | BLSSIREADEDGE;
 	rtl_set_bbreg(hw, RFPGA0_XA_HSSIPARAMETER2, MASKDWORD,
 		      tmplong & (~BLSSIREADEDGE));
-	rtl_set_bbreg(hw, pphyreg->rfhssi_para2, MASKDWORD, tmplong2);
+	rtl_set_bbreg(hw, RFPGA0_XA_HSSIPARAMETER2, MASKDWORD,
+		      tmplong | BLSSIREADEDGE);
 	udelay(20);
 	if (rfpath == RF90_PATH_A)
 		rfpi_enable = (u8)rtl_get_bbreg(hw, RFPGA0_XA_HSSIPARAMETER1,

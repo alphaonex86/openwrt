@@ -44,6 +44,16 @@ void gpon_flow_tally_note(struct gpon_flow_tally *t, enum gpon_flow_refusal r)
 		t->last = r;
 }
 
+/* Which ingress and leg the last REFUSED offer carried: a leg judged from the
+ * wrong ingress is what a downstream refused as upstream looks like. */
+void gpon_flow_tally_leg(struct gpon_flow_tally *t, int iif, bool ds_leg)
+{
+	if (!t)
+		return;
+	t->last_iif = iif;
+	t->last_ds_leg = ds_leg;
+}
+
 /* A counter the family did not establish is n/a.  Rendering it as 0 turns an
  * unasked question into a device finding, which is the defect this whole flag
  * family exists to stop. */
@@ -95,6 +105,9 @@ int gpon_flow_diag_line(const struct gpon_flow_tally *t,
 	pos += scnprintf(out + pos, sz - pos, " last=%s",
 			 (refused || by_design) ? gpon_flow_refusal_name(t->last)
 						: "none");
+	if (refused || by_design)
+		pos += scnprintf(out + pos, sz - pos, " last_iif=%d last_ds_leg=%u",
+				 t->last_iif, t->last_ds_leg);
 
 	/* Only the causes that FIRED, so a healthy board prints nothing here. */
 	pos += scnprintf(out + pos, sz - pos, " why{");

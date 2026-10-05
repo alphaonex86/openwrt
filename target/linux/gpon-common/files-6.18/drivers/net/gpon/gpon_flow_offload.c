@@ -361,6 +361,7 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	return 0;
 
 out_put:
+	GPON_FLOW_NOTE_LEG(fo, ctx.idev ? ctx.idev->ifindex : 0, ctx.ds_leg);
 	GPON_FLOW_NOTE(fo, why);
 	if (ctx.idev)
 		dev_put(ctx.idev);

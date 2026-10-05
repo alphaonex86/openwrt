@@ -1179,8 +1179,9 @@ static void l34_proc_show_recent(struct seq_file *sf, struct rtl9602c_l34 *l)
 	for (i = 0; i < n; i++) {
 		const struct l34_offer *o = &l->recent_offer[i];
 
-		seq_printf(sf, "  offer %pI4h:%u -> %pI4h:%u proto %u\n",
-			   &o->sip, o->sport, &o->dip, o->dport, o->proto);
+		seq_printf(sf, "  offer %pI4h:%u -> %pI4h:%u proto %u iif %s ds_leg %u\n",
+			   &o->sip, o->sport, &o->dip, o->dport, o->proto,
+			   o->iif[0] ? o->iif : "-", o->ds_leg);
 	}
 
 	n = l->recent_n < L34_RECENT ? l->recent_n : L34_RECENT;

@@ -1295,10 +1295,13 @@ static void _rtl92fe_enable_aspm_back_door(struct ieee80211_hw *hw)
 		tmp8 = rtl_read_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2);
 		count++;
 	}
+	/* ASPM off (the default) CLEARS the L1/CLKREQ backdoor bits rather than
+	 * skipping them: a warm re-init must not keep what an earlier init set.
+	 */
 	if (tmp8 == 0) {
 		tmp32 = rtl_read_dword(rtlpriv, REG_BACKDOOR_DBI_RDATA);
-		rtl_write_dword(rtlpriv, REG_BACKDOOR_DBI_WDATA,
-				tmp32 | BIT(31));
+		tmp32 = ppsc->support_backdoor ? tmp32 | BIT(31) : tmp32 & ~BIT(31);
+		rtl_write_dword(rtlpriv, REG_BACKDOOR_DBI_WDATA, tmp32);
 		rtl_write_word(rtlpriv, REG_BACKDOOR_DBI_DATA, 0xf70c);
 		rtl_write_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2, 0x1);
 	}
@@ -1320,10 +1323,11 @@ static void _rtl92fe_enable_aspm_back_door(struct ieee80211_hw *hw)
 		tmp8 = rtl_read_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2);
 		count++;
 	}
-	if (ppsc->support_backdoor || (tmp8 == 0)) {
+	if (tmp8 == 0) {
 		tmp32 = rtl_read_dword(rtlpriv, REG_BACKDOOR_DBI_RDATA);
-		rtl_write_dword(rtlpriv, REG_BACKDOOR_DBI_WDATA,
-				tmp32 | BIT(11) | BIT(12));
+		tmp32 = ppsc->support_backdoor ? tmp32 | BIT(11) | BIT(12) :
+						 tmp32 & ~(BIT(11) | BIT(12));
+		rtl_write_dword(rtlpriv, REG_BACKDOOR_DBI_WDATA, tmp32);
 		rtl_write_word(rtlpriv, REG_BACKDOOR_DBI_DATA, 0xf718);
 		rtl_write_byte(rtlpriv, REG_BACKDOOR_DBI_DATA + 2, 0x1);
 	}

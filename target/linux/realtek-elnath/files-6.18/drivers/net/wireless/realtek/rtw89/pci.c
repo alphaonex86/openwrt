@@ -9,9 +9,10 @@
 #include "reg.h"
 #include "ser.h"
 
-static bool rtw89_pci_disable_clkreq;
-static bool rtw89_pci_disable_aspm_l1;
-static bool rtw89_pci_disable_l1ss;
+/* Link power saving is off by default (stability over energy); 0644, so `N` re-enables it. */
+static bool rtw89_pci_disable_clkreq = true;
+static bool rtw89_pci_disable_aspm_l1 = true;
+static bool rtw89_pci_disable_l1ss = true;
 module_param_named(disable_clkreq, rtw89_pci_disable_clkreq, bool, 0644);
 module_param_named(disable_aspm_l1, rtw89_pci_disable_aspm_l1, bool, 0644);
 module_param_named(disable_aspm_l1ss, rtw89_pci_disable_l1ss, bool, 0644);
@@ -4141,10 +4142,8 @@ static void rtw89_pci_clkreq_set(struct rtw89_dev *rtwdev, bool enable)
 	const struct rtw89_pci_info *info = rtwdev->pci_info;
 	const struct rtw89_pci_gen_def *gen_def = info->gen_def;
 
-	if (rtw89_pci_disable_clkreq)
-		return;
-
-	gen_def->clkreq_set(rtwdev, enable);
+	/* disabled CLEARS, so a warm re-init cannot keep what an earlier init set */
+	gen_def->clkreq_set(rtwdev, enable && !rtw89_pci_disable_clkreq);
 }
 
 static void rtw89_pci_clkreq_set_ax(struct rtw89_dev *rtwdev, bool enable)
@@ -4186,10 +4185,7 @@ static void rtw89_pci_aspm_set(struct rtw89_dev *rtwdev, bool enable)
 	const struct rtw89_pci_info *info = rtwdev->pci_info;
 	const struct rtw89_pci_gen_def *gen_def = info->gen_def;
 
-	if (rtw89_pci_disable_aspm_l1)
-		return;
-
-	gen_def->aspm_set(rtwdev, enable);
+	gen_def->aspm_set(rtwdev, enable && !rtw89_pci_disable_aspm_l1);
 }
 
 static void rtw89_pci_aspm_set_ax(struct rtw89_dev *rtwdev, bool enable)
@@ -4285,11 +4281,8 @@ static void rtw89_pci_link_cfg(struct rtw89_dev *rtwdev)
 		return;
 	}
 
-	if (link_ctrl & PCI_EXP_LNKCTL_CLKREQ_EN)
-		rtw89_pci_clkreq_set(rtwdev, true);
-
-	if (link_ctrl & PCI_EXP_LNKCTL_ASPM_L1)
-		rtw89_pci_aspm_set(rtwdev, true);
+	rtw89_pci_clkreq_set(rtwdev, !!(link_ctrl & PCI_EXP_LNKCTL_CLKREQ_EN));
+	rtw89_pci_aspm_set(rtwdev, !!(link_ctrl & PCI_EXP_LNKCTL_ASPM_L1));
 }
 
 static void rtw89_pci_l1ss_set(struct rtw89_dev *rtwdev, bool enable)
@@ -4297,10 +4290,7 @@ static void rtw89_pci_l1ss_set(struct rtw89_dev *rtwdev, bool enable)
 	const struct rtw89_pci_info *info = rtwdev->pci_info;
 	const struct rtw89_pci_gen_def *gen_def = info->gen_def;
 
-	if (rtw89_pci_disable_l1ss)
-		return;
-
-	gen_def->l1ss_set(rtwdev, enable);
+	gen_def->l1ss_set(rtwdev, enable && !rtw89_pci_disable_l1ss);
 }
 
 static void rtw89_pci_l1ss_set_ax(struct rtw89_dev *rtwdev, bool enable)
@@ -4347,17 +4337,13 @@ static void rtw89_pci_l1ss_cfg(struct rtw89_dev *rtwdev)
 	struct pci_dev *pdev = rtwpci->pdev;
 	u32 l1ss_cap_ptr, l1ss_ctrl;
 
-	if (rtw89_pci_disable_l1ss)
-		return;
-
 	l1ss_cap_ptr = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_L1SS);
 	if (!l1ss_cap_ptr)
 		return;
 
 	pci_read_config_dword(pdev, l1ss_cap_ptr + PCI_L1SS_CTL1, &l1ss_ctrl);
 
-	if (l1ss_ctrl & PCI_L1SS_CTL1_L1SS_MASK)
-		rtw89_pci_l1ss_set(rtwdev, true);
+	rtw89_pci_l1ss_set(rtwdev, !!(l1ss_ctrl & PCI_L1SS_CTL1_L1SS_MASK));
 }
 
 static void rtw89_pci_cpl_timeout_cfg(struct rtw89_dev *rtwdev)

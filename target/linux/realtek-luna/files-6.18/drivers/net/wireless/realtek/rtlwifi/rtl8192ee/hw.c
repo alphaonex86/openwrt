@@ -19,6 +19,21 @@
 #include "../pwrseqcmd.h"
 #include "pwrseq.h"
 
+/* The module's reference crystal. Mainline programs the AFE for a 40 MHz
+ * crystal (AFE_CTRL2 = 0x83); the V2801RGW's RTL8192EE runs on 25 MHz -- its
+ * stock prints "clock 25MHz" at every wlan init and holds AFE_CTRL2 = 0x05
+ * (APLL_EN | FREF_SEL), the value a 25 MHz board gets from the vendor HAL.
+ * A 25 MHz reference driven as 40 MHz puts the TSF at 0.625 MHz and the LO
+ * off-band: the AP is deaf and mute while every queue moves. */
+static int rtl92ee_xtal_khz = 40000;
+module_param_named(xtal_khz, rtl92ee_xtal_khz, int, 0444);
+MODULE_PARM_DESC(xtal_khz, "reference crystal in kHz: 40000 (default) or 25000");
+
+static u8 rtl92ee_afe_ctrl2(void)
+{
+	return rtl92ee_xtal_khz == 25000 ? 0x05 : 0x83;
+}
+
 #define LLT_CONFIG	5
 
 static void _rtl92ee_set_bcn_ctrl_reg(struct ieee80211_hw *hw,
@@ -307,12 +322,10 @@ void rtl92ee_get_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val)
 		*((bool *)(val)) = ppsc->fw_current_inpsmode;
 		break;
 	case HW_VAR_CORRECT_TSF:{
-		u64 tsf;
-		u32 *ptsf_low = (u32 *)&tsf;
-		u32 *ptsf_high = ((u32 *)&tsf) + 1;
-
-		*ptsf_high = rtl_read_dword(rtlpriv, (REG_TSFTR + 4));
-		*ptsf_low = rtl_read_dword(rtlpriv, REG_TSFTR);
+		/* explicit halves: a pointer to "the second u32 of a u64" is the LOW
+		 * word on this big-endian core */
+		u64 tsf = ((u64)rtl_read_dword(rtlpriv, REG_TSFTR + 4) << 32) |
+			  rtl_read_dword(rtlpriv, REG_TSFTR);
 
 		*((u64 *)(val)) = tsf;
 		}
@@ -746,9 +759,9 @@ static bool _rtl92ee_init_mac(struct ieee80211_hw *hw)
 		rtl_write_byte(rtlpriv, 0x16, bytetmp | BIT(4) | BIT(6));
 		rtl_write_byte(rtlpriv, 0x7c, 0x83);
 	}
-	/* 1. 40Mhz crystal source*/
+	/* 1. the crystal source: FREF_SEL (bit 2) set only for a 25 MHz reference */
 	bytetmp = rtl_read_byte(rtlpriv, REG_AFE_CTRL2);
-	bytetmp &= 0xfb;
+	bytetmp = (bytetmp & 0xfb) | (rtl92ee_afe_ctrl2() & 0x04);
 	rtl_write_byte(rtlpriv, REG_AFE_CTRL2, bytetmp);
 
 	dwordtmp = rtl_read_dword(rtlpriv, REG_AFE_CTRL4);
@@ -1304,10 +1317,10 @@ int rtl92ee_hw_init(struct ieee80211_hw *hw)
 
 	rtl_write_byte(rtlpriv, 0x577, 0x03);
 
-	/*for Crystal 40 Mhz setting */
+	/* the crystal setting: 0x83 for 40 MHz (mainline), 0x05 for 25 MHz (stock) */
 	rtl_write_byte(rtlpriv, REG_AFE_CTRL4, 0x2A);
 	rtl_write_byte(rtlpriv, REG_AFE_CTRL4 + 1, 0x00);
-	rtl_write_byte(rtlpriv, REG_AFE_CTRL2, 0x83);
+	rtl_write_byte(rtlpriv, REG_AFE_CTRL2, rtl92ee_afe_ctrl2());
 
 	/*Forced the antenna b to wifi */
 	if (rtlpriv->btcoexist.btc_info.btcoexist == 1) {

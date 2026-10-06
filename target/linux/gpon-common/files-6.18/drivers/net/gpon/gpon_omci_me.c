@@ -181,6 +181,7 @@ enum omci_text {
 	OMCI_TEXT_EXT_ONU_G12,	/* ME 65408 #12 */
 	OMCI_TEXT_HW_CAP,	/* ME 65427 #2 capability declaration */
 	OMCI_TEXT_P2Q_CAP,	/* ME 350 #14 */
+	OMCI_TEXT_CTC_OP,	/* ME 65529 #1 operation ID */
 };
 
 static const u8 omci_text[][26] = {
@@ -194,6 +195,7 @@ static const u8 omci_text[][26] = {
 	[OMCI_TEXT_EXT_ONU_G12]	= "EeAa",
 	[OMCI_TEXT_HW_CAP]	= "RSQQQSQSQSSSSQQS",
 	[OMCI_TEXT_P2Q_CAP]	= "\x01\x08",
+	[OMCI_TEXT_CTC_OP]	= "CTC",
 };
 
 /* Where an OMCI_SRC_TBL write goes. */
@@ -860,6 +862,14 @@ static const struct omci_attr omci_attrs[] = {
 	A_TXT(65427, 2, 16, OMCI_TEXT_HW_CAP),
 	A_C(65427, 3, 1, 0x90),
 	A_C(65427, 4, 1, 0x6f),
+
+	/* ---- ME 65529 CTC ONU capability (inst 0, mib_OnuCapability): the
+	 * HSGQ OLT takes the ISP ONU type from #3 before it counts VEIPs ---- */
+	A_TXT(65529, 1, 4, OMCI_TEXT_CTC_OP),	/* #1  Operation ID */
+	A_C(65529, 2, 1, 0),			/* #2  CTC spec version */
+	A_C(65529, 3, 1, 1),			/* #3  ONU type: 1 = HGU */
+	A_C(65529, 4, 1, 2),			/* #4  TX power supply control */
+	A_HIDE(65529, 5, 1, OMCI_SRC_CONST, 1, 1),	/* #5  customized type, Get only */
 
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
 	A_ID(65530, 1, operator_id),		/* #1  Operation ID */

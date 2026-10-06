@@ -141,6 +141,9 @@
 		ip-host-wan-mac = /bits/ 8 <1 1 1 1 1 1>;
 		onu-capacity = /bits/ 16 <16 127 16 127>;
 		downstream-queue-ports = /bits/ 16 <0x0401 0x0101 0x0102 0x0103 0x0601>;
+		/* Stock's CTC ONU capability, OnuType 1 = HGU (omcicli mib get 65529,
+		 * 2026-10-06): without it the HSGQ OLT keeps the type it last saw. */
+		extra-me-instances = /bits/ 16 <65529 0>;
 	};
 
 	pon-optics {

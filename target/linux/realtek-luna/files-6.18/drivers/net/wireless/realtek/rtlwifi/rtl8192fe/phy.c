@@ -2409,6 +2409,8 @@ static void _rtl92fe_phy_path_a_fill_iqk_matrix(struct ieee80211_hw *hw,
 			return;
 
 		reg = result[final_candidate][2];
+		if (reg <= 0xf0 || reg >= 0x110)
+			reg = 0x100;
 		rtl_set_bbreg(hw, ROFDM0_XARXIQIMBALANCE, 0x3FF, reg);
 
 		reg = result[final_candidate][3] & 0x3F;
@@ -2460,7 +2462,7 @@ static void _rtl92fe_phy_path_b_fill_iqk_matrix(struct ieee80211_hw *hw,
 		rtl_set_bbreg(hw, ROFDM0_XBRXIQIMBALANCE, 0xFC00, reg);
 
 		reg = (result[final_candidate][7] >> 6) & 0xF;
-		rtl_set_bbreg(hw, ROFDM0_AGCRSSITABLE, 0xF0000000, reg);
+		rtl_set_bbreg(hw, ROFDM0_TXCOEFF2, 0x000000F0, reg);
 	}
 }
 

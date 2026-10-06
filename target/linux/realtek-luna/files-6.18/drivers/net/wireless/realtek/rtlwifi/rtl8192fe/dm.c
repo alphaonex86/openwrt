@@ -823,6 +823,9 @@ static void rtl92fe_dm_init_txpower_tracking(struct ieee80211_hw *hw)
 	dm->thermalvalue = rtlpriv->efuse.eeprom_thermalmeter;
 	dm->thermalvalue_iqk = dm->thermalvalue;
 	dm->thermalvalue_lck = dm->thermalvalue;
+	memset(dm->thermalvalue_avg, 0, sizeof(dm->thermalvalue_avg));
+	dm->thermalvalue_avg_index = 0;
+	dm->tm_trigger = 0;
 
 	for (path = RF90_PATH_A; path < MAX_RF_PATH; path++) {
 		dm->swing_idx_ofdm_base[path] = dm->default_ofdm_index;
@@ -837,7 +840,8 @@ void rtl92fe_dm_txpower_tracking_callback(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_dm *dm = rtl_dm(rtlpriv);
-	u8 thermalvalue, delta;
+	u8 thermalvalue, delta, i, samples = 0;
+	u32 total = 0;
 
 	if (!dm->txpower_tracking)
 		return;
@@ -858,22 +862,27 @@ void rtl92fe_dm_txpower_tracking_callback(struct ieee80211_hw *hw)
 	if (thermalvalue == 0)
 		return;
 
-	delta = (thermalvalue > rtlpriv->efuse.eeprom_thermalmeter) ?
-		(thermalvalue - rtlpriv->efuse.eeprom_thermalmeter) :
-		(rtlpriv->efuse.eeprom_thermalmeter - thermalvalue);
+	dm->thermalvalue_avg[dm->thermalvalue_avg_index] = thermalvalue;
+	dm->thermalvalue_avg_index = (dm->thermalvalue_avg_index + 1) % 4;
+	for (i = 0; i < 4; i++) {
+		if (!dm->thermalvalue_avg[i])
+			continue;
+		total += dm->thermalvalue_avg[i];
+		samples++;
+	}
+	thermalvalue = total / samples;
+	if (!dm->thermalvalue_lck)
+		dm->thermalvalue_lck = rtlpriv->efuse.eeprom_thermalmeter;
+	delta = thermalvalue > dm->thermalvalue_lck ?
+		thermalvalue - dm->thermalvalue_lck :
+		dm->thermalvalue_lck - thermalvalue;
 
-	rtl_dbg(rtlpriv, COMP_POWER_TRACKING, DBG_LOUD,
-		"thermal=%d eeprom=%d delta=%d\n",
-		thermalvalue, rtlpriv->efuse.eeprom_thermalmeter, delta);
-
-	/* Re-trigger IQK / LCK once the meter has drifted far enough; these
-	 * thresholds match the 8192-series tracking cadence.
-	 */
-	if (delta >= 8) {
-		/* 8192F is a 2T2R part, so request the dual-path LCK. */
-		if (rtlpriv->cfg->ops->phy_lc_calibrate)
-			rtlpriv->cfg->ops->phy_lc_calibrate(hw, true);
+	/* The 8192F tracks drift from its last LCK, not from factory trim. */
+	if (delta >= 8 && !rtlpriv->mac80211.act_scanning &&
+	    !rtlpriv->phy.lck_inprogress &&
+	    rtlpriv->cfg->ops->phy_lc_calibrate) {
 		dm->thermalvalue_lck = thermalvalue;
+		rtlpriv->cfg->ops->phy_lc_calibrate(hw, true);
 	}
 
 	/* TODO(8192f): apply the per-path OFDM/CCK TX-power ... -- dev/MEASURED-dm.c.md sec 4. */

@@ -1456,18 +1456,40 @@ static u8 omci_slot_value(const struct omci_slot *s, u16 dyn)
 	}
 }
 
-/* ME 277 #6 as stock numbers its queues: blocks of 8 counting DOWN (queue 0
- * -> priority 7).  Downstream block b is the board's b-th declared queue port;
- * upstream queue 0x8000 + 8t + p belongs to T-CONT 0x8000 + t. */
+static u8 omci_usq_of(const struct omci_onu *o, u8 t)
+{
+	return o->cap.usq_per[t] ? o->cap.usq_per[t] : 8;
+}
+
+static u16 omci_usq_total(const struct omci_onu *o)
+{
+	u16 n = 0;
+	u8 t;
+
+	for (t = 0; t < o->cap.tcont_n; t++)
+		n += omci_usq_of(o, t);
+	return n;
+}
+
+/* ME 277 #6 as stock numbers its queues: per port, counting DOWN (its first
+ * queue holds the highest priority).  Downstream block b of 8 is the board's
+ * b-th declared queue port; upstream queues fill T-CONT 0x8000, 0x8001, ... in
+ * turn, each with its declared count. */
 static u32 omci_pq_related_port(const struct omci_onu *o, u16 inst)
 {
-	u16 block = (u16)((inst & 0x7fff) / 8), port;
+	u16 q = inst & 0x7fff, port;
+	u8 t, n = 8;
 
-	if (inst & 0x8000)
-		port = (u16)(0x8000 + block);
-	else
-		port = block < o->cap.dsq_n ? o->cap.dsq_port[block] : 0;
-	return ((u32)port << 16) | (7u - (inst & 7));
+	if (inst & 0x8000) {
+		for (t = 0; t + 1 < o->cap.tcont_n && q >= (n = omci_usq_of(o, t)); t++)
+			q -= n;
+		n = omci_usq_of(o, t);
+		port = (u16)(0x8000 + t);
+	} else {
+		port = q / 8 < o->cap.dsq_n ? o->cap.dsq_port[q / 8] : 0;
+		q %= 8;
+	}
+	return ((u32)port << 16) | (u32)(n - 1 - q);
 }
 
 static const u8 *omci_attr_bytes(struct omci_onu *o,
@@ -1705,7 +1727,7 @@ static u16 omci_mi_count(const struct omci_onu *o, u8 from)
 	case OMCI_MI_SCHED:
 		return o->cap.sched_n;
 	case OMCI_MI_QUEUE:
-		return (u16)(8 * o->cap.dsq_n + (o->cap.usq ? 8 * o->cap.tcont_n : 0));
+		return (u16)(8 * o->cap.dsq_n + (o->cap.usq ? omci_usq_total(o) : 0));
 	case OMCI_MI_EXTRA:
 		return o->extra_me_n;
 	default:
@@ -2275,6 +2297,40 @@ enum omci_uni_decl omci_onu_declare_extra_me_be(struct omci_onu *o,
 	return OMCI_UNI_DECL_OK;
 }
 
+enum omci_uni_decl omci_onu_declare_usq_be(struct omci_onu *o, const void *per,
+					   int len, const char **why)
+{
+	u8 was[OMCI_TCONT_MAX];
+	const u8 *b = per;
+	int t;
+
+	if (len < 0) {
+		*why = "every T-CONT holds 8 queues";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!b || len != o->cap.tcont_n) {
+		*why = "the upstream queue counts are not one per T-CONT";
+		return OMCI_UNI_DECL_BAD;
+	}
+	for (t = 0; t < len; t++) {
+		if (!b[t] || b[t] > 8) {
+			*why = "an upstream queue count outside 1..8";
+			return OMCI_UNI_DECL_BAD;
+		}
+	}
+	memcpy(was, o->cap.usq_per, sizeof(was));
+	memcpy(o->cap.usq_per, b, len);
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		memcpy(o->cap.usq_per, was, sizeof(was));
+		omci_build_mib(o);
+		*why = "more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why)
 {
@@ -2301,6 +2357,9 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	b = prop(ctx, "downstream-queue-ports", &blen);
 	OMCI_DECLARED(omci_onu_declare_queues_be(o, a, alen, b, blen, &reason),
 		      "onu-capacity");
+	a = prop(ctx, "upstream-queues-per-tcont", &alen);
+	OMCI_DECLARED(omci_onu_declare_usq_be(o, a, alen, &reason),
+		      "upstream-queues-per-tcont");
 	a = prop(ctx, "extra-me-instances", &alen);
 	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
 		      "extra-me-instances");

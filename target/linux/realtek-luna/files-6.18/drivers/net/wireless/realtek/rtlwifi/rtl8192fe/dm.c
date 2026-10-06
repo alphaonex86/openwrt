@@ -297,6 +297,8 @@ void rtl92fe_dm_write_dig(struct ieee80211_hw *hw, u8 current_igi)
 		return;
 
 	if (dm_dig->cur_igvalue != current_igi) {
+		rtl_dbg(rtlpriv, COMP_DIG, DBG_LOUD, "DIG: igi %#x -> %#x (rssi min %u)\n",
+			dm_dig->cur_igvalue, current_igi, dm_dig->rssi_val_min);
 		rtl_set_bbreg(hw, ROFDM0_XAAGCCORE1, 0x7f, current_igi);
 		if (rtlpriv->phy.rf_type != RF_1T1R)
 			rtl_set_bbreg(hw, ROFDM0_XBAGCCORE1, 0x7f, current_igi);
@@ -549,12 +551,16 @@ static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 
 	if (reg_c50 > 0x28 && reg_c58 > 0x28) {
 		if (!rtlpriv->rtlhal.pre_edcca_enable) {
+			rtl_dbg(rtlpriv, COMP_DIG, DBG_LOUD, "EDCCA on (igi A %#x B %#x)\n",
+				reg_c50, reg_c58);
 			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD, 0x03);
 			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2, 0x00);
 			rtlpriv->rtlhal.pre_edcca_enable = true;
 		}
 	} else if (reg_c50 < 0x25 && reg_c58 < 0x25) {
 		if (rtlpriv->rtlhal.pre_edcca_enable) {
+			rtl_dbg(rtlpriv, COMP_DIG, DBG_LOUD, "EDCCA off (igi A %#x B %#x)\n",
+				reg_c50, reg_c58);
 			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD, 0x7f);
 			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2, 0x7f);
 			rtlpriv->rtlhal.pre_edcca_enable = false;
@@ -876,11 +882,15 @@ void rtl92fe_dm_txpower_tracking_callback(struct ieee80211_hw *hw)
 	delta = thermalvalue > dm->thermalvalue_lck ?
 		thermalvalue - dm->thermalvalue_lck :
 		dm->thermalvalue_lck - thermalvalue;
+	rtl_dbg(rtlpriv, COMP_RF, DBG_TRACE, "thermal %u (lck ref %u, delta %u)\n",
+		thermalvalue, dm->thermalvalue_lck, delta);
 
 	/* The 8192F tracks drift from its last LCK, not from factory trim. */
 	if (delta >= 8 && !rtlpriv->mac80211.act_scanning &&
 	    !rtlpriv->phy.lck_inprogress &&
 	    rtlpriv->cfg->ops->phy_lc_calibrate) {
+		rtl_dbg(rtlpriv, COMP_RF, DBG_LOUD, "LCK: thermal %u, last LCK at %u\n",
+			thermalvalue, dm->thermalvalue_lck);
 		dm->thermalvalue_lck = thermalvalue;
 		rtlpriv->cfg->ops->phy_lc_calibrate(hw, true);
 	}

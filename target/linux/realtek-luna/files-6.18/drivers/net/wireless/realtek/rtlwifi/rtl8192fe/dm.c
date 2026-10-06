@@ -42,16 +42,19 @@ module_param_named(dig_fixed_igi, rtl92fe_dig_fixed_igi, int, 0644);
 MODULE_PARM_DESC(dig_fixed_igi,
 		 "DIAGNOSTIC: pin the initial gain index (0x10..0x7f) and skip the DIG loop; 0 = DIG runs (default)");
 
-/* Our DIG is the mainline 8192EE STA recipe: `num_qry_beacon_pkt < 5` (an AP
- * never counts its own beacons) pins the gain floor at 0x1e, so a -15 dBm
- * client is received at maximum initial gain. The vendor AP (phydm_dig.c
- * 1098-1250) bounds the IGI by the weakest station instead. 1 = that rule,
- * for EDCCA too (phydm_adaptivity.c:849,911: L2H = max(IGI + 8, 0x30)).
+/* The mainline 8192EE recipe below is a STATION's: with a client at PWDB 70 it
+ * lets the IGI climb to rssi + 10 = 0x50 (deaf below -40 dBm), and once both
+ * IGIs pass 0x28 it arms EDCCA at 0x03/0x00 -- a CCA threshold so low that
+ * every neighbour reads BUSY and the MAC sends nothing, beacons included
+ * (field X111W 2026-10-06: 0 own beacons at 0x303, 252 at 0x7f037f, 0 again
+ * restored, same monitor). The vendor AP (phydm_dig.c 1098-1250,
+ * phydm_adaptivity.c 849/911) bounds the IGI by the weakest station and keeps
+ * L2H = max(IGI + 8, 0x30). AP mode runs that rule; 0 restores mainline for an A/B.
  */
-static int rtl92fe_dig_ap_rule;
+static int rtl92fe_dig_ap_rule = 1;
 module_param_named(dig_ap_rule, rtl92fe_dig_ap_rule, int, 0644);
 MODULE_PARM_DESC(dig_ap_rule,
-		 "1 = the vendor AP's DIG/EDCCA bounds (no station [0x1c,0x26]; else clamp(rssi_min,0x20,0x40)..+15); 0 = the mainline recipe (default)");
+		 "1 = the vendor AP's DIG/EDCCA bounds (default; no station [0x1c,0x26], else clamp(rssi_min,0x20,0x40)..+15, L2H>=0x30); 0 = the mainline STA recipe");
 
 static void rtl92fe_dm_false_alarm_counter_statistics(struct ieee80211_hw *hw)
 {
@@ -592,6 +595,7 @@ check_exit:
 static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_mac *mac = rtl_mac(rtlpriv);
 	u8 reg_c50, reg_c58;
 	bool fw_current_in_ps_mode = false;
 
@@ -603,7 +607,7 @@ static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 	reg_c50 = rtl_get_bbreg(hw, ROFDM0_XAAGCCORE1, MASKBYTE0);
 	reg_c58 = rtl_get_bbreg(hw, ROFDM0_XBAGCCORE1, MASKBYTE0);
 
-	if (rtl92fe_dig_ap_rule) {
+	if (rtl92fe_dig_ap_rule && mac->opmode == NL80211_IFTYPE_AP) {
 		u8 l2h = (u8)max(reg_c50 + 8, 0x30);
 
 		if (rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD) != l2h) {

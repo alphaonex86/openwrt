@@ -1688,7 +1688,9 @@ static int i2c_wait_done(u32 ind_cmd, u32 *cmd_out)
 	bool nacked = false;
 	int i;
 
-	udelay(I2C_XACT_SETTLE_US);
+	/* sleep through the transfer: a 50 kHz read is ~0.8 ms, and spinning it
+	 * cost ~3% CPU on the 50 ms laser-maintenance loop */
+	usleep_range(I2C_XACT_SETTLE_US, I2C_XACT_SETTLE_US + 100);
 	for (i = 0; i < I2C_BUSY_POLL_MAX; i++) {
 		u32 cmd = sw_rd(ind_cmd);
 

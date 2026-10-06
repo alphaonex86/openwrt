@@ -686,6 +686,7 @@ config REALTEK_LUNA
 	select IRQ_DOMAIN
 	select USE_OF
 	select TIMER_OF
+	select REALTEK_OTTO_TIMER
 	select SYS_HAS_CPU_MIPS32_R1
 	select SYS_HAS_CPU_MIPS32_R2
 	select SYS_HAS_EARLY_PRINTK
@@ -700,7 +701,7 @@ config REALTEK_LUNA
 	select CPU_R3K_TLB if CPU_MIPS32_R1
 	#   RTL9607C "interAptiv" (MIPS32 R2): R4000 TLB (8-bit ASID) in a
 	#     Coherent Processing System, with a GIC, the R2 vectored/external
-	#     interrupt modes and the Realtek Otto SoC timer.
+	#     interrupt modes.
 	select SYS_SUPPORTS_SMP if CPU_MIPS32_R2
 	select SYS_SUPPORTS_MIPS_CPS if CPU_MIPS32_R2
 	select MIPS_CPU_SCACHE if CPU_MIPS32_R2
@@ -708,7 +709,6 @@ config REALTEK_LUNA
 	select CLKSRC_MIPS_GIC if CPU_MIPS32_R2
 	select CPU_MIPSR2_IRQ_VI if CPU_MIPS32_R2
 	select CPU_MIPSR2_IRQ_EI if CPU_MIPS32_R2
-	select REALTEK_OTTO_TIMER if CPU_MIPS32_R2
 	help
 	  Realtek "Luna" GPON ONU SoCs built on the RLX "Taroko" core
 	  (RTL9602C/RTL9603C, MIPS32 R1, R3000-style TLB) or on the MIPS

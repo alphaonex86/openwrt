@@ -51,12 +51,6 @@ CONFIG_NET_FLOW_LIMIT=y
 # CONFIG_MIPS_CPS_NS16550_BOOL is not set
 
 #
-# System tick + clocksource come from the Realtek Otto SoC timer. The GIC
-# local timer / CP0 compare are not used (no gic-timer node in the DT).
-#
-CONFIG_REALTEK_OTTO_TIMER=y
-
-#
 # 100 Hz, matching the proven-good 9607C bring-up.
 #
 # CONFIG_HZ_250 is not set

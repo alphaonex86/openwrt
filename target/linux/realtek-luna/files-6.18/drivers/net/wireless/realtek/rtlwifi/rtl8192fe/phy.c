@@ -833,6 +833,10 @@ static bool phy_config_bb_with_pghdrfile(struct ieee80211_hw *hw,
 
 	phy_regarray_pg_len = RTL8192FE_PHY_REG_ARRAY_PG_LEN;
 	phy_regarray_table_pg = RTL8192FE_PHY_REG_ARRAY_PG;
+	if (rtlpriv->rtlhal.rfe_type == 3) {
+		phy_regarray_pg_len = RTL8192FE_PHY_REG_ARRAY_PG_RFE3_LEN;
+		phy_regarray_table_pg = RTL8192FE_PHY_REG_ARRAY_PG_RFE3;
+	}
 
 	if (configtype == BASEBAND_CONFIG_PHY_REG) {
 		for (i = 0; i < phy_regarray_pg_len; i = i + 6) {

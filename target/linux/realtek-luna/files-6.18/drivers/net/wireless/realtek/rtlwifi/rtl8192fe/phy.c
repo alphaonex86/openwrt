@@ -2863,85 +2863,52 @@ void rtl92fe_phy_iq_calibrate(struct ieee80211_hw *hw, bool b_recovery)
 static void _rtl92fe_phy_lc_calibrate(struct ieee80211_hw *hw, bool is2t)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	u8 tmpreg;
-	u32 rf_a_mode = 0, rf_b_mode = 0, lc_cal;
-	u32 psf_backup;
+	u32 psf_backup, channel;
+	u8 tx_mode;
+	unsigned int poll;
 
-	/* Aries narrow-band: stash and zero the small-BW PN weight bits so
-	 * the LCK tone is clean, then restore them afterwards.
-	 */
+	(void)is2t;
 	psf_backup = rtl_get_bbreg(hw, ROFDM0_TXPSEUDONOISEWGT,
-				   (BIT(31) | BIT(30)));
-	rtl_set_bbreg(hw, ROFDM0_TXPSEUDONOISEWGT, (BIT(31) | BIT(30)), 0);
-
-	tmpreg = rtl_read_byte(rtlpriv, 0xd03);
-
-	if ((tmpreg & 0x70) != 0)
-		rtl_write_byte(rtlpriv, 0xd03, tmpreg & 0x8F);
+				   BIT(31) | BIT(30));
+	rtl_set_bbreg(hw, ROFDM0_TXPSEUDONOISEWGT, BIT(31) | BIT(30), 0);
+	tx_mode = rtl_read_byte(rtlpriv, 0xd03);
+	if (tx_mode & 0x70)
+		rtl_write_byte(rtlpriv, 0xd03, tx_mode & 0x8f);
 	else
-		rtl_write_byte(rtlpriv, REG_TXPAUSE, 0xFF);
+		rtl_write_byte(rtlpriv, REG_TXPAUSE, 0xff);
 
-	if ((tmpreg & 0x70) != 0) {
-		rf_a_mode = rtl_get_rfreg(hw, RF90_PATH_A, 0x00, MASK12BITS);
-
-		if (is2t)
-			rf_b_mode = rtl_get_rfreg(hw, RF90_PATH_B, 0x00,
-						  MASK12BITS);
-
-		rtl_set_rfreg(hw, RF90_PATH_A, 0x00, MASK12BITS,
-			      (rf_a_mode & 0x8FFFF) | 0x10000);
-
-		if (is2t)
-			rtl_set_rfreg(hw, RF90_PATH_B, 0x00, MASK12BITS,
-				      (rf_b_mode & 0x8FFFF) | 0x10000);
+	/* Stock 8192F restores the entire channel word even after a timeout. */
+	channel = rtl_get_rfreg(hw, RF90_PATH_A, 0x18, RFREG_OFFSET_MASK);
+	rtl_set_rfreg(hw, RF90_PATH_A, 0x18, RFREG_OFFSET_MASK,
+		      channel | BIT(15));
+	for (poll = 0; poll < 100; poll++) {
+		if (!rtl_get_rfreg(hw, RF90_PATH_A, 0x18, BIT(15)))
+			break;
+		mdelay(10);
 	}
-	lc_cal = rtl_get_rfreg(hw, RF90_PATH_A, 0x18, MASK12BITS);
+	if (poll == 100)
+		pr_warn_ratelimited("LCK timed out; restoring the operating channel\n");
+	rtl_set_rfreg(hw, RF90_PATH_A, 0x18, RFREG_OFFSET_MASK, channel);
 
-	/* Trigger the LCK (RF 0x18 bit15); poll-and-cap the settle. */
-	rtl_set_rfreg(hw, RF90_PATH_A, 0x18, MASK12BITS, lc_cal | 0x08000);
-
-	mdelay(100);
-
-	if ((tmpreg & 0x70) != 0) {
-		rtl_write_byte(rtlpriv, 0xd03, tmpreg);
-		rtl_set_rfreg(hw, RF90_PATH_A, 0x00, MASK12BITS, rf_a_mode);
-
-		if (is2t)
-			rtl_set_rfreg(hw, RF90_PATH_B, 0x00, MASK12BITS,
-				      rf_b_mode);
-	} else {
-		rtl_write_byte(rtlpriv, REG_TXPAUSE, 0x00);
-	}
-
-	/* Restore the narrow-band PN weight. */
-	rtl_set_bbreg(hw, ROFDM0_TXPSEUDONOISEWGT, (BIT(31) | BIT(30)),
+	if (tx_mode & 0x70)
+		rtl_write_byte(rtlpriv, 0xd03, tx_mode);
+	else
+		rtl_write_byte(rtlpriv, REG_TXPAUSE, 0);
+	rtl_set_bbreg(hw, ROFDM0_TXPSEUDONOISEWGT, BIT(31) | BIT(30),
 		      psf_backup);
-
-	/* Bounce the OFDM state machine so the new LCK takes effect. */
-	rtl_set_bbreg(hw, RFPGA0_RFMOD, BIT(25), 0x0);
-	rtl_set_bbreg(hw, RFPGA0_RFMOD, BIT(25), 0x1);
+	rtl_set_bbreg(hw, RFPGA0_RFMOD, BIT(25), 0);
+	rtl_set_bbreg(hw, RFPGA0_RFMOD, BIT(25), 1);
 }
 
 void rtl92fe_phy_lc_calibrate(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_phy *rtlphy = &rtlpriv->phy;
-	struct rtl_hal *rtlhal = &rtlpriv->rtlhal;
-	bool is2t = (rtlphy->num_total_rfpath > 1);
-	u32 timeout = 2000, timecount = 0;
 
-	while (rtlpriv->mac80211.act_scanning && timecount < timeout) {
-		udelay(50);
-		timecount += 50;
-	}
-
+	if (rtlpriv->mac80211.act_scanning || rtlphy->lck_inprogress)
+		return;
 	rtlphy->lck_inprogress = true;
-	RTPRINT(rtlpriv, FINIT, INIT_IQK,
-		"LCK:Start!!! currentband %x delay %d ms\n",
-		rtlhal->current_bandtype, timecount);
-
-	_rtl92fe_phy_lc_calibrate(hw, is2t);
-
+	_rtl92fe_phy_lc_calibrate(hw, rtlphy->num_total_rfpath > 1);
 	rtlphy->lck_inprogress = false;
 }
 

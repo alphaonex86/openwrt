@@ -109,6 +109,7 @@ struct omci_capacity {
 	u16	dsq_port[OMCI_DSQ_MAX];
 	u8	dsq_n;
 	bool	usq;
+	u8	usq_per[OMCI_TCONT_MAX];	/* upstream queues per T-CONT, 0 = 8 */
 };
 
 /* The one VEIP every board's model carries. */
@@ -501,6 +502,13 @@ enum omci_uni_decl omci_onu_declare_queues_be(struct omci_onu *o,
 					      const void *dsq, int dsq_len,
 					      const char **why);
 
+/* Declare how many upstream priority queues each T-CONT holds, one byte per
+ * declared T-CONT, each 1..8 (stock V2801RGW: 4 4 2 1 ... 2 4 4).  Absent
+ * (len < 0), every T-CONT holds 8.  Refused, nothing changed, on a list whose
+ * length is not the T-CONT count or a count outside 1..8. */
+enum omci_uni_decl omci_onu_declare_usq_be(struct omci_onu *o, const void *per,
+					   int len, const char **why);
+
 /* Declare the board's ME 53 PPTP POTS UNI instances (big-endian 16-bit list).
  * Refused, nothing changed, on an empty, oversized, zero or duplicate list. */
 enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
@@ -530,7 +538,7 @@ typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
 
 /* Declare everything of the board's equipment beside its UNIs: circuit-packs,
  * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity,
- * downstream-queue-ports and extra-me-instances.  Each is applied on its own; -> the first property
+ * downstream-queue-ports, upstream-queues-per-tcont and extra-me-instances.  Each is applied on its own; -> the first property
  * refused (its reason in @why), or NULL when none was. */
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why);

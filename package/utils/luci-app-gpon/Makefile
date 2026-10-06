@@ -38,10 +38,17 @@ define Package/luci-app-gpon/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/status/include
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/status/include/35_gpon.js \
 		$(1)/www/luci-static/resources/view/status/include/35_gpon.js
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/status/include/36_onu_health.js \
+		$(1)/www/luci-static/resources/view/status/include/36_onu_health.js
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/tools
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/tools/onu-health.js \
+		$(1)/www/luci-static/resources/tools/onu-health.js
+	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
+	$(INSTALL_BIN) ./root/usr/libexec/rpcd/onu-health $(1)/usr/libexec/rpcd/onu-health
 	# The rpcd 'gpon' status backend (usr/libexec/rpcd/gpon) is shipped by the
 	# target base-files (its actively-maintained copy), so it is NOT installed
-	# here -- doing so collided with base-files. This app provides the UI, menu
-	# and ACL only; the ACL references the ubus 'gpon' object base-files provides.
+	# here -- doing so collided with base-files. The separate onu-health backend
+	# reads cached GPON state and standard wireless station counters only.
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-gpon.json \
 		$(1)/usr/share/luci/menu.d/luci-app-gpon.json

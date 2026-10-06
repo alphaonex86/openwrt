@@ -49,12 +49,15 @@ MODULE_PARM_DESC(dig_fixed_igi,
  * (field X111W 2026-10-06: 0 own beacons at 0x303, 252 at 0x7f037f, 0 again
  * restored, same monitor). The vendor AP (phydm_dig.c 1098-1250,
  * phydm_adaptivity.c 849/911) bounds the IGI by the weakest station and keeps
- * L2H = max(IGI + 8, 0x30). AP mode runs that rule; 0 restores mainline for an A/B.
+ * L2H = max(IGI + 8, 0x30). The EDCCA rule is unconditional in AP mode (the
+ * mute is proven); the DIG bounds, an approximation of stock's boundary
+ * helpers (112 emulated rows), sit behind this switch so an A/B can drop
+ * them without re-arming the mute.
  */
 static int rtl92fe_dig_ap_rule = 1;
 module_param_named(dig_ap_rule, rtl92fe_dig_ap_rule, int, 0644);
 MODULE_PARM_DESC(dig_ap_rule,
-		 "1 = the vendor AP's DIG/EDCCA bounds (default; no station [0x1c,0x26], else clamp(rssi_min,0x20,0x40)..+15, L2H>=0x30); 0 = the mainline STA recipe");
+		 "1 = stock's AP DIG bounds (default; no station [0x1c,0x26], else clamp(rssi_min,0x20,0x40)..min(rssi_min,0x40)+15); 0 = the mainline STA recipe. EDCCA L2H>=0x30 either way");
 
 static void rtl92fe_dm_false_alarm_counter_statistics(struct ieee80211_hw *hw)
 {
@@ -179,8 +182,10 @@ static void rtl92fe_dm_dig_ap(struct ieee80211_hw *hw)
 	u8 lo = 0x1c, hi = 0x26, igi = dm_dig->cur_igvalue;
 
 	if (rtlpriv->dm.entry_min_undec_sm_pwdb) {
+		/* stock's boundary helpers under emulation (112 rows, rtl8192fe_dig_golden.h):
+		 * min = clamp(rssi, 0x20, 0x40), max = min(rssi, 0x40) + 15, never below min */
 		lo = (u8)(rssi < 0x20 ? 0x20 : rssi > 0x40 ? 0x40 : rssi);
-		hi = (u8)min(lo + 15, 0x5a);
+		hi = (u8)max((rssi > 0x40 ? 0x40 : rssi) + 15, lo);
 	}
 	if (fa > DM_DIG_FA_TH2)
 		igi += 4;
@@ -607,7 +612,9 @@ static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 	reg_c50 = rtl_get_bbreg(hw, ROFDM0_XAAGCCORE1, MASKBYTE0);
 	reg_c58 = rtl_get_bbreg(hw, ROFDM0_XBAGCCORE1, MASKBYTE0);
 
-	if (rtl92fe_dig_ap_rule && mac->opmode == NL80211_IFTYPE_AP) {
+	/* An AP never arms 0x03/0x00 (field X111W 2026-10-06: 0 own beacons at 0x303,
+	 * 252 at 0x7f037f, 0 again restored); stock's rule, not behind any switch. */
+	if (mac->opmode == NL80211_IFTYPE_AP) {
 		u8 l2h = (u8)max(reg_c50 + 8, 0x30);
 		u8 h2l = l2h - 8;
 

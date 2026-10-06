@@ -32,6 +32,16 @@ MODULE_PARM_DESC(restart_on_tx_hang,
 MODULE_PARM_DESC(dump_rf,
 		 "set 1 to one-shot dump operating RF/BB/MAC-AFE regs in the dm watchdog");
 
+/* DIAGNOSTIC lever for the field X111W (2026-10-06): a quarter to a half of a
+ * present client's RTS get no CTS, i.e. the PHY did not decode them. Pinning
+ * the initial gain lets the air capture answer whether the DIG loop is the
+ * deaf half: `echo 0x2e > /sys/module/rtl8192fe/parameters/dig_fixed_igi`.
+ */
+static int rtl92fe_dig_fixed_igi;
+module_param_named(dig_fixed_igi, rtl92fe_dig_fixed_igi, int, 0644);
+MODULE_PARM_DESC(dig_fixed_igi,
+		 "DIAGNOSTIC: pin the initial gain index (0x10..0x7f) and skip the DIG loop; 0 = DIG runs (default)");
+
 static void rtl92fe_dm_false_alarm_counter_statistics(struct ieee80211_hw *hw)
 {
 	u32 ret_value;
@@ -159,6 +169,12 @@ static void rtl92fe_dm_dig(struct ieee80211_hw *hw)
 
 	if (mac->act_scanning)
 		return;
+	if (rtl92fe_dig_fixed_igi) {
+		int igi = rtl92fe_dig_fixed_igi;
+
+		rtl92fe_dm_write_dig(hw, (u8)(igi < 0x10 ? 0x10 : igi > 0x7f ? 0x7f : igi));
+		return;
+	}
 
 	dig_min_0 = dm_dig->dig_min_0;
 	bfirstconnect = (mac->link_state >= MAC80211_LINKED) &&

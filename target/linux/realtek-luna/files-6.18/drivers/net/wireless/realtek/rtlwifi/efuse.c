@@ -1227,7 +1227,7 @@ int rtl_get_hwinfo(struct ieee80211_hw *hw, struct rtl_priv *rtlpriv,
 	struct rtl_pci_priv *rtlpcipriv = rtl_pcipriv(hw);
 	struct device *dev = &rtlpcipriv->dev.pdev->dev;
 	u16 eeprom_id;
-	u16 i, usvalue;
+	u16 i;
 
 	switch (rtlefuse->epromtype) {
 	case EEPROM_BOOT_EFUSE:
@@ -1277,10 +1277,8 @@ int rtl_get_hwinfo(struct ieee80211_hw *hw, struct rtl_priv *rtlpriv,
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 		"EEPROM SMID = 0x%4x\n", rtlefuse->eeprom_smid);
 
-	for (i = 0; i < 6; i += 2) {
-		usvalue = *(u16 *)&hwinfo[params[5] + i];
-		*((u16 *)(&rtlefuse->dev_addr[i])) = usvalue;
-	}
+	for (i = 0; i < 6; i++)		/* bytes, in the map's order on either endianness */
+		rtlefuse->dev_addr[i] = hwinfo[params[5] + i];
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_DMESG, "%pM\n", rtlefuse->dev_addr);
 
 	rtlefuse->eeprom_channelplan = *&hwinfo[params[6]];

@@ -125,6 +125,9 @@ void rtl92ee_phy_set_rf_reg(struct ieee80211_hw *hw,
 	_rtl92ee_phy_rf_serial_write(hw, rfpath, addr, data);
 
 	spin_unlock(&rtlpriv->locks.rf_lock);
+	/* The V2801RGW stock settles 2 us after every RF write: its setter at
+	 * 0x803944f8 tails into __udelay(2) through 0x8036c88c. */
+	udelay(2);
 
 	rtl_dbg(rtlpriv, COMP_RF, DBG_TRACE,
 		"regaddr(%#x), bitmask(%#x), data(%#x), rfpath(%#x)\n",
@@ -283,48 +286,11 @@ static void _rtl92ee_config_rf_reg(struct ieee80211_hw *hw, u32 addr, u32 data,
 		mdelay(50);
 	} else {
 		rtl_set_rfreg(hw, rfpath, regaddr, RFREG_OFFSET_MASK, data);
-		udelay(1);
-
-		if (addr == 0xb6) {
-			u32 getvalue;
-			u8 count = 0;
-
-			getvalue = rtl_get_rfreg(hw, rfpath, addr, MASKDWORD);
-			udelay(1);
-
-			while ((getvalue >> 8) != (data >> 8)) {
-				count++;
-				rtl_set_rfreg(hw, rfpath, regaddr,
-					      RFREG_OFFSET_MASK, data);
-				udelay(1);
-				getvalue = rtl_get_rfreg(hw, rfpath, addr,
-							 MASKDWORD);
-				if (count > 5)
-					break;
-			}
-		}
-
-		if (addr == 0xb2) {
-			u32 getvalue;
-			u8 count = 0;
-
-			getvalue = rtl_get_rfreg(hw, rfpath, addr, MASKDWORD);
-			udelay(1);
-
-			while (getvalue != data) {
-				count++;
-				rtl_set_rfreg(hw, rfpath, regaddr,
-					      RFREG_OFFSET_MASK, data);
-				udelay(1);
-				rtl_set_rfreg(hw, rfpath, 0x18,
-					      RFREG_OFFSET_MASK, 0x0fc07);
-				udelay(1);
-				getvalue = rtl_get_rfreg(hw, rfpath, addr,
-							 MASKDWORD);
-				if (count > 5)
-					break;
-			}
-		}
+		/* The V2801RGW stock writes each row once and settles 1 ms (its loop
+		 * at 0x8034c7e4 calls delay_ms(1), a udelay(1000) spin at 0x8036c858);
+		 * it never reads 0xb2/0xb6 back, so mainline's verify-and-retry loops
+		 * are dropped to keep the write sequence stock's. */
+		mdelay(1);
 	}
 }
 

@@ -122,6 +122,9 @@ static DEFINE_MUTEX(bosa_lock);
 static bool luna_driver_ready, luna_activation_ready, luna_stopping;
 static bool bosa_gn_identified, bosa_cal_ready;
 static int bosa_cal_error;
+static int luna_optical_init_error;
+static int luna_health_los = -1;
+static struct proc_dir_entry *luna_health_proc;
 static int luna_activate_locked(bool identity_changed);
 static int luna_quiesce_locked(void);
 static void luna_resume_poll(void);
@@ -8250,7 +8253,9 @@ static void gpon_fsm_poll(struct timer_list *t)
 	/* The PERIODIC half of the FSM is the core's, as the ...
 	 * dev/MEASURED-luna_gpon.c.md sec 246. */
 	gpon_ploam_tick(&luna_ploam);
-	gpon_led_los_set((gpon_rd(GPON_GTC_DS_LOS_CFG_STS) & GPON_OPTIC_LOS_SIG) != 0);
+	WRITE_ONCE(luna_health_los,
+		   !!(gpon_rd(GPON_GTC_DS_LOS_CFG_STS) & GPON_OPTIC_LOS_SIG));
+	gpon_led_los_set(READ_ONCE(luna_health_los));
 	/* The serial was (re)provisioned after ranging began. Drop to O1 and re-offer
 	 * the new Serial_Number. */
 	gpon_apply_identity_change();
@@ -8501,6 +8506,24 @@ static bool board_gpio_pads_set;
  * needs no host calibration (neither RTL8290B nor GN25L95) */
 static bool optics_self_managed;
 
+/* Cached operational state only: reading the full dump consumes PM counters. */
+static int luna_health_show(struct seq_file *s, void *v)
+{
+	bool active;
+
+	mutex_lock(&bosa_lock);
+	active = luna_driver_ready && luna_activation_ready && !luna_stopping;
+	seq_printf(s, "driver_ready: %u\nactivation_ready: %u\ninit_error: %d\n"
+		   "onu_state: %u\nlos: %d\noptics_backend: %s\n",
+		   luna_driver_ready && !luna_stopping, active,
+		   luna_optical_init_error, READ_ONCE(gpon_fsm_state),
+		   active ? READ_ONCE(luna_health_los) : -1,
+		   optics_self_managed ? "self-managed" : bosa_regs_live() ? "RTL8290B" :
+		   bosa_gn_identified ? "GN25L95" : "unknown");
+	mutex_unlock(&bosa_lock);
+	return 0;
+}
+
 static void gpon_optical_work_fn(struct work_struct *w)
 {
 	static unsigned long optical_next;
@@ -8622,6 +8645,7 @@ static int luna_quiesce_locked(void)
 		timer_delete_sync(&gpon_fsm_timer);
 		cancel_work_sync(&gpon_cdr_reset_work);
 	}
+	WRITE_ONCE(luna_health_los, -1);
 	gpon_wr_us_protected(GPON_GTC_US_CFG, GPON_US_CFG_BEN_POLAR);	/* disarmed, BEN kept inactive */
 	gpon_wr(GPON_GTC_US_PLOAM_CFG, 0);
 	gpon_wr(GPON_GTC_US_PLOAM_IND, 0);
@@ -8691,8 +8715,11 @@ static int luna_activate_locked(bool identity_changed)
 	if (datapath_rearm)
 		gpon_us_feed_rearm();
 	bosa_cal_error = 0;
+	luna_optical_init_error = 0;
 	return 0;
 fail:
+	/* Reached only after an optical operation, never an identity/hold refusal. */
+	luna_optical_init_error = ret;
 	bosa_cal_error = ret;
 	/* A release failure can leave the pin at an uncertain level. Re-inhibit,
 	 * preserving the original error and reporting an independent inhibit error. */
@@ -9240,6 +9267,9 @@ skip_bosa_init:
 		pr_info("luna-gpon: upstream inhibited, activation pending: %d\n", bosa_cal_error);
 	luna_resume_poll();
 	mutex_unlock(&bosa_lock);
+	luna_health_proc = proc_create_single("gpon_health", 0444, NULL, luna_health_show);
+	if (!luna_health_proc)
+		pr_warn("luna-gpon: cannot expose cached health status\n");
 	schedule_delayed_work(&gpon_optical_work, msecs_to_jiffies(50));
 	return 0;
 fail_maps:
@@ -9274,6 +9304,8 @@ static void __exit rtl9602c_gpon_exit(void)
 	/* OUTSIDE bosa_lock, and after the producers: the worker holds that
 	 * mutex for its whole apply, so cancelling under it would deadlock. */
 	cancel_delayed_work_sync(&luna_uni_apply_work);
+	proc_remove(luna_health_proc);
+	luna_health_proc = NULL;
 	remove_proc_entry("gpon", NULL);
 	remove_proc_entry("bosadump", NULL);
 	remove_proc_entry("pidump", NULL);

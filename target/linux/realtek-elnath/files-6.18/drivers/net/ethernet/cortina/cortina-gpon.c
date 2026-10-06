@@ -451,6 +451,8 @@ struct cortina_gpon {
 	void __iomem *glb;		/* ioremap of the GLB reset/clock window */
 	void __iomem *gpio;		/* ioremap of the PER_GPIO window */
 	struct proc_dir_entry *proc;
+	struct proc_dir_entry *health_proc;
+	int optical_init_error;
 #ifdef CONFIG_GPON_OLT_DIAG
 	struct proc_dir_entry *oltcap_proc;	/* the far-end capture dump */
 #endif
@@ -1117,6 +1119,7 @@ static int cg_mac_activate(struct cortina_gpon *cg, bool identity_changed,
 	mdelay(10);	/* let the TX_DIS net settle before the i2c stream */
 
 	ret = cg_bosa_init(cg->dev);
+	cg->optical_init_error = ret;
 	if (ret) {
 		cg->activated = false;
 		dev_err(cg->dev,
@@ -3098,6 +3101,23 @@ static void cg_show_gpon_mib(struct seq_file *m, struct cortina_gpon *cg)
 		   cg_mac_rd(cg, CG_REG_FEC_CORR_BYTES));
 }
 
+/* No cached, separately decoded LOS exists on this family yet. */
+static int cg_health_show(struct seq_file *s, void *v)
+{
+	struct cortina_gpon *cg = s->private;
+	u8 state;
+
+	mutex_lock(&cg->sn_lock);
+	state = READ_ONCE(cg->last_state);
+	seq_printf(s, "driver_ready: %u\nactivation_ready: %u\ninit_error: %d\n"
+		   "onu_state: %u\nlos: -1\noptics_backend: GN25L95\n",
+		   !cg->stopping, cg->activated && !cg->stopping,
+		   cg->optical_init_error,
+		   state < 7 ? state + 1 : 0);
+	mutex_unlock(&cg->sn_lock);
+	return 0;
+}
+
 static int cg_proc_show(struct seq_file *m, void *v)
 {
 	struct omci_data_binding binding = {0};
@@ -3609,6 +3629,10 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 		cortina_ni_pon_rx_hook_set(cg_rx_omci);
 	cg_wan_create(cg);	/* Stage D: the gpon0 WAN netdev */
 	cg->proc = proc_create_data("gpon", 0644, NULL, &cg_proc_ops, cg);
+	cg->health_proc = proc_create_single_data("gpon_health", 0444, NULL,
+						 cg_health_show, cg);
+	if (!cg->health_proc)
+		dev_warn(dev, "cannot expose cached GPON health status\n");
 #ifdef CONFIG_GPON_OLT_DIAG
 	cg->oltcap_proc = proc_create_single("oltcap", 0444, NULL, cg_oltcap_show);
 #endif
@@ -3627,6 +3651,8 @@ static void cortina_gpon_remove(struct platform_device *pdev)
 	WRITE_ONCE(cg->stopping, true);
 	mutex_unlock(&cg->sn_lock);
 
+	proc_remove(cg->health_proc);
+	cg->health_proc = NULL;
 	/*  2. /proc, which is a producer in its own right through sn_set */
 	if (cg->proc) {
 		proc_remove(cg->proc);

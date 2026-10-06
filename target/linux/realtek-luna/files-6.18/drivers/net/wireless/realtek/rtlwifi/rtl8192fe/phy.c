@@ -875,11 +875,17 @@ bool rtl92fe_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 	u32 *array;
 	u16 len;
 	u32 v1 = 0, v2 = 0;
+	u32 sys_cfg = rtl_read_dword(rtlpriv, REG_SYS_CFG1);
+	bool rfe3_cut_b = rtlpriv->rtlhal.rfe_type == 3 &&
+		!(sys_cfg & TRP_VAUX_EN) &&
+		((sys_cfg & CHIP_VER_RTL_MASK) >> CHIP_VER_RTL_SHIFT) == 1;
 
 	switch (rfpath) {
 	case RF90_PATH_A:
-		len = RTL8192FE_RADIOA_ARRAY_LEN;
-		array = RTL8192FE_RADIOA_ARRAY;
+		len = rfe3_cut_b ? RTL8192FE_RADIOA_RFE3_CUT_B_ARRAY_LEN :
+			RTL8192FE_RADIOA_ARRAY_LEN;
+		array = rfe3_cut_b ? RTL8192FE_RADIOA_RFE3_CUT_B_ARRAY :
+			RTL8192FE_RADIOA_ARRAY;
 		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 			"Radio_A:RTL8192FE_RADIOA_ARRAY %d\n", len);
 		for (i = 0; i < len; i = i + 2) {
@@ -919,8 +925,10 @@ bool rtl92fe_phy_config_rf_with_headerfile(struct ieee80211_hw *hw,
 		break;
 
 	case RF90_PATH_B:
-		len = RTL8192FE_RADIOB_ARRAY_LEN;
-		array = RTL8192FE_RADIOB_ARRAY;
+		len = rfe3_cut_b ? RTL8192FE_RADIOB_RFE3_CUT_B_ARRAY_LEN :
+			RTL8192FE_RADIOB_ARRAY_LEN;
+		array = rfe3_cut_b ? RTL8192FE_RADIOB_RFE3_CUT_B_ARRAY :
+			RTL8192FE_RADIOB_ARRAY;
 		rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
 			"Radio_B:RTL8192FE_RADIOB_ARRAY %d\n", len);
 		for (i = 0; i < len; i = i + 2) {

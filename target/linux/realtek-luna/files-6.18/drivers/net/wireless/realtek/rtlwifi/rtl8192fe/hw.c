@@ -1481,9 +1481,12 @@ static void _rtl92fe_reset_pcie_interface_dma(struct rtl_priv *rtlpriv,
 	rtl_write_byte(rtlpriv, REG_PMC_DBG_CTRL2, tmp);
 }
 
-/* Fixed-argument TX/RX-path ("TRX mode") init for the ... -- dev/MEASURED-hw.c.md sec 12. */
+/* RFE 7 AB/AB overrides; X111W stock RFE 3 keeps the BB table defaults. */
 static void _rtl92fe_config_rfe(struct ieee80211_hw *hw)
 {
+	if (rtl_hal(rtl_priv(hw))->rfe_type != 7)
+		return;
+
 	rtl_set_bbreg(hw, 0x103c, 0x70000, 0x7);
 	rtl_set_bbreg(hw, 0x04c, 0x6c00000, 0x0);
 	rtl_set_bbreg(hw, 0x064, BIT(29) | BIT(28), 0x3);
@@ -2440,6 +2443,7 @@ struct rtl92fe_board_cal {
 	u8 thermalmeter;	/* HW_WLAN0_11N_THER  */
 	u8 crystalcap;		/* HW_WLAN0_11N_XCAP  (xtal load cap) */
 	u8 pa_type;		/* HW_WLAN0_11N_PA_TYPE (0 = internal PA) */
+	u8 rfe_type;		/* Board RF front-end topology, independent of PA type. */
 	u8 reg_domain;		/* HW_WLAN0_REG_DOMAIN */
 };
 
@@ -2459,6 +2463,7 @@ static const struct rtl92fe_board_cal rtl92fe_x111w_cal = {
 	.thermalmeter = 36,		/* MIB text "36", INT_T => base 10 */
 	.crystalcap = 47,		/* MIB text "47", INT_T => base 10 */
 	.pa_type = 0,
+	.rfe_type = 3,		/* Own stock M225-260618 mib_rf and native RFE init. */
 	.reg_domain = 1,
 };
 
@@ -2477,6 +2482,7 @@ static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 	.thermalmeter = 34,		/* MIB text "34", INT_T => base 10 */
 	.crystalcap = 21,		/* MIB text "21", INT_T => base 10 */
 	.pa_type = 0,
+	.rfe_type = 7,		/* Preserve existing profile pending own-stock RFE evidence. */
 	.reg_domain = 14,		/* MIB text "14", INT_T => base 10 */
 };
 
@@ -2558,10 +2564,10 @@ static void _rtl92fe_apply_board_cal(struct ieee80211_hw *hw,
 
 	/* Front-end / regulatory. The WiFi efuse is blank, so ...
 	 * dev/MEASURED-hw.c.md sec 29. */
-	rtl_hal(rtlpriv)->rfe_type = 7;
+	rtl_hal(rtlpriv)->rfe_type = cal->rfe_type;
 	efu->board_type = 0;
 	rtl_hal(rtlpriv)->board_type = 0;
-	efu->external_pa = 1;
+	efu->external_pa = !!cal->pa_type;
 	efu->eeprom_regulatory = cal->reg_domain & 0x07;
 
 	/* Channel plan: 2.4 GHz world-wide 13 (+ ch14 handled per-channel). */
@@ -2606,6 +2612,7 @@ static void _rtl92fe_apply_unit_cal(struct ieee80211_hw *hw)
 	cal.crystalcap = unit_xcap;
 	cal.reg_domain = unit_reg_domain;
 	cal.pa_type = model ? model->pa_type : 0;
+	cal.rfe_type = model ? model->rfe_type : rtl_hal(rtl_priv(hw))->rfe_type;
 	_rtl92fe_apply_board_cal(hw, &cal);
 }
 

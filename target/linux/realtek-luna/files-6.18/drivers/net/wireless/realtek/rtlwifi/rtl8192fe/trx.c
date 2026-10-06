@@ -507,7 +507,6 @@ u16 rtl92fe_rx_desc_buff_remained_cnt(struct ieee80211_hw *hw, u8 queue_index)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	u16 read_point, write_point, remind_cnt;
 	u32 tmp_4byte;
-	static bool start_rx;
 
 	tmp_4byte = rtl_read_dword(rtlpriv, REG_RXQ_TXBD_IDX);
 	read_point = (u16)((tmp_4byte >> 16) & 0x7ff);
@@ -522,13 +521,11 @@ u16 rtl92fe_rx_desc_buff_remained_cnt(struct ieee80211_hw *hw, u8 queue_index)
 		write_point = (u16)(tmp_4byte & 0x7ff);
 	}
 
-	if (read_point > 0)
-		start_rx = true;
-	if (!start_rx)
-		return 0;
-
-	remind_cnt = calc_fifo_space(read_point, write_point,
-				     RTL_PCI_MAX_RX_COUNT);
+	/* RX indices delimit completed slots; unlike TX free space, no slot
+	 * is reserved. Native RX drains until host and hardware indices match.
+	 */
+	remind_cnt = (read_point + RTL_PCI_MAX_RX_COUNT - write_point) %
+		     RTL_PCI_MAX_RX_COUNT;
 
 	if (remind_cnt == 0)
 		return 0;

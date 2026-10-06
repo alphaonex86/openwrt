@@ -42,6 +42,17 @@ module_param_named(dig_fixed_igi, rtl92fe_dig_fixed_igi, int, 0644);
 MODULE_PARM_DESC(dig_fixed_igi,
 		 "DIAGNOSTIC: pin the initial gain index (0x10..0x7f) and skip the DIG loop; 0 = DIG runs (default)");
 
+/* Our DIG is the mainline 8192EE STA recipe: `num_qry_beacon_pkt < 5` (an AP
+ * never counts its own beacons) pins the gain floor at 0x1e, so a -15 dBm
+ * client is received at maximum initial gain. The vendor AP (phydm_dig.c
+ * 1098-1250) bounds the IGI by the weakest station instead. 1 = that rule,
+ * for EDCCA too (phydm_adaptivity.c:849,911: L2H = max(IGI + 8, 0x30)).
+ */
+static int rtl92fe_dig_ap_rule;
+module_param_named(dig_ap_rule, rtl92fe_dig_ap_rule, int, 0644);
+MODULE_PARM_DESC(dig_ap_rule,
+		 "1 = the vendor AP's DIG/EDCCA bounds (no station [0x1c,0x26]; else clamp(rssi_min,0x20,0x40)..+15); 0 = the mainline recipe (default)");
+
 static void rtl92fe_dm_false_alarm_counter_statistics(struct ieee80211_hw *hw)
 {
 	u32 ret_value;
@@ -156,6 +167,29 @@ static void rtl92fe_dm_cck_packet_detection_thresh(struct ieee80211_hw *hw)
 	rtl92fe_dm_write_cck_cca_thres(hw, cur_cck_cca_thresh);
 }
 
+static void rtl92fe_dm_dig_ap(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct dig_t *dm_dig = &rtlpriv->dm_digtable;
+	u32 fa = rtlpriv->falsealm_cnt.cnt_all;
+	long rssi = dm_dig->rssi_val_min;
+	u8 lo = 0x1c, hi = 0x26, igi = dm_dig->cur_igvalue;
+
+	if (rtlpriv->dm.entry_min_undec_sm_pwdb) {
+		lo = (u8)(rssi < 0x20 ? 0x20 : rssi > 0x40 ? 0x40 : rssi);
+		hi = (u8)min(lo + 15, 0x5a);
+	}
+	if (fa > DM_DIG_FA_TH2)
+		igi += 4;
+	else if (fa > DM_DIG_FA_TH1)
+		igi += 2;
+	else if (fa < DM_DIG_FA_TH0)
+		igi -= 2;
+	rtl92fe_dm_write_dig(hw, igi < lo ? lo : igi > hi ? hi : igi);
+	dm_dig->rx_gain_min = lo;
+	dm_dig->rx_gain_max = hi;
+}
+
 static void rtl92fe_dm_dig(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -173,6 +207,10 @@ static void rtl92fe_dm_dig(struct ieee80211_hw *hw)
 		int igi = rtl92fe_dig_fixed_igi;
 
 		rtl92fe_dm_write_dig(hw, (u8)(igi < 0x10 ? 0x10 : igi > 0x7f ? 0x7f : igi));
+		return;
+	}
+	if (rtl92fe_dig_ap_rule && mac->opmode == NL80211_IFTYPE_AP) {
+		rtl92fe_dm_dig_ap(hw);
 		return;
 	}
 
@@ -564,6 +602,17 @@ static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 
 	reg_c50 = rtl_get_bbreg(hw, ROFDM0_XAAGCCORE1, MASKBYTE0);
 	reg_c58 = rtl_get_bbreg(hw, ROFDM0_XBAGCCORE1, MASKBYTE0);
+
+	if (rtl92fe_dig_ap_rule) {
+		u8 l2h = (u8)max(reg_c50 + 8, 0x30);
+
+		if (rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD) != l2h) {
+			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD, l2h);
+			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2, l2h - 8);
+			rtlpriv->rtlhal.pre_edcca_enable = true;
+		}
+		return;
+	}
 
 	if (reg_c50 > 0x28 && reg_c58 > 0x28) {
 		if (!rtlpriv->rtlhal.pre_edcca_enable) {

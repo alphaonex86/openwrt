@@ -237,6 +237,7 @@ enum omci_attr_dyn {
 	OMCI_DYN_SCHED_N,	/* ONU2-G #7 */
 	OMCI_DYN_GEM_N,		/* ONU2-G #9 */
 	OMCI_DYN_WAN_MAC,	/* the WAN netdev's MAC, could-not-ask until set */
+	OMCI_DYN_CTC,		/* ME 65529 #2..#5, as the board declares them */
 };
 
 /* One modelled attribute. Rows of the same class are ...
@@ -866,10 +867,10 @@ static const struct omci_attr omci_attrs[] = {
 	/* ---- ME 65529 CTC ONU capability (inst 0, mib_OnuCapability): the
 	 * HSGQ OLT takes the ISP ONU type from #3 before it counts VEIPs ---- */
 	A_TXT(65529, 1, 4, OMCI_TEXT_CTC_OP),	/* #1  Operation ID */
-	A_C(65529, 2, 1, 0),			/* #2  CTC spec version */
-	A_C(65529, 3, 1, 1),			/* #3  ONU type: 1 = HGU */
-	A_C(65529, 4, 1, 2),			/* #4  TX power supply control */
-	A_HIDE(65529, 5, 1, OMCI_SRC_CONST, 1, 1),	/* #5  customized type, Get only */
+	A_D(65529, 2, 1, OMCI_DYN_CTC),		/* #2  CTC spec version */
+	A_D(65529, 3, 1, OMCI_DYN_CTC),		/* #3  ONU type: 1 = HGU */
+	A_D(65529, 4, 1, OMCI_DYN_CTC),		/* #4  TX power supply control */
+	A_HIDE(65529, 5, 1, OMCI_SRC_DYN, OMCI_DYN_CTC, 1),	/* #5  customized type, Get only */
 
 	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
 	A_ID(65530, 1, operator_id),		/* #1  Operation ID */
@@ -1574,6 +1575,9 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		case OMCI_DYN_GEM_N:
 			val = o->cap.gem_ports;
 			break;
+		case OMCI_DYN_CTC:
+			val = o->cap.ctc[a->attr - 2];
+			break;
 		case OMCI_DYN_IP_HOST_MAC: {
 			int i = omci_ip_host_index(o, inst);
 
@@ -2002,6 +2006,10 @@ static const struct omci_slot omci_slot_default = {
 	.inst = 0x0101, .type = OMCI_UNI_TYPE_DEFAULT, .ports = 1, .priq = 8,
 };
 
+/* ME 65529 #2..#5 as stock X100DG and G24W serve them: spec 0, HGU, TX power
+ * supply control 2, customized type 1. */
+static const u8 omci_ctc_default[4] = { 0, 1, 2, 1 };
+
 #define OMCI_SLOT_BE_FIELDS 6
 
 enum omci_uni_decl omci_onu_declare_slots_be(struct omci_onu *o,
@@ -2297,6 +2305,22 @@ enum omci_uni_decl omci_onu_declare_extra_me_be(struct omci_onu *o,
 	return OMCI_UNI_DECL_OK;
 }
 
+enum omci_uni_decl omci_onu_declare_ctc_be(struct omci_onu *o, const void *be,
+					   int len, const char **why)
+{
+	if (len < 0) {
+		*why = "the core's 0 1 2 1";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!be || len != sizeof(o->cap.ctc)) {
+		*why = "the CTC capability is not <spec-version onu-type tx-power customized>";
+		return OMCI_UNI_DECL_BAD;
+	}
+	memcpy(o->cap.ctc, be, sizeof(o->cap.ctc));
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
 enum omci_uni_decl omci_onu_declare_usq_be(struct omci_onu *o, const void *per,
 					   int len, const char **why)
 {
@@ -2360,6 +2384,9 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	a = prop(ctx, "upstream-queues-per-tcont", &alen);
 	OMCI_DECLARED(omci_onu_declare_usq_be(o, a, alen, &reason),
 		      "upstream-queues-per-tcont");
+	a = prop(ctx, "ctc-onu-capability", &alen);
+	OMCI_DECLARED(omci_onu_declare_ctc_be(o, a, alen, &reason),
+		      "ctc-onu-capability");
 	a = prop(ctx, "extra-me-instances", &alen);
 	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
 		      "extra-me-instances");
@@ -2394,6 +2421,7 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->cap.sched_n = OMCI_TCONT_COUNT;
 	o->cap.onu2g_pq = 0x0060;
 	o->cap.gem_ports = 0x0040;
+	memcpy(o->cap.ctc, omci_ctc_default, sizeof(o->cap.ctc));
 	o->cap.dsq_port[0] = 0x0101;
 	o->cap.dsq_n = 1;
 	omci_onu_declare_unis(o, omci_uni_default, NULL, 1,

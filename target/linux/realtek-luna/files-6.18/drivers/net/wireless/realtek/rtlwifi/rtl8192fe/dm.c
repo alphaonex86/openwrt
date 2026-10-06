@@ -609,10 +609,12 @@ static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 
 	if (rtl92fe_dig_ap_rule && mac->opmode == NL80211_IFTYPE_AP) {
 		u8 l2h = (u8)max(reg_c50 + 8, 0x30);
+		u8 h2l = l2h - 8;
 
-		if (rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD) != l2h) {
+		if (rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD) != l2h ||
+		    rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2) != h2l) {
 			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD, l2h);
-			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2, l2h - 8);
+			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2, h2l);
 			rtlpriv->rtlhal.pre_edcca_enable = true;
 		}
 		return;

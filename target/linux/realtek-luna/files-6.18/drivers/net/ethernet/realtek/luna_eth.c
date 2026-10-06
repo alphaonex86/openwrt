@@ -345,6 +345,7 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	/* MEASURED on THIS unit's own stock, two independent sources ...
 	 * dev/MEASURED-luna_eth.c.md sec 10. */
 	.wan_mac_offset	= 5,
+	.cold_phy_status = 0,	/* keep the existing warm PHY path on this die */
 };
 
 /* Accessors: the table lives in `ep->c`, so a per-port register is one call and

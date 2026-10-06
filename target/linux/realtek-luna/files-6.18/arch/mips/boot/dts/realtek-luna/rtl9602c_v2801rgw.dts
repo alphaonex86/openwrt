@@ -69,6 +69,11 @@
 		onu-capacity = /bits/ 16 <16 64 16 64>;
 		downstream-queue-ports = /bits/ 16 <0x0101 0x0601>;
 		upstream-queues-per-tcont = /bits/ 8 <4 4 2 1 1 1 1 1 1 1 1 1 1 2 4 4>;
+		/* Stock's CTC ONU capability: HGU, TX power supply control 1 (the
+		 * core serves 2 undeclared); without it the HSGQ OLT keeps the ISP
+		 * ONU type it last saw. */
+		ctc-onu-capability = /bits/ 8 <0 1 1 1>;
+		extra-me-instances = /bits/ 16 <65529 0>;
 	};
 };
 

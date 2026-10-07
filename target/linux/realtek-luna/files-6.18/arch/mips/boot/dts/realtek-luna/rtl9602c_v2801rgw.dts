@@ -41,7 +41,6 @@
 		};
 	};
 
-	/delete-node/ flash@14000000;
 	/delete-node/ watchdog@18003260;
 
 	/* The X111W's pad routing, which this board has run with so far:
@@ -91,4 +90,53 @@
  * unit's row while stock ran (2026-09-30). */
 &nic {
 	realtek,wan-mac-offset = <5>;
+};
+
+/* The identity the OLT and the LAN see (VSOL/GZNO/V1.1, GPON SN, LOID, factory
+ * MAC) lives in this unit's own `config` partition, which rtk_factory reads
+ * (proven offline on the 2026-09-26 mapped capture, CRC32 8c72e6b7) -- its
+ * U-Boot has no bootargs variable to carry any of it. Same SoC and PIO block
+ * as the X111W: read through the memory-mapped window, erase/program through
+ * the controller, so the OpenWrt overlay in r0 persists. The six partitions
+ * are this unit's own /proc/mtd and U-Boot environment (8 MiB, one bank:
+ * flashing bank 0 replaces stock, so the full NOR is dumped first). */
+&spi_nor {
+	compatible = "realtek,luna-spi-nor";
+	reg = <0x14000000 0x800000>, <0x18001200 0x10>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "boot";
+			reg = <0x000000 0x040000>;	/* 256K */
+			read-only;
+		};
+		partition@40000 {
+			label = "env";
+			reg = <0x040000 0x002000>;	/* 8K */
+			read-only;
+		};
+		partition@42000 {
+			label = "env2";
+			reg = <0x042000 0x002000>;	/* 8K */
+			read-only;
+		};
+		partition@44000 {
+			label = "config";
+			reg = <0x044000 0x05c000>;	/* 368K, the identity */
+			read-only;
+		};
+		partition@a0000 {
+			label = "k0";
+			reg = <0x0a0000 0x280000>;	/* 2560K kernel (img0_kernel) */
+		};
+		partition@320000 {
+			label = "r0";
+			reg = <0x320000 0x4e0000>;	/* 4992K rootfs + overlay */
+			linux,rootfs;
+		};
+	};
 };

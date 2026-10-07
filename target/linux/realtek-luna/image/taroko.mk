@@ -51,8 +51,18 @@ define Device/vsol_v2801rgw
   DEVICE_DTS := rtl9602c_v2801rgw
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9602c
-  IMAGES :=
-  DEVICE_PACKAGES :=
+  # One bank on an 8 MiB Winbond EF4017, from the unit's own /proc/mtd and U-Boot env:
+  #   k0 = 0x280000 (2560k) kernel at 0xa0000, r0 = 0x4e0000 (4992k) rootfs at 0x320000.
+  # check-size fails the BUILD when either overflows: an oversize image never reaches a unit.
+  KERNEL_SIZE := 2560k
+  IMAGE_SIZE := 4992k
+  IMAGES := kernel.bin rootfs.bin sysupgrade.bin
+  IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
+  IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  # The same router stack as the X111W (see its profile for the why of each package).
+  DEVICE_PACKAGES := gpon-provision luci-app-gpon luci-base luci-mod-admin-full luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file \
+	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls
 endef
 TARGET_DEVICES += vsol_v2801rgw
 

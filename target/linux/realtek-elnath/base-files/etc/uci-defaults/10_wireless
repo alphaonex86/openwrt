@@ -24,8 +24,8 @@
 #
 # BSSIDs: the 5G phy reports macaddress ff:ff:ff:ff:ff:ff (blank efuse) and
 # the 2.4G phy's efuse MAC is not this board's, so pin per-board vif MACs
-# from the factory base MAC: 2.4G = base+2, 5G = base+3 (base = eth0/LAN,
-# base+1 = gpon0/WAN, per 05_factory_mac).
+# from the factory base MAC exactly as stock does: 2.4G = base+7, 5G = base+1,
+# the same MAC as gpon0/WAN (operator, 2026-10-07: copy stock, both bands).
 #
 # 2.4G quirks carried over from the proven realtek-luna rtl8192fe AP (same
 # driver): legacy_rates=1 (CCK basic rates; without it strict phone scan
@@ -171,8 +171,8 @@ chan_5g=149
 
 # per-board vif MACs (see header); base comes from the same factory source
 base=$(echo "$mac" | sed 's/../&:/g;s/:$//')
-mac_2g=$(macaddr_add "$base" 2)
-mac_5g=$(macaddr_add "$base" 3)
+mac_2g=$(macaddr_add "$base" 7)
+mac_5g=$(macaddr_add "$base" 1)
 
 logger -t wireless-defaults \
 	"ssid='$ssid' 2g=$mac_2g 5g=$mac_5g country=$country (board said '$board_country') chan_2g=$chan_2g chan_5g=$chan_5g mac_n=$mac_n"

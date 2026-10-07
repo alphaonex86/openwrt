@@ -40,8 +40,20 @@ return baseclass.extend({
 			this.previousClients = current;
 			this.previousUptime = uptime;
 		}
+		var problems = rows.filter(function(row) { return row.level === 'warning' || row.level === 'danger'; });
+		if (!problems.length) {
+			/* nothing to report: the status page keeps a section it once showed, so hide it again */
+			var none = E('div', {});
+			if (typeof window !== 'undefined')
+				window.setTimeout(function() {
+					var section = none.parentNode && none.parentNode.parentNode;
+					if (section)
+						section.style.display = 'none';
+				}, 0);
+			return none;
+		}
 		var table = E('table', { 'class': 'table' });
-		rows.forEach(function(row) {
+		problems.forEach(function(row) {
 			table.appendChild(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td', 'width': '25%' }, [ row.component ]),
 				E('td', { 'class': 'td' }, [ E('span', { 'class': 'label ' + row.level }, [ _(row.message) ]) ])
@@ -68,8 +80,6 @@ return baseclass.extend({
 			link.remove();
 			window.setTimeout(function() { window.URL.revokeObjectURL(url); }, 1000);
 		} }, [ _('Download diagnostics') ]);
-		return E('div', {}, [ table, clients.length ? detail : '',
-			E('p', {}, [ _('Counters describe observed driver and link behavior. Retries are not a packet-loss percentage; signal strength alone cannot identify a damaged antenna.') ]),
-			download ]);
+		return E('div', {}, [ table, clients.length ? detail : '', download ]);
 	}
 });

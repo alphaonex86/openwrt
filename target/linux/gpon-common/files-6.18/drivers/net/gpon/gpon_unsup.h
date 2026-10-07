@@ -13,6 +13,10 @@
 #ifndef GPON_UNSUP_SUBSYS
 #define GPON_UNSUP_SUBSYS	"gpon"
 #endif
+/* Where the line goes: a shell with its own protocol log names it here. */
+#ifndef GPON_UNSUP_LOG
+#define GPON_UNSUP_LOG	pr_info
+#endif
 
 /* HOST builds only; in kernel context compiler_attributes.h ...
  * dev/MEASURED-gpon_unsup.h.md sec 2. */
@@ -72,7 +76,7 @@ static noinline __maybe_unused void gpon_unsup_emit(const char *subsys,
 		hex[2u * i + 1u] = hexd[data[i] & 0xfu];
 	}
 	hex[2u * len] = '\0';
-	pr_info("%s: UNSUP kind=%s class=%s val=0x%x want=%s n=%u d=%s\n",
+	GPON_UNSUP_LOG("%s: UNSUP kind=%s class=%s val=0x%x want=%s n=%u d=%s\n",
 		subsys, kind, gpon_unsup_class_name(cls), val,
 		want ? want : "-", c, hex);
 }

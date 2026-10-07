@@ -334,8 +334,8 @@
  * the index is placed in CPU force-mode and enabled for parallel (vs serial-
  * shift) output. A working unit lights the green PON LED solid once ranged to
  * the OLT and lights the red LOS LED only while downstream light is absent.
- * Board X111W wires PON-status to index 12 and LOS to index 13. Offsets are
- * into swcore_base (phys 0x1b000000).
+ * Which index is which lamp is the BOARD's (DT gpon node). Offsets are into
+ * swcore_base (phys 0x1b000000).
  */
 #define LED_MODE_SEL		0x1e000		/* [0] 0 = parallel output      */
 #define LED_DATA_CFG(idx)	(0x1e004 + (idx) * 4)	/* [12] CPU force-mode  */
@@ -351,15 +351,13 @@
 #define LED_FORCE_ON		1u
 #define LED_FORCE_BLINK		2u
 #define LED_BLINK_512MS		4u		/* [14:12] period code           */
-#define PON_LED_IDX		12u
-#define LOS_LED_IDX		13u
+#define LED_IDX_NONE		0xffu		/* board declares no such lamp   */
+#define LED_IDX_MAX		15u		/* 2-bit fields in LED_FORCE_VALUE */
 /* Ethernet port-link LEDs: hardware-auto (the switch lights them straight from
  * port link + activity, no CPU). 0xf78 = link at every speed (bits 8..11) +
  * activity at every speed (bits 3..6). The switch port map is port0=FE(100M),
  * port1=GE(1G), so each LED is typed to its own port. */
-#define LED_LINKACT		0xf78u
-#define LED_TYPE_UTP0		0x01u		/* switch port 0 = FE 100M */
-#define LED_TYPE_UTP1		0x02u		/* switch port 1 = GE 1G   */
+#define LED_LINKACT		0xf78u		/* type code = switch port + 1 */
 
 #define GPIO_PHYS_BASE		0x18003300u
 #define GPIO_REG_SIZE		0x40u

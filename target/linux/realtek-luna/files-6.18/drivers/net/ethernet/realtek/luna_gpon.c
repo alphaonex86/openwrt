@@ -37,6 +37,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/ktime.h>	/* the far-end capture timestamps its records */
+#include <linux/sched/clock.h>	/* local_clock: the GPON log's timestamps */
 #include <linux/math64.h>	/* div_u64: ns -> us without a 64-bit divide */
 #include <linux/timer.h>
 #include <linux/workqueue.h>
@@ -48,10 +49,63 @@
 #include "luna_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
 #include "luna_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
 
+/* The GPON/protocol log: a ring read at /proc/gpon_log, never printk (operator,
+ * 2026-10-07: dmesg is for the device itself). Protocol events run in the FSM
+ * timer, where a console line cost the production OLT's Password deadline.
+ * Lines keep the dmesg spelling, so a reader only changes its source. */
+#define LUNA_LOG_BYTES	(32 * 1024)
+static char luna_log_buf[LUNA_LOG_BYTES];
+static unsigned int luna_log_head;
+static DEFINE_SPINLOCK(luna_log_lock);
+
+static __printf(1, 2) void luna_log_raw(const char *fmt, ...)
+{
+	u64 ns = local_clock();
+	u32 us = do_div(ns, NSEC_PER_SEC) / NSEC_PER_USEC;
+	unsigned long flags;
+	char line[320];
+	va_list ap;
+	int n, i;
+
+	n = scnprintf(line, sizeof(line), "[%5llu.%06u] ", ns, us);
+	va_start(ap, fmt);
+	n += vscnprintf(line + n, sizeof(line) - n, fmt, ap);
+	va_end(ap);
+	spin_lock_irqsave(&luna_log_lock, flags);
+	for (i = 0; i < n; i++)
+		luna_log_buf[luna_log_head++ % LUNA_LOG_BYTES] = line[i];
+	spin_unlock_irqrestore(&luna_log_lock, flags);
+}
+
+#define luna_log(fmt, ...)	luna_log_raw("luna-gpon: " fmt, ##__VA_ARGS__)
+#define GPON_UNSUP_LOG		luna_log_raw
+
 /* Anything this driver receives and cannot place leaves ...
  * dev/MEASURED-luna_gpon.c.md sec 2. */
 #define GPON_UNSUP_SUBSYS	"luna-gpon"
 #include "gpon_unsup.h"		/* shared: the UNSUP report + its rate limit */
+
+static int luna_log_show(struct seq_file *s, void *v)
+{
+	char *snap = kvmalloc(LUNA_LOG_BYTES, GFP_KERNEL);
+	unsigned int head, len, i, start = 0;
+	unsigned long flags;
+
+	if (!snap)
+		return -ENOMEM;
+	spin_lock_irqsave(&luna_log_lock, flags);
+	head = luna_log_head;
+	len = min_t(unsigned int, head, LUNA_LOG_BYTES);
+	for (i = 0; i < len; i++)
+		snap[i] = luna_log_buf[(head - len + i) % LUNA_LOG_BYTES];
+	spin_unlock_irqrestore(&luna_log_lock, flags);
+	if (head > LUNA_LOG_BYTES)	/* the oldest line was overwritten in part */
+		while (start < len && snap[start++] != '\n')
+			;
+	seq_write(s, snap + start, len - start);
+	kvfree(snap);
+	return 0;
+}
 
 #define GPON_PHYS_BASE	0x1b700000u
 
@@ -90,8 +144,6 @@ static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
 #define GPON_GTC_US_ONU_ID_SHIFT 8		/* [15:8] OLT-assigned ONU-ID  */
 
 /* SoC hardware I2C master (SWCORE register file). The ... -- dev/MEASURED-luna_gpon.c.md sec 5. */
-#define GE_LED_IDX		1u
-#define FE_LED_IDX		15u
 
 /* SoC GPIO controller (its own register page at phys ... -- dev/MEASURED-luna_gpon.c.md sec 6. */
 #define PI_US_SRAM_NO		127u		/* 128 pages - 1               */
@@ -1416,10 +1468,41 @@ MODULE_PARM_DESC(gpon_leds, "drive the front-panel PON/LOS LEDs from GPON state 
 static u32 gpon_led_pon_val = ~0u;	/* last value written (forces first update) */
 static u32 gpon_led_los_val = ~0u;
 
+/* The panel map is the BOARD's, from its DT gpon node: realtek,pon-led,
+ * realtek,los-led, realtek,los-led-blink-rate (present = LOS blinks, at that
+ * period code) and realtek,port-leds = <index type>... (hardware link/activity).
+ * A board that declares nothing gets no lamp driven: the X111W's indices on
+ * another board drove pins the panel does not use (V2801RGW, 2026-10-07). */
+static u32 led_pon_idx = LED_IDX_NONE;
+static u32 led_los_idx = LED_IDX_NONE;
+static u32 led_los_blink_rate = LED_IDX_NONE;
+static u32 led_ports[8];
+static int led_nports;
+
+static void __init luna_led_map_from_dt(void)
+{
+	struct device_node *np = of_find_node_by_path("/gpon");
+	int n;
+
+	if (!np)
+		return;
+	of_property_read_u32(np, "realtek,pon-led", &led_pon_idx);
+	of_property_read_u32(np, "realtek,los-led", &led_los_idx);
+	of_property_read_u32(np, "realtek,los-led-blink-rate", &led_los_blink_rate);
+	n = of_property_count_u32_elems(np, "realtek,port-leds");
+	if (n > 0 && n % 2 == 0 && n <= (int)ARRAY_SIZE(led_ports) &&
+	    !of_property_read_u32_array(np, "realtek,port-leds", led_ports, n))
+		led_nports = n / 2;
+	else if (n > 0)
+		pr_err("luna-gpon: realtek,port-leds holds %d cells, not <index type> pairs (max %zu) -- no port LED driven\n",
+		       n, ARRAY_SIZE(led_ports) / 2);
+	of_node_put(np);
+}
+
 /* Drive one LED index's 2-bit parallel force value (0=off 1=on 2=blink). */
 static void gpon_led_force(unsigned int idx, u32 val)
 {
-	if (is_9603cvd)		/* Board-C offsets/indices -- see gpon_led_init() */
+	if (is_9603cvd || idx > LED_IDX_MAX)
 		return;
 	sw_field(LED_FORCE_VALUE, idx * 2 + 1, idx * 2, val);
 }
@@ -1450,18 +1533,24 @@ static void gpon_led_pon_set(u8 st)
 
 	if (!gpon_leds || v == gpon_led_pon_val)
 		return;
-	gpon_led_force(PON_LED_IDX, v);
+	if (v == LED_FORCE_BLINK)
+		sw_field(LED_BLINK_RATE, 14, 12, LED_BLINK_512MS);
+	gpon_led_force(led_pon_idx, v);
 	gpon_led_pon_val = v;
 }
 
-/* Red LOS LED: on only while the downstream optical signal is lost. */
+/* Red LOS LED: lit (or blinking, when the board declares a rate) only while the
+ * downstream optical signal is lost. */
 static void gpon_led_los_set(bool los)
 {
-	u32 v = los ? LED_FORCE_ON : LED_FORCE_OFF;
+	bool blink = led_los_blink_rate <= 7;
+	u32 v = !los ? LED_FORCE_OFF : blink ? LED_FORCE_BLINK : LED_FORCE_ON;
 
 	if (!gpon_leds || v == gpon_led_los_val)
 		return;
-	gpon_led_force(LOS_LED_IDX, v);
+	if (v == LED_FORCE_BLINK)
+		sw_field(LED_BLINK_RATE, 14, 12, led_los_blink_rate);
+	gpon_led_force(led_los_idx, v);
 	gpon_led_los_val = v;
 }
 
@@ -1516,9 +1605,11 @@ static void gpon_led_sysfs_init(void)
 	unsigned int i;
 	int rc;
 
-	luna_panel_leds[0].idx = PON_LED_IDX;
-	luna_panel_leds[1].idx = LOS_LED_IDX;
+	luna_panel_leds[0].idx = led_pon_idx;
+	luna_panel_leds[1].idx = led_los_idx;
 	for (i = 0; i < ARRAY_SIZE(luna_panel_leds); i++) {
+		if (luna_panel_leds[i].idx > LED_IDX_MAX)
+			continue;
 		luna_panel_leds[i].cdev.brightness_set = luna_panel_led_set;
 		luna_panel_leds[i].cdev.brightness_get = luna_panel_led_get;
 		rc = led_classdev_register(NULL, &luna_panel_leds[i].cdev);
@@ -1548,6 +1639,8 @@ static void gpon_led_sysfs_exit(void)
  * configuration. */
 static void gpon_led_init(void)
 {
+	int i;
+
 	if (!gpon_leds)
 		return;
 	/* Every constant in this block is Board C's, and on the ...
@@ -1557,27 +1650,33 @@ static void gpon_led_init(void)
 			swc->chip);
 		return;
 	}
+	if (led_pon_idx > LED_IDX_MAX && led_los_idx > LED_IDX_MAX && !led_nports) {
+		pr_info("luna-gpon: panel LEDs not driven (%s: no LED map in the DT gpon node)\n",
+			swc->chip);
+		return;
+	}
 	sw_field(LED_PARA_EN, LED_SERI_DATA_EN_BIT, LED_SERI_DATA_EN_BIT, 0);
 	sw_field(LED_PARA_EN, LED_SERI_CLK_EN_BIT, LED_SERI_CLK_EN_BIT, 0);
 	sw_field(LED_IO_EN, LED_SERI_OUT_EN_BIT, LED_SERI_OUT_EN_BIT, 0);
 	sw_field(LED_MODE_SEL, 0, 0, 0);			/* parallel output   */
 	sw_field(LED_BLINK_RATE, 14, 12, LED_BLINK_512MS);
-	gpon_led_claim(PON_LED_IDX);
-	gpon_led_claim(LOS_LED_IDX);
-	gpon_led_force(PON_LED_IDX, LED_FORCE_OFF);
-	gpon_led_force(LOS_LED_IDX, LED_FORCE_OFF);
+	if (led_pon_idx <= LED_IDX_MAX)
+		gpon_led_claim(led_pon_idx);
+	if (led_los_idx <= LED_IDX_MAX)
+		gpon_led_claim(led_los_idx);
+	gpon_led_force(led_pon_idx, LED_FORCE_OFF);
+	gpon_led_force(led_los_idx, LED_FORCE_OFF);
 	gpon_led_pon_val = LED_FORCE_OFF;
 	gpon_led_los_val = LED_FORCE_OFF;
 
 	/* Ethernet port-link LEDs, hardware-auto: the switch lights each from its
-	 * OWN port's link + activity, no CPU. FE = index 15 (switch port0, UTP0),
-	 * GE = index 1 (switch port1, UTP1) -- both confirmed by cable test, so an
-	 * FE-plug lights only FE and a GE-plug lights only GE. */
-	gpon_led_port(FE_LED_IDX, LED_TYPE_UTP0);
-	gpon_led_port(GE_LED_IDX, LED_TYPE_UTP1);
+	 * OWN port's link + activity, no CPU. */
+	for (i = 0; i < led_nports; i++)
+		if (led_ports[2 * i] <= LED_IDX_MAX)
+			gpon_led_port(led_ports[2 * i], led_ports[2 * i + 1]);
 
-	pr_info("luna-gpon: panel LEDs init (PON idx%u / LOS idx%u force-mode; FE idx%u / GE idx%u link-auto)\n",
-		PON_LED_IDX, LOS_LED_IDX, FE_LED_IDX, GE_LED_IDX);
+	pr_info("luna-gpon: panel LEDs init (PON idx%u / LOS idx%u%s force-mode; %d port LED(s) link-auto)\n",
+		led_pon_idx, led_los_idx, led_los_blink_rate <= 7 ? " blinking" : "", led_nports);
 
 	/* Only now: the class devices describe lamps this function just claimed,
 	 * so a die that returned early above exposes NOTHING rather than a node
@@ -2967,7 +3066,7 @@ static void bosa_laser_maint(void)
 	 * the laser actually emits (mpd != 0) and holds bias once the FSM is in O3 and
 	 * bursting upstream. EN_L = W4/0x204 bit4 (laser booster output enable). */
 	if (trace && (bosa_stat_ticks++ % 50) == 0)
-		pr_info("luna-gpon: laser stat: 0x383=0x%02x 0x389=0x%02x R30=0x%02x bias=0x%02x mod=0x%02x mpd=%02x/%02x EN_L=%d state=O%u\n",
+		luna_log("laser stat: 0x383=0x%02x 0x389=0x%02x R30=0x%02x bias=0x%02x mod=0x%02x mpd=%02x/%02x EN_L=%d state=O%u\n",
 			s2 & 0xff, fs & 0xff, bosa_read_reg(0x31e) & 0xff,
 			bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x237) & 0xff,
 			bosa_read_reg(0x320) & 0xff, bosa_read_reg(0x321) & 0xff,
@@ -3000,12 +3099,12 @@ static void bosa_laser_maint(void)
 
 		bosa_maint_faults++;
 		if (now != bosa_maint_last) {
-			pr_info("luna-gpon: laser maint re-arm (0x383=0x%02x 0x389=0x%02x R30=0x%02x)%s\n",
+			luna_log("laser maint re-arm (0x383=0x%02x 0x389=0x%02x R30=0x%02x)%s\n",
 				s2 & 0xff, fs & 0xff, r30,
 				bosa_maint_last == BOSA_MAINT_NONE ? "" :
 				" [state changed]");
 			if (bosa_maint_last != BOSA_MAINT_NONE)
-				pr_info("luna-gpon: ... the previous laser-maint state held for %u re-arm(s)\n",
+				luna_log("... the previous laser-maint state held for %u re-arm(s)\n",
 					bosa_maint_faults - bosa_maint_since);
 			bosa_maint_last = now;
 			bosa_maint_since = bosa_maint_faults;
@@ -4475,7 +4574,7 @@ static void gpon_us_feed_rearm(void)
 	sw_field(WSDS_DIG_00, 10, 10, 1);	/* release -> soft-reset edge   */
 	gpon_pbo_init();			/* re-arm US-feed (pool persists)*/
 	gpon_us_feed_rearm_cnt++;
-	pr_info("luna-gpon: US-feed re-armed (WSDS GPON reset edge + pbo re-init, cnt=%u)\n",
+	luna_log("US-feed re-armed (WSDS GPON reset edge + pbo re-init, cnt=%u)\n",
 		gpon_us_feed_rearm_cnt);
 }
 
@@ -4496,7 +4595,7 @@ static void gpon_us_feed_rearm_light(void)
 	 * and drowns serial diagnostics. The count is the useful signal -- log it periodically
 	 * (still readable, no flood). */
 	if (!(gpon_us_feed_rearm_cnt % 1000))
-		pr_info("luna-gpon: US-feed FIFO re-armed at O5 (feed edge, no reset, cnt=%u)\n",
+		luna_log("US-feed FIFO re-armed at O5 (feed edge, no reset, cnt=%u)\n",
 			gpon_us_feed_rearm_cnt);
 }
 
@@ -4507,7 +4606,7 @@ static void gpon_o3_feed_unpark(void)
 	sw_field(WSDS_DIG_00, 10, 10, 0);
 	sw_field(WSDS_DIG_00, 10, 10, 1);
 	gpon_us_feed_rearm_light();
-	pr_info("luna-gpon: O3 post-relock WSDS feed-reset edge (un-park GEM-US framer)\n");
+	luna_log("O3 post-relock WSDS feed-reset edge (un-park GEM-US framer)\n");
 }
 
 /* Full BOSA page2 (slave 0x54) + page3 (slave 0x55) register dump for diagnostics.
@@ -5795,7 +5894,7 @@ static void gpon_send_cpu_ploam(u8 queue, const u8 m[12])
 			udelay(5);
 		}
 		if (dbgn++ < 40)
-			pr_info("luna-gpon: PLM_TX q=%u enq_cleared=%d(%dus) IND=0x%08x urg_e=%d urg_f=%d nrm_e=%d nrm_f=%d cputx=%u autotx=%u\n",
+			luna_log("PLM_TX q=%u enq_cleared=%d(%dus) IND=0x%08x urg_e=%d urg_f=%d nrm_e=%d nrm_f=%d cputx=%u autotx=%u\n",
 				queue, cleared, j * 5, i2,
 				!!(i2 & GPON_US_PLM_URG_EMPTY), !!(i2 & GPON_US_PLM_URG_FULL),
 				!!(i2 & GPON_US_PLM_NRM_EMPTY), !!(i2 & GPON_US_PLM_NRM_FULL),
@@ -5933,7 +6032,7 @@ static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
 	udelay(50);
 	pi_wr(PI_IO_CMD_0_US, 0x90101070u);	/* GMII on -> rising edge latches classify */
 
-	pr_info("luna-gpon: ponmac_modeset_gpon: re-latched US-NIC SID classify (serdes_recommit=%u)\n",
+	luna_log("ponmac_modeset_gpon: re-latched US-NIC SID classify (serdes_recommit=%u)\n",
 		serdes_recommit);
 }
 
@@ -6025,7 +6124,7 @@ static int gpon_install_omcc(u16 gem)
 	/* Read the packed entries back through pi_packed_get, the mirror of
 	 * pi_packed_set, to confirm SID2QID landed at the TRUE word: the old per-word
 	 * math wrote the wrong one and this readback was blind to it. */
-	pr_info("luna-gpon: pi readback sid2qid[64]=%u sidvalid[64]=%u sidqmapds[64]=%u\n",
+	luna_log("pi readback sid2qid[64]=%u sidvalid[64]=%u sidqmapds[64]=%u\n",
 		pi_packed_get(PI_PON_SID2QID, GPON_OMCC_FLOW, 7),
 		pi_packed_get(PI_PON_SIDVALID, GPON_OMCC_FLOW, 1),
 		pi_packed_get(PI_PON_SID_Q_MAP_DS, GPON_OMCC_FLOW, 2));
@@ -6045,7 +6144,7 @@ static int gpon_install_omcc(u16 gem)
 	if (relatch_us) {
 		pi_wr(PI_IO_CMD_0_US, 0x90101050u);	/* GMII RX OFF */
 		pi_wr(PI_IO_CMD_0_US, 0x90101070u);	/* GMII RX ON -> re-latch */
-		pr_info("luna-gpon: relatch_us: re-pulsed GMII_RX_EN after OMCC install (io0_us=0x%08x)\n",
+		luna_log("relatch_us: re-pulsed GMII_RX_EN after OMCC install (io0_us=0x%08x)\n",
 			pi_rd(PI_IO_CMD_0_US));
 	}
 
@@ -6061,11 +6160,11 @@ static int gpon_install_omcc(u16 gem)
 		gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_UNLOCK);
 		gpon_field(GPON_GTC_US_PROC_MODE, 0, 0, 1);	/* US_PROC_MODE.AUTO_PROC_SSTART = 1 */
 		gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_LOCK);
-		pr_info("luna-gpon: O5 re-asserted AUTO_PROC_SSTART (0x5200 bit0=%u)\n",
+		luna_log("O5 re-asserted AUTO_PROC_SSTART (0x5200 bit0=%u)\n",
 			gpon_rd(GPON_GTC_US_PROC_MODE) & 1u);
 	}
 
-	pr_info("luna-gpon: OMCC installed gem=%u flow=%u (compl %d)\n",
+	luna_log("OMCC installed gem=%u flow=%u (compl %d)\n",
 		gem, GPON_OMCC_FLOW, rc);
 	return 0;
 }
@@ -6703,7 +6802,7 @@ static void luna_data_tcont_from_assign(u16 alloc, bool assigned)
 		gpon_install_tcont(GPON_DATA_TCONT, alloc);
 		return;
 	}
-	pr_info("luna-gpon: Alloc 0x%x NOT bound to the data T-CONT: %s\n",
+	luna_log("Alloc 0x%x NOT bound to the data T-CONT: %s\n",
 		alloc, gpon_gem_us_bind_name(bind));
 }
 
@@ -6815,7 +6914,7 @@ static void luna_omci_poll(void)
 			if (gpon_omci_diag_line(frame.msg, frame.len,
 					       n == OMCI_LEN ? response : NULL, n,
 					       line, sizeof(line)))
-				pr_info("luna-gpon: OMCI DS: %s\n", line);
+				luna_log("OMCI DS: %s\n", line);
 		}
 #endif
 		/* An accepted mutation gets its hardware turn before another PDU can
@@ -6926,7 +7025,7 @@ int gpon_install_data_gem(void)
 			pr_err("luna-gpon: DATA GEM classify readback timeout\n");
 			return -ETIMEDOUT;
 		}
-		pr_info("luna-gpon: data-gem: flow-%u classify committed after %d edge(s)\n",
+		luna_log("data-gem: flow-%u classify committed after %d edge(s)\n",
 			GPON_DATA_FLOW, tries + 1);
 
 		/* DS half of the same fix: the DS-NIC drain config and GMII edge were latched
@@ -6950,7 +7049,7 @@ int gpon_install_data_gem(void)
 	gpon_data_installed = true;
 	gpon_ploam_set_data_installed(&luna_ploam, true);
 
-	pr_info("luna-gpon: DATA GEM installed gem=%u flow=%u qid=%u sid2qid=%u sidvalid=%u\n",
+	luna_log("DATA GEM installed gem=%u flow=%u qid=%u sid2qid=%u sidvalid=%u\n",
 		gpon_data_gem_port, GPON_DATA_FLOW, luna_data_qid,
 		pi_packed_get(PI_PON_SID2QID, GPON_DATA_FLOW, 7),
 		pi_packed_get(PI_PON_SIDVALID, GPON_DATA_FLOW, 1));
@@ -7116,7 +7215,7 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 			u32 pir  = pi_rd(PI_PON_QID_PIR_RATE + qid * PI_QID_RATE_STRIDE) & 0x3ffffu;
 
 			if (en && qmap && pir)
-				pr_info("luna-gpon: SIDVALID[%u] arm_ctx OK (tcont_en=1 sch_qmap=%u pir=0x%x) -> re-issuing on armed queue\n",
+				luna_log("SIDVALID[%u] arm_ctx OK (tcont_en=1 sch_qmap=%u pir=0x%x) -> re-issuing on armed queue\n",
 					GPON_OMCC_FLOW, qmap, pir);
 			else
 				pr_warn("luna-gpon: SIDVALID[%u] re-issued with arm INCOMPLETE (tcont_en=%u sch_qmap=%u pir=0x%x) -> binding committed against un-armed queue\n",
@@ -7135,7 +7234,7 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 	/* The GMII re-latch used to be here, at Assign_ONU-ID time, ...
 	 * dev/MEASURED-luna_gpon.c.md sec 321. */
 
-	pr_info("luna-gpon: T-CONT %u <- alloc 0x%x bound (compl %d)\n",
+	luna_log("T-CONT %u <- alloc 0x%x bound (compl %d)\n",
 		tcont, alloc, rc);
 	return 0;
 }
@@ -7257,7 +7356,7 @@ static void luna_gem_diag_report(const struct gpon_data_armed *armed,
 	if (n <= 0 || !strcmp(line, last))
 		return;
 	strscpy(last, line, sizeof(last));
-	pr_info("luna-gpon: %s\n", line);
+	luna_log("%s\n", line);
 }
 #endif /* CONFIG_GPON_GEM_DIAG */
 
@@ -7518,7 +7617,7 @@ static void gpon_apply_boh(bool ranged)
 	for (i = 0; i < size; i++)
 		gpon_wr(GPON_GTC_US_BOH_DATA + i * 4, oh[i]);
 
-	pr_info("luna-gpon: BOH %s guard=%u rep=%u boh_repeat=%u ptn=0x%02x delim=%02x%02x%02x t3=%u boh_len=%u size=%u oh=%*phN\n",
+	luna_log("BOH %s guard=%u rep=%u boh_repeat=%u ptn=0x%02x delim=%02x%02x%02x t3=%u boh_len=%u size=%u oh=%*phN\n",
 		ranged ? "ranged" : "prerng", guard, rep, (size - 4) & 0xf, gpon_boh_ptn,
 		gpon_boh_delim[0], gpon_boh_delim[1], gpon_boh_delim[2],
 		t3, boh_len, size, size, oh);
@@ -7563,7 +7662,7 @@ static void gpon_txpll_relock(void)
 	}
 	sw_field(WSDS_DIG_1D, 14, 14, 0);			/* FIFO r/w ptr re-sync */
 	sw_field(WSDS_DIG_1D, 14, 14, 1);
-	pr_info("luna-gpon: TX-PLL relock (CMU re-toggle + FIFO re-sync) at O3 entry\n");
+	luna_log("TX-PLL relock (CMU re-toggle + FIFO re-sync) at O3 entry\n");
 }
 
 /* The ACTION is lifted for the core's ops; the POLICY stays: the core decides
@@ -7616,7 +7715,7 @@ static void gpon_below_o5(void)
 	if (gpon_vlan_lan_open && !lan_keep_open) {
 		sw_field(SW_VLAN_CTRL, 0, 0, 1);	/* re-assert VLAN_FILTER for re-config */
 		gpon_vlan_lan_open = false;
-		pr_info("luna-gpon: re-range -> VLAN_FILTER re-armed (config phase)\n");
+		luna_log("re-range -> VLAN_FILTER re-armed (config phase)\n");
 	}
 	/* lan_keep_open (default): leave VLAN_FILTER cleared so LAN management
 	 * survives the WAN-down/re-range; the OLT re-config on resume tolerates it. */
@@ -7638,7 +7737,7 @@ static void gpon_fsm_set_state(u8 st)
 	 * X111W, production OLT, 2026-10-02). */
 	gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 3, 0, st);
 	if (gpon_fsm_state != st)
-		pr_info("luna-gpon: ONU state O%u -> O%u\n", gpon_fsm_state, st);
+		luna_log("ONU state O%u -> O%u\n", gpon_fsm_state, st);
 	if (prev != st)
 		gpon_los_run = 0;	/* fresh LOS debounce window on every transition */
 	gpon_fsm_state = st;
@@ -7654,7 +7753,7 @@ static void gpon_fsm_set_state(u8 st)
 			gpon_rerange_start_j = 0;
 			if (!gpon_rerange_last_log_j ||
 			    time_after(jiffies, gpon_rerange_last_log_j + msecs_to_jiffies(2000))) {
-				pr_info("luna-gpon: re-range #%u -> O5 (outage ~%u ms); data-GEM re-install pending\n",
+				luna_log("re-range #%u -> O5 (outage ~%u ms); data-GEM re-install pending\n",
 					gpon_rerange_cnt, gpon_last_outage_ms);
 				gpon_rerange_last_log_j = jiffies;
 			}
@@ -7685,7 +7784,7 @@ static void gpon_cdr_reset_worker(struct work_struct *w)
 		return;
 	if (full_serdes_reinit) {
 		gpon_serdes_init();	/* full analog re-init: fresh lock attempt */
-		pr_info("luna-gpon: re-range FULL serdes re-init\n");
+		luna_log("re-range FULL serdes re-init\n");
 		return;
 	}
 	cdr = sw_rd(SDS_ANA_COM_REG12);
@@ -7693,7 +7792,7 @@ static void gpon_cdr_reset_worker(struct work_struct *w)
 	mdelay(10);
 	sw_wr(SDS_ANA_COM_REG12, cdr);
 	/* the computed address, for the reason given at the other call site */
-	pr_info("luna-gpon: re-range serdesCdr_reset pulse (COM_REG12 @ 0x%05x bit15), restored=0x%08x\n",
+	luna_log("re-range serdesCdr_reset pulse (COM_REG12 @ 0x%05x bit15), restored=0x%08x\n",
 		SDS_ANA_COM_REG12, cdr);
 }
 
@@ -7998,7 +8097,7 @@ static void luna_o5_window_sample(void)
 			pl++;
 	}
 	luna_bwcap_arm();
-	pr_info("luna-gpon: o5win +%ums grants=%u ploamu=%u first=%08x/%08x | us_intr dlt=%x sts=%x | ploam_ind=%03x cpu_tx=%08x auto_tx=%08x | gem_byte=%u dbru=%u idle16=%u | eqd=%08x boh=%03x sstart=%u\n",
+	luna_log("o5win +%ums grants=%u ploamu=%u first=%08x/%08x | us_intr dlt=%x sts=%x | ploam_ind=%03x cpu_tx=%08x auto_tx=%08x | gem_byte=%u dbru=%u idle16=%u | eqd=%08x boh=%03x sstart=%u\n",
 		(gpon_fsm_ticks - gpon_o5_entry_tick) * GPON_FSM_TICK_MS, n, pl,
 		first0, first1,
 		gpon_rd(GPON_GTC_US_INTR_DLT), gpon_rd(GPON_GTC_US_INTR_STS),
@@ -8092,7 +8191,7 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 	}
 	gpon_ploam_diag_format(line, sizeof(line), p,
 			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state, &d);
-	pr_info("luna-gpon: %s\n", line);
+	luna_log("%s\n", line);
 	/* The accepted-grant capture since the previous point: empty the engine into
 	 * the accumulator, report, then start the next window. */
 	if (luna_bwcap_armed) {
@@ -8102,7 +8201,7 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 	gpon_bwcap_diag_format(line, sizeof(line), p,
 			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state,
 			       luna_bwcap_armed ? &luna_bwcap : NULL);
-	pr_info("luna-gpon: %s\n", line);
+	luna_log("%s\n", line);
 	if (luna_bwcap_raw_n) {
 		/* The first entries since the last point, raw and family-specific, so a
 		 * human can tell twelve real grants from one entry read twelve times. */
@@ -8112,7 +8211,7 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 		for (i = 0; i < luna_bwcap_raw_n && pos < (int)sizeof(line) - 20; i++)
 			pos += scnprintf(line + pos, sizeof(line) - pos, " %08x/%08x",
 					 luna_bwcap_raw[2 * i], luna_bwcap_raw[2 * i + 1]);
-		pr_info("luna-gpon: bwcap-raw %s first%u=%s\n",
+		luna_log("bwcap-raw %s first%u=%s\n",
 			gpon_ploam_diag_point_name(p), luna_bwcap_raw_n, line);
 	}
 	memset(&luna_bwcap, 0, sizeof(luna_bwcap));
@@ -8134,9 +8233,9 @@ static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
 	if ((unsigned int)ev < ARRAY_SIZE(luna_ev_name))
 		nm = luna_ev_name[ev];
 	if (nm)
-		pr_info("luna-gpon: core %s a=%u b=%u\n", nm, a, b);
+		luna_log("core %s a=%u b=%u\n", nm, a, b);
 	else
-		pr_info("luna-gpon: core ev%u a=%u b=%u (no name in this shell -- the core gained an event)\n",
+		luna_log("core ev%u a=%u b=%u (no name in this shell -- the core gained an event)\n",
 			(unsigned int)ev, a, b);
 }
 
@@ -8174,7 +8273,7 @@ static void gpon_fsm_handle(const u8 *m)
 	 * traffic, so activation progress is visible. */
 	gpon_last_ds_type = type;
 	if (trace && !gpon_ploam_ds_repetitive(type))
-		pr_info_ratelimited("luna-gpon: DS PLOAM onu_id=0x%02x type=0x%02x d=%*phN\n",
+		luna_log("DS PLOAM onu_id=0x%02x type=0x%02x d=%*phN\n",
 				    onu_id, type, 8, d);
 
 	/* Say which FSM is dispatching, once, so a boot log is never ...
@@ -8184,7 +8283,7 @@ static void gpon_fsm_handle(const u8 *m)
 
 		if (!said) {
 			said = true;
-			pr_info("luna-gpon: PLOAM dispatch = COMMON core gpon_ploam.c\n");
+			luna_log("PLOAM dispatch = COMMON core gpon_ploam.c\n");
 		}
 	}
 
@@ -8224,7 +8323,7 @@ static void luna_lan_keep_open_poll(void)
 	sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> LAN open, every state */
 	if (!gpon_vlan_lan_open) {
 		gpon_vlan_lan_open = true;
-		pr_info("luna-gpon: lan_keep_open -> VLAN_FILTER off (LAN access open)\n");
+		luna_log("lan_keep_open -> VLAN_FILTER off (LAN access open)\n");
 	}
 }
 
@@ -8334,7 +8433,7 @@ drain_downstream:
 		 * clear once O5 has held. Re-armed on any drop below O5. */
 		sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> open LAN */
 		gpon_vlan_lan_open = true;
-		pr_info("luna-gpon: O5 stable %u ticks -> VLAN_FILTER off (LAN access open)\n",
+		luna_log("O5 stable %u ticks -> VLAN_FILTER off (LAN access open)\n",
 			gpon_fsm_ticks - gpon_o5_entry_tick);
 	}
 	if (IS_ENABLED(CONFIG_GPON_PLOAM_DIAG) && o5_window_ticks &&
@@ -8346,7 +8445,7 @@ drain_downstream:
 		 * context reproducibly HANGS the poll right after OMCC install (two boots
 		 * identical). It is an indirect polled PON-IP access, unsafe here unlike
 		 * sw_rd/gpon_rd; read those counters through /proc instead. */
-		pr_info("luna-gpon: O5 t=%u last=0x%02x onu=%u hwst=%u eqd=0x%08x | dsrx_omcc=%u pirx=%u omcirx=%d | ploam_cpu=%u gem_byte=%u gemus_omcc=%u idle16=%u idle8=%u\n",
+		luna_log("O5 t=%u last=0x%02x onu=%u hwst=%u eqd=0x%08x | dsrx_omcc=%u pirx=%u omcirx=%d | ploam_cpu=%u gem_byte=%u gemus_omcc=%u idle16=%u idle8=%u\n",
 			gpon_fsm_ticks, gpon_last_ds_type, luna_ploam.onu_id,
 			gpon_rd(GPON_GTC_DS_ONU_ID_STATUS) & 0xf, gpon_rd(GPON_GTC_US_EQD),
 			gpon_gem_ds_rx_cnt(GPON_OMCC_FLOW), sw_rd(OMCI_RX_PKT_CNT),
@@ -8367,7 +8466,7 @@ drain_downstream:
 		 * means the US OMCI frame DOES reach the US-NIC classifier, so the stall
 		 * is downstream at the queue/scheduler; zero with ustx=0 means it never
 		 * reaches the US-NIC at all. pi_rd is safe in this context. */
-		pr_info("luna-gpon: USDIAG t=%u ustx=%u pirx=%u usdrop=%u uscrc=%u | rxsid=%u/%u/%u/%u/%u\n",
+		luna_log("USDIAG t=%u ustx=%u pirx=%u usdrop=%u uscrc=%u | rxsid=%u/%u/%u/%u/%u\n",
 			gpon_fsm_ticks, sw_rd(OMCI_TX_PKT_CNT), sw_rd(OMCI_RX_PKT_CNT),
 			sw_rd(OMCI_DROP_PKT_CNT), sw_rd(OMCI_CRC_ERROR_PKT_CNT),
 			(u32)pi_rd(PI_RX_SID_GOOD_CNT_US),
@@ -8548,7 +8647,7 @@ static void gpon_optical_work_fn(struct work_struct *w)
 					bosa_set_bit(0x20e, 7, 0);
 					bosa_set_bit(BOSA_W(80), 4, 0);
 					apc_offk_latched = 1;
-					pr_info("luna-gpon: OFFK LATCHED: R29(0x31d)=0x%02x (modulator nulled)\n",
+					luna_log("OFFK LATCHED: R29(0x31d)=0x%02x (modulator nulled)\n",
 						r & 0xff);
 				}
 			}
@@ -8793,6 +8892,7 @@ static int __init rtl9602c_gpon_init(void)
 	    : is_9603cvd ? &gpon_swc_9603cvd : &gpon_swc_9602c;
 	gtune = is_9603cvd ? &luna_gtc_tune_9603cvd : &luna_gtc_tune_9602c;
 	luna_laser_gpio_from_dt();
+	luna_led_map_from_dt();
 	ret = luna_gpio_drive(laser_tx_dis_gpio, true, "TX_DISABLE inhibit");
 	if (ret)
 		goto fail_maps;
@@ -9124,6 +9224,7 @@ skip_bosa_init:
 	mutex_unlock(&bosa_lock);
 
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
+	proc_create_single("gpon_log", 0444, NULL, luna_log_show);
 	proc_create_single("bosadump", 0444, NULL, bosadump_proc_show);
 	proc_create_single("pidump", 0444, NULL, pidump_proc_show);
 	proc_create_single("swdump", 0444, NULL, swdump_proc_show);
@@ -9307,6 +9408,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	proc_remove(luna_health_proc);
 	luna_health_proc = NULL;
 	remove_proc_entry("gpon", NULL);
+	remove_proc_entry("gpon_log", NULL);
 	remove_proc_entry("bosadump", NULL);
 	remove_proc_entry("pidump", NULL);
 	remove_proc_entry("swdump", NULL);

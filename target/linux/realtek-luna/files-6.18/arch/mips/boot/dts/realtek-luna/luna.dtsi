@@ -75,11 +75,11 @@
  *   ignore_loglevel       the default level hides driver messages, which is
  *                         what made this board undebuggable.
  *
- * ⚠ THIS IS A DEVELOPMENT DEFAULT AND IT IS DELIBERATE.  These units are being
- *   brought up and certified; a silent kernel costs days, and the cost of the
- *   verbosity is console bytes.  When a board ships, drop `ignore_loglevel`
- *   from its own `chosen` -- and say so there, so the next reader knows the
- *   silence was chosen rather than inherited.
+ * ⚠ IT SHIPS: printk never waits on the UART here.  From late_initcall the
+ *   console is asynchronous (drivers/tty/serial/8250/luna_console.c, a ring
+ *   drained into the FIFO by a thread), so verbosity costs console bytes, not
+ *   time in the caller.  Before it, every line held the GPON FSM ~6 ms and the
+ *   production OLT deactivated the ONU 98 times (2026-10-07).
  */
 
 / {

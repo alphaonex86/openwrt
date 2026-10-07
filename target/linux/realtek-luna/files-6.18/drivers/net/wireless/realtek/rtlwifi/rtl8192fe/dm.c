@@ -12,6 +12,7 @@
 #include "fw.h"
 #include "trx.h"
 #include "hw.h"
+#include "../ap_dm.h"
 
 /* Dynamic-management (DM) layer for the RTL8192F. The 8192F ... -- dev/MEASURED-dm.c.md sec 1. */
 
@@ -173,31 +174,6 @@ static void rtl92fe_dm_cck_packet_detection_thresh(struct ieee80211_hw *hw)
 	rtl92fe_dm_write_cck_cca_thres(hw, cur_cck_cca_thresh);
 }
 
-static void rtl92fe_dm_dig_ap(struct ieee80211_hw *hw)
-{
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	struct dig_t *dm_dig = &rtlpriv->dm_digtable;
-	u32 fa = rtlpriv->falsealm_cnt.cnt_all;
-	long rssi = dm_dig->rssi_val_min;
-	u8 lo = 0x1c, hi = 0x26, igi = dm_dig->cur_igvalue;
-
-	if (rtlpriv->dm.entry_min_undec_sm_pwdb) {
-		/* stock's boundary helpers under emulation (112 rows, rtl8192fe_dig_golden.h):
-		 * min = clamp(rssi, 0x20, 0x40), max = min(rssi, 0x40) + 15, never below min */
-		lo = (u8)(rssi < 0x20 ? 0x20 : rssi > 0x40 ? 0x40 : rssi);
-		hi = (u8)max((rssi > 0x40 ? 0x40 : rssi) + 15, lo);
-	}
-	if (fa > DM_DIG_FA_TH2)
-		igi += 4;
-	else if (fa > DM_DIG_FA_TH1)
-		igi += 2;
-	else if (fa < DM_DIG_FA_TH0)
-		igi -= 2;
-	rtl92fe_dm_write_dig(hw, igi < lo ? lo : igi > hi ? hi : igi);
-	dm_dig->rx_gain_min = lo;
-	dm_dig->rx_gain_max = hi;
-}
-
 static void rtl92fe_dm_dig(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -218,7 +194,7 @@ static void rtl92fe_dm_dig(struct ieee80211_hw *hw)
 		return;
 	}
 	if (rtl92fe_dig_ap_rule && mac->opmode == NL80211_IFTYPE_AP) {
-		rtl92fe_dm_dig_ap(hw);
+		rtl_ap_dm_dig(hw, rtl92fe_dm_write_dig);
 		return;
 	}
 
@@ -615,15 +591,7 @@ static void rtl92fe_dm_dynamic_edcca(struct ieee80211_hw *hw)
 	/* An AP never arms 0x03/0x00 (field X111W 2026-10-06: 0 own beacons at 0x303,
 	 * 252 at 0x7f037f, 0 again restored); stock's rule, not behind any switch. */
 	if (mac->opmode == NL80211_IFTYPE_AP) {
-		u8 l2h = (u8)max(reg_c50 + 8, 0x30);
-		u8 h2l = l2h - 8;
-
-		if (rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD) != l2h ||
-		    rtl_read_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2) != h2l) {
-			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD, l2h);
-			rtl_write_byte(rtlpriv, ROFDM0_ECCATHRESHOLD + 2, h2l);
-			rtlpriv->rtlhal.pre_edcca_enable = true;
-		}
+		rtl_ap_dm_edcca(hw, reg_c50);
 		return;
 	}
 

@@ -46,6 +46,7 @@
 #include "gpon_gem_diag.h"
 #include "gpon_olt_diag.h"	/* the far-end capture: replayed off the board */
 #include "gpon_mon.h"		/* the control plane as Ethernet frames for gponmon0 */
+#include "gpon_lat.h"		/* gpon_lat_add(): the OMCI turnaround record */
 #include <linux/etherdevice.h>
 #include "luna_gpon_nic.h"
 #include "luna_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
@@ -6291,6 +6292,21 @@ static int gpon_install_omcc(u16 gem)
 
 /* Install the WAN data GEM (the OLT's wire gem-port-id) on ...
  * dev/MEASURED-luna_gpon.c.md sec 202. */
+/* The activation timeline of this boot, ms since boot, 0 = not yet: the first O5,
+ * the first OMCI request, the data GEM installed. Benchmarks read it from
+ * /proc/gpon_timing; a re-range keeps the first values. */
+static struct {
+	u32 o5_ms, omci_ms, data_ms;
+} luna_marks;
+
+static void luna_mark(u32 *m)
+{
+	if (!*m)
+		*m = max_t(u32, 1, (u32)div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC));
+}
+
+static void luna_omci_turnaround(u64 rx_ns);
+
 #define LUNA_OMCI_QUEUE_LEN 64u
 #define LUNA_OMCI_POLL_BUDGET 8u
 #define LUNA_OMCI_ALARM_TICKS 300u
@@ -6307,6 +6323,8 @@ static struct {
 	void (*tx_fence)(void *);
 	int (*uni_admin_set)(void *, unsigned int, bool);
 	struct luna_omci_frame queue[LUNA_OMCI_QUEUE_LEN];
+	u64 rx_ns[LUNA_OMCI_QUEUE_LEN];		/* when each queued request arrived */
+	struct gpon_lat turnaround;		/* request in -> response handed to TX */
 	struct omci_data_binding binding;
 	u16 head, count;
 	u8 seed;
@@ -6744,8 +6762,10 @@ int luna_omci_enqueue(void *cookie, const u8 *msg, unsigned int len)
 		memset(f->msg, 0, sizeof(f->msg));
 		memcpy(f->msg, msg, min_t(unsigned int, len, sizeof(f->msg)));
 		f->len = len;
+		luna_omci.rx_ns[f - luna_omci.queue] = ktime_get_ns();
 		luna_omci.count++;
 		luna_omci.queued++;
+		luna_mark(&luna_marks.omci_ms);
 	}
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	return rc;
@@ -6995,6 +7015,7 @@ static void luna_omci_poll(void)
 		struct luna_omci_frame frame;
 		u8 response[OMCI_LEN];
 		unsigned long flags;
+		u64 rx_ns;
 		int n;
 
 		spin_lock_irqsave(&luna_omci_lock, flags);
@@ -7003,6 +7024,7 @@ static void luna_omci_poll(void)
 			break;
 		}
 		frame = luna_omci.queue[luna_omci.head];
+		rx_ns = luna_omci.rx_ns[luna_omci.head];
 		luna_omci.head = (luna_omci.head + 1) % LUNA_OMCI_QUEUE_LEN;
 		luna_omci.count--;
 		n = omci_onu_input_ex(luna_omci.onu, frame.msg, frame.len,
@@ -7027,8 +7049,10 @@ static void luna_omci_poll(void)
 		}
 		spin_unlock_irqrestore(&luna_omci_lock, flags);
 		luna_mon_frame(GPON_MON_OMCI, 0, frame.msg, frame.len);
-		if (n > 0)
+		if (n > 0) {
 			luna_omci_send(response, n);
+			luna_omci_turnaround(rx_ns);
+		}
 #ifdef CONFIG_GPON_OMCI_DIAG
 		/* Preserve the shared request/response trace at its new owner. The
 		 * common predicate limits only bulk diagnostics, never acceptance. */
@@ -7172,11 +7196,50 @@ int gpon_install_data_gem(void)
 		return -EIO;
 	gpon_data_installed = true;
 	gpon_ploam_set_data_installed(&luna_ploam, true);
+	luna_mark(&luna_marks.data_ms);
 
 	luna_log("DATA GEM installed gem=%u flow=%u qid=%u sid2qid=%u sidvalid=%u\n",
 		gpon_data_gem_port, GPON_DATA_FLOW, luna_data_qid,
 		pi_packed_get(PI_PON_SID2QID, GPON_DATA_FLOW, 7),
 		pi_packed_get(PI_PON_SIDVALID, GPON_DATA_FLOW, 1));
+	return 0;
+}
+
+static void luna_omci_turnaround(u64 rx_ns)
+{
+	u64 us = div_u64(ktime_get_ns() - rx_ns, NSEC_PER_USEC);
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	gpon_lat_add(&luna_omci.turnaround, (u32)min_t(u64, us, U32_MAX));
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+}
+
+/* /proc/gpon_timing: this boot's activation timeline and the OMCI turnaround,
+ * read by the suite's gpon_timing benchmark. */
+static int luna_timing_show(struct seq_file *s, void *v)
+{
+	struct {
+		struct gpon_lat lat;
+		u32 out[GPON_LAT_RING];
+	} *t = kmalloc(sizeof(*t), GFP_KERNEL);
+	unsigned long flags;
+	unsigned int i, n;
+
+	if (!t)
+		return -ENOMEM;
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	t->lat = luna_omci.turnaround;
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	n = gpon_lat_samples(&t->lat, t->out);
+	seq_printf(s, "fsm_tick_ms %u\no5_ms %u\nomci_first_ms %u\ndata_ms %u\n",
+		   GPON_FSM_TICK_MS, luna_marks.o5_ms, luna_marks.omci_ms, luna_marks.data_ms);
+	seq_printf(s, "omci_turnaround_us n=%u max=%u sum=%llu\nomci_turnaround_ring",
+		   t->lat.n, t->lat.max_us, t->lat.sum_us);
+	for (i = 0; i < n; i++)
+		seq_printf(s, " %u", t->out[i]);
+	seq_putc(s, '\n');
+	kfree(t);
 	return 0;
 }
 
@@ -7883,6 +7946,7 @@ static void gpon_fsm_set_state(u8 st)
 			}
 		}
 		gpon_o5_entry_tick = gpon_fsm_ticks ? gpon_fsm_ticks : 1;
+		luna_mark(&luna_marks.o5_ms);
 		gpon_avc_sent = 0;	/* re-report oper-up to the OLT each online */
 		/* Re-apply the O5 packed-burst gate cluster + re-arm the HW ...
 		 * dev/MEASURED-luna_gpon.c.md sec 231. */
@@ -9349,6 +9413,7 @@ skip_bosa_init:
 
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
 	proc_create_single("gpon_log", 0444, NULL, luna_log_show);
+	proc_create_single("gpon_timing", 0444, NULL, luna_timing_show);
 	luna_mon_register();
 	proc_create_single("bosadump", 0444, NULL, bosadump_proc_show);
 	proc_create_single("pidump", 0444, NULL, pidump_proc_show);
@@ -9534,6 +9599,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	luna_health_proc = NULL;
 	remove_proc_entry("gpon", NULL);
 	remove_proc_entry("gpon_log", NULL);
+	remove_proc_entry("gpon_timing", NULL);
 	luna_mon_unregister();
 	remove_proc_entry("bosadump", NULL);
 	remove_proc_entry("pidump", NULL);

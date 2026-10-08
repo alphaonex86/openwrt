@@ -330,34 +330,25 @@
 
 /*
  * Front-panel LED controller (SWCORE window). Each panel LED has an index whose
- * 2-bit "force value" the CPU can drive directly — 0=off, 1=on, 2=blink — once
+ * 2-bit "force value" the CPU can drive directly -- 0=off, 1=on, 2=blink -- once
  * the index is placed in CPU force-mode and enabled for parallel (vs serial-
- * shift) output. A working unit lights the green PON LED solid once ranged to
- * the OLT and lights the red LOS LED only while downstream light is absent.
- * Which index is which lamp is the BOARD's (DT gpon node). Offsets are into
- * swcore_base (phys 0x1b000000).
+ * shift) output; a port lamp is instead typed to its switch port and lit by the
+ * switch. Which index is which lamp is the BOARD's (DT gpon node). The block
+ * base and DATA_LED_CFG are common; the addresses below are the RTL9602C's and
+ * the per-die table (luna_led_regs in luna_gpon.c) carries each die's own.
+ * Offsets are into swcore_base (phys 0x1b000000).
  */
 #define LED_MODE_SEL		0x1e000		/* [0] 0 = parallel output      */
-#define LED_DATA_CFG(idx)	(0x1e004 + (idx) * 4)	/* [12] CPU force-mode  */
-#define   LED_CPU_FORCE_BIT	12
+#define LED_DATA_CFG(idx)	(0x1e004 + (idx) * 4)	/* [20:16] type, force-mode */
 #define LED_FORCE_VALUE		0x1e04c		/* [idx*2+1:idx*2] force value  */
 #define LED_BLINK_RATE		0x1e050		/* [14:12] force blink period   */
 #define LED_PARA_EN		0x1e05c		/* [n+1] LEDn parallel-enable    */
-#define   LED_SERI_DATA_EN_BIT	19
-#define   LED_SERI_CLK_EN_BIT	18
 #define LED_IO_EN		0x23014		/* [n] LEDn pad-output enable    */
-#define   LED_SERI_OUT_EN_BIT	17
 #define LED_FORCE_OFF		0u
 #define LED_FORCE_ON		1u
 #define LED_FORCE_BLINK		2u
-#define LED_BLINK_512MS		4u		/* [14:12] period code           */
+#define LED_BLINK_512MS		4u		/* force blink period code       */
 #define LED_IDX_NONE		0xffu		/* board declares no such lamp   */
-#define LED_IDX_MAX		15u		/* 2-bit fields in LED_FORCE_VALUE */
-/* Ethernet port-link LEDs: hardware-auto (the switch lights them straight from
- * port link + activity, no CPU). 0xf78 = link at every speed (bits 8..11) +
- * activity at every speed (bits 3..6). The switch port map is port0=FE(100M),
- * port1=GE(1G), so each LED is typed to its own port. */
-#define LED_LINKACT		0xf78u		/* type code = switch port + 1 */
 
 #define GPIO_PHYS_BASE		0x18003300u
 #define GPIO_REG_SIZE		0x40u

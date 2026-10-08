@@ -21,8 +21,10 @@
  *     is what lets gpon-provision read this unit's own GPON_SN out of the
  *     vendor MIB in `config`, so the board announces ITS OWN serial with
  *     nothing on the kernel command line. Program/erase have no driver.
- *   - WiFi, LEDs: still not claimed. See the "DELIBERATELY ABSENT" block
- *     in rtl9603cvd.dtsi for why each is out.
+ *   - Panel LEDs: PON, LOS and the four socket lamps through the SoC LED
+ *     controller (the gpon node, at the end). PWR is a GPIO lamp and the
+ *     GPIO block is still in the "DELIBERATELY ABSENT" list of
+ *     rtl9603cvd.dtsi.
  *
  * Clean-room: board description from observed hardware only.
  *
@@ -359,4 +361,15 @@
 			};
 		};
 	};
+};
+
+/* Panel map from this board's stock: PON index 15 and LOS index 9 CPU-forced
+ * (rtk_pon_led_group_set disassembled: the profile's stores are reordered, so
+ * 9/15 read in declaration order is the wrong way round), the four sockets on
+ * indices 17/5/4/13 typed to switch ports 0..3 -- the index set its own
+ * LED_EN/IO_LED_EN capture enables. */
+&gpon {
+	realtek,pon-led = <15>;
+	realtek,los-led = <9>;
+	realtek,port-leds = <17 1>, <5 2>, <4 3>, <13 4>;
 };

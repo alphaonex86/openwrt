@@ -139,9 +139,15 @@
 	};
 };
 
-/* US then DS, as luna_gpon reads them. */
+/* US then DS, as luna_gpon reads them. Panel map from this board's stock: its
+ * capture has indices 6 and 15 PON-typed and CPU-forced, index 1 on switch port
+ * 1 (type 2); its kernel's GPON spec inits configure 6 and its "others" (LOS)
+ * spec inits 15, the layout whose LOS lamp is 10 on the V2801RGW. */
 &gpon {
 	memory-region = <&pbo_us>, <&pbo_ds>;
+	realtek,pon-led = <6>;
+	realtek,los-led = <15>;
+	realtek,port-leds = <1 2>;
 };
 
 /* The GPON stays ENABLED: the NIC's open re-runs the PON buffer init and the

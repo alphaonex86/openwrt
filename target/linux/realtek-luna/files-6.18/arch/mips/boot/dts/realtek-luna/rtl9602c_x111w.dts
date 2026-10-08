@@ -208,10 +208,11 @@
 	};
 };
 
-/* Panel map measured on this board: PON index 12, LOS index 13 (solid), FE lamp
- * index 15 on switch port 0 (type 1), GE lamp index 1 on port 1 (type 2). */
+/* Panel map from this board's stock: PON index 12, LOS index 13, FE lamp index
+ * 15 on switch port 0 (type 1), GE lamps indices 1 and 2 on port 1 (type 2:
+ * stock drives index 2 byte-identical to index 1). */
 &gpon {
 	realtek,pon-led = <12>;
 	realtek,los-led = <13>;
-	realtek,port-leds = <15 1>, <1 2>;
+	realtek,port-leds = <15 1>, <1 2>, <2 2>;
 };

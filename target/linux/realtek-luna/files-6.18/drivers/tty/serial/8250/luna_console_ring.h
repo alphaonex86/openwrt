@@ -112,4 +112,22 @@ static inline unsigned int luna_con_ring_get(struct luna_con_ring *r, unsigned c
 	return n;
 }
 
+/* Take up to @max bytes, stopping after the first '\n'.
+ * -> bytes copied; *@eol says whether the last one ends a line. */
+static inline unsigned int luna_con_ring_get_line(struct luna_con_ring *r, unsigned char *out,
+						  unsigned int max, int *eol)
+{
+	unsigned int tail = r->tail;
+	unsigned int avail = LCR_LOAD(&r->head) - tail;
+	unsigned int n = 0;
+
+	*eol = 0;
+	while (n < avail && n < max && !*eol) {
+		out[n] = r->buf[(tail + n) & r->mask];
+		*eol = out[n++] == '\n';
+	}
+	LCR_STORE(&r->tail, tail + n);
+	return n;
+}
+
 #endif /* LUNA_CONSOLE_RING_H */

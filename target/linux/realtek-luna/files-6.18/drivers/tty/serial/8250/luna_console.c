@@ -13,6 +13,11 @@
  * the port lock is held for one FIFO load. Panic, oops and shutdown write
  * synchronously so the last lines still reach the wire. At late_initcall it
  * takes over the 8250 console of the same port: same name, same /dev/console.
+ *
+ * The tty shares the UART. A kernel line starts only while the tty transmitter
+ * is idle, and the tty's start_tx waits for the line's last byte, so neither
+ * cuts into the other (a FIFO-sized slice of a kernel line inside a shell
+ * reply broke the rig's console reads).
  */
 #include <linux/console.h>
 #include <linux/delay.h>
@@ -44,6 +49,10 @@ static struct console *luna_con_vendor;
 static struct task_struct *luna_con_thread;
 static DECLARE_WAIT_QUEUE_HEAD(luna_con_wq);
 static bool luna_con_sync;
+static const struct uart_ops *luna_con_port_ops;
+static struct uart_ops luna_con_ops;
+static bool luna_con_in_line;	/* port lock */
+static bool luna_con_tx_owed;	/* port lock */
 
 static bool luna_con_fifo_on(struct uart_8250_port *up)
 {
@@ -54,18 +63,55 @@ static bool luna_con_fifo_on(struct uart_8250_port *up)
 	       test_bit(TTY_PORT_INITIALIZED, &port->state->port.iflags);
 }
 
-/* One FIFO load when the transmitter is empty. Port lock held. -> bytes sent */
-static unsigned int luna_con_load_fifo(struct uart_8250_port *up)
+/* One FIFO load, never past the end of a line, when the transmitter is empty.
+ * Port lock held. -> bytes sent */
+static unsigned int luna_con_load_fifo(struct uart_8250_port *up, int *eol)
 {
 	unsigned char chunk[64];
 	unsigned int n, i, room;
 
+	*eol = 0;
 	if (!(serial_lsr_in(up) & UART_LSR_THRE))
 		return 0;
 	room = luna_con_fifo_on(up) ? min_t(unsigned int, up->tx_loadsz, sizeof(chunk)) : 1;
-	n = luna_con_ring_get(&luna_con_ring, chunk, room);
+	n = luna_con_ring_get_line(&luna_con_ring, chunk, room, eol);
 	for (i = 0; i < n; i++)
 		serial_port_out(&up->port, UART_TX, chunk[i]);
+	return n;
+}
+
+/* The tty's start_tx: deferred while a kernel line is on the wire. Port lock held. */
+static void luna_con_start_tx(struct uart_port *port)
+{
+	if (luna_con_in_line) {
+		luna_con_tx_owed = true;
+		return;
+	}
+	luna_con_port_ops->start_tx(port);
+}
+
+/* One step of the drain thread. -> bytes worth of time to sleep */
+static unsigned int luna_con_drain_step(struct uart_8250_port *up)
+{
+	unsigned long flags;
+	unsigned int n = 0;
+	int eol;
+
+	uart_port_lock_irqsave(&up->port, &flags);
+	if (luna_con_in_line || !(up->ier & UART_IER_THRI)) {
+		n = luna_con_load_fifo(up, &eol);
+		if (n)
+			luna_con_in_line = !eol;
+		if (!luna_con_ring_used(&luna_con_ring))
+			luna_con_in_line = false;	/* a record without '\n' ends here */
+		if (!luna_con_in_line && luna_con_tx_owed) {
+			luna_con_tx_owed = false;
+			luna_con_port_ops->start_tx(&up->port);
+		}
+	} else {
+		n = up->tx_loadsz;	/* the tty is sending: one FIFO of its time */
+	}
+	uart_port_unlock_irqrestore(&up->port, flags);
 	return n;
 }
 
@@ -125,12 +171,8 @@ static int luna_con_drain(void *unused)
 		wait_event_interruptible(luna_con_wq, kthread_should_stop() ||
 					 luna_con_ring_used(&luna_con_ring));
 		while (luna_con_ring_used(&luna_con_ring) && !kthread_should_stop()) {
-			unsigned long flags;
-			unsigned int us;
+			unsigned int us = max(luna_con_drain_step(luna_con_up), 1u) * LUNA_CON_BYTE_US;
 
-			uart_port_lock_irqsave(&luna_con_up->port, &flags);
-			us = max(luna_con_load_fifo(luna_con_up), 1u) * LUNA_CON_BYTE_US;
-			uart_port_unlock_irqrestore(&luna_con_up->port, flags);
 			usleep_range(us, us + 100);
 		}
 	}
@@ -158,6 +200,7 @@ static struct console luna_con = {
 static int __init luna_con_init(void)
 {
 	struct console *c;
+	unsigned long flags;
 
 	console_list_lock();
 	for_each_console(c) {
@@ -173,6 +216,12 @@ static int __init luna_con_init(void)
 		return -ENODEV;
 	}
 	luna_con_up = serial8250_get_port(luna_con_vendor->index);
+	uart_port_lock_irqsave(&luna_con_up->port, &flags);
+	luna_con_port_ops = luna_con_up->port.ops;
+	luna_con_ops = *luna_con_port_ops;
+	luna_con_ops.start_tx = luna_con_start_tx;
+	luna_con_up->port.ops = &luna_con_ops;
+	uart_port_unlock_irqrestore(&luna_con_up->port, flags);
 	luna_con_thread = kthread_run(luna_con_drain, NULL, "luna-console");
 	if (IS_ERR(luna_con_thread)) {
 		pr_err("luna-console: drain thread not started (%ld) -- printk stays synchronous\n",

@@ -109,6 +109,18 @@
 		clocks = <&lx_clk>;
 	};
 
+	/* The family watchdog at TC_BASE + 0x60. Its kick reloads on the RTL9601D,
+	 * RTL9602C and RTL9603CVD (measured 2026-10-08), and this unit's own stock
+	 * kernel feeds the same block every 5 s ("CPU0 kick watchdog!" on onu4).
+	 * The live proof on our 9607C image is owed: U-Boot could not be caught on
+	 * this unit that day. */
+	watchdog@18003260 {
+		compatible = "realtek,rtl9607c-wdt", "realtek,rtl960x-wdt";
+		reg = <0x18003260 0xc>;
+		clocks = <&lx_clk>;
+		timeout-sec = <30>;
+	};
+
 	uart0: serial@18002000 {
 		compatible = "ns16550a";
 		reg = <0x18002000 0x100>;

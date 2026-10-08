@@ -247,13 +247,13 @@ struct omci_onu {
 	 * octets total -- the subscriber VLAN simply does not fit the shape
 	 * every other modelled ME uses. */
 	struct gpon_vlan_model	vlan;
-	/* G.988 11.2.2.1 retained last response.  The OMCC is stop-and-wait, so
-	 * ONE entry covers every retransmission, and a byte-identical repeat is
-	 * REPLAYED from here instead of re-executed -- otherwise a lost US
-	 * response bumps MIB-Data-Sync twice for one OLT transaction. */
-	u8	last_req[40];		/* bytes 0..39 (trailer+MIC derived) */
-	u8	last_resp[OMCI_LEN];
-	bool	have_last;
+	/* G.988 11.2.2.1 and B.2.1 retained last response, one per priority
+	 * (TCI bit 15): each priority is stop-and-wait, so a byte-identical
+	 * repeat is REPLAYED from here instead of re-executed -- otherwise a
+	 * lost US response bumps MIB-Data-Sync twice for one OLT transaction. */
+	u8	last_req[2][40];	/* bytes 0..39 (trailer+MIC derived) */
+	u8	last_resp[2][OMCI_LEN];
+	bool	have_last[2];
 	/* spy counters (dump/probe capability is first-class, project rule) */
 	u32	unhandled;		/* DS message types with no ONU action */
 	u32	dup_replay;		/* retransmissions served from the cache */

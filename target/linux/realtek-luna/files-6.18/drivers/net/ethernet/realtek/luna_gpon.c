@@ -6794,6 +6794,27 @@ void luna_omci_detach(void *cookie)
 }
 EXPORT_SYMBOL(luna_omci_detach);
 
+static void luna_omci_poll(void);
+static void luna_data_reconcile(void);
+
+/* A queued OMCI request is answered on arrival, in BH context, not at the next
+ * FSM tick: the OLT sends its next request only after our answer, so a tick-paced
+ * answer set its pace (20 ms per request, stock ~9 ms). The tick stays the
+ * backstop; a stopped FSM answers nothing. */
+static void luna_omci_work_fn(struct work_struct *work)
+{
+	unsigned int rounds = LUNA_OMCI_QUEUE_LEN;
+
+	spin_lock(&luna_fsm_lock);
+	while (rounds-- && timer_pending(&gpon_fsm_timer) &&
+	       READ_ONCE(luna_activation_ready) && READ_ONCE(luna_omci.count)) {
+		luna_omci_poll();
+		luna_data_reconcile();
+	}
+	spin_unlock(&luna_fsm_lock);
+}
+static DECLARE_WORK(luna_omci_work, luna_omci_work_fn);
+
 int luna_omci_enqueue(void *cookie, const u8 *msg, unsigned int len)
 {
 	struct luna_omci_frame *f;
@@ -6821,6 +6842,8 @@ int luna_omci_enqueue(void *cookie, const u8 *msg, unsigned int len)
 		luna_mark(&luna_marks.omci_ms);
 	}
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	if (!rc)
+		queue_work(system_bh_highpri_wq, &luna_omci_work);
 	return rc;
 }
 EXPORT_SYMBOL(luna_omci_enqueue);
@@ -9787,6 +9810,7 @@ static void __exit rtl9602c_gpon_exit(void)
 		free_irq(luna_gpon_irq, NULL);
 		cancel_work_sync(&luna_ds_ploam_work);
 	}
+	cancel_work_sync(&luna_omci_work);	/* no enqueue since luna_activation_ready fell */
 	cancel_work_sync(&gpon_cdr_reset_work);
 	cancel_delayed_work_sync(&gpon_optical_work);
 	/* OUTSIDE bosa_lock, and after the producers: the worker holds that

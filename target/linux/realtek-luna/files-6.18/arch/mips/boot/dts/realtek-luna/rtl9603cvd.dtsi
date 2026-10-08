@@ -197,22 +197,16 @@
 	 * FAULTY SILICON IS DEAD AT ITS PREMISE ON THIS CHIP: stock enables it.
 	 * Nothing here is evidence of a hardware fault.
 	 *
-	 * ★ THE NODE STAYS DISABLED ANYWAY, for a REASON THAT SURVIVES the
-	 * correction: on this silicon the driver has never run, so its reload is
-	 * unproven here -- and on the SIBLING RTL9602C the same driver is
-	 * shipped ENABLED and resets that board every boot, with the evidence
-	 * pointing at a kick that does not reload. Enabling an unproven reload
-	 * on a second board would multiply the fault, not test it.
-	 *
-	 * ENABLE once the reload is isolated on the 9602C and re-proven here --
-	 * not at a milestone, at a MEASUREMENT.
+	 * ENABLED 2026-10-08 on the measurement this note asked for: with devmem and
+	 * stock's word on our G24W image, 5 s kicks held it from 29.7 s to 122.6 s of
+	 * uptime and it bit 47 s after the last kick -- the kick reloads here as on
+	 * the RTL9602C and RTL9601D (fork d4c4354e00).
 	 */
 	watchdog@18003260 {
 		compatible = "realtek,rtl9603cvd-wdt", "realtek,rtl960x-wdt";
 		reg = <0x18003260 0xc>;
 		clocks = <&lx_clk>;
 		timeout-sec = <30>;
-		status = "disabled";
 	};
 
 	/*

@@ -282,7 +282,7 @@ static DEFINE_SPINLOCK(luna_ploam_cap_lock);
 /* When the downstream PLOAM being handled landed: its record is timed from
  * arrival, as G.984.3's 750 us answer budget is. 0 outside a drain. */
 static u64 luna_ds_rx_ns;
-static u32 luna_ds_irqs, luna_ds_unsignalled;	/* interrupts; drains the tick found unannounced */
+static u32 luna_ds_irqs, luna_ds_unsignalled, luna_ds_parks;	/* interrupts; drains the tick found unannounced; times the line went off */
 
 static void luna_ploam_capture(enum gpon_olt_dir dir, const u8 *m, unsigned int len)
 {
@@ -7287,7 +7287,8 @@ static int luna_timing_show(struct seq_file *s, void *v)
 	n = gpon_lat_samples(&t->lat, t->out);
 	seq_printf(s, "fsm_tick_ms %u\no5_ms %u\nomci_first_ms %u\ndata_ms %u\n",
 		   GPON_FSM_TICK_MS, luna_marks.o5_ms, luna_marks.omci_ms, luna_marks.data_ms);
-	seq_printf(s, "ds_ploam irq=%u unsignalled=%u\n", luna_ds_irqs, luna_ds_unsignalled);
+	seq_printf(s, "ds_ploam irq=%u unsignalled=%u parked=%u\n", luna_ds_irqs, luna_ds_unsignalled,
+		   luna_ds_parks);
 	seq_printf(s, "omci_turnaround_us n=%u max=%u sum=%llu\nomci_turnaround_ring",
 		   t->lat.n, t->lat.max_us, t->lat.sum_us);
 	for (i = 0; i < n; i++)
@@ -8578,6 +8579,11 @@ static atomic64_t luna_ds_arrival_ns;	/* the oldest unread PLOAM's interrupt, 0 
 static u64 luna_ds_carry_ns;		/* the arrival of PLOAMs a full drain left queued */
 #define GPON_FRAME_NS	125000u		/* one PLOAMd per downstream frame: queued PLOAMs are this far apart */
 static bool luna_ds_waited;		/* the tick already gave a silent PLOAM one period */
+/* Far above the drains one tick needs, far below a level event looping through
+ * the drain (V2801RGW: 165k/s). */
+#define LUNA_GPON_IRQ_TICK_BUDGET	64u
+static unsigned int luna_ds_irq_burst;	/* drains the line came back from since the last tick */
+static bool luna_gpon_irq_parked;	/* the line is off until the next tick */
 
 /* Hand every queued downstream PLOAM to the core, timed from its interrupt; the
  * k-th of one drain landed no earlier than k frames after it. The tick gives an
@@ -8598,7 +8604,7 @@ static void luna_ds_ploam_drain(bool from_irq)
 	if (!arrival && luna_gpon_irq) {
 		if (from_irq)
 			return;		/* its own interrupt is latched behind this one */
-		if (!luna_ds_waited) {
+		if (!luna_ds_waited && !READ_ONCE(luna_gpon_irq_parked)) {	/* off: none will come */
 			luna_ds_waited = true;
 			return;
 		}
@@ -8630,25 +8636,54 @@ static void luna_ds_ploam_drain(bool from_irq)
 	luna_ds_rx_ns = 0;
 }
 
-static irqreturn_t luna_gpon_irq_stamp(int irq, void *data)
+/* The line comes back after its drain; with nobody to drain, or past the tick's
+ * budget, it stays off until the tick. */
+static void luna_ds_ploam_work_fn(struct work_struct *work)
 {
-	atomic64_cmpxchg(&luna_ds_arrival_ns, 0, ktime_get_boottime_ns());
-	luna_ds_irqs++;
-	return IRQ_WAKE_THREAD;
-}
+	bool live;
 
-/* Clear the latch before the event, so a PLOAM landing meanwhile raises it again. */
-static irqreturn_t luna_gpon_irq_thread(int irq, void *data)
+	spin_lock(&luna_fsm_lock);
+	live = READ_ONCE(ploam_irq) && timer_pending(&gpon_fsm_timer);
+	if (live)
+		luna_ds_ploam_drain(true);
+	if (live && ++luna_ds_irq_burst <= LUNA_GPON_IRQ_TICK_BUDGET) {
+		enable_irq(luna_gpon_irq);
+	} else {
+		WRITE_ONCE(luna_gpon_irq_parked, true);
+		luna_ds_parks++;
+	}
+	spin_unlock(&luna_fsm_lock);
+}
+static DECLARE_WORK(luna_ds_ploam_work, luna_ds_ploam_work_fn);
+
+/* The drain runs in BH context, on this interrupt's exit: a PREEMPT_NONE kernel
+ * left an interrupt thread 16 ms behind a kernel path (X100DG). The latch is
+ * cleared before the event, so a PLOAM landing meanwhile raises it again; the
+ * line is off until the drain, as a queued PLOAM keeps its event raised. */
+static irqreturn_t luna_gpon_irq_handler(int irq, void *data)
 {
 	u32 events;
 
+	if (!(gpon_rd(GPON_GTC_DS_PLOAM_IND) & GPON_DS_PLM_BUF_EMPTY))
+		atomic64_cmpxchg(&luna_ds_arrival_ns, 0, ktime_get_boottime_ns());
+	luna_ds_irqs++;
 	sw_wr(SW_INTR_IMS, SW_INTR_GPON);
 	events = gpon_rd(GPON_GTC_DS_INTR_DLT);		/* read-clear */
-	spin_lock_bh(&luna_fsm_lock);
-	if (READ_ONCE(ploam_irq) && timer_pending(&gpon_fsm_timer))	/* the FSM is live */
-		luna_ds_ploam_drain(true);
-	spin_unlock_bh(&luna_fsm_lock);
-	return events ? IRQ_HANDLED : IRQ_NONE;
+	if (!events)
+		return IRQ_NONE;
+	disable_irq_nosync(irq);
+	queue_work(system_bh_highpri_wq, &luna_ds_ploam_work);
+	return IRQ_HANDLED;
+}
+
+/* At the end of every tick, under luna_fsm_lock: a new budget, a parked line back on. */
+static void luna_gpon_irq_unpark(void)
+{
+	luna_ds_irq_burst = 0;
+	if (READ_ONCE(luna_gpon_irq_parked)) {
+		WRITE_ONCE(luna_gpon_irq_parked, false);
+		enable_irq(luna_gpon_irq);
+	}
 }
 
 static void luna_gpon_irq_request(void)
@@ -8659,8 +8694,7 @@ static void luna_gpon_irq_request(void)
 		pr_info("luna-gpon: no GPON interrupt in the device tree: downstream PLOAM waits for the FSM tick\n");
 		return;
 	}
-	ret = request_threaded_irq(luna_gpon_irq, luna_gpon_irq_stamp, luna_gpon_irq_thread,
-				   IRQF_ONESHOT, "luna-gpon", NULL);
+	ret = request_irq(luna_gpon_irq, luna_gpon_irq_handler, 0, "luna-gpon", NULL);
 	if (ret) {
 		pr_warn("luna-gpon: GPON interrupt %d refused (%d): downstream PLOAM waits for the FSM tick\n",
 			luna_gpon_irq, ret);
@@ -8896,8 +8930,10 @@ drain_downstream:
 
 
 next_poll:
-	if (!READ_ONCE(luna_stopping))		/* re-armed under the lock: see the thread */
+	if (!READ_ONCE(luna_stopping))		/* re-armed under the lock: see the BH drain */
 		mod_timer(&gpon_fsm_timer, jiffies + GPON_FSM_TICK_JIFFIES);
+	if (luna_gpon_irq)
+		luna_gpon_irq_unpark();
 	spin_unlock(&luna_fsm_lock);
 }
 
@@ -9749,6 +9785,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	if (luna_gpon_irq) {
 		sw_field(SW_INTR_IMR, 10, 10, 0);
 		free_irq(luna_gpon_irq, NULL);
+		cancel_work_sync(&luna_ds_ploam_work);
 	}
 	cancel_work_sync(&gpon_cdr_reset_work);
 	cancel_delayed_work_sync(&gpon_optical_work);

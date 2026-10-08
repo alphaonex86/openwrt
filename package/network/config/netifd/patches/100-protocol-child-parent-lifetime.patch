@@ -1,0 +1,34 @@
+--- a/main.c
++++ b/main.c
+@@ -18,6 +18,7 @@
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <syslog.h>
++#include <sys/prctl.h>
+ 
+ #include "netifd.h"
+ #include "ubus.h"
+@@ -209,6 +210,7 @@
+ {
+ 	int pfds[2];
+ 	int pid;
++	pid_t parent_pid = getpid();
+ 
+ 	netifd_kill_process(proc);
+ 
+@@ -220,6 +222,15 @@
+ 
+ 	if (!pid) {
+ 		int i;
++
++		/* Protocol daemons must not outlive a crashed netifd. */
++		if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0) {
++			perror("netifd: PR_SET_PDEATHSIG");
++			_exit(127);
++		}
++		/* The parent may have died between fork() and prctl(). */
++		if (getppid() != parent_pid)
++			_exit(127);
+ 
+ 		if (env) {
+ 			while (*env) {

@@ -44,6 +44,12 @@ typedef uint32_t u32;
 #define PLM_DS_CONFIG_PORT		0x0e	/* Configure_Port-ID (ACK) */
 #define PLM_DS_CFG_VPVC			0x07	/* Configure_VP/VC (ATM, unsupported; ACK) */
 #define PLM_DS_BER_INTERVAL		0x12	/* BER interval (ACK; arms BER reporting) */
+#define PLM_DS_SN_MASK			0x02	/* Serial_number_mask, deprecated since 2008 */
+#define PLM_DS_NO_MESSAGE		0x0b
+#define PLM_DS_POPUP			0x0c	/* O6 -> O4 (broadcast) or O5 (directed) */
+#define PLM_DS_SWIFT_POPUP		0x16	/* G.984.3 Annex D: O6 -> O5 */
+#define PLM_DS_RANGING_ADJ		0x17	/* G.984.3 Annex D: relative EqD, ACK if unicast */
+#define PLM_DS_DISABLE_SN_ZTE		0x81	/* chip SDK: 0x11 disables, 0x0f/0x10 enable */
 #define PLM_US_ENCRYPT_KEY		0x05	/* US Encryption_Key response */
 #define PLM_US_PASSWORD			0x02	/* US Password response (to Request_Password) */
 #define PLM_US_SERIAL_NUMBER		0x01
@@ -119,7 +125,7 @@ enum gpon_ploam_ev {
 	GPON_PLOAM_EV_ONU_ID,		/* a = assigned ONU-ID, b = T-CONT16 alloc */
 	GPON_PLOAM_EV_CAM_READBACK,	/* a = T-CONT, b = wanted alloc            */
 	GPON_PLOAM_EV_RANGING_TIME,	/* a = EqD                                 */
-	GPON_PLOAM_EV_DISABLE_SN,	/* a = disable code d[0]                   */
+	GPON_PLOAM_EV_DISABLE_SN,	/* a = code d[0], b = 1 on an enable       */
 	GPON_PLOAM_EV_DEACT,		/* a = our ONU-ID at the time              */
 	GPON_PLOAM_EV_DEACT_KEEP_LOCK,	/* a = ticks held at O5 (reseat skipped)   */
 	GPON_PLOAM_EV_EXT_BURST,	/* a = t3pre, b = t3ranged                 */
@@ -208,6 +214,9 @@ struct gpon_ploam_ops {
 	 * clear-on-read counter once per interval). <0 = could not ask: that REI
 	 * is skipped, never sent as 0. NULL = this family sends no REI. */
 	int  (*ds_bip_errors)(void *sh, u32 *count);
+	/* Optional: Encrypted_Port-ID marks a GEM Port-ID encrypted or clear.
+	 * NULL = this family cannot decrypt; an encrypted port is reported. */
+	void (*port_encrypt)(void *sh, u16 port, bool encrypted);
 	/* --- diagnostics: NEVER load-bearing, NULL is always legal. */
 	void (*trace)(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b);
 	/* ONE datum the FSM received and could not place. Same ...
@@ -325,6 +334,9 @@ struct gpon_ploam {
 	u8 boh_t12;			/* Upstream_Overhead (d[1] + d[2]) / 8 = Type-1+2 bytes */
 	u8 boh_t3pre;			/* Ext_Burst_Length d[0] = pre-ranged Type-3 len */
 	u8 boh_t3ranged;		/* Ext_Burst_Length d[1] = ranged Type-3 len     */
+	u32 pre_eqd;			/* Upstream_Overhead pre-assigned EqD, bits      */
+	u32 eqd;			/* the EqD last written, bits (Ranging_Adjustment base) */
+	u32 popup_until_tick;		/* a ridden-through LOS makes POPUP valid until here */
 	/* --- provisioning flags the PLOAM layer owns: set and cleared by PLOAM
 	 * events and by the poll teardowns.  The CAM/table work itself is behind
 	 * the install ops. */

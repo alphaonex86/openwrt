@@ -205,7 +205,40 @@ static void set_eqd(struct gpon_ploam *o, u32 value)
 	u32 multi = eqd1 / GPON_PLOAM_EQD_FRAME_LEN;
 	u32 intra = eqd1 - multi * GPON_PLOAM_EQD_FRAME_LEN;
 
+	o->eqd = value;
 	o->ops->set_eqd(o->sh, multi, intra);
+}
+
+/* Assigned, and addressed: an ONU without an ONU-ID answers nothing but SN
+ * requests (G.984.3 10.2.5.1), even to a broadcast. */
+static bool addressed(const struct gpon_ploam *o, u8 onu_id, bool bcast_ok)
+{
+	return o->onu_id != GPON_PLOAM_ONU_ID_BROADCAST &&
+	       (onu_id == o->onu_id ||
+		(bcast_ok && onu_id == GPON_PLOAM_ONU_ID_BROADCAST));
+}
+
+/* Disable_Serial_Number and the chip SDK's 0x81 variant. Enable-all (0x0f)
+ * names no serial number. */
+static bool sn_disables(const struct gpon_ploam *o, u8 type, const u8 *d)
+{
+	return !memcmp(&d[1], o->sn, 8) &&
+	       d[0] == (type == PLM_DS_DISABLE_SN ? 0xff : 0x11);
+}
+
+static bool sn_enables(const struct gpon_ploam *o, u8 type, const u8 *d)
+{
+	if (type == PLM_DS_DISABLE_SN)
+		return d[0] == 0x0f || (d[0] == 0x00 && !memcmp(&d[1], o->sn, 8));
+	return (d[0] == 0x0f || d[0] == 0x10) && !memcmp(&d[1], o->sn, 8);
+}
+
+/* G.984.3 O6 without leaving O5: a LOS shorter than TO2 is ridden through,
+ * and for TO2 after it a POPUP is answered as from O6. */
+static bool popup_pending(const struct gpon_ploam *o)
+{
+	return o->state == GPON_O5_OPERATION && o->popup_until_tick &&
+	       o->popup_until_tick - o->ticks <= o->cfg->los_rerange_ticks;
 }
 
 
@@ -238,6 +271,8 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		o->los_run = 0;		/* fresh LOS debounce on every transition */
 	if (prev != st && st != GPON_O5_OPERATION)
 		o->rei_interval_ms = 0;	/* the next activation sets its own */
+	if (prev != st)
+		o->popup_until_tick = 0;
 	o->state = st;
 
 	/* ★ The EARLY clock, armed AFTER the state is really set -- ...
@@ -270,7 +305,7 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 		}
 		o->o5_entry_tick = o->ticks ? o->ticks : 1;
 		o->avc_sent = 0;	/* re-report oper-up on each online */
-	} else if (st < GPON_O5_OPERATION && prev >= GPON_O5_OPERATION) {
+	} else if (st != GPON_O5_OPERATION && prev == GPON_O5_OPERATION) {
 		o->rerange_start_ms = now_ms ? now_ms : 1;  /* outage timer starts */
 		o->o5_entry_tick = 0;
 		/* The shell re-arms whatever it gates on O5 (Luna: the VLAN
@@ -336,6 +371,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			o->boh_delim[2] = d[6];
 			ev(o, GPON_PLOAM_EV_BOH, 0,
 			   apply_boh(o, false));	/* folds in any prior 0x14 t3pre */
+			o->pre_eqd = pre_eqd;
 			set_eqd(o, pre_eqd);
 			set_state(o, GPON_O2_STANDBY, now_ms);
 			set_state(o, GPON_O3_SERIAL, now_ms);
@@ -434,10 +470,21 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_DISABLE_SN:
-		/* Disable_Serial_Number (G.984.3): d[0] is the disable/enable ...
-		 * dev/MEASURED-gpon_ploam.c.md sec 18. */
-		if (!((d[0] == 0xff && !memcmp(&d[1], o->sn, 8)) || d[0] == 0x0f))
-			break;		/* enable / not our SN -> keep activating */
+	case PLM_DS_DISABLE_SN_ZTE:
+		/* G.984.3 9.2.3.6, 10.2.5.1 i/j: broadcast only; a disable of our
+		 * serial number is O7 and silence until an enable, 0x0f = enable
+		 * every disabled ONU.  dev/MEASURED-gpon_ploam.c.md sec 18. */
+		if (onu_id != GPON_PLOAM_ONU_ID_BROADCAST)
+			break;
+		if (o->state == GPON_O7_EMERGENCY) {
+			if (sn_enables(o, type, d)) {
+				ev(o, GPON_PLOAM_EV_DISABLE_SN, d[0], 1);
+				set_state(o, GPON_O1_INITIAL, now_ms);
+			}
+			break;
+		}
+		if (!sn_disables(o, type, d))
+			break;
 		ev(o, GPON_PLOAM_EV_DISABLE_SN, d[0], 0);
 		/* A real Disable_SN tears down exactly like an OLT Deactivate, so
 		 * it drops into that case rather than duplicating the teardown.
@@ -447,6 +494,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	case PLM_DS_DEACTIVATE_ONU:
 		if (onu_id == o->onu_id || onu_id == 0xff) {
+			if (o->state == GPON_O7_EMERGENCY)
+				break;		/* only an enable leaves O7 */
 			ev(o, GPON_PLOAM_EV_DEACT, o->onu_id, 0);
 			/* TEARDOWN 1 of 4: OLT Deactivate / Disable_SN. FULL reset to ...
 			 * dev/MEASURED-gpon_ploam.c.md sec 19. */
@@ -474,7 +523,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 				   o->o5_entry_tick ? o->ticks - o->o5_entry_tick : 0, 0);
 				o->keep_lock_tick = o->ticks ? o->ticks : 1;
 			}
-			set_state(o, GPON_O1_INITIAL, now_ms);
+			set_state(o, type == PLM_DS_DEACTIVATE_ONU ?
+				     GPON_O1_INITIAL : GPON_O7_EMERGENCY, now_ms);
 		}
 		break;
 
@@ -493,7 +543,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	case PLM_DS_CONFIG_PORT:
 		/* Configure_Port-ID: the OLT assigns the OMCC GEM port for ...
 		 * dev/MEASURED-gpon_ploam.c.md sec 22. */
-		if (onu_id == o->onu_id) {
+		if (addressed(o, onu_id, false)) {
 			u16 gem = ((u16)d[1] << 4) | (d[2] >> 4);
 
 			/* ★ REBIND ON CHANGE, not once. A one-shot install drops an ...
@@ -519,7 +569,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	case PLM_DS_ASSIGN_ALLOC_ID:
 		/* Assign_Alloc-ID: alloc = (d[0]<<4)|(d[1]>>4); d[2] 0x01 = ...
 		 * dev/MEASURED-gpon_ploam.c.md sec 23. */
-		if (onu_id == o->onu_id) {
+		if (addressed(o, onu_id, false)) {
 			u16 alloc = ((u16)d[0] << 4) | (d[1] >> 4);
 
 			ev(o, GPON_PLOAM_EV_ASSIGN_ALLOC, alloc, d[2]);
@@ -556,7 +606,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	case PLM_DS_REQUEST_KEY:
 		/* The OLT requests a downstream AES key; reply with
 		 * Encryption_Key and load the same key into the staged bank. */
-		if (onu_id == o->onu_id) {
+		if (addressed(o, onu_id, false)) {
 			send_key(o);
 			ev(o, GPON_PLOAM_EV_REQ_KEY, 0, 0);
 		}
@@ -567,7 +617,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		 * this and deactivates us with LOAi. The lab OLT ignores the value;
 		 * a production OLT deactivated a zero one (field X111W, 2026-09-30).
 		 * Broadcast is accepted, like stock. */
-		if (onu_id == o->onu_id || onu_id == 0xff) {
+		if (addressed(o, onu_id, true)) {
 			send_password(o);
 			ev(o, GPON_PLOAM_EV_REQ_PW, 0, 0);
 		}
@@ -576,7 +626,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	case PLM_DS_KEY_SWITCH:
 		/* Key_Switching_Time: the OLT supplies the 30-bit superframe ...
 		 * dev/MEASURED-gpon_ploam.c.md sec 24. */
-		if (onu_id == o->onu_id || onu_id == 0xff) {
+		if (addressed(o, onu_id, true)) {
 			u32 fc = ((u32)(d[0] & 0x3f) << 24) | ((u32)d[1] << 16) |
 				 ((u32)d[2] << 8) | d[3];
 
@@ -597,8 +647,19 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	case PLM_DS_ENCRYPT_PORT:
 		/* Encrypted_Port-ID: G.984.3 requires an Acknowledge; the OLT
-		 * arms a ~43 s timer and Deactivates us if none arrives. */
-		if (onu_id == o->onu_id) {
+		 * arms a ~43 s timer and Deactivates us if none arrives.  d[0]
+		 * bit 0 marks the Port-ID encrypted, bit 1 must be set or the
+		 * mark is ignored (9.2.3.8): a family that cannot decrypt says
+		 * so instead of delivering ciphertext. */
+		if (addressed(o, onu_id, false)) {
+			u16 port = ((u16)d[1] << 4) | (d[2] >> 4);
+
+			if ((d[0] & 2) && o->ops->port_encrypt)
+				o->ops->port_encrypt(o->sh, port, d[0] & 1);
+			else if ((d[0] & 3) == 3)
+				unsup(o, "ds_port_encryption", GPON_UNSUP_UNKNOWN,
+				      port, "a-family-that-decrypts", m,
+				      GPON_PLOAM_DS_LEN);
 			send_ack(o, m);
 			if (o->cfg->trace)
 				ev(o, GPON_PLOAM_EV_ACK, type, 0);
@@ -609,7 +670,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		/* Configure_VP/VC: legacy ATM connection setup, unsupported on
 		 * a GEM ONU — but stock still Acknowledges, and a missing ACK
 		 * to any acknowledge-required downstream PLOAM raises LOAi. */
-		if (onu_id == o->onu_id) {
+		if (addressed(o, onu_id, false)) {
 			send_ack(o, m);
 			ev(o, GPON_PLOAM_EV_ACK, type, 0);
 		}
@@ -618,7 +679,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 	case PLM_DS_BER_INTERVAL:
 		/* BER_interval: the OLT configures the upstream BER reporting ...
 		 * dev/MEASURED-gpon_ploam.c.md sec 44. */
-		if (onu_id == o->onu_id || onu_id == 0xff) {
+		if (addressed(o, onu_id, true)) {
 			u32 frames = ((u32)d[0] << 24) | ((u32)d[1] << 16) |
 				     ((u32)d[2] << 8) | d[3];
 
@@ -628,6 +689,50 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			o->rei_due_ms = now_ms + o->rei_interval_ms;
 			o->rei_seq = 0;
 		}
+		break;
+
+	case PLM_DS_RANGING_ADJ:
+		/* G.984.3 Annex D: O5 only, octet 3 bit 1 = decrease (bit 0, as
+		 * the chip SDK reads it, too); a unicast one is acknowledged.  An
+		 * EqD below zero cannot be: it is reported, never written. */
+		if (o->state == GPON_O5_OPERATION && addressed(o, onu_id, true)) {
+			u32 delta = ((u32)d[1] << 24) | ((u32)d[2] << 16) |
+				    ((u32)d[3] << 8) | d[4];
+
+			if (!(d[0] & 3))
+				set_eqd(o, o->eqd + delta);
+			else if (delta <= o->eqd)
+				set_eqd(o, o->eqd - delta);
+			else
+				unsup(o, "ranging_adjustment", GPON_UNSUP_RANGE,
+				      delta, "at-most-the-current-eqd", m,
+				      GPON_PLOAM_DS_LEN);
+			if (onu_id == o->onu_id)
+				send_ack(o, m);
+			ev(o, GPON_PLOAM_EV_RANGING_TIME, o->eqd, 1);
+		}
+		break;
+
+	case PLM_DS_POPUP:
+	case PLM_DS_SWIFT_POPUP:
+		/* G.984.3 10.2.5.1 f/g, Annex D: a broadcast POPUP re-ranges with
+		 * the ONU-ID kept (O4, pre-ranged burst and EqD, TO1); a directed
+		 * one or a Swift_POPUP is O5, which we never left. */
+		if (!popup_pending(o) ||
+		    (onu_id != o->onu_id && onu_id != GPON_PLOAM_ONU_ID_BROADCAST))
+			break;
+		o->popup_until_tick = 0;
+		if (type == PLM_DS_POPUP && onu_id == GPON_PLOAM_ONU_ID_BROADCAST) {
+			u32 boh = apply_boh(o, false);
+
+			set_eqd(o, o->pre_eqd);
+			set_state(o, GPON_O4_RANGING, now_ms);
+			ev(o, GPON_PLOAM_EV_BOH, 0, boh);
+		}
+		break;
+
+	case PLM_DS_NO_MESSAGE:
+	case PLM_DS_SN_MASK:
 		break;
 
 	default:
@@ -755,6 +860,14 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 			       o->cfg->o4_ranging_timeout_ticks)) {
 		ev(o, GPON_PLOAM_EV_O4_TIMEOUT, o->ticks - o->o4_entry_tick, 0);
 		o->onu_id = 0xff;
+		o->omcc_installed = false;	/* a POPUP O4 still held them */
+		o->omcc_gem = 0;
+		o->tcont_installed = false;
+		o->data_installed = false;
+		o->data_tcont_installed = false;
+		o->data_alloc = 0;
+		o->aes_switch_time = 0xffffffff;
+		o->key_staged = false;
 		o->ops->set_hw_onu_id(o->sh, 0xff);
 		set_state(o, GPON_O1_INITIAL, now_ms);
 		return (int)(o->tx_total - tx0);
@@ -790,7 +903,8 @@ int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark,
 {
 	u32 tx0 = o->tx_total;
 
-	if (o->cfg->los_rerange_ticks && o->state >= GPON_O2_STANDBY) {
+	if (o->cfg->los_rerange_ticks && o->state >= GPON_O2_STANDBY &&
+	    o->state != GPON_O7_EMERGENCY) {
 		if (optic_los && sds_dark) {
 			if (++o->los_run == o->cfg->los_rerange_ticks) {
 				ev(o, GPON_PLOAM_EV_LOS_RERANGE, o->los_run, 0);
@@ -814,6 +928,8 @@ int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark,
 				set_state(o, GPON_O1_INITIAL, now_ms);
 			}
 		} else {
+			if (o->los_run && o->state == GPON_O5_OPERATION)
+				o->popup_until_tick = o->ticks + o->cfg->los_rerange_ticks;
 			o->los_run = 0;
 		}
 	}
@@ -827,8 +943,8 @@ int gpon_ploam_poll_sn_reoffer(struct gpon_ploam *o, u32 now_ms)
 	u32 tx0 = o->tx_total;
 
 	(void)now_ms;
-	if (o->state >= GPON_O3_SERIAL && o->onu_id == 0xff &&
-	    (o->ticks % GPON_PLOAM_SN_REOFFER_TICKS) == 0)
+	if (o->state >= GPON_O3_SERIAL && o->state != GPON_O7_EMERGENCY &&
+	    o->onu_id == 0xff && (o->ticks % GPON_PLOAM_SN_REOFFER_TICKS) == 0)
 		send_sn(o);
 	return (int)(o->tx_total - tx0);
 }

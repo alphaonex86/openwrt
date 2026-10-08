@@ -254,7 +254,7 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		      u8 *resp, struct omci_accepted *accepted)
 {
 	u16 class_id, inst;
-	u8 mt, devid;
+	u8 mt, devid, prio;
 
 	if (accepted)
 		memset(accepted, 0, sizeof(*accepted));
@@ -273,6 +273,7 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 			o->mic_conv_bad++;
 	}
 	devid = msg[3];
+	prio = msg[0] >> 7;		/* G.988 11.2.1: TCI bit 15 */
 	mt = msg[2] & 0x1f;
 	class_id = ((u16)msg[4] << 8) | msg[5];
 	inst = ((u16)msg[6] << 8) | msg[7];
@@ -294,8 +295,8 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 
 	/* G.988 11.2.2.1 retained last response: the OMCC is ...
 	 * dev/MEASURED-gpon_omci_core.c.md sec 11. */
-	if (o->have_last && len >= 40 && !memcmp(msg, o->last_req, 40)) {
-		memcpy(resp, o->last_resp, OMCI_LEN);
+	if (o->have_last[prio] && !memcmp(msg, o->last_req[prio], 40)) {
+		memcpy(resp, o->last_resp[prio], OMCI_LEN);
 		o->dup_replay++;
 		return OMCI_LEN;
 	}
@@ -457,12 +458,13 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 
 	/* Refresh the retransmission cache. It may only ever hold the ...
 	 * dev/MEASURED-gpon_omci_core.c.md sec 17. */
-	if ((msg[2] & 0x40) && len >= 40) {
-		memcpy(o->last_req, msg, 40);
-		memcpy(o->last_resp, resp, OMCI_LEN);
-		o->have_last = true;
+	if (msg[2] & 0x40) {
+		memcpy(o->last_req[prio], msg, 40);
+		memcpy(o->last_resp[prio], resp, OMCI_LEN);
+		o->have_last[prio] = true;
 	} else {
-		o->have_last = false;
+		o->have_last[0] = false;
+		o->have_last[1] = false;
 	}
 
 	/* AR clear = the OLT asked for no acknowledgement (G.988): the message

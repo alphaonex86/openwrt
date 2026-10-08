@@ -399,6 +399,24 @@ static bool is_9607c;
  * carries its table; see the note at the assignment. */
 static bool is_9603cvd;
 
+/* The panel LED controller, per die: the same block base and per-index
+ * DATA_LED_CFG, nearly everything else moved (each die's chipdef; the block's
+ * version word read on each board's stock). LEDn is parallel-enabled at bit
+ * n + 1 and pad-enabled at bit n; force values pack 16 indices per word. */
+struct luna_led_regs {
+	u32 force_value;	/* 2 bits per index, 16 indices per word */
+	u32 blink_rate;		/* the force-blink period field [lsb+2:lsb] */
+	u8  blink_lsb;
+	u32 para_en;
+	u32 pad_en;
+	u32 seri_para;		/* serial-mode enables in para_en, kept clear */
+	u32 seri_pad;		/* serial-mode enable in pad_en, kept clear */
+	u8  cpu_force_bit;	/* DATA_LED_CFG: the CPU drives the force value */
+	u8  pon_type;		/* DATA_LED_CFG [20:16] source code of a PON lamp */
+	u16 link_act;		/* DATA_LED_CFG: link + activity at every speed */
+	u8  indices;
+};
+
 /* The SWCORE offsets that move between family members. The ...
  * dev/MEASURED-luna_gpon.c.md sec 7. */
 struct gpon_swc_map {
@@ -494,6 +512,7 @@ struct gpon_swc_map {
 	u32 qos_uni_trap_pri_ctrl;   /* QOS_UNI_TRAP_PRI_CTRL */
 	u32 oam_ctrl_0;              /* OAM_CTRL_0 */
 	u32 cfg_unhiol;              /* CFG_UNHIOL */
+	const struct luna_led_regs *led;	/* NULL: no table for this die */
 };
 
 /* The PON-IP relocation table's element type, declared HERE because the chip
@@ -501,8 +520,27 @@ struct gpon_swc_map {
 struct luna_pi_move { u32 from, to; };
 extern const struct luna_pi_move luna_pi_moves_9603cvd[];
 
+/* RTL9602C, and the RTL9601D, whose stock X100DG reads the same block version
+ * 0x16030301 and drives its lamps at these offsets. */
+static const struct luna_led_regs luna_led_9602c = {
+	.force_value = LED_FORCE_VALUE, .blink_rate = LED_BLINK_RATE, .blink_lsb = 12,
+	.para_en = LED_PARA_EN, .pad_en = LED_IO_EN,
+	.seri_para = BIT(19) | BIT(18), .seri_pad = BIT(17),
+	.cpu_force_bit = 12, .pon_type = 0x1b, .link_act = 0xf78, .indices = 16,
+};
+
+/* RTL9603CVD: 18 indices, so the force values take two words and 0x1e05c is the
+ * blink rate here; the stock G24W's own capture names the same index set. */
+static const struct luna_led_regs luna_led_9603cvd = {
+	.force_value = 0x1e054, .blink_rate = 0x1e05c, .blink_lsb = 3,
+	.para_en = 0x1e068, .pad_en = 0x23010,
+	.seri_para = BIT(25), .seri_pad = BIT(23),
+	.cpu_force_bit = 14, .pon_type = 0x07, .link_act = 0x1e78, .indices = 18,
+};
+
 static const struct gpon_swc_map gpon_swc_9602c = {
 	.chip = "RTL9602C",
+	.led = &luna_led_9602c,
 	/* ★ REGISTERED, NOT LEFT TO THE COMPILER (2026-09-14, ...
 	 * dev/MEASURED-luna_gpon.c.md sec 274. */
 	.alloc_idx_swap = false,	/* the logical T-CONT permutation is the RTL9603CVD's alone */
@@ -563,6 +601,7 @@ static const struct gpon_swc_map gpon_swc_9602c = {
 
 static const struct gpon_swc_map gpon_swc_9603cvd = {
 	.chip = "RTL9603CVD",
+	.led = &luna_led_9603cvd,
 	.alloc_idx_swap = true,
 	.omcc_flow = GPON_OMCC_FLOW_9603CVD,
 	/* the DS PBO DRAM pool, from the G24W's own stock live at O5 */
@@ -1541,13 +1580,12 @@ static u32 gpon_led_pon_val = ~0u;	/* last value written (forces first update) *
 static u32 gpon_led_los_val = ~0u;
 
 /* The panel map is the BOARD's, from its DT gpon node: realtek,pon-led,
- * realtek,los-led, realtek,los-led-blink-rate (present = LOS blinks, at that
- * period code) and realtek,port-leds = <index type>... (hardware link/activity).
- * A board that declares nothing gets no lamp driven: the X111W's indices on
- * another board drove pins the panel does not use (V2801RGW, 2026-10-07). */
+ * realtek,los-led and realtek,port-leds = <index type>... (hardware link/
+ * activity). A board that declares nothing gets no lamp driven: the X111W's
+ * indices on another board drove pins the panel does not use (V2801RGW,
+ * 2026-10-07). What the lamps SAY is the same on every ONU (below). */
 static u32 led_pon_idx = LED_IDX_NONE;
 static u32 led_los_idx = LED_IDX_NONE;
-static u32 led_los_blink_rate = LED_IDX_NONE;
 static u32 led_ports[8];
 static int led_nports;
 
@@ -1560,7 +1598,6 @@ static void __init luna_led_map_from_dt(void)
 		return;
 	of_property_read_u32(np, "realtek,pon-led", &led_pon_idx);
 	of_property_read_u32(np, "realtek,los-led", &led_los_idx);
-	of_property_read_u32(np, "realtek,los-led-blink-rate", &led_los_blink_rate);
 	n = of_property_count_u32_elems(np, "realtek,port-leds");
 	if (n > 0 && n % 2 == 0 && n <= (int)ARRAY_SIZE(led_ports) &&
 	    !of_property_read_u32_array(np, "realtek,port-leds", led_ports, n))
@@ -1571,20 +1608,41 @@ static void __init luna_led_map_from_dt(void)
 	of_node_put(np);
 }
 
+static bool gpon_led_valid(unsigned int idx)
+{
+	return swc->led && idx < swc->led->indices;
+}
+
+static u32 gpon_led_force_reg(unsigned int idx)
+{
+	return swc->led->force_value + idx / 16 * 4;
+}
+
 /* Drive one LED index's 2-bit parallel force value (0=off 1=on 2=blink). */
 static void gpon_led_force(unsigned int idx, u32 val)
 {
-	if (is_9603cvd || idx > LED_IDX_MAX)
+	if (!gpon_led_valid(idx))
 		return;
-	sw_field(LED_FORCE_VALUE, idx * 2 + 1, idx * 2, val);
+	sw_field(gpon_led_force_reg(idx), idx % 16 * 2 + 1, idx % 16 * 2, val);
 }
 
-/* Claim one index for CPU-forced parallel output (parallel + pad + force-mode). */
+static u32 gpon_led_force_get(unsigned int idx)
+{
+	return (sw_rd(gpon_led_force_reg(idx)) >> (idx % 16 * 2)) & 3;
+}
+
+/* Parallel output and pad output for one index. */
+static void gpon_led_enable(unsigned int idx)
+{
+	sw_field(swc->led->para_en, idx + 1, idx + 1, 1);
+	sw_field(swc->led->pad_en, idx, idx, 1);
+}
+
+/* Claim one index as a CPU-forced PON-typed lamp, the word stock writes. */
 static void gpon_led_claim(unsigned int idx)
 {
-	sw_field(LED_PARA_EN, idx + 1, idx + 1, 1);		/* parallel-enable   */
-	sw_field(LED_IO_EN, idx, idx, 1);			/* pad-output enable */
-	sw_field(LED_DATA_CFG(idx), LED_CPU_FORCE_BIT, LED_CPU_FORCE_BIT, 1);
+	sw_wr(LED_DATA_CFG(idx), swc->led->pon_type << 16 | BIT(swc->led->cpu_force_bit));
+	gpon_led_enable(idx);
 }
 
 /* Configure one LED index as a hardware-auto port-link/activity LED: the switch
@@ -1592,36 +1650,31 @@ static void gpon_led_claim(unsigned int idx)
  * so plug/unplug is reflected with zero software. CPU_FORCE_MOD stays 0. */
 static void gpon_led_port(unsigned int idx, u32 type)
 {
-	sw_wr(LED_DATA_CFG(idx), (type << 16) | LED_LINKACT);
-	sw_field(LED_PARA_EN, idx + 1, idx + 1, 1);		/* parallel-enable   */
-	sw_field(LED_IO_EN, idx, idx, 1);			/* pad-output enable */
+	sw_wr(LED_DATA_CFG(idx), (type << 16) | swc->led->link_act);
+	gpon_led_enable(idx);
 }
 
-/* Green PON LED: solid when operational (O5), blinking while ranging (O2..O4),
- * off when down (O1/unknown). */
+/* One panel language on every ONU, so a field technician reads any unit alike
+ * (operator, 2026-10-07): PON green solid at O5 and blinking in every other
+ * state, no fibre included -- stock's own table turns it off at O1; LOS red
+ * blinking while the downstream light is lost. Both blink at one rate: the
+ * 9603CVD has a single force-blink period. */
 static void gpon_led_pon_set(u8 st)
 {
-	u32 v = (st >= 5) ? LED_FORCE_ON : (st >= 2) ? LED_FORCE_BLINK : LED_FORCE_OFF;
+	u32 v = st == 5 ? LED_FORCE_ON : LED_FORCE_BLINK;
 
 	if (!gpon_leds || v == gpon_led_pon_val)
 		return;
-	if (v == LED_FORCE_BLINK)
-		sw_field(LED_BLINK_RATE, 14, 12, LED_BLINK_512MS);
 	gpon_led_force(led_pon_idx, v);
 	gpon_led_pon_val = v;
 }
 
-/* Red LOS LED: lit (or blinking, when the board declares a rate) only while the
- * downstream optical signal is lost. */
 static void gpon_led_los_set(bool los)
 {
-	bool blink = led_los_blink_rate <= 7;
-	u32 v = !los ? LED_FORCE_OFF : blink ? LED_FORCE_BLINK : LED_FORCE_ON;
+	u32 v = los ? LED_FORCE_BLINK : LED_FORCE_OFF;
 
 	if (!gpon_leds || v == gpon_led_los_val)
 		return;
-	if (v == LED_FORCE_BLINK)
-		sw_field(LED_BLINK_RATE, 14, 12, led_los_blink_rate);
 	gpon_led_force(led_los_idx, v);
 	gpon_led_los_val = v;
 }
@@ -1667,9 +1720,7 @@ static enum led_brightness luna_panel_led_get(struct led_classdev *c)
 	/* ⚠ SWCORE, not the PON IP. The first cut read this with pi_packed_get(),
 	 * whose pi_rd() addresses a DIFFERENT BLOCK -- it would have returned a
 	 * confident brightness for a register that is not this lamp's. */
-	u32 v = (sw_rd(LED_FORCE_VALUE) >> (l->idx * 2)) & 3;
-
-	return v == LED_FORCE_OFF ? LED_OFF : LED_FULL;
+	return gpon_led_force_get(l->idx) == LED_FORCE_OFF ? LED_OFF : LED_FULL;
 }
 
 static void gpon_led_sysfs_init(void)
@@ -1680,7 +1731,7 @@ static void gpon_led_sysfs_init(void)
 	luna_panel_leds[0].idx = led_pon_idx;
 	luna_panel_leds[1].idx = led_los_idx;
 	for (i = 0; i < ARRAY_SIZE(luna_panel_leds); i++) {
-		if (luna_panel_leds[i].idx > LED_IDX_MAX)
+		if (!gpon_led_valid(luna_panel_leds[i].idx))
 			continue;
 		luna_panel_leds[i].cdev.brightness_set = luna_panel_led_set;
 		luna_panel_leds[i].cdev.brightness_get = luna_panel_led_get;
@@ -1706,49 +1757,46 @@ static void gpon_led_sysfs_exit(void)
 	}
 }
 
-/* Put the controller in parallel mode and claim the PON/LOS indices. Only the
- * two indices we own are touched, so any other panel LED keeps its power-on
- * configuration. */
+/* Put the controller in parallel mode and claim the board's indices. Only the
+ * indices the board declares are touched, so any other panel LED keeps its
+ * power-on configuration. Every board has at least PON and LOS: a die with no
+ * table or a board with no map is an error, never a quiet panel. */
 static void gpon_led_init(void)
 {
+	const struct luna_led_regs *r = swc->led;
 	int i;
 
 	if (!gpon_leds)
 		return;
-	/* Every constant in this block is Board C's, and on the ...
-	 * dev/MEASURED-luna_gpon.c.md sec 68. */
-	if (is_9603cvd) {
-		pr_info("luna-gpon: panel LEDs skipped (%s: Board-C LED map; LED_IO_EN 0x23014 is IO_MODE_EN here -- measured steal of HS_UART_FC/I2C1/SLIC_ISI/DYING pins)\n",
-			swc->chip);
+	if (!r) {
+		pr_err("luna-gpon: panel LEDs not driven (%s: no LED-controller table for this die)\n",
+		       swc->chip);
 		return;
 	}
-	if (led_pon_idx > LED_IDX_MAX && led_los_idx > LED_IDX_MAX && !led_nports) {
-		pr_info("luna-gpon: panel LEDs not driven (%s: no LED map in the DT gpon node)\n",
-			swc->chip);
+	if (!gpon_led_valid(led_pon_idx) || !gpon_led_valid(led_los_idx)) {
+		pr_err("luna-gpon: panel LEDs not driven (%s: the DT gpon node declares no valid PON/LOS lamp)\n",
+		       swc->chip);
 		return;
 	}
-	sw_field(LED_PARA_EN, LED_SERI_DATA_EN_BIT, LED_SERI_DATA_EN_BIT, 0);
-	sw_field(LED_PARA_EN, LED_SERI_CLK_EN_BIT, LED_SERI_CLK_EN_BIT, 0);
-	sw_field(LED_IO_EN, LED_SERI_OUT_EN_BIT, LED_SERI_OUT_EN_BIT, 0);
+	sw_wr(r->para_en, sw_rd(r->para_en) & ~r->seri_para);
+	sw_wr(r->pad_en, sw_rd(r->pad_en) & ~r->seri_pad);
 	sw_field(LED_MODE_SEL, 0, 0, 0);			/* parallel output   */
-	sw_field(LED_BLINK_RATE, 14, 12, LED_BLINK_512MS);
-	if (led_pon_idx <= LED_IDX_MAX)
-		gpon_led_claim(led_pon_idx);
-	if (led_los_idx <= LED_IDX_MAX)
-		gpon_led_claim(led_los_idx);
-	gpon_led_force(led_pon_idx, LED_FORCE_OFF);
+	sw_field(r->blink_rate, r->blink_lsb + 2, r->blink_lsb, LED_BLINK_512MS);
+	gpon_led_claim(led_pon_idx);
+	gpon_led_claim(led_los_idx);
+	gpon_led_force(led_pon_idx, LED_FORCE_BLINK);	/* not yet O5 */
 	gpon_led_force(led_los_idx, LED_FORCE_OFF);
-	gpon_led_pon_val = LED_FORCE_OFF;
+	gpon_led_pon_val = LED_FORCE_BLINK;
 	gpon_led_los_val = LED_FORCE_OFF;
 
 	/* Ethernet port-link LEDs, hardware-auto: the switch lights each from its
 	 * OWN port's link + activity, no CPU. */
 	for (i = 0; i < led_nports; i++)
-		if (led_ports[2 * i] <= LED_IDX_MAX)
+		if (gpon_led_valid(led_ports[2 * i]))
 			gpon_led_port(led_ports[2 * i], led_ports[2 * i + 1]);
 
-	pr_info("luna-gpon: panel LEDs init (PON idx%u / LOS idx%u%s force-mode; %d port LED(s) link-auto)\n",
-		led_pon_idx, led_los_idx, led_los_blink_rate <= 7 ? " blinking" : "", led_nports);
+	pr_info("luna-gpon: panel LEDs init (%s: PON idx%u / LOS idx%u force-mode; %d port LED(s) link-auto)\n",
+		swc->chip, led_pon_idx, led_los_idx, led_nports);
 
 	/* Only now: the class devices describe lamps this function just claimed,
 	 * so a die that returned early above exposes NOTHING rather than a node

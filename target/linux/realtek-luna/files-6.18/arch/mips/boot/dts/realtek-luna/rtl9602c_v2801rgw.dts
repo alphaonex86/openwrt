@@ -85,11 +85,10 @@
  * stock's "burst-enable polarity: high". */
 &gpon {
 	/* Panel map from the stock kernel (board_01_led_init, pon_led_*_spec_type_00,
-	 * libmib set_los_led_state): PON index 6, LOS index 10 blinking at code 3
-	 * (256 ms), the copper port's lamp index 5 on switch port 1 (type 2). */
+	 * libmib set_los_led_state): PON index 6, LOS index 10, the copper port's
+	 * lamp index 5 on switch port 1 (type 2). */
 	realtek,pon-led = <6>;
 	realtek,los-led = <10>;
-	realtek,los-led-blink-rate = <3>;
 	realtek,port-leds = <5 2>;
 };
 

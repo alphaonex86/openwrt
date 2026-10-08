@@ -305,3 +305,10 @@
 		#size-cells = <1>;
 	};
 };
+
+/* The GPON block raises the switch interrupt, aggregator input 8: stock's
+ * "apl_sw" in /proc/interrupts on the X111W and the X100DG. */
+&gpon {
+	interrupt-parent = <&intc>;
+	interrupts = <8>;
+};

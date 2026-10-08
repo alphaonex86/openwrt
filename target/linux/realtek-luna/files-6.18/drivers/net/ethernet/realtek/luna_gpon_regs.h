@@ -81,6 +81,10 @@
  * SWCORE window only, and they belong to the SC_* family SC_IND_WD is in. */
 #define SC_CMD			0x0040	/* SWCORE: serial-command issue */
 #define SC_DATA			0x0044	/* SWCORE: its read-back / data */
+#define SW_INTR_IMR		0x1d00c	/* SWCORE: switch interrupt enable, every Luna die */
+#define SW_INTR_IMS		0x1d010	/* SWCORE: its latched status, write 1 to clear */
+#define   SW_INTR_GPON		BIT(10)
+#define   GPON_INTR_GTC_DS	BIT(1)		/* GPON_INTR_MASK: GTC downstream events */
 #define GPON_GTC_DS_INTR_DLT	0x1000
 #define GPON_GTC_DS_INTR_MASK	0x1004
 #define GPON_GTC_DS_INTR_STS	0x1008

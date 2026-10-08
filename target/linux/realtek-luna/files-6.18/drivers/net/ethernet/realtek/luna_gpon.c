@@ -43,6 +43,8 @@
 #include <linux/workqueue.h>
 #include <linux/of.h>
 #include <linux/of_address.h>	/* of_address_to_resource: the board's reserved PBO pools */
+#include <linux/of_irq.h>
+#include <linux/interrupt.h>
 #include "gpon_gem_diag.h"
 #include "gpon_olt_diag.h"	/* the far-end capture: replayed off the board */
 #include "gpon_mon.h"		/* the control plane as Ethernet frames for gponmon0 */
@@ -277,13 +279,20 @@ static struct gpon_olt_capture luna_ploam_cap;
 static DEFINE_SPINLOCK(luna_ploam_cap_lock);
 #endif
 
+/* When the downstream PLOAM being handled landed: its record is timed from
+ * arrival, as G.984.3's 750 us answer budget is. 0 outside a drain. */
+static u64 luna_ds_rx_ns;
+static u32 luna_ds_irqs, luna_ds_unsignalled;	/* interrupts; drains the tick found unannounced */
+
 static void luna_ploam_capture(enum gpon_olt_dir dir, const u8 *m, unsigned int len)
 {
 #ifdef CONFIG_GPON_OLT_DIAG
 	unsigned long flags;
 
 	spin_lock_irqsave(&luna_ploam_cap_lock, flags);
-	gpon_olt_capture_add(&luna_ploam_cap, div_u64(ktime_get_boottime_ns(), 1000),
+	gpon_olt_capture_add(&luna_ploam_cap,
+			     div_u64(dir == GPON_OLT_DS && luna_ds_rx_ns ? luna_ds_rx_ns :
+				     ktime_get_boottime_ns(), 1000),
 			     (u8)luna_ploam.state, dir, m, len);
 	spin_unlock_irqrestore(&luna_ploam_cap_lock, flags);
 #endif
@@ -515,6 +524,7 @@ struct gpon_swc_map {
 	u32 cfg_unhiol;              /* CFG_UNHIOL */
 	const struct luna_led_regs *led;	/* NULL: no table for this die */
 };
+#define LUNA_CLASSIFY_SID_MAX	128	/* the largest classify_sid_num below */
 
 /* The PON-IP relocation table's element type, declared HERE because the chip
  * map below points at one. The table itself is generated beside pi_x(). */
@@ -1395,6 +1405,8 @@ module_param(gpon_hold, bool, 0444);
 MODULE_PARM_DESC(gpon_hold, "hold the GPON FSM at O1 (no ranging) -> stable br-lan/WiFi for LAN+WiFi access (GPON/WAN disabled)");
 /* gpon_sn_bytes is defined near the top: the onu_sn setter needs it. */
 static struct timer_list gpon_fsm_timer;
+/* The tick and the downstream-PLOAM interrupt both drive the core under it. */
+static DEFINE_SPINLOCK(luna_fsm_lock);
 static u8 gpon_fsm_state = 1;		/* O1 */
 
 /* Deferred US-TX CDR-reset (re-range path). gpon_fsm_handle() ...
@@ -5120,22 +5132,32 @@ static int gpon_ds_cam_read(u8 flow)
 
 /* Invalidate non-management DS GEM-port CAM entries (CLEAN op ...
  * dev/MEASURED-luna_gpon.c.md sec 171. */
+static int gpon_ds_cam_clean(unsigned int f)
+{
+	int rc = luna_cam_xact(false, GPON_GTC_CAM_OP_CLEAN, f, NULL, NULL);
+
+	if (!rc)
+		gpon_field(GPON_GTC_DS_TRAFFIC_CFG + f * DS_TRAFFIC_CFG_STRIDE, 4, 0, 0);
+	return rc;
+}
+
 static int gpon_ds_cam_clear_all(void)
 {
 	unsigned int f;
 
 	for (f = 0; f < 128; f++) {
-		int rc;
+		int rc = f == GPON_OMCC_FLOW ? 0 : gpon_ds_cam_clean(f);
 
-		if (f == GPON_OMCC_FLOW)
-			continue;
-		rc = luna_cam_xact(false, GPON_GTC_CAM_OP_CLEAN, f, NULL, NULL);
 		if (rc)
 			return rc;
-		gpon_field(GPON_GTC_DS_TRAFFIC_CFG + f * DS_TRAFFIC_CFG_STRIDE, 4, 0, 0);
 	}
 	return 0;
 }
+
+/* The reset's garbage is gone (cleared once after it): a Configure_Port-ID then
+ * cleans only the flows this driver programs, 127 transactions fewer (~0.6 ms on
+ * the RLX) between the request and its Acknowledge. */
+static bool luna_ds_cam_scrubbed;
 
 /* GTC US MISC PM counter (GPON_GTC_US_MISC_CNTR_IDX 0x5140 ...
  * dev/MEASURED-luna_gpon.c.md sec 172. */
@@ -6081,6 +6103,25 @@ static void pi_packed_set(u32 base, unsigned int idx, unsigned int bits, u32 val
 	pi_wr(slot.reg, pi_packed_insert(pi_rd(slot.reg), &slot, val));
 }
 
+/* pi_packed_set() of `val` into every entry below n not in `keep`, each register
+ * word read and written once: the same end state, a 128-entry classify table in
+ * 36 accesses instead of 512 (~0.5 ms before a Configure_Port-ID's Acknowledge). */
+static void pi_packed_fill(u32 base, unsigned int n, unsigned int bits, u32 val,
+			   const unsigned long *keep)
+{
+	unsigned int i = 0;
+
+	while (i < n) {
+		struct pi_packed_slot s = pi_packed_locate(base, i, bits);
+		u32 reg = s.reg, w = pi_rd(reg);
+
+		for (; i < n && (s = pi_packed_locate(base, i, bits)).reg == reg; i++)
+			if (!test_bit(i, keep))
+				w = pi_packed_insert(w, &s, val);
+		pi_wr(reg, w);
+	}
+}
+
 /* Read the `bits`-wide entry back through the SAME locate, so a /proc readback
  * shows the TRUE value -- the old contiguous read showed the wrong SID's, which
  * is why the SID2QID mis-addressing stayed invisible across many boots. */
@@ -6095,20 +6136,21 @@ static u32 pi_packed_get(u32 base, unsigned int idx, unsigned int bits)
  * dev/MEASURED-luna_gpon.c.md sec 197. */
 static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
 {
-	unsigned int sid;
+	DECLARE_BITMAP(keep, LUNA_CLASSIFY_SID_MAX) = { 0 };
 
 	if (!ponmac_modeset)
 		return;
 
 	/* (1) all-SID classify invalidation pre-pass, so the US-NIC resolves the
 	 * OMCC SID cleanly at the re-latch, as stock does. */
-	for (sid = 0; sid < swc->classify_sid_num; sid++) {
-		if (sid == GPON_OMCC_FLOW || (keep_data && (sid == GPON_DATA_FLOW ||
-		    (sid == GPON_CTRL_FLOW && luna_ctrl_flow_wanted()))))
-			continue;
-		pi_packed_set(PI_PON_SIDVALID, sid, 1, 0);
-		pi_packed_set(PI_PON_SID2QID, sid, 7, swc->scratch_phys_qid & 0x7f);
+	__set_bit(GPON_OMCC_FLOW, keep);
+	if (keep_data) {
+		__set_bit(GPON_DATA_FLOW, keep);
+		if (luna_ctrl_flow_wanted())
+			__set_bit(GPON_CTRL_FLOW, keep);
 	}
+	pi_packed_fill(PI_PON_SIDVALID, swc->classify_sid_num, 1, 0, keep);
+	pi_packed_fill(PI_PON_SID2QID, swc->classify_sid_num, 7, swc->scratch_phys_qid & 0x7f, keep);
 
 	/* (2) OMCI classify triple, in stock order (SID2QID -> SIDVALID -> OMCI_CFG). */
 	pi_packed_set(PI_PON_SID2QID, GPON_OMCC_FLOW, 7, GPON_OMCC_PHYS_QID & 0x7f);
@@ -6177,9 +6219,11 @@ static int gpon_install_omcc(u16 gem)
 	rc = luna_data_retire();
 	if (rc)
 		return rc;
-	rc = gpon_ds_cam_clear_all();
+	rc = !luna_ds_cam_scrubbed ? gpon_ds_cam_clear_all() :
+	     gpon_ds_cam_clean(GPON_DATA_FLOW) ?: gpon_ds_cam_clean(GPON_MCAST_FLOW);
 	if (rc)
 		return rc;
+	luna_ds_cam_scrubbed = true;
 
 	/* DS GEM-port CAM: map gem -> the OMCC flow, mark isOMCI. One indirect-CAM
 	 * transaction through the shared gpon_gtc_ds_port_write() reading
@@ -6307,6 +6351,15 @@ static void luna_mark(u32 *m)
 
 static void luna_omci_turnaround(u64 rx_ns);
 
+/* Stop the FSM: its tick, then a PLOAM interrupt already draining. One that
+ * starts later finds the tick disarmed and leaves the queue to it. */
+static void luna_fsm_stop(void)
+{
+	timer_delete_sync(&gpon_fsm_timer);
+	spin_lock_bh(&luna_fsm_lock);
+	spin_unlock_bh(&luna_fsm_lock);
+}
+
 #define LUNA_OMCI_QUEUE_LEN 64u
 #define LUNA_OMCI_POLL_BUDGET 8u
 #define LUNA_OMCI_ALARM_TICKS 300u
@@ -6367,7 +6420,7 @@ void luna_gpon_nic_reset_begin(void)
 {
 	mutex_lock(&bosa_lock);
 	if (luna_driver_ready)
-		timer_delete_sync(&gpon_fsm_timer);
+		luna_fsm_stop();
 	luna_data_suspend();
 }
 EXPORT_SYMBOL(luna_gpon_nic_reset_begin);
@@ -6723,7 +6776,7 @@ void luna_omci_detach(void *cookie)
 	 * model lock while waiting for it, or while taking the NIC TX lock. */
 	mutex_lock(&bosa_lock);
 	if (luna_driver_ready)
-		timer_delete_sync(&gpon_fsm_timer);
+		luna_fsm_stop();
 	spin_lock_irqsave(&luna_omci_lock, flags);
 	if (luna_omci.cookie == cookie) {
 		WRITE_ONCE(luna_data_admitted, false);
@@ -7234,6 +7287,7 @@ static int luna_timing_show(struct seq_file *s, void *v)
 	n = gpon_lat_samples(&t->lat, t->out);
 	seq_printf(s, "fsm_tick_ms %u\no5_ms %u\nomci_first_ms %u\ndata_ms %u\n",
 		   GPON_FSM_TICK_MS, luna_marks.o5_ms, luna_marks.omci_ms, luna_marks.data_ms);
+	seq_printf(s, "ds_ploam irq=%u unsignalled=%u\n", luna_ds_irqs, luna_ds_unsignalled);
 	seq_printf(s, "omci_turnaround_us n=%u max=%u sum=%llu\nomci_turnaround_ring",
 		   t->lat.n, t->lat.max_us, t->lat.sum_us);
 	for (i = 0; i < n; i++)
@@ -8515,10 +8569,112 @@ static void luna_lan_keep_open_poll(void)
 	}
 }
 
-static void gpon_fsm_poll(struct timer_list *t)
+static bool ploam_irq = true;
+module_param(ploam_irq, bool, 0644);
+MODULE_PARM_DESC(ploam_irq, "answer a downstream PLOAM from its interrupt (default 1); 0 leaves it to the FSM tick, an A/B of the answer time");
+
+static int luna_gpon_irq;		/* 0: the device tree wires none */
+static atomic64_t luna_ds_arrival_ns;	/* the oldest unread PLOAM's interrupt, 0 = none */
+static u64 luna_ds_carry_ns;		/* the arrival of PLOAMs a full drain left queued */
+#define GPON_FRAME_NS	125000u		/* one PLOAMd per downstream frame: queued PLOAMs are this far apart */
+static bool luna_ds_waited;		/* the tick already gave a silent PLOAM one period */
+
+/* Hand every queued downstream PLOAM to the core, timed from its interrupt; the
+ * k-th of one drain landed no earlier than k frames after it. The tick gives an
+ * unannounced PLOAM one period for its interrupt, then counts it unsignalled and
+ * times it from this read. Under luna_fsm_lock. */
+static void luna_ds_ploam_drain(bool from_irq)
 {
+	u64 arrival;
 	int guard = 0;
 
+	if (gpon_rd(GPON_GTC_DS_PLOAM_IND) & GPON_DS_PLM_BUF_EMPTY) {
+		if (from_irq)
+			atomic64_set(&luna_ds_arrival_ns, 0);	/* another GTC event's */
+		luna_ds_waited = false;
+		return;
+	}
+	arrival = luna_ds_carry_ns ?: (u64)atomic64_xchg(&luna_ds_arrival_ns, 0);
+	if (!arrival && luna_gpon_irq) {
+		if (from_irq)
+			return;		/* its own interrupt is latched behind this one */
+		if (!luna_ds_waited) {
+			luna_ds_waited = true;
+			return;
+		}
+	}
+	if (!arrival) {
+		luna_ds_unsignalled++;
+		arrival = ktime_get_boottime_ns();
+	}
+	luna_ds_carry_ns = 0;
+	luna_ds_waited = false;
+	while (!(gpon_rd(GPON_GTC_DS_PLOAM_IND) & GPON_DS_PLM_BUF_EMPTY)) {
+		u8 m[13];
+
+		luna_ds_rx_ns = arrival + (u64)guard * GPON_FRAME_NS;
+		if (guard++ == 16) {
+			luna_ds_carry_ns = luna_ds_rx_ns;
+			break;
+		}
+		/* The word-unpack is the core's (gpon_gtc_ploam.h, x86-proven); this shell
+		 * contributes the accessor and the per-SoC offset. The DEQ below advances
+		 * the queue even on a refusal: the queue discipline is this loop's. */
+		luna_rx_burst_idx = (u8)(guard - 1);	/* 0 = the first this drain */
+		if (gpon_gtc_ds_ploam_read(&gpon_io,
+					   reg_make(GPON_GTC_DS_PLOAM_MSG), m))
+			gpon_fsm_handle(m);
+		gpon_ds_rx++;					/* DS-lock liveness */
+		gpon_wr(GPON_GTC_DS_PLOAM_IND, GPON_DS_PLM_DEQ);	/* advance */
+	}
+	luna_ds_rx_ns = 0;
+}
+
+static irqreturn_t luna_gpon_irq_stamp(int irq, void *data)
+{
+	atomic64_cmpxchg(&luna_ds_arrival_ns, 0, ktime_get_boottime_ns());
+	luna_ds_irqs++;
+	return IRQ_WAKE_THREAD;
+}
+
+/* Clear the latch before the event, so a PLOAM landing meanwhile raises it again. */
+static irqreturn_t luna_gpon_irq_thread(int irq, void *data)
+{
+	u32 events;
+
+	sw_wr(SW_INTR_IMS, SW_INTR_GPON);
+	events = gpon_rd(GPON_GTC_DS_INTR_DLT);		/* read-clear */
+	spin_lock_bh(&luna_fsm_lock);
+	if (READ_ONCE(ploam_irq) && timer_pending(&gpon_fsm_timer))	/* the FSM is live */
+		luna_ds_ploam_drain(true);
+	spin_unlock_bh(&luna_fsm_lock);
+	return events ? IRQ_HANDLED : IRQ_NONE;
+}
+
+static void luna_gpon_irq_request(void)
+{
+	int ret;
+
+	if (!luna_gpon_irq) {
+		pr_info("luna-gpon: no GPON interrupt in the device tree: downstream PLOAM waits for the FSM tick\n");
+		return;
+	}
+	ret = request_threaded_irq(luna_gpon_irq, luna_gpon_irq_stamp, luna_gpon_irq_thread,
+				   IRQF_ONESHOT, "luna-gpon", NULL);
+	if (ret) {
+		pr_warn("luna-gpon: GPON interrupt %d refused (%d): downstream PLOAM waits for the FSM tick\n",
+			luna_gpon_irq, ret);
+		luna_gpon_irq = 0;
+		return;
+	}
+	gpon_wr(GPON_INTR_MASK, GPON_INTR_GTC_DS);
+	sw_wr(SW_INTR_IMS, SW_INTR_GPON);
+	sw_field(SW_INTR_IMR, 10, 10, 1);
+}
+
+static void gpon_fsm_poll(struct timer_list *t)
+{
+	spin_lock(&luna_fsm_lock);
 	gpon_fsm_ticks++;
 	spin_lock(&luna_pwd_lock);
 	if (luna_pwd_dirty) {
@@ -8547,20 +8703,7 @@ static void gpon_fsm_poll(struct timer_list *t)
 	 * the new Serial_Number. */
 	gpon_apply_identity_change();
 drain_downstream:
-	while (!(gpon_rd(GPON_GTC_DS_PLOAM_IND) & GPON_DS_PLM_BUF_EMPTY) &&
-	       guard++ < 16) {
-		u8 m[13];
-
-		/* The word-unpack is the core's (gpon_gtc_ploam.h, x86-proven); this shell
-		 * contributes the accessor and the per-SoC offset. The DEQ below advances
-		 * the queue even on a refusal: the queue discipline is this loop's. */
-		luna_rx_burst_idx = (u8)(guard - 1);	/* 0 = the first this poll */
-		if (gpon_gtc_ds_ploam_read(&gpon_io,
-					   reg_make(GPON_GTC_DS_PLOAM_MSG), m))
-			gpon_fsm_handle(m);
-		gpon_ds_rx++;					/* DS-lock liveness */
-		gpon_wr(GPON_GTC_DS_PLOAM_IND, GPON_DS_PLM_DEQ);	/* advance */
-	}
+	luna_ds_ploam_drain(false);
 	if (!READ_ONCE(luna_activation_ready))
 		goto next_poll;
 	/* Both provisioning follow-ups are one core poll: the WAN ...
@@ -8753,8 +8896,9 @@ drain_downstream:
 
 
 next_poll:
-	if (!READ_ONCE(luna_stopping))
+	if (!READ_ONCE(luna_stopping))		/* re-armed under the lock: see the thread */
 		mod_timer(&gpon_fsm_timer, jiffies + GPON_FSM_TICK_JIFFIES);
+	spin_unlock(&luna_fsm_lock);
 }
 
 /* Stock's omitted LDO init step, byte-exact. SC-indirect ...
@@ -8929,7 +9073,7 @@ static int luna_quiesce_locked(void)
 {
 	WRITE_ONCE(luna_activation_ready, false);
 	if (luna_driver_ready) {
-		timer_delete_sync(&gpon_fsm_timer);
+		luna_fsm_stop();
 		cancel_work_sync(&gpon_cdr_reset_work);
 	}
 	WRITE_ONCE(luna_health_los, -1);
@@ -9039,8 +9183,10 @@ static int __init rtl9602c_gpon_init(void)
 		bool declared = np != NULL;
 		bool on = declared && of_device_is_available(np);
 
-		if (on)
+		if (on) {
 			luna_pbo_regions_from_dt(np);
+			luna_gpon_irq = irq_of_parse_and_map(np, 0);
+		}
 		/* the board may forbid the laser outright: receive only, nothing
 		 * transmitted into a shared PON, whatever the command line says */
 		if (on && of_property_read_bool(np, "realtek,laser-off")) {
@@ -9079,6 +9225,12 @@ static int __init rtl9602c_gpon_init(void)
 	swc = is_9607c ? &gpon_swc_9607c
 	    : is_9603cvd ? &gpon_swc_9603cvd : &gpon_swc_9602c;
 	gtune = is_9603cvd ? &luna_gtc_tune_9603cvd : &luna_gtc_tune_9602c;
+	if (swc->classify_sid_num > LUNA_CLASSIFY_SID_MAX) {
+		pr_err("luna-gpon: %s classifies %u SIDs, past LUNA_CLASSIFY_SID_MAX %u\n",
+		       swc->chip, swc->classify_sid_num, LUNA_CLASSIFY_SID_MAX);
+		ret = -EINVAL;
+		goto fail_maps;
+	}
 	luna_laser_gpio_from_dt();
 	luna_led_map_from_dt();
 	ret = luna_gpio_drive(laser_tx_dis_gpio, true, "TX_DISABLE inhibit");
@@ -9392,6 +9544,9 @@ skip_bosa_init:
 	else
 		pr_info("luna-gpon: MAC reset done, ONU state O%u\n",
 			gpon_rd(GPON_GTC_DS_ONU_ID_STATUS) & GPON_ONU_STATE_MASK);
+	luna_ds_cam_scrubbed = !gpon_ds_cam_clear_all();
+	if (!luna_ds_cam_scrubbed)
+		pr_warn("luna-gpon: DS GEM-port CAM not cleared after the reset: the first Configure_Port-ID clears it\n");
 
 	/* Optical loss-of-signal monitoring, inverted polarity. The downstream framer
 	 * gates on OPTIC_LOS_SIG; until the input is enabled with the correct
@@ -9558,6 +9713,7 @@ skip_bosa_init:
 		pr_info("luna-gpon: upstream inhibited, activation pending: %d\n", bosa_cal_error);
 	luna_resume_poll();
 	mutex_unlock(&bosa_lock);
+	luna_gpon_irq_request();
 	luna_health_proc = proc_create_single("gpon_health", 0444, NULL, luna_health_show);
 	if (!luna_health_proc)
 		pr_warn("luna-gpon: cannot expose cached health status\n");
@@ -9589,7 +9745,11 @@ static void __exit rtl9602c_gpon_exit(void)
 	 * producer that is already running cannot re-arm behind the cancel. */
 	luna_uni_apply_close();
 	mutex_unlock(&bosa_lock);
-	timer_delete_sync(&gpon_fsm_timer);
+	luna_fsm_stop();
+	if (luna_gpon_irq) {
+		sw_field(SW_INTR_IMR, 10, 10, 0);
+		free_irq(luna_gpon_irq, NULL);
+	}
 	cancel_work_sync(&gpon_cdr_reset_work);
 	cancel_delayed_work_sync(&gpon_optical_work);
 	/* OUTSIDE bosa_lock, and after the producers: the worker holds that

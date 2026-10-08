@@ -45,6 +45,8 @@
 #include <linux/of_address.h>	/* of_address_to_resource: the board's reserved PBO pools */
 #include "gpon_gem_diag.h"
 #include "gpon_olt_diag.h"	/* the far-end capture: replayed off the board */
+#include "gpon_mon.h"		/* the control plane as Ethernet frames for gponmon0 */
+#include <linux/etherdevice.h>
 #include "luna_gpon_nic.h"
 #include "luna_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
 #include "luna_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
@@ -197,25 +199,95 @@ static bool gpon_sn_changed;		/* SN (re)provisioned -> FSM must re-range */
 static struct gpon_ploam luna_ploam;
 static u8 gpon_sn_bytes[8];		/* defined here for the same reason */
 
+/* gponmon0: every PLOAM and OMCI PDU as an Ethernet frame for packet sockets
+ * (tcpdump, Wireshark), never printk. Down by default; while down a PDU costs
+ * one flag test. Control plane only: the GEM data path never passes here. */
+static struct net_device *luna_mon;
+
+static netdev_tx_t luna_mon_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static const struct net_device_ops luna_mon_ops = {
+	.ndo_start_xmit = luna_mon_xmit,
+};
+
+static void luna_mon_setup(struct net_device *dev)
+{
+	ether_setup(dev);
+	dev->netdev_ops = &luna_mon_ops;
+	/* Receive-only: no ARP, no IPv6 address, no multicast report of its own,
+	 * so a capture holds the control plane and nothing else. */
+	dev->flags = (dev->flags | IFF_NOARP) & ~IFF_MULTICAST;
+	dev->priv_flags |= IFF_NO_QUEUE | IFF_NO_ADDRCONF;
+}
+
+static void luna_mon_frame(enum gpon_mon_proto proto, int upstream, const u8 *pdu, int len)
+{
+	struct net_device *dev = READ_ONCE(luna_mon);
+	struct sk_buff *skb;
+
+	if (!dev || !netif_running(dev) || !pdu || len <= 0)
+		return;
+	skb = netdev_alloc_skb(dev, GPON_MON_HDR + len);
+	if (!skb) {
+		dev_core_stats_rx_dropped_inc(dev);
+		return;
+	}
+	gpon_mon_encap(skb_put(skb, GPON_MON_HDR + len), proto, upstream, pdu, len);
+	skb->protocol = eth_type_trans(skb, dev);
+	netif_rx(skb);
+}
+
+static void luna_mon_register(void)
+{
+	struct net_device *dev = alloc_netdev(0, "gponmon%d", NET_NAME_ENUM, luna_mon_setup);
+
+	if (!dev) {
+		pr_err("luna-gpon: gponmon netdev not allocated -- no control-plane capture\n");
+		return;
+	}
+	eth_hw_addr_random(dev);
+	if (register_netdev(dev)) {
+		pr_err("luna-gpon: gponmon netdev not registered -- no control-plane capture\n");
+		free_netdev(dev);
+		return;
+	}
+	WRITE_ONCE(luna_mon, dev);
+}
+
+static void luna_mon_unregister(void)
+{
+	struct net_device *dev = luna_mon;
+
+	if (!dev)
+		return;
+	WRITE_ONCE(luna_mon, NULL);
+	unregister_netdev(dev);
+	free_netdev(dev);
+}
+
 #ifdef CONFIG_GPON_OLT_DIAG
 /* The PLOAM half of the far end's conversation: the OMCI ring's codec and
  * clock, in a ring of its own because the OMCI burst alone overflows that one. */
 static struct gpon_olt_capture luna_ploam_cap;
 static DEFINE_SPINLOCK(luna_ploam_cap_lock);
+#endif
 
 static void luna_ploam_capture(enum gpon_olt_dir dir, const u8 *m, unsigned int len)
 {
+#ifdef CONFIG_GPON_OLT_DIAG
 	unsigned long flags;
 
 	spin_lock_irqsave(&luna_ploam_cap_lock, flags);
 	gpon_olt_capture_add(&luna_ploam_cap, div_u64(ktime_get_boottime_ns(), 1000),
 			     (u8)luna_ploam.state, dir, m, len);
 	spin_unlock_irqrestore(&luna_ploam_cap_lock, flags);
-}
-#else
-static inline void luna_ploam_capture(enum gpon_olt_dir dir, const u8 *m,
-				      unsigned int len) { }
 #endif
+	luna_mon_frame(GPON_MON_PLOAM, dir == GPON_OLT_US, m, len);
+}
 
 static int onu_sn_set(const char *val, const struct kernel_param *kp)
 {
@@ -6658,7 +6730,10 @@ EXPORT_SYMBOL(luna_omci_set_optical);
 
 static int luna_omci_send(const u8 *msg, int n)
 {
-	int ret = luna_omci.tx(luna_omci.cookie, msg, n);
+	int ret;
+
+	luna_mon_frame(GPON_MON_OMCI, 1, msg, n);
+	ret = luna_omci.tx(luna_omci.cookie, msg, n);
 
 	if (ret)
 		luna_omci.tx_errors++;
@@ -6903,6 +6978,7 @@ static void luna_omci_poll(void)
 					   GPON_MCAST_GEM, &luna_omci.binding);
 		}
 		spin_unlock_irqrestore(&luna_omci_lock, flags);
+		luna_mon_frame(GPON_MON_OMCI, 0, frame.msg, frame.len);
 		if (n > 0)
 			luna_omci_send(response, n);
 #ifdef CONFIG_GPON_OMCI_DIAG
@@ -9225,6 +9301,7 @@ skip_bosa_init:
 
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
 	proc_create_single("gpon_log", 0444, NULL, luna_log_show);
+	luna_mon_register();
 	proc_create_single("bosadump", 0444, NULL, bosadump_proc_show);
 	proc_create_single("pidump", 0444, NULL, pidump_proc_show);
 	proc_create_single("swdump", 0444, NULL, swdump_proc_show);
@@ -9409,6 +9486,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	luna_health_proc = NULL;
 	remove_proc_entry("gpon", NULL);
 	remove_proc_entry("gpon_log", NULL);
+	luna_mon_unregister();
 	remove_proc_entry("bosadump", NULL);
 	remove_proc_entry("pidump", NULL);
 	remove_proc_entry("swdump", NULL);

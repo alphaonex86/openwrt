@@ -928,6 +928,15 @@ config KERNEL_MTD_LUNA_NOR_WRITE
 	  stays readable (the unit's identity) and nothing can write it
 	  (build-openwrt.py variant "ram").
 
+config KERNEL_LUNA_DEBUG
+	bool "Luna bring-up markers and driver diagnostics"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  Early-boot markers on the UART ([P] prom, [M] memory setup, [L] L2 window
+	  done, [T] timer, [I] irqchip) plus the luna_eth bring-up aids
+	  (build-openwrt.py variant "boot-marks").
+
 config KERNEL_MEM_ALLOC_PROFILING
 	bool "Track kernel allocation sites in /proc/allocinfo"
 	select KERNEL_DEBUG_KERNEL

@@ -104,7 +104,7 @@ config LUNA_DEBUG
 	bool "Luna family bring-up diagnostics (boot markers, frame dumps, link diag, PHY survey)"
 	default n
 	help
-	  Also the platform's early boot markers ([P] [M] [T] [I] [i]) and its
+	  Also the platform's early boot markers ([P] [M] [L] [T] [I] [i]) and its
 	  LUNA-DIAG CPU / CM lines, on every Luna board (2026-09-29).
 	  The FAMILY member of the per-category debug set (operator, 2026-09-22:
 	  "DEBUG por categoria ... para evitar sobrecargar el firmware"). It

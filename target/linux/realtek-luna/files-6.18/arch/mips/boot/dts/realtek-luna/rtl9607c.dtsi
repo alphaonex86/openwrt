@@ -228,3 +228,10 @@
 		pe-ipc-cpuid = <0>;
 	};
 };
+
+/* The GPON block raises the switch interrupt, GIC shared 15 like switch@0 above
+ * (stock's "apl_sw"): a downstream PLOAM is answered from it, not the FSM tick. */
+&gpon {
+	interrupt-parent = <&gic>;
+	interrupts = <0 15 4>;
+};

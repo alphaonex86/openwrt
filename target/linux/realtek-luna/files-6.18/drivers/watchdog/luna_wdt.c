@@ -308,6 +308,7 @@ static int luna_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.parent = dev;
 	wdt->wdd.min_timeout = LUNA_WDT_MIN_TIMEOUT;
 	wdt->wdd.max_timeout = max_timeout;
+	wdt->wdd.max_hw_heartbeat_ms = max_timeout * 1000;
 	wdt->wdd.timeout = min(LUNA_WDT_DEFAULT_TIMEOUT, max_timeout);
 
 
@@ -327,14 +328,13 @@ static int luna_wdt_probe(struct platform_device *pdev)
 	 * dev/MEASURED-luna_wdt.c.md sec 16. */
 	watchdog_stop_on_reboot(&wdt->wdd);
 
-	if (adopted) {
-		/* Take the window OVER rather than inherit it. The counter ...
-		 * dev/MEASURED-luna_wdt.c.md sec 17. */
-		ret = luna_wdt_start(&wdt->wdd);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "cannot reprogram the inherited window\n");
-	}
+	/* Armed here and flagged running: the core feeds it until userspace opens
+	 * /dev/watchdog, so a hard lockup from probe on resets the chip. An
+	 * inherited window is reprogrammed to ours by the same start. */
+	ret = luna_wdt_start(&wdt->wdd);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot arm the window\n");
+	set_bit(WDOG_HW_RUNNING, &wdt->wdd.status);
 
 	platform_set_drvdata(pdev, wdt);
 
@@ -343,7 +343,7 @@ static int luna_wdt_probe(struct platform_device *pdev)
 		return ret;
 
 	dev_info(dev,
-		 "Luna WDT at %pa on a %lu Hz clock: %u s timeout (max %u s), full-chip reset, %s at kernel entry%s\n",
+		 "Luna WDT at %pa on a %lu Hz clock: %u s timeout (max %u s), full-chip reset, %s at kernel entry, armed%s\n",
 		 &phys, wdt->rate, wdt->wdd.timeout, wdt->wdd.max_timeout,
 		 adopted ? "ALREADY RUNNING (reprogrammed to our window)"
 			 : "stopped",

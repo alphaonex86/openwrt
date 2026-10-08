@@ -41,8 +41,6 @@
 		};
 	};
 
-	/delete-node/ watchdog@18003260;
-
 	/* The X111W's pad routing, which this board has run with so far:
 	 * IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
 	pon-optics {

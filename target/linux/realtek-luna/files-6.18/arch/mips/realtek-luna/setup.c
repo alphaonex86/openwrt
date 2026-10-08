@@ -81,46 +81,60 @@ static void luna_machine_halt(void)
 #define LUNA_CONF2_SL_SHIFT	4
 #define LUNA_CONF2_SL_MASK	(0xfu << LUNA_CONF2_SL_SHIFT)
 
-/* ★★★ NOTHING MAY TOUCH DRAM BETWEEN THE UN-BYPASS AND THE ... -- dev/MEASURED-setup.c.md sec 4. */
+/* ★★★ THE L2 GOES LIVE FROM KSEG1, WITH THE L1 EMPTY AND NOT ONE MEMORY ... -- dev/MEASURED-setup.c.md sec 4. */
 static unsigned int luna_conf2_reset __initdata;
 static unsigned int luna_conf2_now __initdata;
 
-static void __init luna_l2_unbypass(void)
+static void __init luna_l2_enable(void)
 {
-	unsigned int c2 = read_c0_config2();
+	unsigned int c1 = read_c0_config1();
+	unsigned long dline = 2UL << ((c1 & MIPS_CONF1_DL) >> MIPS_CONF1_DL_SHF);
+	unsigned long dsize = (64UL << ((c1 & MIPS_CONF1_DS) >> MIPS_CONF1_DS_SHF)) * dline *
+			      (((c1 & MIPS_CONF1_DA) >> MIPS_CONF1_DA_SHF) + 1);
+	unsigned long tmp, addr, end;
 
-	luna_conf2_reset = c2;
-	if (c2 & LUNA_CONF2_L2_BYPASS) {
-		write_c0_config2(c2 & ~LUNA_CONF2_L2_BYPASS);
-		back_to_back_c0_hazard();
-	}
-	luna_conf2_now = read_c0_config2();
-}
-
-static void __init luna_l2_invalidate_tags(void)
-{
-	unsigned long addr;
-
-	/* Zero the L2 tag/data shadow registers -> Index_Store_Tag writes an
-	 * invalid tag. (CP0 $28 sel 4/5, $29 sel 5 = L2 TagLo/DataLo/DataHi.) */
+	luna_conf2_reset = read_c0_config2();
 	__asm__ __volatile__(
-		"	.set	push		\n"
-		"	.set	noreorder	\n"
-		"	mtc0	$0, $28, 4	\n"
-		"	mtc0	$0, $28, 5	\n"
-		"	mtc0	$0, $29, 5	\n"
-		"	.set	pop		\n"
-		::: "memory");
-
-	for (addr = CKSEG0; addr < CKSEG0 + LUNA_L2_SIZE; addr += LUNA_L2_LINE)
-		__asm__ __volatile__(
-			"	.set	push		\n"
-			"	.set	noreorder	\n"
-			"	cache	0x0b, 0(%0)	\n"	/* Index_Store_Tag_S */
-			"	.set	pop		\n"
-			:: "r" (addr) : "memory");
-
-	__asm__ __volatile__("sync" ::: "memory");
+	"	.set	push				\n"
+	"	.set	noreorder			\n"
+	"	.set	mips32r2			\n"
+	"	lui	%[addr], 0x8000			\n"
+	"	addu	%[end], %[addr], %[dsize]	\n"
+	"1:	cache	0x01, 0(%[addr])		\n"	/* Index_Writeback_Inv_D */
+	"	addu	%[addr], %[addr], %[dline]	\n"
+	"	bne	%[addr], %[end], 1b		\n"
+	"	 nop					\n"
+	"	sync					\n"
+	"	la	%[tmp], 2f			\n"	/* continue at the KSEG1 alias */
+	"	lui	%[addr], 0x2000			\n"
+	"	or	%[tmp], %[tmp], %[addr]		\n"
+	"	jr	%[tmp]				\n"
+	"	 nop					\n"
+	"2:	mfc0	%[tmp], $16, 2			\n"
+	"	ins	%[tmp], $0, %[l2b], 1		\n"	/* Config2: L2 bypass off */
+	"	mtc0	%[tmp], $16, 2			\n"
+	"	ehb					\n"
+	"	mtc0	$0, $28, 0			\n"	/* ITagLo */
+	"	mtc0	$0, $28, 4			\n"	/* L2 TagLo, DataLo, DataHi */
+	"	mtc0	$0, $28, 5			\n"
+	"	mtc0	$0, $29, 5			\n"
+	"	lui	%[addr], 0x8000			\n"
+	"	addu	%[end], %[addr], %[l2size]	\n"
+	"3:	cache	0x08, 0(%[addr])		\n"	/* Index_Store_Tag_I */
+	"	cache	0x0b, 0(%[addr])		\n"	/* Index_Store_Tag_S */
+	"	addiu	%[addr], %[addr], %[l2line]	\n"
+	"	bne	%[addr], %[end], 3b		\n"
+	"	 nop					\n"
+	"	sync					\n"
+	"	la	%[tmp], 4f			\n"	/* back to KSEG0 */
+	"	jr.hb	%[tmp]				\n"
+	"	 nop					\n"
+	"4:	.set	pop				\n"
+	: [tmp] "=&r" (tmp), [addr] "=&r" (addr), [end] "=&r" (end)
+	: [dsize] "r" (dsize), [dline] "r" (dline), [l2size] "r" (LUNA_L2_SIZE),
+	  [l2line] "i" (LUNA_L2_LINE), [l2b] "i" (__builtin_ctz(LUNA_CONF2_L2_BYPASS))
+	: "memory");
+	luna_conf2_now = read_c0_config2();
 }
 
 /* UserLocal / thread-pointer (TLS) enable. The C library ... -- dev/MEASURED-setup.c.md sec 5. */
@@ -149,8 +163,8 @@ void __init plat_mem_setup(void)
 {
 	luna_mark('M');
 #ifdef CONFIG_MIPS_CM
-	luna_l2_unbypass();		/* the L2 is hidden at reset on the 9603CVD */
-	luna_l2_invalidate_tags();	/* clean the boot-time garbage L2 tags */
+	luna_l2_enable();		/* hidden at reset on the 9603CVD; garbage tags */
+	luna_mark('L');			/* the L2 window is behind us */
 	/* ★ THE TOP-OF-DRAM PROBE THAT USED TO RUN HERE IS GONE, and ...
 	 * dev/MEASURED-setup.c.md sec 7. */
 #endif

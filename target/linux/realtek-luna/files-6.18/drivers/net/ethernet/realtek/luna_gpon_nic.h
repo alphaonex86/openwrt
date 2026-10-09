@@ -24,6 +24,7 @@ void luna_omci_set_wan_mac(const u8 *mac);
 void luna_omci_rx_errors(u32 *bad_mic, u32 *runt);
 void luna_omci_report_oper_up(void);
 bool luna_gpon_data_ready(void);
+void luna_gpon_vlan_filter_ok(bool ok);
 /* The CPU's WAN control frames ride their own flow on the data T-CONT's next queue
  * (luna_gpon.c ctrl_queue): an offloaded flood fills the data queue, and the PPP LCP
  * echo replies queued behind it were lost (X100DG, V2801RGW, 2026-10-04). */

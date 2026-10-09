@@ -260,6 +260,12 @@ static bool rtl9602c_uni_port_locked(unsigned int port)
 					 * (config done) to open LAN; re-assert on any re-range. Proven viable: online
 					 * with 0x19 then poke 0x13008=0 -> stays online 6h + LAN reachable. */
 #define SW_DEFAULT_VID		1
+/* The PON port's own VLAN (members PON + CPU), as stock does (PON 4025, LAN 4005): a WAN
+ * broadcast then floods to the CPU only, never to a LAN port. 0 = the PON shares VID 1. */
+static uint pon_vid = 4025;
+module_param(pon_vid, uint, 0444);
+MODULE_PARM_DESC(pon_vid, "VLAN of the PON port, apart from the LAN's (default 4025 as stock; 0 = shared VID 1)");
+#define SW_WAN_PVID	(pon_vid ? pon_vid : SW_DEFAULT_VID)
 /* Indirect VLAN 4k-table access (field positions):
  * TBL_ACCESS_CTRL[31]=start [20:9]=addr/VID [6:4]=method(1) [3]=cmd(1=write)
  * [2:0]=type(1=VLAN); STS bit13=BUSY; WR_DATA holds the entry word. */
@@ -607,6 +613,18 @@ static void rtl9602c_sw_tbl_pause(void)
 	udelay(1);
 }
 
+/* One VLAN 4k-table entry: ext[17:11] | untag[7:4] | mbr[3:0], IVL and FID 0 as the L34 lookups
+ * expect. The extension ports are the CPU's: without them the VLAN filter drops its traffic. */
+static int rtl9602c_vlan_write(struct rtl9602c_eth *ep, u16 vid, u32 mbr, u32 untag, u32 ext)
+{
+	struct hwio io = luna_sw_io(ep->sw);
+
+	iowrite32((ext << 11) | (untag << 4) | mbr, ep->sw + SW_TBL_WRDATA);
+	iowrite32(SW_TBL_VLAN_WR(vid), ep->sw + SW_TBL_CTRL);
+	return gpon_ind_poll(&io, reg_make(SW_TBL_STS), SW_TBL_BUSY, SW_TBL_TRIES,
+			     rtl9602c_sw_tbl_pause);
+}
+
 static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 {
 	if (!ep->sw)
@@ -648,26 +666,27 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	/* 0x27000 (PISO) is a 5-bit isolation-vector INDEX per port, ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 37. */
 	{
-		struct hwio io = luna_sw_io(ep->sw);
 		int p, rc;
 
-		/* 4k-table entry: untag[7:4]=0xf | mbr[3:0]=0xf (all four ports) */
-		iowrite32((0xf << 4) | 0xf, ep->sw + SW_TBL_WRDATA);
-		iowrite32(SW_TBL_VLAN_WR(SW_DEFAULT_VID), ep->sw + SW_TBL_CTRL);
-		/* THE POLL WAS HAND-ROLLED AND ITS ANSWER WAS THROWN AWAY: it ...
-		 * dev/MEASURED-rtl9602c_eth.c.md sec 38. */
-		rc = gpon_ind_poll(&io, reg_make(SW_TBL_STS), SW_TBL_BUSY,
-				   SW_TBL_TRIES, rtl9602c_sw_tbl_pause);
+		u32 lan_ext = 0x7, pon = BIT(ep->swm->pon_port) | BIT(ep->swm->cpu_port);
+
+		/* As stock's 4005: every port and the CPU's extension ports, all untagged */
+		rc = rtl9602c_vlan_write(ep, SW_DEFAULT_VID, 0xf, 0xf, lan_ext);
 		if (rc < 0)
 			netdev_warn(ep->ndev,
 				    "swcore VLAN 4k-table engine still BUSY after %u tries (rc=%d): default VLAN %u may not be installed, LAN egress may stay filtered\n",
 				    SW_TBL_TRIES, rc, SW_DEFAULT_VID);
+		/* As stock's 4025: the PON floods to the CPU only */
+		if (pon_vid && rtl9602c_vlan_write(ep, pon_vid, pon, pon, 0x1) < 0)
+			netdev_warn(ep->ndev,
+				    "swcore VLAN table BUSY writing the PON VLAN %u: WAN broadcasts may reach the LAN ports\n",
+				    pon_vid);
 		iowrite32(0, ep->sw + SW_VLAN_PORT_ACCEPT_FRAME_TYPE);	/* accept all frame types */
 		/* PVID is a 12-bit element array packed TWO PER WORD, so a ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 39. */
 		for (p = 0; p < SW_VLAN_PB_VID_PORTS; p++) {
 			void __iomem *w;
-			u32 vid = SW_DEFAULT_VID;
+			u32 vid = p == ep->swm->pon_port ? SW_WAN_PVID : SW_DEFAULT_VID;
 
 			if (!(ep->swm->port_mask & BIT(p)))
 				continue;	/* not a port on this chip */
@@ -688,13 +707,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 				u32 mbr = BIT(p) | BIT(ep->swm->cpu_port);
 
 				vid = SW_PORT_VID_BASE + p;
-				iowrite32((BIT(p) << 4) | mbr,
-					  ep->sw + SW_TBL_WRDATA);
-				iowrite32(SW_TBL_VLAN_WR(vid),
-					  ep->sw + SW_TBL_CTRL);
-				if (gpon_ind_poll(&io, reg_make(SW_TBL_STS),
-						  SW_TBL_BUSY, SW_TBL_TRIES,
-						  rtl9602c_sw_tbl_pause) < 0)
+				if (rtl9602c_vlan_write(ep, vid, mbr, BIT(p), lan_ext) < 0)
 					netdev_warn(ep->ndev,
 						    "swcore VLAN table BUSY writing per-port VLAN %u for port %u: that socket will not be separable\n",
 						    vid, p);
@@ -708,6 +721,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 		}
 		iowrite32(0xf, ep->sw + SW_VLAN_INGRESS);	/* ingress filter, ports 0-3 */
 		iowrite32(SW_VLAN_CTRL_VAL, ep->sw + SW_VLAN_CTRL); /* enable VLAN function */
+		luna_gpon_vlan_filter_ok(pon_vid != 0);
 	}
 	/* Force the CPU port link UP. CRITICAL: the bootloader leaves ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 40. */
@@ -1099,6 +1113,26 @@ static int rtl9602c_eth_wan_stop(struct net_device *ndev)
 	return 0;
 }
 
+/* With the VLAN filter on, a tagged WAN needs its VID in the table: PON and CPU, tagged. */
+static int rtl9602c_wan_vid(struct rtl9602c_eth *ep, u16 vid, bool add)
+{
+	u32 mbr = BIT(ep->swm->pon_port) | BIT(ep->swm->cpu_port);
+
+	if (!ep->sw || !pon_vid || !vid || vid == SW_DEFAULT_VID || vid == pon_vid)
+		return 0;
+	return rtl9602c_vlan_write(ep, vid, add ? mbr : 0, 0, add ? 0x1 : 0) < 0 ? -EBUSY : 0;
+}
+
+static int rtl9602c_wan_vid_add(struct net_device *ndev, __be16 proto, u16 vid)
+{
+	return rtl9602c_wan_vid(*(struct rtl9602c_eth **)netdev_priv(ndev), vid, true);
+}
+
+static int rtl9602c_wan_vid_kill(struct net_device *ndev, __be16 proto, u16 vid)
+{
+	return rtl9602c_wan_vid(*(struct rtl9602c_eth **)netdev_priv(ndev), vid, false);
+}
+
 static const struct net_device_ops rtl9602c_eth_wan_ops = {
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	.ndo_setup_tc		= rtl9602c_l34_setup_tc,
@@ -1108,6 +1142,8 @@ static const struct net_device_ops rtl9602c_eth_wan_ops = {
 	.ndo_start_xmit		= rtl9602c_eth_wan_xmit,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_vlan_rx_add_vid	= rtl9602c_wan_vid_add,
+	.ndo_vlan_rx_kill_vid	= rtl9602c_wan_vid_kill,
 };
 
 static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
@@ -2822,7 +2858,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			wan->netdev_ops = &rtl9602c_eth_wan_ops;
 			/* Keep the LAN and WAN feature declarations consistent. */
 			wan->hw_features |= NETIF_F_HW_TC;
-			wan->features |= NETIF_F_HW_TC;
+			wan->features |= NETIF_F_HW_TC | NETIF_F_HW_VLAN_CTAG_FILTER;
 			/* Initial WAN MAC = board MAC + offset; re-derived at open + on eth0 MAC
 			 * changes once rtk_factory provisions the real board MAC onto eth0. */
 			rtl9602c_wan_mac(wmac, ndev->dev_addr);

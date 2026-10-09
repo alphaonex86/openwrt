@@ -8596,16 +8596,27 @@ static void gpon_apply_identity_change(void)
 	gpon_ploam_sn_changed(&luna_ploam, luna_now_ms());
 }
 
+static bool luna_vlan_filter_ok;
+
+/* The Ethernet driver's VLAN table carries the CPU's extension ports and a PON VLAN of its
+ * own: the LAN then stays open WITH the filter, and the filter keeps WAN broadcasts off it. */
+void luna_gpon_vlan_filter_ok(bool ok)
+{
+	WRITE_ONCE(luna_vlan_filter_ok, ok);
+}
+EXPORT_SYMBOL(luna_gpon_vlan_filter_ok);
+
 /* Ahead of the activation gate: a board whose activation never becomes ready kept
  * VLAN_FILTER on and its LAN dark (X100DG, 2026-10-01). */
 static void luna_lan_keep_open_poll(void)
 {
 	if (!lan_keep_open)
 		return;
-	sw_field(SW_VLAN_CTRL, 0, 0, 0);		/* VLAN_FILTER off -> LAN open, every state */
+	sw_field(SW_VLAN_CTRL, 0, 0, READ_ONCE(luna_vlan_filter_ok));	/* LAN open, every state */
 	if (!gpon_vlan_lan_open) {
 		gpon_vlan_lan_open = true;
-		luna_log("lan_keep_open -> VLAN_FILTER off (LAN access open)\n");
+		luna_log("lan_keep_open -> LAN access open (VLAN_FILTER %d)\n",
+			 READ_ONCE(luna_vlan_filter_ok));
 	}
 }
 

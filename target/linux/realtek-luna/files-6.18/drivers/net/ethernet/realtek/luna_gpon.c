@@ -1429,9 +1429,15 @@ MODULE_PARM_DESC(gpon_fsm_tick_req_ms,
 
 #define GPON_FSM_TICK_REQ_MS	gpon_fsm_tick_req_ms
 #define GPON_FSM_TICK_JIFFIES	msecs_to_jiffies(GPON_FSM_TICK_REQ_MS)
-#define GPON_FSM_TICK_MS	((u32)jiffies_to_msecs(GPON_FSM_TICK_JIFFIES))
+
+/* The core's clock: ms-based protocol timers never depend on the FSM tick. */
+static u32 luna_now_ms(void)
+{
+	return max_t(u32, 1, (u32)div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC));
+}
 
 static u32 gpon_fsm_ticks;
+static u32 luna_fsm_first_ms;
 static u8 gpon_sds_synced;	/* one-shot SDS TX re-sync done */
 static u32 gpon_ds_rx;		/* total downstream PLOAMs drained (DS-lock liveness) */
 /* The GEM the install SUCCEEDED on.  Deliberately NOT gpon_omcc_gem_port, which
@@ -6346,7 +6352,7 @@ static struct {
 static void luna_mark(u32 *m)
 {
 	if (!*m)
-		*m = max_t(u32, 1, (u32)div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC));
+		*m = luna_now_ms();
 }
 
 static void luna_omci_turnaround(u64 rx_ns);
@@ -7309,7 +7315,8 @@ static int luna_timing_show(struct seq_file *s, void *v)
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	n = gpon_lat_samples(&t->lat, t->out);
 	seq_printf(s, "fsm_tick_ms %u\no5_ms %u\nomci_first_ms %u\ndata_ms %u\n",
-		   GPON_FSM_TICK_MS, luna_marks.o5_ms, luna_marks.omci_ms, luna_marks.data_ms);
+		   gpon_fsm_ticks > 1 ? (luna_now_ms() - luna_fsm_first_ms) / (gpon_fsm_ticks - 1) : 0,
+		   luna_marks.o5_ms, luna_marks.omci_ms, luna_marks.data_ms);
 	seq_printf(s, "ds_ploam irq=%u unsignalled=%u parked=%u\n", luna_ds_irqs, luna_ds_unsignalled,
 		   luna_ds_parks);
 	seq_printf(s, "omci_turnaround_us n=%u max=%u sum=%llu\nomci_turnaround_ring",
@@ -8363,8 +8370,8 @@ static void luna_o5_window_sample(void)
 			pl++;
 	}
 	luna_bwcap_arm();
-	luna_log("o5win +%ums grants=%u ploamu=%u first=%08x/%08x | us_intr dlt=%x sts=%x | ploam_ind=%03x cpu_tx=%08x auto_tx=%08x | gem_byte=%u dbru=%u idle16=%u | eqd=%08x boh=%03x sstart=%u\n",
-		(gpon_fsm_ticks - gpon_o5_entry_tick) * GPON_FSM_TICK_MS, n, pl,
+	luna_log("o5win +%u ticks grants=%u ploamu=%u first=%08x/%08x | us_intr dlt=%x sts=%x | ploam_ind=%03x cpu_tx=%08x auto_tx=%08x | gem_byte=%u dbru=%u idle16=%u | eqd=%08x boh=%03x sstart=%u\n",
+		gpon_fsm_ticks - gpon_o5_entry_tick, n, pl,
 		first0, first1,
 		gpon_rd(GPON_GTC_US_INTR_DLT), gpon_rd(GPON_GTC_US_INTR_STS),
 		gpon_rd(GPON_GTC_US_PLOAM_IND) & 0x7ffu,
@@ -8456,7 +8463,7 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 		d.rng_req = GPON_GTC_DS_ACTIVE_RNG_REQ(act);
 	}
 	gpon_ploam_diag_format(line, sizeof(line), p,
-			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state, &d);
+			       luna_now_ms(), gpon_fsm_state, &d);
 	luna_log("%s\n", line);
 	/* The accepted-grant capture since the previous point: empty the engine into
 	 * the accumulator, report, then start the next window. */
@@ -8465,7 +8472,7 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 		luna_bwcap_arm();
 	}
 	gpon_bwcap_diag_format(line, sizeof(line), p,
-			       gpon_fsm_ticks * GPON_FSM_TICK_MS, gpon_fsm_state,
+			       luna_now_ms(), gpon_fsm_state,
 			       luna_bwcap_armed ? &luna_bwcap : NULL);
 	luna_log("%s\n", line);
 	if (luna_bwcap_raw_n) {
@@ -8561,7 +8568,7 @@ static void gpon_fsm_handle(const u8 *m)
 	if (!gpon_ploam_ds_repetitive(type))
 		luna_ploam_capture(GPON_OLT_DS, m, GPON_PLOAM_DS_LEN);
 	gpon_ploam_ds(&luna_ploam, m, GPON_PLOAM_DS_LEN,
-		      gpon_fsm_ticks * GPON_FSM_TICK_MS);
+		      luna_now_ms());
 }
 
 /* Has the WAN netdev received NOTHING? Both watchdogs below ...
@@ -8577,7 +8584,7 @@ static bool gpon_wan_rx_silent(void)
  * also consumes early parameter changes through this same existing logic. */
 static void gpon_apply_identity_change(void)
 {
-	gpon_ploam_sn_changed(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
+	gpon_ploam_sn_changed(&luna_ploam, luna_now_ms());
 }
 
 /* Ahead of the activation gate: a board whose activation never becomes ready kept
@@ -8733,6 +8740,8 @@ static void gpon_fsm_poll(struct timer_list *t)
 {
 	spin_lock(&luna_fsm_lock);
 	gpon_fsm_ticks++;
+	if (!luna_fsm_first_ms)
+		luna_fsm_first_ms = luna_now_ms();
 	spin_lock(&luna_pwd_lock);
 	if (luna_pwd_dirty) {
 		gpon_ploam_set_password(&luna_ploam, luna_pwd);
@@ -8765,7 +8774,7 @@ drain_downstream:
 		goto next_poll;
 	/* Both provisioning follow-ups are one core poll: the WAN ...
 	 * dev/MEASURED-luna_gpon.c.md sec 247. */
-	gpon_ploam_poll_provision(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
+	gpon_ploam_poll_provision(&luna_ploam, luna_now_ms());
 	luna_omci_service();
 
 	/* feed_rekick: per-tick self-terminating US-feed FIFO re-arm. The one-shot
@@ -8796,7 +8805,7 @@ drain_downstream:
 	/* O5 provisioning watchdog. A boot that reached O5 locally ...
 	 * dev/MEASURED-luna_gpon.c.md sec 248. */
 	gpon_ploam_poll_watchdog(&luna_ploam, gpon_wan_rx_silent(),
-				 gpon_fsm_ticks * GPON_FSM_TICK_MS);
+				 luna_now_ms());
 
 	/* Autonomous downstream-LOS recovery (fiber pull). The OLT ...
 	 * dev/MEASURED-luna_gpon.c.md sec 327. */
@@ -8810,7 +8819,7 @@ drain_downstream:
 		/* Real DS-light loss = the GTC optical-LOS AND the SoC SerDes ...
 		 * dev/MEASURED-luna_gpon.c.md sec 249. */
 		gpon_ploam_poll_los(&luna_ploam, optic_los, sds_dark,
-				    gpon_fsm_ticks * GPON_FSM_TICK_MS);
+				    luna_now_ms());
 	}
 
 	/* Hybrid LAN/VLAN: clear VLAN_FILTER so the LAN ports forward ...
@@ -8889,11 +8898,11 @@ drain_downstream:
 	}
 	/* While unregistered in O3, re-offer our Serial_Number_ONU ~twice a second
 	 * (the OLT grants SN windows intermittently). */
-	gpon_ploam_poll_sn_reoffer(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
+	gpon_ploam_poll_sn_reoffer(&luna_ploam, luna_now_ms());
 	/* Periodic O5 upstream-PLOAM keepalive. Once ranged the FSM ...
 	 * dev/MEASURED-luna_gpon.c.md sec 252. */
-	gpon_ploam_poll_keepalive(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
-	gpon_ploam_poll_rei(&luna_ploam, gpon_fsm_ticks * GPON_FSM_TICK_MS);
+	gpon_ploam_poll_keepalive(&luna_ploam, luna_now_ms());
+	gpon_ploam_poll_rei(&luna_ploam, luna_now_ms());
 
 	/* Runtime DS-CDR-wedge recovery -- the stock link-state-check ...
 	 * dev/MEASURED-luna_gpon.c.md sec 253. */
@@ -8953,8 +8962,10 @@ drain_downstream:
 
 
 next_poll:
-	if (!READ_ONCE(luna_stopping))		/* re-armed under the lock: see the BH drain */
-		mod_timer(&gpon_fsm_timer, jiffies + GPON_FSM_TICK_JIFFIES);
+	/* Re-armed under the lock (see the BH drain). The wheel fires an expiry one jiffy
+	 * late, so `- 1` makes the tick the period every *_ticks constant counts in. */
+	if (!READ_ONCE(luna_stopping))
+		mod_timer(&gpon_fsm_timer, jiffies + GPON_FSM_TICK_JIFFIES - 1);
 	if (luna_gpon_irq)
 		luna_gpon_irq_unpark();
 	spin_unlock(&luna_fsm_lock);

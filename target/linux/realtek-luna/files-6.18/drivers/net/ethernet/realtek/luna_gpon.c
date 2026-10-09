@@ -1407,6 +1407,7 @@ MODULE_PARM_DESC(gpon_hold, "hold the GPON FSM at O1 (no ranging) -> stable br-l
 static struct timer_list gpon_fsm_timer;
 /* The tick and the downstream-PLOAM interrupt both drive the core under it. */
 static DEFINE_SPINLOCK(luna_fsm_lock);
+static int luna_gpon_irq;		/* 0: the device tree wires none */
 static u8 gpon_fsm_state = 1;		/* O1 */
 
 /* Deferred US-TX CDR-reset (re-range path). gpon_fsm_handle() ...
@@ -8060,10 +8061,18 @@ static void gpon_cdr_reset_worker(struct work_struct *w)
 		luna_log("re-range FULL serdes re-init\n");
 		return;
 	}
+	/* The DS GTC runs on the recovered clock: while the CDR is reset, neither the
+	 * GPON interrupt nor the tick (luna_fsm_lock) may read it. */
+	if (luna_gpon_irq)
+		disable_irq(luna_gpon_irq);
+	spin_lock_bh(&luna_fsm_lock);
 	cdr = sw_rd(SDS_ANA_COM_REG12);
 	sw_wr(SDS_ANA_COM_REG12, cdr ^ BIT(15));
 	mdelay(10);
 	sw_wr(SDS_ANA_COM_REG12, cdr);
+	spin_unlock_bh(&luna_fsm_lock);
+	if (luna_gpon_irq)
+		enable_irq(luna_gpon_irq);
 	/* the computed address, for the reason given at the other call site */
 	luna_log("re-range serdesCdr_reset pulse (COM_REG12 @ 0x%05x bit15), restored=0x%08x\n",
 		SDS_ANA_COM_REG12, cdr);
@@ -8604,7 +8613,6 @@ static bool ploam_irq = true;
 module_param(ploam_irq, bool, 0644);
 MODULE_PARM_DESC(ploam_irq, "answer a downstream PLOAM from its interrupt (default 1); 0 leaves it to the FSM tick, an A/B of the answer time");
 
-static int luna_gpon_irq;		/* 0: the device tree wires none */
 static atomic64_t luna_ds_arrival_ns;	/* the oldest unread PLOAM's interrupt, 0 = none */
 static u64 luna_ds_carry_ns;		/* the arrival of PLOAMs a full drain left queued */
 #define GPON_FRAME_NS	125000u		/* one PLOAMd per downstream frame: queued PLOAMs are this far apart */
@@ -9816,13 +9824,13 @@ static void __exit rtl9602c_gpon_exit(void)
 	luna_uni_apply_close();
 	mutex_unlock(&bosa_lock);
 	luna_fsm_stop();
+	cancel_work_sync(&gpon_cdr_reset_work);	/* it masks the line, so before free_irq */
 	if (luna_gpon_irq) {
 		sw_field(SW_INTR_IMR, 10, 10, 0);
 		free_irq(luna_gpon_irq, NULL);
 		cancel_work_sync(&luna_ds_ploam_work);
 	}
 	cancel_work_sync(&luna_omci_work);	/* no enqueue since luna_activation_ready fell */
-	cancel_work_sync(&gpon_cdr_reset_work);
 	cancel_delayed_work_sync(&gpon_optical_work);
 	/* OUTSIDE bosa_lock, and after the producers: the worker holds that
 	 * mutex for its whole apply, so cancelling under it would deadlock. */

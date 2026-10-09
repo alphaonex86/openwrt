@@ -728,6 +728,15 @@ static inline void luna_eth_set_promisc(void __iomem *base, bool on)
 struct rx_desc { u32 opts1, addr, opts2, opts3; };
 struct tx_desc { u32 opts1, addr, opts2, opts3, opts4; };
 
+/* A frame waits at @head: read from the ring, never from R_ISR.  A NAPI poll acks
+ * the status it masked, so a descriptor handed back after its drain and before that
+ * ack loses its bit and would wait for the NEXT frame's interrupt: on 2026-10-08 a
+ * DS OMCI request waited 7 s for the OLT's retry, and the OLT deactivated the ONU. */
+static inline bool luna_rx_ready(const struct rx_desc *ring, unsigned int head)
+{
+	return !(READ_ONCE(ring[head].opts1) & D_OWN);
+}
+
 /* ---- RX refill --------------------------------------------------------------
  * Arm ONE RX slot with a fresh skb.  Shared because both drivers had it
  * character for character apart from the struct they reached `->rx_ring`

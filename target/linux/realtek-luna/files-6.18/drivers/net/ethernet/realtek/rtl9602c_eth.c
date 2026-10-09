@@ -422,6 +422,7 @@ struct rtl9602c_eth {
 	u32		dbg_filled;	/* RX descriptors HW handed back (D_OWN cleared) */
 	u32		dbg_good;	/* frames pushed up the stack */
 	u32		dbg_err;	/* RX descriptors with error/oversize */
+	u32		dbg_rx_repoll;	/* frames found waiting after the IRQ re-arm, re-polled */
 	u32		dbg_rxlen;	/* raw length of the last captured RX frame */
 	u8		dbg_rxbuf[48];	/* first bytes of the last RX frame (pre-pull) */
 
@@ -1504,14 +1505,17 @@ static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
 	rtl9602c_eth_tx_rekick(ep);	/* un-park a stalled TX ring */
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
-	if (work < budget) {
-		napi_complete_done(napi, work);
+	if (work < budget && napi_complete_done(napi, work)) {
 		/* Re-arm. W1C-ack any status latched while masked FIRST so we do
 		 * not immediately re-fire on a stale bit, THEN set the mask bits. */
 		iowrite16(ioread16(ep->base + R_ISR), ep->base + R_ISR);
 		ep_wr(ep, R_ISR1, ep_rd(ep, R_ISR1));
 		iowrite16(ioread16(ep->base + R_IMR) | IMR_RX_BITS, ep->base + R_IMR);
 		ep_wr(ep, R_IMR0, ep_rd(ep, R_IMR0) | IMR0_TX_BITS);
+		if (luna_rx_ready(ep->rx_ring, ep->rx_head)) {	/* its bit went to the ack */
+			ep->dbg_rx_repoll++;
+			napi_schedule(napi);
+		}
 	}
 	return work;
 }
@@ -2353,9 +2357,9 @@ static int rtl9602c_ethdump_show(struct seq_file *m, void *v)
 		else
 			hwfilled++;
 	}
-	seq_printf(m, "poll=%u filled=%u good=%u err=%u rx_head=%u\n",
+	seq_printf(m, "poll=%u filled=%u good=%u err=%u rx_head=%u rx_repoll=%u\n",
 		   ep->dbg_poll, ep->dbg_filled, ep->dbg_good, ep->dbg_err,
-		   ep->rx_head);
+		   ep->rx_head, ep->dbg_rx_repoll);
 	seq_printf(m, "last RX frame (pre-pull, len=%u): %*ph\n",
 		   ep->dbg_rxlen, (int)sizeof(ep->dbg_rxbuf), ep->dbg_rxbuf);
 	seq_printf(m, "omci: trap=%u rx=%u lastlen=%u msg=%*ph\n",

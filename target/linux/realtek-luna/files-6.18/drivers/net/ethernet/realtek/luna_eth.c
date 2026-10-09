@@ -1796,13 +1796,14 @@ static int eth_napi_poll(struct napi_struct *napi, int budget)
 	eth_tx_reclaim(ep);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 
-	if (work < budget) {
-		napi_complete_done(napi, work);
+	if (work < budget && napi_complete_done(napi, work)) {
 		/* W1C any status latched while masked, then re-unmask. */
 		iowrite16(ioread16(ep->base + R_ISR), ep->base + R_ISR);
 		ep_wr(ep, R_ISR1, ep_rd(ep, R_ISR1));
 		iowrite16(IMR_RX_BITS, ep->base + R_IMR);
 		ep_wr(ep, R_IMR0, IMR0_TX_BITS);
+		if (luna_rx_ready(ep->rx_ring, ep->rx_head))	/* its bit went to the ack */
+			napi_schedule(napi);
 	}
 	return work;
 }

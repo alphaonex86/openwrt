@@ -30,6 +30,24 @@ WIFI_CAL_DIR=/sys/module/rtl8192fe/parameters
 
 log() { logger -t gpon_provision "$@"; }
 
+# Every factory field from ONE rtk_factory read (the fields cost ~0.12 s each when
+# asked one by one): RTK_<verb>, and RTK_HAS_<verb>=1 when the unit has the key,
+# since an empty value is not an absent one (see set_password).
+rtk_load() {
+	local k v
+	for k in ${RTK_LOADED:-}; do unset "RTK_$k" "RTK_HAS_$k"; done
+	RTK_LOADED=
+	while IFS='=' read -r k v; do
+		case "$k" in ''|*[!a-z0-9_]*) continue ;; esac
+		eval "RTK_$k=\$v; RTK_HAS_$k=1"
+		RTK_LOADED="$RTK_LOADED $k"
+	done <<EOF
+$("$RTK" -p "$1" all 2>/dev/null)
+EOF
+}
+
+rtk_need() { [ -n "${RTK_LOADED:-}" ] || rtk_load "$1"; }
+
 apply_mac() {
 	local ifname="$1" mac="$2"
 	[ -n "$mac" ] || return 1
@@ -65,15 +83,16 @@ provision() {
 	config_get vid     identity pon_vendor_id
 
 	if [ "$source" = "factory" ] && [ -x "$RTK" ]; then
-		mac=$("$RTK" -p "$part" mac 2>/dev/null)
-		oui=$("$RTK" -p "$part" oui 2>/dev/null)
-		sn=$("$RTK"  -p "$part" sn  2>/dev/null)
-		[ -n "$vid" ]     || vid=$("$RTK"     -p "$part" vendor_id 2>/dev/null)
+		rtk_load "$part"
+		mac=${RTK_mac:-}
+		oui=${RTK_oui:-}
+		sn=${RTK_sn:-}
+		[ -n "$vid" ]     || vid=${RTK_vendor_id:-}
 		# SW-block params: adopt the factory value only where the installer left UCI empty.
-		[ -n "$loid" ]    || loid=$("$RTK"    -p "$part" loid 2>/dev/null)
-		[ -n "$loid_pw" ] || loid_pw=$("$RTK" -p "$part" loid_passwd 2>/dev/null)
-		[ -n "$ploam" ]   || ploam=$("$RTK"   -p "$part" ploam_passwd 2>/dev/null)
-		[ -n "$olt" ]     || olt=$("$RTK"     -p "$part" olt_mode 2>/dev/null)
+		[ -n "$loid" ]    || loid=${RTK_loid:-}
+		[ -n "$loid_pw" ] || loid_pw=${RTK_loid_passwd:-}
+		[ -n "$ploam" ]   || ploam=${RTK_ploam_passwd:-}
+		[ -n "$olt" ]     || olt=${RTK_olt_mode:-}
 	fi
 
 	mac=$(echo "$mac" | tr 'A-F' 'a-f')
@@ -227,7 +246,8 @@ set_password() {
 	config_get source identity source factory
 	config_get pw identity ploam_passwd
 	if [ -z "$pw" ]; then
-		[ "$source" = factory ] && pw=$("$RTK" -p "$part" ploam_passwd 2>/dev/null) || {
+		[ "$source" = factory ] && rtk_need "$part" && [ -n "${RTK_HAS_ploam_passwd:-}" ] &&
+			pw=${RTK_ploam_passwd:-} || {
 			log "no PLOAM password in this unit's MIB - the driver keeps its default"
 			return 0
 		}
@@ -251,7 +271,7 @@ set_omci_identity() {
 		case "$name" in
 		sw_ver1|sw_ver2) [ -n "$val" ] || val=$(owrt_version 2>/dev/null) ;;
 		*) [ -n "$val" ] || [ "$source" != factory ] ||
-			val=$("$RTK" -p "$part" "$name" 2>/dev/null) ;;
+			{ rtk_need "$part"; eval "val=\${RTK_$name:-}"; } ;;
 		esac
 		[ -n "$val" ] || continue
 		[ -w "$OMCI_ID_DIR/onu_$name" ] || {
@@ -268,8 +288,9 @@ set_omci_identity() {
 set_wifi_cal() {
 	local part="$1" verb val vals=""
 	[ -d "$WIFI_CAL_DIR" ] || return 0
+	rtk_need "$part"
 	for verb in $WIFI_CAL_VERBS; do
-		val=$("$RTK" -p "$part" "$verb" 2>/dev/null)
+		eval "val=\${RTK_$verb:-}"
 		case "$verb" in
 		wlan_cck_*|wlan_ht40_*)
 			echo "$val" | grep -qxE '([0-9a-fA-F]{2},){13}[0-9a-fA-F]{2}' ||
@@ -298,7 +319,8 @@ try_identity() {
 	config_get part storage config_part config
 	config_get sn identity sn
 	if [ "$source" = factory ]; then
-		sn=$("$RTK" -p "$part" sn) || return 1
+		rtk_load "$part"
+		sn=${RTK_sn:-}
 	fi
 	[ -n "$sn" ] || { log "no GPON serial available; will retry"; return 1; }
 

@@ -777,6 +777,72 @@ static int mtd_path_by_name(const char *name, char *out, size_t n)
 	return found;
 }
 
+/* One value as the verb prints it: a MAC as aa:bb:.., anything else verbatim. */
+static void print_value(const struct map *m, const char *val, const char *prefix)
+{
+	int j;
+
+	printf("%s", prefix);
+	if (m->is_mac && strlen(val) == 12) {              /* 001122334455 -> 00:11:22:... */
+		for (j = 0; j < 12; j += 2)
+			printf("%c%c%s", val[j], val[j + 1], j < 10 ? ":" : "\n");
+	} else {
+		printf("%s\n", val);
+	}
+}
+
+/* Every MAP verb as one `verb=value` line from ONE read of the partition: the
+ * provisioning init asked ~25 times at ~0.12 s each. A key the unit lacks is
+ * left out, exactly as its own verb exits 1; a refusal refuses the whole set. */
+static int do_all(const char *part)
+{
+	static const enum famrole roles[] = { F_HW, F_SW };
+	const struct family *fam;
+	const struct map *m;
+	char path[256], prefix[40];
+	int is_jffs2 = 0;
+	ssize_t got;
+	unsigned int r;
+
+	got = part_read(part, path, sizeof path);
+	if (got < 0)
+		return 1;
+	(void)jffs2_root_ino(partbuf, (uint32_t)got, "", &is_jffs2);
+	fam = jffs2_family(partbuf, (uint32_t)got);
+	if (!fam && is_jffs2) {
+		fprintf(stderr, "rtk_factory: %s IS jffs2 but names no known current pair -- "
+			"refusing the blind scan\n", path);
+		return 3;
+	}
+	for (r = 0; r < sizeof(roles) / sizeof(roles[0]); r++) {
+		long flen = -2;
+
+		if (fam) {
+			flen = jffs2_read_file(partbuf, (uint32_t)got,
+					       roles[r] == F_HW ? fam->hw : fam->sw);
+			if (flen == -1) {
+				fprintf(stderr, "rtk_factory: %s is jffs2 but '%s' could not be "
+					"read FAITHFULLY -- refusing every field\n", path,
+					roles[r] == F_HW ? fam->hw : fam->sw);
+				return 3;
+			}
+		}
+		for (m = MAP; m->verb; m++) {
+			const char *val;
+
+			if (m->role != roles[r])
+				continue;
+			val = fam ? (flen >= 0 ? xml_value(filebuf, flen, m->key) : NULL)
+				  : mib_value(partbuf, (long)got, m->key);
+			if (!val)
+				continue;
+			snprintf(prefix, sizeof prefix, "%s=", m->verb);
+			print_value(m, val, prefix);
+		}
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *part = "config", *verb;
@@ -794,12 +860,14 @@ int main(int argc, char **argv)
 			"vendor_id|model|hw_ver|mac_key|loid|loid_passwd|ploam_passwd|"
 			"wlan_cck_a|wlan_cck_b|wlan_ht40_a|wlan_ht40_b|wlan_thermal|"
 			"wlan_xcap|wlan_reg_domain|"
-			"olt_mode|sw_ver1|sw_ver2|product_code|"
+			"olt_mode|sw_ver1|sw_ver2|product_code|all|"
 			"optical_cal|laser_cal|bosa_cal <outfile>>\n");
 		return 2;
 	}
 	verb = argv[a];
 
+	if (!strcmp(verb, "all"))
+		return do_all(part);
 	if (!strcmp(verb, "optical_cal"))
 		return do_optical_cal(part);
 	if (!strcmp(verb, "laser_cal"))
@@ -872,12 +940,6 @@ have_val:
 		return 1;
 	}
 
-	if (m->is_mac && strlen(val) == 12) {              /* 001122334455 -> 00:11:22:... */
-		int j;
-		for (j = 0; j < 12; j += 2)
-			printf("%c%c%s", val[j], val[j + 1], j < 10 ? ":" : "\n");
-	} else {
-		printf("%s\n", val);
-	}
+	print_value(m, val, "");
 	return 0;
 }

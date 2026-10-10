@@ -5,9 +5,9 @@
 # Boards are brought up run-from-RAM first: the initramfs uImage is TFTP'd
 # into RAM and bootm'd by the vendor U-Boot (no flash write during bring-up).
 
-# A RAM-only allocation-profiling kernel (build-openwrt --variant memory-debug) is never
-# flashed, so it is held to no partition: the TFTP boot is its only route to a unit.
-flash_kernel_size = $(if $(CONFIG_KERNEL_MEM_ALLOC_PROFILING),,$(1))
+# A RAM-only memory-diagnosis kernel (build-openwrt --variant memory-debug / slab-debug) is
+# never flashed, so it is held to no partition: the TFTP boot is its only route to a unit.
+flash_kernel_size = $(if $(CONFIG_KERNEL_MEM_ALLOC_PROFILING)$(CONFIG_KERNEL_SLUB_DEBUG),,$(1))
 
 define Device/hsgq_x111w
   DEVICE_VENDOR := HSGQ

@@ -2148,6 +2148,41 @@ static int bosa_a2h_read(struct gpon_ddm_a2h *d)
 	return gpon_ddm_a2h_decode(raw, err, d);
 }
 
+static void bosa_seq_uw10(struct seq_file *s, u16 uw10)
+{
+	if (uw10)
+		seq_printf(s, "%d", gpon_ddm_uw10_to_cdbm(uw10));
+	else
+		seq_puts(s, "-inf");
+}
+
+/* A module without RTL8290B registers is read the standard way, in the Cortina
+ * shell's /proc format: every level beside the raw block it came from. */
+static void bosa_a2h_show(struct seq_file *s)
+{
+	struct gpon_ddm_a2h d;
+	unsigned int i;
+
+	if (bosa_a2h_read(&d) != GPON_DDM_OK) {
+		seq_printf(s, "optic_ddm      = %s\n", gpon_ddm_status_str(d.status));
+		return;
+	}
+	seq_printf(s, "optic_ddm      = live (SFF-8472 A2h 0x%02x-0x%02x)\n",
+		   GPON_DDM_A2H_BASE, GPON_DDM_A2H_BASE + GPON_DDM_A2H_LEN - 1);
+	seq_printf(s, "optic_rx_raw: 0x%04x optic_rx_cdbm: ", d.rx_pwr);
+	bosa_seq_uw10(s, d.rx_pwr);
+	seq_printf(s, " optic_tx_raw: 0x%04x\n", d.tx_pwr);
+	seq_printf(s, "optic_env:   temp_dc=%d bias_ua=%u tx_cdbm=",
+		   gpon_ddm_temp_dc(d.temp), gpon_ddm_bias_ua(d.bias));
+	bosa_seq_uw10(s, d.tx_pwr);
+	seq_printf(s, " vcc_mv=%u\n", gpon_ddm_vcc_mv(d.vcc));
+	seq_printf(s, "optic_ddm_raw: %02x..%02x =",
+		   GPON_DDM_A2H_BASE, GPON_DDM_A2H_BASE + GPON_DDM_A2H_LEN - 1);
+	for (i = 0; i < GPON_DDM_A2H_LEN; i++)
+		seq_printf(s, " %02x", d.raw[i]);
+	seq_putc(s, '\n');
+}
+
 /* Sample the calibrated DDM optical words and refresh the ANI-G level cache.
  * Called from process work at a slow cadence (never from the GET path);
  * a "not available" word keeps the previous cached value. */
@@ -5856,6 +5891,8 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 				   rxc, cdbm_s, txw & 0xffff);
 			seq_printf(s, "optic_env:   temp_dc=%d bias_ua=%u tx_cdbm=%d\n",
 				   bosa_temp_dc(), bosa_bias_ua(), bosa_tx_power_cdbm());
+		} else {
+			bosa_a2h_show(s);
 		}
 		/* ★ The module's OWN optical monitor, raw, beside the derived dBm --
 		 * the witness that is independent of the SoC pad mux and the SerDes.

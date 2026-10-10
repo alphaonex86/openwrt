@@ -947,10 +947,6 @@ static int rtl_op_sta_add(struct ieee80211_hw *hw,
 		memcpy(sta_entry->mac_addr, sta->addr, ETH_ALEN);
 		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
 			"Add sta addr is %pM\n", sta->addr);
-		/* TEMP AP-PS probe: the STA's negotiated U-APSD (0 = legacy PS-Poll
-		 * path -> needs the live-TIM beacon; non-zero -> uAPSD unicast path). */
-		pr_info("rtl92fe sta_add %pM wme=%d uapsd=%#x max_sp=%u\n",
-			sta->addr, sta->wme, sta->uapsd_queues, sta->max_sp);
 		rtlpriv->cfg->ops->update_rate_tbl(hw, sta, 0, true);
 	}
 

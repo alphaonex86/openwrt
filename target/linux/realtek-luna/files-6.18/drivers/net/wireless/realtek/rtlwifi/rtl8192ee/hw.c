@@ -2274,6 +2274,17 @@ static u8 _rtl92ee_mrate_idx_to_arfr_id(struct ieee80211_hw *hw, u8 rate_index)
 	return ret;
 }
 
+/* The firmware rate adaptation knows an AP peer's macid only once it is CONNECTed;
+ * until then every frame to it leaves at the lowest rate (V2801RGW: 1 Mbit/s). */
+static void rtl92ee_media_connect_macid(struct ieee80211_hw *hw, u8 macid)
+{
+	u8 parm[3] = { 0, macid, 0 };
+
+	SET_H2CCMD_MSRRPT_PARM_OPMODE(parm, RT_MEDIA_CONNECT);
+	SET_H2CCMD_MSRRPT_PARM_MACID_IND(parm, 0);
+	rtl92ee_fill_h2c_cmd(hw, H2C_92E_MSRRPT, 3, parm);
+}
+
 static void rtl92ee_update_hal_rate_mask(struct ieee80211_hw *hw,
 					 struct ieee80211_sta *sta,
 					 u8 rssi_level, bool update_bw)
@@ -2405,6 +2416,8 @@ static void rtl92ee_update_hal_rate_mask(struct ieee80211_hw *hw,
 		ratr_index, ratr_bitmap, rate_mask[0], rate_mask[1],
 		rate_mask[2], rate_mask[3], rate_mask[4],
 		rate_mask[5], rate_mask[6]);
+	if (macid)
+		rtl92ee_media_connect_macid(hw, macid);
 	rtl92ee_fill_h2c_cmd(hw, H2C_92E_RA_MASK, 7, rate_mask);
 	_rtl92ee_set_bcn_ctrl_reg(hw, BIT(3), 0);
 }

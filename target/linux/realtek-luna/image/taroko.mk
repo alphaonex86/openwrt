@@ -5,6 +5,10 @@
 # Boards are brought up run-from-RAM first: the initramfs uImage is TFTP'd
 # into RAM and bootm'd by the vendor U-Boot (no flash write during bring-up).
 
+# A RAM-only allocation-profiling kernel (build-openwrt --variant memory-debug) is never
+# flashed, so it is held to no partition: the TFTP boot is its only route to a unit.
+flash_kernel_size = $(if $(CONFIG_KERNEL_MEM_ALLOC_PROFILING),,$(1))
+
 define Device/hsgq_x111w
   DEVICE_VENDOR := HSGQ
   DEVICE_MODEL := X111W
@@ -17,7 +21,7 @@ define Device/hsgq_x111w
   # SIZE GUARD: KERNEL_SIZE auto-fires check-size on the kernel (image.mk), and the
   # explicit check-size on kernel.bin/rootfs.bin makes the BUILD fail if either
   # overflows its partition -- an oversize image is never written to the device.
-  KERNEL_SIZE := 3072k
+  KERNEL_SIZE := $(call flash_kernel_size,3072k)
   IMAGE_SIZE := 4864k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
@@ -54,7 +58,7 @@ define Device/vsol_v2801rgw
   # One bank on an 8 MiB Winbond EF4017, from the unit's own /proc/mtd and U-Boot env:
   #   k0 = 0x280000 (2560k) kernel at 0xa0000, r0 = 0x4e0000 (4992k) rootfs at 0x320000.
   # check-size fails the BUILD when either overflows: an oversize image never reaches a unit.
-  KERNEL_SIZE := 2560k
+  KERNEL_SIZE := $(call flash_kernel_size,2560k)
   IMAGE_SIZE := 4992k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)

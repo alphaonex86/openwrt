@@ -27,6 +27,7 @@ struct luna_flow_engine {
 	struct gpon_flow_offload *fo;
 	struct gpon_edge edge;
 	bool initialized, provisioned;
+	unsigned long hits_at;	/* jiffies of the last hit-bit sweep */
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
 	struct proc_dir_entry *proc;
 	u32 offered, hits;
@@ -107,11 +108,18 @@ static int luna_flow_initialize(struct luna_eth *ep)
 	return 0;
 }
 
+/* Every flow's stats call ran this whole-table sweep under luna_flow_mutex, so N offloaded
+ * flows meant N sweeps a second: the waiting stats works piled up 48 kworkers that never left
+ * (G24W, 2026-10-12, 200 TCP/s). One sweep serves every flow for HZ/4.
+ */
 static void luna_flow_hits(struct luna_eth *ep)
 {
 	struct luna_flow_engine *e = ep->flow;
 	unsigned int count = luna_flow_entry_count(&e->sram.hash), base, bit;
 
+	if (e->hits_at && time_before(jiffies, e->hits_at + HZ / 4))
+		return;
+	e->hits_at = jiffies;
 	for (base = 0; base < count; base += 32) {
 		u32 hits = luna_flow_rd(ep, 0x800000 + base / 8);
 

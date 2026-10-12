@@ -927,9 +927,14 @@ dma64_end:
 		       TX_DESC_NUM_92E | ((RTL8192EE_SEG_NUM << 12) & 0x3000));
 	rtl_write_word(rtlpriv, REG_HI7Q_TXBD_NUM,
 		       TX_DESC_NUM_92E | ((RTL8192EE_SEG_NUM << 12) & 0x3000));
-	/*Rx*/
+	/* Rx: the chip walks exactly the ring pci.c allocated. RX_DESC_NUM_92E (upstream's 512)
+	 * outlived the 384-slot ring (97edcd1d31): the chip read 128 descriptors past its end,
+	 * DMA'd frames to stale addresses and handed the host slots it never wrote -- old frames
+	 * that jumped the block-ack window and stalled the uplink (V2801RGW, 2026-10-12).
+	 */
+	BUILD_BUG_ON(RTL_PCI_MAX_RX_COUNT & ~0xFFFU);
 	rtl_write_word(rtlpriv, REG_RX_RXBD_NUM,
-		       RX_DESC_NUM_92E |
+		       RTL_PCI_MAX_RX_COUNT |
 		       ((RTL8192EE_SEG_NUM << 13) & 0x6000) | 0x8000);
 
 	rtl_write_dword(rtlpriv, REG_TSFTIMER_HCI, 0XFFFFFFFF);

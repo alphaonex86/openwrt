@@ -811,6 +811,24 @@ int gpon_ploam_poll_provision(struct gpon_ploam *o, u32 now_ms)
 
 /* 6650-6671 — O5 provisioning watchdog. A boot that reached ...
  * dev/MEASURED-gpon_ploam.c.md sec 29. */
+/* Forget the activation and re-enter O1 (the O5 watchdogs' common exit). */
+static void leave_o5(struct gpon_ploam *o, u32 now_ms)
+{
+	o->onu_id = 0xff;
+	o->omcc_installed = false;
+	o->omcc_gem = 0;
+	o->tcont_installed = false;
+	o->data_installed = false;
+	o->data_tcont_installed = false;
+	o->data_alloc = 0;
+	o->aes_switch_time = 0xffffffff;
+	o->key_staged = false;
+	o->ops->set_hw_onu_id(o->sh, 0xff);
+	if (o->cfg->cdr_reseat_on_reactivate)
+		o->ops->cdr_reseat(o->sh);
+	set_state(o, GPON_O1_INITIAL, now_ms);
+}
+
 int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 {
 	u32 tx0 = o->tx_total;
@@ -879,21 +897,37 @@ int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms)
 	    (o->ticks - o->o5_entry_tick) > o->cfg->o5_provision_watchdog_ticks &&
 	    wan_rx_zero) {
 		ev(o, GPON_PLOAM_EV_O5_WATCHDOG, o->ticks - o->o5_entry_tick, 0);
-		o->onu_id = 0xff;
-		o->omcc_installed = false;
-		o->omcc_gem = 0;
-		o->tcont_installed = false;
-		o->data_installed = false;
-		o->data_tcont_installed = false;
-		o->data_alloc = 0;
-		o->aes_switch_time = 0xffffffff;
-		o->key_staged = false;
-		o->ops->set_hw_onu_id(o->sh, 0xff);
-		if (o->cfg->cdr_reseat_on_reactivate)
-			o->ops->cdr_reseat(o->sh);
-		set_state(o, GPON_O1_INITIAL, now_ms);
+		leave_o5(o, now_ms);
 	}
 	return (int)(o->tx_total - tx0);
+}
+
+/* An O5 the OLT no longer grants is an O5 on our side only: the OLT has dropped us ("Laser out",
+ * Offline) and sends no Deactivate to act on -- the X111W sat so 13 min after a cold boot
+ * (2026-10-12). Back to O1, so the next O3 entry relocks and the OLT re-admits us. A granted O5,
+ * provisioned or idle, never trips; a run of misses backs off so a dead path cannot churn the OLT.
+ * `grants`: grants addressed to our ONU-ID since the last call.
+ */
+int gpon_ploam_poll_grants(struct gpon_ploam *o, u32 grants, u32 now_ms)
+{
+	u32 from, limit;
+
+	if (o->state != GPON_O5_OPERATION || grants) {
+		if (grants && o->state == GPON_O5_OPERATION)
+			o->ungranted_streak = 0;
+		o->grant_tick = o->ticks;
+		return 0;
+	}
+	if (!o->cfg->o5_ungranted_ticks || o->onu_id == 0xff || !o->o5_entry_tick)
+		return 0;
+	from = (s32)(o->grant_tick - o->o5_entry_tick) > 0 ? o->grant_tick : o->o5_entry_tick;
+	limit = o->cfg->o5_ungranted_ticks << (o->ungranted_streak < 5 ? o->ungranted_streak : 5);
+	if (o->ticks - from <= limit)
+		return 0;
+	ev(o, GPON_PLOAM_EV_O5_UNGRANTED, o->ticks - from, o->ungranted_streak);
+	o->ungranted_streak++;
+	leave_o5(o, now_ms);
+	return 1;
 }
 
 /* 6680-6724 — autonomous downstream-LOS recovery (fibre pull ...

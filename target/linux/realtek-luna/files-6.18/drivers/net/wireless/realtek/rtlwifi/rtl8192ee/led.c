@@ -17,10 +17,8 @@ void rtl92ee_sw_led_on(struct ieee80211_hw *hw, enum rtl_led_pin pin)
 	case LED_PIN_GPIO0:
 		break;
 	case LED_PIN_LED0:
-		/* LED0 is the chip's GPIO5. On the Luna ONUs it is no LED (the WiFi lamp is
-		 * the SoC's), and the V2801RGW's stock never drives it (GPIO_PIN_CTRL 0x1e):
-		 * driving it low kept the AP off the air. Upstream's off path also wrote
-		 * `|= ~BIT(21)`, enabling every other GPIO as an output. Left untouched. */
+		/* Upstream drove GPIO5 (GPIO_PIN_CTRL) as "LED0", which kept the V2801RGW's
+		 * AP off the air; stock never drives it (0x1e). The lamp is rtl92ee_lamp_set's. */
 		break;
 	case LED_PIN_LED1:
 
@@ -43,10 +41,8 @@ void rtl92ee_sw_led_off(struct ieee80211_hw *hw, enum rtl_led_pin pin)
 	case LED_PIN_GPIO0:
 		break;
 	case LED_PIN_LED0:
-		/* LED0 is the chip's GPIO5. On the Luna ONUs it is no LED (the WiFi lamp is
-		 * the SoC's), and the V2801RGW's stock never drives it (GPIO_PIN_CTRL 0x1e):
-		 * driving it low kept the AP off the air. Upstream's off path also wrote
-		 * `|= ~BIT(21)`, enabling every other GPIO as an output. Left untouched. */
+		/* Upstream drove GPIO5 (GPIO_PIN_CTRL) as "LED0", which kept the V2801RGW's
+		 * AP off the air; stock never drives it (0x1e). The lamp is rtl92ee_lamp_set's. */
 		break;
 	case LED_PIN_LED1:
 
@@ -56,6 +52,17 @@ void rtl92ee_sw_led_off(struct ieee80211_hw *hw, enum rtl_led_pin pin)
 			"switch case %#x not processed\n", pin);
 		break;
 	}
+}
+
+/* The panel's lamp is LED0 in LEDCFG0, left as the vendor's led_type 7 leaves it (this
+ * V2801RGW's stock, 2026-10-04: 0x4c = 0x0fe28800): software mode, pad output, low = lit,
+ * LED1 software-off. Ours had left both in hardware mode (0x8282). */
+void rtl92ee_lamp_set(struct ieee80211_hw *hw, bool on)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	u32 ledcfg = rtl_read_dword(rtlpriv, REG_LEDCFG0) & ~0xffffU;
+
+	rtl_write_dword(rtlpriv, REG_LEDCFG0, ledcfg | 0x8800 | (on ? 0 : BIT(3)));
 }
 
 static void _rtl92ee_sw_led_control(struct ieee80211_hw *hw,

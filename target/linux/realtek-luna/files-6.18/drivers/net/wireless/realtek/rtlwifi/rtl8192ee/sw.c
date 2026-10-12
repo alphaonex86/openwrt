@@ -157,12 +157,15 @@ static int rtl92ee_init_sw_vars(struct ieee80211_hw *hw)
 		return 1;
 	}
 
+	rtl_lamp_register(hw, "rtl8192ee", rtl92ee_lamp_set);
 	return 0;
 }
 
 static void rtl92ee_deinit_sw_vars(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
+	rtl_lamp_unregister(hw);
 
 	if (rtlpriv->rtlhal.pfirmware) {
 		vfree(rtlpriv->rtlhal.pfirmware);

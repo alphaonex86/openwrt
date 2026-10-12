@@ -147,6 +147,7 @@ enum gpon_ploam_ev {
 	GPON_PLOAM_EV_EARLY_DWELL,
 	GPON_PLOAM_EV_KEEP_LOCK_GIVEUP,	/* a = ticks since the keep-lock DEACT, b = state */
 	GPON_PLOAM_EV_O3_UNHEARD,	/* a = ticks at O3, b = SN offers so far  */
+	GPON_PLOAM_EV_O5_UNGRANTED,	/* a = ticks at O5 with no grant, b = streak */
 };
 
 /* The imperative shell: every entry is a SIDE EFFECT the core ...
@@ -291,6 +292,9 @@ struct gpon_ploam_cfg {
 	/* Re-range if held at O5 this many ticks with zero WAN RX.  0 disables,
 	 * and that is the shipped default: proven ineffective. */
 	unsigned int o5_provision_watchdog_ticks;
+	/* Leave O5 for O1 after this many ticks with no grant to our ONU-ID, doubling per
+	 * consecutive miss up to 32x.  0 disables. */
+	unsigned int o5_ungranted_ticks;
 	/* Emit a No_message US PLOAM every N ticks at O5.  0 disables, and that
 	 * is the shipped default: stock emits no unsolicited US PLOAM at O5. */
 	unsigned int o5_ploam_keepalive_ticks;
@@ -321,6 +325,8 @@ struct gpon_ploam {
 	enum gpon_ostate state;
 	u32 ticks;			/* FSM poll ticks (~10 ms each)              */
 	u32 o5_entry_tick;		/* tick of the last O5 entry (0 = not at O5) */
+	u32 grant_tick;			/* tick of the last grant seen, or of leaving O5 */
+	u32 ungranted_streak;		/* O5 dwells in a row left for want of a grant */
 	u32 o4_entry_tick;		/* tick of the last O4 entry (0 = not at O4) */
 	u32 keep_lock_tick;		/* tick a keep-lock DEACT left O5 (0 = none) */
 	u32 early_entry_tick;		/* tick this O1/O2/O3 dwell began (0 = not early) */
@@ -455,6 +461,7 @@ int gpon_ploam_poll_provision(struct gpon_ploam *o, u32 now_ms);
 /* `wan_rx_zero` = the WAN netdev has received nothing since the last re-range;
  * sampled by the shell because it lives in another driver. */
 int gpon_ploam_poll_watchdog(struct gpon_ploam *o, bool wan_rx_zero, u32 now_ms);
+int gpon_ploam_poll_grants(struct gpon_ploam *o, u32 grants, u32 now_ms);
 /* `optic_los` = the GTC optical loss-of-signal bit, `sds_dark` = the SoC SerDes
  * signal-detect is gone.  Both sampled by the shell; only the AND is a real
  * fibre pull. */

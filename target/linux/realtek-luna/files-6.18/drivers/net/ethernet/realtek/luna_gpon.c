@@ -1157,6 +1157,13 @@ MODULE_PARM_DESC(o5_ploam_keepalive_ticks, "emit No_message US-PLOAM every N 10m
 static uint o5_provision_watchdog_ticks;	/* default 0 = off (proven ineffective, see above) */
 module_param(o5_provision_watchdog_ticks, uint, 0644);
 MODULE_PARM_DESC(o5_provision_watchdog_ticks, "re-range if at O5 this many ticks with gpon0 RX=0 (0=off default; PROVEN INEFFECTIVE: re-range does not re-roll the cold-start serializer lock)");
+/* o5_ungranted_ticks: leave O5 for O1 after this many ~10 ms ticks with no grant to our ONU-ID
+ * (the OLT dropped us: "Laser out", Offline) -- the X111W sat at O5 13 min so (2026-10-12). A healthy
+ * O5 sees grants every second; misses in a row double the wait, up to 32x. */
+static uint o5_ungranted_ticks = 1000;
+module_param(o5_ungranted_ticks, uint, 0644);
+MODULE_PARM_DESC(o5_ungranted_ticks, "re-activate after this many 10 ms ticks at O5 with no grant to our ONU-ID, doubling per miss up to 32x (0=off, default 1000)");
+
 /* los_rerange_ticks: autonomous downstream-LOS recovery. With ...
  * dev/MEASURED-luna_gpon.c.md sec 31. */
 static uint los_rerange_ticks = 30;		/* ~300ms of (optic_los & !sds_sdet): catches a real
@@ -1490,6 +1497,22 @@ MODULE_PARM_DESC(data_tcont, "route the WAN data GEM US to the data T-CONT 8 que
 
 static inline u32 gpon_rd(u32 off) { return ioread32(gpon_base + off); }
 static inline void gpon_wr(u32 off, u32 v) { iowrite32(v, gpon_base + off); }
+
+/* GPON_GTC_DS_MISC_CNTR_BWM_ACPT clears on read and has several readers: one fold keeps the
+ * total, and each reader takes its own delta, so none reads another's grants as its own. */
+static atomic_t gpon_bwm_acpt_total = ATOMIC_INIT(0);
+static u32 gpon_bwm_acpt_ds_cntr_last, gpon_bwm_acpt_us_tx_last, gpon_bwm_acpt_diag_last;
+static u32 gpon_bwm_acpt_watch_last;
+
+static u32 gpon_bwm_acpt_since(u32 *last)
+{
+	u32 total = (u32)atomic_add_return((int)gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT),
+					   &gpon_bwm_acpt_total);
+	u32 delta = total - *last;
+
+	*last = total;
+	return delta;
+}
 
 /* RTL9607C SWCORE proxy: the I2C-indirect registers ... -- dev/MEASURED-luna_gpon.c.md sec 62. */
 #define   SW_MDX_M_EN		BIT(10)
@@ -5460,7 +5483,8 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 		u32 act = gpon_rd(GPON_GTC_DS_MISC_CNTR_ACTIVE);
 
 		seq_printf(s, "ds_cntr: ploam_acpt=%u ploam_fail=%u bwm_acpt=%u bwm_fail=%u bwm_inv=%u sn_req=%u rng_req=%u (all clear-on-read)\n",
-			   gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT), gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT),
+			   gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT), gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_FAIL),
+			   gpon_bwm_acpt_since(&gpon_bwm_acpt_ds_cntr_last),
 			   gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV),
 			   GPON_GTC_DS_ACTIVE_SN_REQ(act), GPON_GTC_DS_ACTIVE_RNG_REQ(act));
 	}
@@ -5607,7 +5631,8 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 		/* GTC upstream grant accounting: if the ONU transmits ANY upstream GEM on
 		 * the OLT's BWMAP grants these climb. */
 		seq_printf(s, "us_tx: ploam_acpt(0x119c)=%u bwm_acpt(0x11b0)=%u bwm_fail(0x11a4)=%u bwm_inv(0x11a8)=%u | us_onu_id=%u ds_cfg(0x1014)=0x%08x\n",
-			   gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV),
+			   gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT), gpon_bwm_acpt_since(&gpon_bwm_acpt_us_tx_last),
+			   gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL), gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV),
 			   (gpon_rd(GPON_GTC_US_ONU_ID) >> 8) & 0xff, gpon_rd(GPON_GTC_DS_CFG));
 		/* Alloc CAM read-back: T-CONT 16 must hold alloc 0x400 (HIT) for the GTC to
 		 * accept the OLT's operational BWMAP grant on that alloc-id. */
@@ -8324,6 +8349,7 @@ static const char * const luna_ev_name[] = {
 	[GPON_PLOAM_EV_LOS_RERANGE]	= "LOS_RERANGE",
 	[GPON_PLOAM_EV_KEEP_LOCK_GIVEUP] = "KEEP_LOCK_GIVEUP",
 	[GPON_PLOAM_EV_O3_UNHEARD]	= "O3_UNHEARD",
+	[GPON_PLOAM_EV_O5_UNGRANTED]	= "O5_UNGRANTED",
 };
 
 /* The events that DECIDE activation, and therefore speak whatever `trace` says.
@@ -8340,6 +8366,7 @@ static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
 	case GPON_PLOAM_EV_RANGING_TIME:
 	case GPON_PLOAM_EV_ONU_ID:
 	case GPON_PLOAM_EV_O5_WATCHDOG:
+	case GPON_PLOAM_EV_O5_UNGRANTED:
 	case GPON_PLOAM_EV_LOS_RERANGE:
 	case GPON_PLOAM_EV_SN_REPROVISIONED:
 	case GPON_PLOAM_EV_UNHANDLED:
@@ -8489,7 +8516,7 @@ static void luna_ploam_diag(enum gpon_ploam_diag_point p)
 		return;
 	d.valid      = GPON_PDIAG_HAS_ALL;
 	d.ploam_acpt = gpon_rd(GPON_GTC_DS_MISC_CNTR_PLOAM_ACPT);
-	d.bwm_acpt   = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_ACPT);
+	d.bwm_acpt   = gpon_bwm_acpt_since(&gpon_bwm_acpt_diag_last);
 	d.bwm_fail   = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_FAIL);
 	d.bwm_inv    = gpon_rd(GPON_GTC_DS_MISC_CNTR_BWM_INV);
 	/* US-GTC misc PM: idx 2 = PLOAM_CPU_TX, idx 3 = ...
@@ -8862,6 +8889,9 @@ drain_downstream:
 	 * dev/MEASURED-luna_gpon.c.md sec 248. */
 	gpon_ploam_poll_watchdog(&luna_ploam, gpon_wan_rx_silent(),
 				 luna_now_ms());
+	if (!(luna_ploam.ticks % 100))
+		gpon_ploam_poll_grants(&luna_ploam, gpon_bwm_acpt_since(&gpon_bwm_acpt_watch_last),
+				       luna_now_ms());
 
 	/* Autonomous downstream-LOS recovery (fiber pull). The OLT ...
 	 * dev/MEASURED-luna_gpon.c.md sec 327. */
@@ -9800,6 +9830,7 @@ skip_bosa_init:
 	luna_ploam_cfg_live.los_rerange_ticks = los_rerange_ticks;
 	luna_ploam_cfg_live.o4_ranging_timeout_ticks = o4_ranging_timeout_ticks;
 	luna_ploam_cfg_live.o5_provision_watchdog_ticks = o5_provision_watchdog_ticks;
+	luna_ploam_cfg_live.o5_ungranted_ticks = o5_ungranted_ticks;
 	luna_ploam_cfg_live.o5_ploam_keepalive_ticks = o5_ploam_keepalive_ticks;
 	/* The fourth, the same omission again: the core read early_dwell_report_ticks
 	 * and nothing gave it a value, so the O1 diagnostic was compiled in and MUTE.

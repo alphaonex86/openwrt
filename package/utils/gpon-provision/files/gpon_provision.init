@@ -24,25 +24,33 @@ OMCI_ID_DIR=/sys/module/luna_gpon/parameters
 # rtl8192fe parameter unit_<x>. All or nothing: the driver needs the whole set.
 WIFI_CAL_VERBS="wlan_cck_a wlan_cck_b wlan_ht40_a wlan_ht40_b wlan_thermal wlan_xcap wlan_reg_domain"
 WIFI_CAL_DIR=/sys/module/rtl8192fe/parameters
+KMSG=/dev/kmsg
 
 . /lib/functions/gpon-cal.sh
 . /lib/functions/onu-identity.sh
 
-log() { logger -t gpon_provision "$@"; }
+# logd starts after this START=09 script, so syslog alone loses every boot-time line
+# (G24W 2026-10-12: a failed factory read left no trace). The kernel log keeps them.
+log() {
+	logger -t gpon_provision "$@"
+	echo "gpon_provision: $*" >> "$KMSG" 2>/dev/null
+}
 
 # Every factory field from ONE rtk_factory read (the fields cost ~0.12 s each when
 # asked one by one): RTK_<verb>, and RTK_HAS_<verb>=1 when the unit has the key,
 # since an empty value is not an absent one (see set_password).
 rtk_load() {
-	local k v
+	local k v out
 	for k in ${RTK_LOADED:-}; do unset "RTK_$k" "RTK_HAS_$k"; done
 	RTK_LOADED=
+	out=$("$RTK" -p "$1" all 2>/dev/null) ||
+		log "factory read of '$1' failed (rc $?); a re-read says: $("$RTK" -p "$1" all 2>&1 >/dev/null)"
 	while IFS='=' read -r k v; do
 		case "$k" in ''|*[!a-z0-9_]*) continue ;; esac
 		eval "RTK_$k=\$v; RTK_HAS_$k=1"
 		RTK_LOADED="$RTK_LOADED $k"
 	done <<EOF
-$("$RTK" -p "$1" all 2>/dev/null)
+$out
 EOF
 }
 
@@ -312,7 +320,7 @@ set_wifi_cal() {
 }
 
 try_identity() {
-	local part source sn p tmp staged=1
+	local part source sn p tmp why staged=1
 
 	config_load gpon
 	config_get source identity source factory
@@ -325,11 +333,13 @@ try_identity() {
 	[ -n "$sn" ] || { log "no GPON serial available; will retry"; return 1; }
 
 	tmp=$(mktemp -d /tmp/gpon-cal.XXXXXX) || return 1
-	if "$RTK" -p "$part" bosa_cal "$tmp/cal" &&
-	   gpon_cal_stage "$tmp/cal" "$tmp/cal.md5" "$BOSA_CAL_DST" 1024; then
+	if "$RTK" -p "$part" bosa_cal "$tmp/cal" 2>"$tmp/err" &&
+	   gpon_cal_stage "$tmp/cal" "$tmp/cal.md5" "$BOSA_CAL_DST" 1024 2>>"$tmp/err"; then
 		staged=0
+	else
+		why=$(cat "$tmp/err")
 	fi
-	rm -f "$tmp/cal" "$tmp/cal.new" "$tmp/cal.md5" "$tmp/cal.md5.new" ||
+	rm -f "$tmp/cal" "$tmp/cal.new" "$tmp/cal.md5" "$tmp/cal.md5.new" "$tmp/err" ||
 		log "could not remove calibration candidate files in $tmp"
 	rmdir "$tmp" || log "could not remove calibration candidate directory $tmp"
 	if [ "$staged" != 0 ]; then
@@ -337,7 +347,7 @@ try_identity() {
 			log "cannot withdraw stale GN25L95 calibration; not activating GPON"
 			return 1
 		}
-		log "GN25L95 calibration unavailable; activation requires a physical RTL8290B or a later successful retry"
+		log "GN25L95 calibration unavailable (${why:-no reason given}); activation requires a physical RTL8290B or a later successful retry"
 	fi
 
 	laser_from_unit "$part" || return 1

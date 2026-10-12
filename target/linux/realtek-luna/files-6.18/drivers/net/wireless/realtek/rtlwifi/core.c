@@ -1983,6 +1983,80 @@ void rtl_init_sw_leds(struct ieee80211_hw *hw)
 }
 EXPORT_SYMBOL(rtl_init_sw_leds);
 
+/* The panel's WiFi lamp as a standard LED class device under the PCI function. The vendor's
+ * led_type 7 lights it while the radio is enabled and blinks it on data: that is mac80211's
+ * throughput trigger with IEEE80211_TPT_LEDTRIG_FL_RADIO. The chip only says how to drive it. */
+struct rtl_lamp {
+	struct led_classdev cdev;
+	struct ieee80211_hw *hw;
+	void (*set)(struct ieee80211_hw *hw, bool on);
+	bool registered;
+	char name[32];
+};
+
+static const struct ieee80211_tpt_blink rtl_lamp_blink[] = {
+	{ .throughput = 0,		.blink_time = 350 },
+	{ .throughput = 64,		.blink_time = 250 },
+	{ .throughput = 1024,		.blink_time = 170 },
+	{ .throughput = 10 * 1024,	.blink_time = 110 },
+	{ .throughput = 100 * 1024,	.blink_time = 60 },
+};
+
+static void rtl_lamp_release(struct device *dev, void *res)
+{
+}
+
+static void rtl_lamp_brightness_set(struct led_classdev *cdev, enum led_brightness value)
+{
+	struct rtl_lamp *lamp = container_of(cdev, struct rtl_lamp, cdev);
+
+	lamp->set(lamp->hw, value != LED_OFF);
+}
+
+void rtl_lamp_register(struct ieee80211_hw *hw, const char *chip,
+		       void (*set)(struct ieee80211_hw *hw, bool on))
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_lamp *lamp;
+	int err;
+
+	lamp = devres_alloc(rtl_lamp_release, sizeof(*lamp), GFP_KERNEL);
+	if (!lamp) {
+		pr_warn("%s: no memory for the WiFi LED device\n", chip);
+		return;
+	}
+	lamp->hw = hw;
+	lamp->set = set;
+	snprintf(lamp->name, sizeof(lamp->name), "%s-%s", chip, wiphy_name(hw->wiphy));
+	lamp->cdev.name = lamp->name;
+	lamp->cdev.max_brightness = 1;
+	lamp->cdev.brightness_set = rtl_lamp_brightness_set;
+	lamp->cdev.default_trigger =
+		ieee80211_create_tpt_led_trigger(hw, IEEE80211_TPT_LEDTRIG_FL_RADIO,
+						 rtl_lamp_blink, ARRAY_SIZE(rtl_lamp_blink));
+	err = led_classdev_register(rtlpriv->io.dev, &lamp->cdev);
+	if (err) {
+		pr_warn("%s: WiFi LED device not registered (%d)\n", chip, err);
+		devres_free(lamp);
+		return;
+	}
+	lamp->registered = true;
+	devres_add(rtlpriv->io.dev, lamp);
+}
+EXPORT_SYMBOL(rtl_lamp_register);
+
+void rtl_lamp_unregister(struct ieee80211_hw *hw)
+{
+	struct rtl_lamp *lamp;
+
+	lamp = devres_find(rtl_priv(hw)->io.dev, rtl_lamp_release, NULL, NULL);
+	if (lamp && lamp->registered) {
+		led_classdev_unregister(&lamp->cdev);
+		lamp->registered = false;
+	}
+}
+EXPORT_SYMBOL(rtl_lamp_unregister);
+
 const struct ieee80211_ops rtl_ops = {
 	.add_chanctx = ieee80211_emulate_add_chanctx,
 	.remove_chanctx = ieee80211_emulate_remove_chanctx,

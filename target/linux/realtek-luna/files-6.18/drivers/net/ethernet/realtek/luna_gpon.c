@@ -674,6 +674,7 @@ static const struct gpon_swc_map gpon_swc_9603cvd = {
 
 static const struct gpon_swc_map gpon_swc_9607c = {
 	.chip = "RTL9607C",
+	.led = NULL,	/* no lamp table for this die yet */
 	/* ★ REGISTERED, NOT LEFT TO THE COMPILER (2026-09-14, ...
 	 * dev/MEASURED-luna_gpon.c.md sec 275. */
 	.alloc_idx_swap = false,	/* the logical T-CONT permutation is the RTL9603CVD's alone */

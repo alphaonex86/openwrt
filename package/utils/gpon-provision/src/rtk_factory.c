@@ -173,6 +173,33 @@ static long jffs2_root_ino(const uint8_t *d, uint32_t n, const char *name,
  *   calibration". Forcing this generic reader to call every empty file corrupt
  *   would put a policy of one caller into a routine several callers share.
  */
+/* JFFS2's rtime: (byte, repeat) pairs; a repeat copies from where that byte last
+ * began. -> 0, or -1 when the stream does not expand to exactly `dsize` bytes.
+ * jffs2_garbage_collect rewrites a file's tail this way, which is how this unit's
+ * rtkbosa_k.bin came to end in a 4-byte rtime node (G24W mtd3, 2026-10-14). */
+static int rtime_expand(uint8_t *out, uint32_t dsize, const uint8_t *in, uint32_t csize)
+{
+	uint32_t last[256] = { 0 }, o = 0, i = 0;
+
+	while (o < dsize) {
+		uint32_t from, rep;
+		uint8_t v;
+
+		if (i + 2 > csize)
+			return -1;
+		v = in[i++];
+		rep = in[i++];
+		out[o++] = v;
+		from = last[v];
+		last[v] = o;
+		if (rep > dsize - o)
+			return -1;
+		while (rep--)
+			out[o++] = out[from++];
+	}
+	return i == csize ? 0 : -1;
+}
+
 static long jffs2_read_file(const uint8_t *d, uint32_t n, const char *name)
 {
 	size_t nl = strlen(name);
@@ -288,8 +315,11 @@ static long jffs2_read_file(const uint8_t *d, uint32_t n, const char *name)
 			 * calibration". */
 			if (dl != dsize)
 				return -1;
+		} else if (compr == 2) {                       /* rtime */
+			if (rtime_expand(filebuf + off, dsize, src, csize))
+				return -1;
 		} else {
-			return -1;                    /* rtime/lzo: we cannot reconstruct */
+			return -1;                    /* lzo and the rest: we cannot reconstruct */
 		}
 		memset(covered + off, 1, dsize);
 		if ((long)(off + dsize) > flen)

@@ -12,9 +12,7 @@
 void gpon_regseq_fld(const struct gpon_regseq_io *io, u32 addr,
 		     u8 msb, u8 lsb, u32 val)
 {
-	u32 mask = gpon_field_mask(msb, lsb);
-
-	io->wr(addr, (io->rd(addr) & ~mask) | ((val << lsb) & mask));
+	io->wr(addr, gpon_field_set(io->rd(addr), msb, lsb, val));
 }
 
 /* Run one sequence. -> 0, or -ETIMEDOUT naming nothing: the ...

@@ -141,11 +141,11 @@ static int send_key(struct gpon_ploam *o)
 
 /* No_message (US type 0x04) on the hardware auto slot. The 0xaa fill and the
  * broadcast ONU-ID are what the driver built at :6117-6119 and :6850-6852. */
-static void build_nomsg(u8 m[GPON_PLOAM_US_LEN])
+static void build_template(u8 m[GPON_PLOAM_US_LEN], u8 type)
 {
 	memset(m, 0xaa, GPON_PLOAM_US_LEN);
 	m[0] = 0xff;			/* ONU-ID (HW overrides via ONUID_OVRD) */
-	m[1] = PLM_US_NO_MESSAGE;	/* 0x04 */
+	m[1] = type;
 }
 
 /* Burst overhead and equalization delay: the two computations ...
@@ -448,8 +448,14 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 				u8 nomsg[GPON_PLOAM_US_LEN];
 
 				o->ops->o5_rearm_burst(o->sh);
-				build_nomsg(nomsg);
+				build_template(nomsg, PLM_US_NO_MESSAGE);
 				ploam_tx(o, PLM_US_QUEUE_NOMSG, nomsg);
+			}
+			if (o->ops->arm_dying_gasp) {
+				u8 dg[GPON_PLOAM_US_LEN];
+
+				build_template(dg, PLM_US_DYING_GASP);
+				o->ops->arm_dying_gasp(o->sh, dg);
 			}
 			set_eqd(o, eqd);
 			boh = apply_boh(o, true);	/* switch to the ranged burst */
@@ -995,7 +1001,7 @@ int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms)
 	    (o->ticks % o->cfg->o5_ploam_keepalive_ticks) == 0) {
 		u8 nomsg[GPON_PLOAM_US_LEN];
 
-		build_nomsg(nomsg);
+		build_template(nomsg, PLM_US_NO_MESSAGE);
 		ploam_tx(o, PLM_US_QUEUE_NOMSG, nomsg);
 	}
 	return (int)(o->tx_total - tx0);

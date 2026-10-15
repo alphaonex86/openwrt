@@ -57,11 +57,13 @@ typedef uint32_t u32;
 
 /* Was a bare 0x04 literal in the Luna driver, commented "US_NOMESSAGE". */
 #define PLM_US_NO_MESSAGE		0x04
+#define PLM_US_DYING_GASP		0x03
 #define PLM_US_REI			0x08	/* Remote_Error_Indication (BER interval) */
 
 #define PLM_US_QUEUE_SN			0x6	/* US_PLOAM_IND[10:8] auto-SN queue */
 #define PLM_US_QUEUE_URG		0x1	/* US_PLOAM_IND[10:8] urgent queue (ACKs) */
 #define PLM_US_QUEUE_NOMSG		0x7	/* US_PLOAM_IND[10:8] HW auto-No_message slot */
+#define PLM_US_QUEUE_DYING_GASP		0x5	/* US_PLOAM_IND[10:8] HW auto-Dying_Gasp slot */
 
 /* The broadcast acquisition traffic the OLT repeats every few frames: what a
  * trace or a capture leaves out to keep the conversation readable. */
@@ -218,6 +220,9 @@ struct gpon_ploam_ops {
 	/* Optional: Encrypted_Port-ID marks a GEM Port-ID encrypted or clear.
 	 * NULL = this family cannot decrypt; an encrypted port is reported. */
 	void (*port_encrypt)(void *sh, u16 port, bool encrypted);
+	/* Optional: load the Dying_Gasp template the GTC sends by itself when the
+	 * power fails. NULL = this family sends no dying gasp. */
+	void (*arm_dying_gasp)(void *sh, const u8 m[GPON_PLOAM_US_LEN]);
 	/* --- diagnostics: NEVER load-bearing, NULL is always legal. */
 	void (*trace)(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b);
 	/* ONE datum the FSM received and could not place. Same ...

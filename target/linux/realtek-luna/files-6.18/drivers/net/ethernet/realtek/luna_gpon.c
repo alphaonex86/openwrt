@@ -6091,7 +6091,7 @@ static void gpon_send_cpu_ploam(u8 queue, const u8 m[12])
 
 	ind |= GPON_US_PLM_ENQ;			/* ENQ 0->1 edge: transmit */
 	gpon_wr(GPON_GTC_US_PLOAM_IND, ind);
-	if (!gpon_ploam_us_repetitive(m[1]))
+	if (queue != PLM_US_QUEUE_DYING_GASP && !gpon_ploam_us_repetitive(m[1]))
 		luna_ploam_capture(GPON_OLT_US, m, GPON_PLOAM_US_LEN);
 
 	/* DBG (ploam_tx_dbg): did the HW actually TRANSMIT this CPU ...
@@ -8120,6 +8120,12 @@ static void luna_op_ploam_tx(void *sh, u8 queue, const u8 m[GPON_PLOAM_US_LEN])
 	gpon_send_cpu_ploam(queue, m);
 }
 
+static void luna_op_arm_dying_gasp(void *sh, const u8 m[GPON_PLOAM_US_LEN])
+{
+	(void)sh;
+	gpon_send_cpu_ploam(PLM_US_QUEUE_DYING_GASP, m);
+}
+
 static void luna_op_boh_write(void *sh, u32 cfg_word, const u8 *oh, u8 size)
 {
 	u8 i;
@@ -8579,6 +8585,7 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.install_omcc	= luna_op_install_omcc,
 	.install_tcont	= luna_op_install_tcont,
 	.data_alloc_changed = luna_data_alloc_changed,
+	.arm_dying_gasp	= luna_op_arm_dying_gasp,
 	.trace		= luna_op_trace,
 };
 

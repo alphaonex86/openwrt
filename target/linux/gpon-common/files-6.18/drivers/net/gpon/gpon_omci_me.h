@@ -551,6 +551,24 @@ typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why);
 
+/* What a board's /omci-uni panel turned out to be; the shell says it out loud. */
+struct omci_panel_decl {
+	const char *unis_why;	/* the UNIs were refused: the single-UNI default stays */
+	const char *part;	/* the first equipment property refused, or NULL */
+	const char *part_why;
+	int ports_len;		/* ethernet-uni-ports bytes, -1 when absent */
+	int unis;		/* Ethernet UNIs declared; ports apply only when equal */
+};
+
+/* The whole panel through @prop: the UNIs, the switch port of each Ethernet UNI
+ * (into @port, *@port_n of them, only when one per UNI -- else the administrative
+ * state is modelled and never applied) and omci_onu_declare_equipment().  Here
+ * @prop answers the LENGTH the board states: -1 absent, 0 present and empty, even
+ * with a NULL value -- an empty list declares no UNI, it does not restore one. */
+void omci_onu_declare_panel(struct omci_onu *o, omci_prop_fn prop, void *ctx,
+			    u8 *port, unsigned int port_cap, u8 *port_n,
+			    struct omci_panel_decl *d);
+
 /* The WAN netdev's MAC, which ME 134 reports; the shell keeps it current. */
 void omci_onu_set_wan_mac(struct omci_onu *o, const u8 mac[6]);
 

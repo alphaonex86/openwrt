@@ -580,17 +580,18 @@ u32 rtl9602c_eth_omci_rx_count(void)
 {
 	struct rtl9602c_eth *ep = g_ep;
 
-	return ep ? ep->dbg_omci_rx : 0;
+	return ep ? ep->dbg_omci_rx : GPON_OMCI_RX_UNAVAIL;
 }
 EXPORT_SYMBOL(rtl9602c_eth_omci_rx_count);
 
-/* gpon0 (WAN) RX packet count. 0 = the OLT has forwarded us ...
- * dev/MEASURED-rtl9602c_eth.c.md sec 123. */
+/* gpon0 (WAN) RX packet count: no WAN netdev is COULD NOT ASK, never 0 (the
+ * O5 watchdog tears a ranged ONU down on 0) -- dev/MEASURED-rtl9602c_eth.c.md sec 123. */
 u32 rtl9602c_eth_wan_rx_count(void)
 {
 	struct rtl9602c_eth *ep = g_ep;
 
-	return (ep && ep->wan_ndev) ? (u32)ep->wan_ndev->stats.rx_packets : 0;
+	return (ep && ep->wan_ndev) ? (u32)ep->wan_ndev->stats.rx_packets
+				    : GPON_OMCI_RX_UNAVAIL;
 }
 EXPORT_SYMBOL(rtl9602c_eth_wan_rx_count);
 

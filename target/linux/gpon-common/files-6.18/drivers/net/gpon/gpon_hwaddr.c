@@ -3,19 +3,9 @@
 #include <linux/random.h>
 
 #include "gpon_hwaddr.h"
+#include "gpon_sn.h"
 
 /* Local so this file also builds on a host (dev/rtl9607c-test). */
-static int hwaddr_hex_nibble(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 bool gpon_hwaddr_parse(const char *s, u8 out[GPON_HWADDR_BYTES])
 {
 	u8 tmp[GPON_HWADDR_BYTES];
@@ -31,12 +21,12 @@ bool gpon_hwaddr_parse(const char *s, u8 out[GPON_HWADDR_BYTES])
 				return false;
 			n++;
 		}
-		d = hwaddr_hex_nibble(s[n]);
+		d = gpon_hex_digit(s[n]);
 		if (d < 0)
 			return false;
 		v = d;
 		n++;
-		d = hwaddr_hex_nibble(s[n]);
+		d = gpon_hex_digit(s[n]);
 		if (d >= 0) {		/* one or two digits per octet */
 			v = (v << 4) | d;
 			n++;

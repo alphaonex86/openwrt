@@ -1030,14 +1030,6 @@ int gpon_ploam_poll_rei(struct gpon_ploam *o, u32 now_ms)
 /* Identity and lifecycle. ★★ THE SERIAL-NUMBER CODEC IS NOT ...
  * dev/MEASURED-gpon_ploam.c.md sec 35. */
 
-static int hex_nibble(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	c |= 0x20;
-	return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
-}
-
 /* Up to 10 printable octets, or exactly 20 hex digits -- the form some vendor
  * MIBs store (the X100DG's GPON_PLOAM_PASSWD "31323334353637383930"); a 20-char
  * printable password does not exist, so the two cannot be confused. One
@@ -1052,11 +1044,11 @@ int gpon_ploam_password_parse(const char *s, u8 out[GPON_PLOAM_PASSWORD_LEN])
 	while (s[n] && !(s[n] == '\n' && !s[n + 1]))
 		n++;
 	if (n == 2 * GPON_PLOAM_PASSWORD_LEN) {
-		for (i = 0; i < n && hex_nibble(s[i]) >= 0; i++)
+		for (i = 0; i < n && gpon_hex_digit(s[i]) >= 0; i++)
 			;
 		if (i == n) {
 			for (i = 0; i < GPON_PLOAM_PASSWORD_LEN; i++)
-				out[i] = (u8)(hex_nibble(s[2 * i]) << 4 | hex_nibble(s[2 * i + 1]));
+				out[i] = (u8)(gpon_hex_digit(s[2 * i]) << 4 | gpon_hex_digit(s[2 * i + 1]));
 			return 0;
 		}
 	}

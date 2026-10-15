@@ -10,17 +10,6 @@
 /* Local, so the file needs no <ctype.h>: the spec's alphabet is ASCII and the
  * kernel's ctype is locale-free anyway -- spelling it out costs four lines and
  * removes a dependency from a file that must also build on a host. */
-static int sn_hex_nibble(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
 /* A vendor ID character: printable ASCII, and not a space. ...
  * dev/MEASURED-gpon_sn.c.md sec 2. */
 static int sn_id_char_ok(char c)
@@ -54,8 +43,8 @@ int gpon_sn_parse(const char *s, u8 out[GPON_SN_BYTES])
 		tmp[i] = (u8)s[i];
 	}
 	for (i = 0; i < 4; i++) {
-		hi = sn_hex_nibble(s[4 + 2 * i]);
-		lo = sn_hex_nibble(s[5 + 2 * i]);
+		hi = gpon_hex_digit(s[4 + 2 * i]);
+		lo = gpon_hex_digit(s[5 + 2 * i]);
 		if (hi < 0 || lo < 0)
 			return -1;
 		tmp[4 + i] = (u8)((hi << 4) | lo);

@@ -2394,6 +2394,51 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	return first;
 }
 
+struct omci_prop_view {
+	omci_prop_fn prop;
+	void *ctx;
+};
+
+/* The equipment readers take a NULL value as absent. */
+static const void *omci_prop_null_absent(void *view, const char *name, int *len)
+{
+	const struct omci_prop_view *v = view;
+	const void *p = v->prop(v->ctx, name, len);
+
+	if (!p)
+		*len = -1;
+	return p;
+}
+
+void omci_onu_declare_panel(struct omci_onu *o, omci_prop_fn prop, void *ctx,
+			    u8 *port, unsigned int port_cap, u8 *port_n,
+			    struct omci_panel_decl *d)
+{
+	const void *pptp, *type, *unig, *cap, *ports;
+	int pptp_len, type_len, unig_len, cap_len;
+	struct omci_prop_view view = { prop, ctx };
+	enum omci_uni_decl decl;
+	const char *why = NULL;
+
+	pptp = prop(ctx, "ethernet-uni-instances", &pptp_len);
+	type = prop(ctx, "ethernet-uni-types", &type_len);
+	unig = prop(ctx, "uni-g-instances", &unig_len);
+	cap = prop(ctx, "uni-g-management-capability", &cap_len);
+	ports = prop(ctx, "ethernet-uni-ports", &d->ports_len);
+	decl = omci_onu_declare_unis_be(o, pptp, pptp_len, type, type_len, unig,
+					unig_len, cap, cap_len, &why);
+	d->unis_why = decl == OMCI_UNI_DECL_BAD ? why : NULL;
+	d->unis = decl == OMCI_UNI_DECL_OK && pptp_len > 0 ? pptp_len / 2 : 0;
+	*port_n = 0;
+	if (d->unis && ports && d->ports_len == d->unis &&
+	    d->ports_len <= (int)port_cap) {
+		memcpy(port, ports, d->ports_len);
+		*port_n = (u8)d->ports_len;
+	}
+	d->part_why = NULL;
+	d->part = omci_onu_declare_equipment(o, omci_prop_null_absent, &view, &d->part_why);
+}
+
 void omci_onu_set_wan_mac(struct omci_onu *o, const u8 mac[6])
 {
 	memcpy(o->wan_mac, mac, sizeof(o->wan_mac));

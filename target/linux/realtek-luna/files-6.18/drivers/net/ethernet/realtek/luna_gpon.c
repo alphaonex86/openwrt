@@ -6718,58 +6718,29 @@ MODULE_PARM_DESC(uni_test, "TEMPORARY board diagnostic: write \"<instance-hex> <
 
 static const void *luna_of_prop(void *np, const char *name, int *len)
 {
-	const void *p = of_get_property(np, name, len);
-
-	if (!p)
-		*len = -1;
-	return p;
+	*len = -1;
+	return of_get_property(np, name, len);
 }
 
 static void luna_omci_declare_uni_panel(struct omci_onu *onu)
 {
 	struct device_node *np = of_find_node_by_path("/omci-uni");
-	const void *pptp, *unig, *cap, *ports, *type;
-	int pptp_len = -1, type_len = -1, unig_len = -1, cap_len = -1, ports_len = -1;
-	const char *what;
-	const char *why = "";
-	enum omci_uni_decl decl;
+	struct omci_panel_decl d;
 
 	if (!np)
 		return;
-	pptp = of_get_property(np, "ethernet-uni-instances", &pptp_len);
-	unig = of_get_property(np, "uni-g-instances", &unig_len);
-	cap = of_get_property(np, "uni-g-management-capability", &cap_len);
-	/* ★ THE SWITCH PORT PER INSTANCE, FROM THE BOARD -- never computed.  The
-	 *   G24W's own mapper answers 0x0101->0 .. 0x0401->3 and the X111W's
-	 *   0x0101->1, 0x0102->0; the Cortina board runs the other way.  No
-	 *   arithmetic on an instance id is right on more than one of them. */
-	ports = of_get_property(np, "ethernet-uni-ports", &ports_len);
-	/* ★ THE PLUG-IN TYPE PER INSTANCE, FROM THE BOARD -- never ...
-	 * dev/MEASURED-luna_gpon.c.md sec 319. */
-	type = of_get_property(np, "ethernet-uni-types", &type_len);
-	/* ⚠ THE RETURNED LENGTH IS THE ANSWER, NOT THE POINTER. ...
-	 * dev/MEASURED-luna_gpon.c.md sec 210. */
-	decl = omci_onu_declare_unis_be(onu, pptp, pptp_len, type, type_len,
-					unig, unig_len, cap, cap_len, &why);
-	if (decl == OMCI_UNI_DECL_BAD)
-		pr_err("luna-gpon: /omci-uni REFUSED: %s -- keeping the single-UNI default\n",
-		       why);
-	luna_uni_port_n = 0;
-	if (decl == OMCI_UNI_DECL_OK && pptp_len > 0) {
-		if (ports && ports_len == pptp_len / 2 &&
-		    ports_len <= (int)ARRAY_SIZE(luna_uni_port)) {
-			memcpy(luna_uni_port, ports, ports_len);
-			luna_uni_port_n = (u8)ports_len;
-		} else {
-			pr_warn("luna-gpon: /omci-uni has no usable ethernet-uni-ports (%d bytes for %d UNIs): the administrative state is modelled and NEVER APPLIED\n",
-				ports_len, pptp_len / 2);
-		}
-	}
-	what = omci_onu_declare_equipment(onu, luna_of_prop, np, &why);
-	if (what)
-		pr_err("luna-gpon: /omci-uni %s REFUSED: %s -- that part keeps its default\n",
-		       what, why);
+	omci_onu_declare_panel(onu, luna_of_prop, np, luna_uni_port,
+			       ARRAY_SIZE(luna_uni_port), &luna_uni_port_n, &d);
 	of_node_put(np);
+	if (d.unis_why)
+		pr_err("luna-gpon: /omci-uni REFUSED: %s -- keeping the single-UNI default\n",
+		       d.unis_why);
+	if (d.unis && !luna_uni_port_n)
+		pr_warn("luna-gpon: /omci-uni has no usable ethernet-uni-ports (%d bytes for %d UNIs): the administrative state is modelled and NEVER APPLIED\n",
+			d.ports_len, d.unis);
+	if (d.part)
+		pr_err("luna-gpon: /omci-uni %s REFUSED: %s -- that part keeps its default\n",
+		       d.part, d.part_why);
 }
 
 /* The unit's own counts over the board's, under luna_omci_lock. */

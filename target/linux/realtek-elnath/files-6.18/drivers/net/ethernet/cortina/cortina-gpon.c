@@ -1761,61 +1761,30 @@ static u8 cg_uni_port_n;
 
 static const void *cg_of_prop(void *np, const char *name, int *len)
 {
-	const void *p = of_get_property(np, name, len);
-
-	if (!p)
-		*len = -1;
-	return p;
+	*len = -1;
+	return of_get_property(np, name, len);
 }
 
 static void cg_omci_declare_uni_panel(struct omci_onu *onu, struct device *dev)
 {
 	struct device_node *np = of_find_node_by_path("/omci-uni");
-	const void *pptp, *unig, *cap, *ports, *type;
-	int pptp_len = -1, type_len = -1, unig_len = -1, cap_len = -1, ports_len = -1;
-	const char *why = "", *what;
-	enum omci_uni_decl decl;
+	struct omci_panel_decl d;
 
 	if (!np)
 		return;
-	pptp = of_get_property(np, "ethernet-uni-instances", &pptp_len);
-	unig = of_get_property(np, "uni-g-instances", &unig_len);
-	cap = of_get_property(np, "uni-g-management-capability", &cap_len);
-	/* ★ THE SWITCH PORT PER INSTANCE, FROM THE BOARD -- never computed.  This
-	 *   board's mapper answers 0x0101->3 .. 0x0104->0, the G24W's 0x0101->0 ..
-	 *   0x0401->3: opposite orders, one with a non-contiguous instance id. */
-	ports = of_get_property(np, "ethernet-uni-ports", &ports_len);
-	/* ★ THE PLUG-IN TYPE PER INSTANCE, FROM THE BOARD -- never computed.  G.988
-	 *   Expected/Sensed type states what the UNI IS: both Luna boards report 47 for
-	 *   their GE port and 24 for every FE one, and the model answered 47 for all. */
-	type = of_get_property(np, "ethernet-uni-types", &type_len);
-	/* ⚠ THE RETURNED LENGTH IS THE ANSWER, NOT THE POINTER. ...
-	 * dev/MEASURED-cortina-gpon.c.md sec 84. */
-	decl = omci_onu_declare_unis_be(onu, pptp, pptp_len, type, type_len,
-					unig, unig_len, cap, cap_len, &why);
-	if (decl == OMCI_UNI_DECL_BAD)
-		dev_err(dev, "/omci-uni REFUSED: %s -- keeping the single-UNI default\n",
-			why);
-	cg_uni_port_n = 0;
-	if (decl == OMCI_UNI_DECL_OK && pptp_len) {
-		/* one byte per declared Ethernet UNI, in the SAME order.  Absent or
-		 * the wrong length, the administrative state is still MODELLED and
-		 * answered -- it is simply never APPLIED, and that is said out loud. */
-		if (ports && ports_len == pptp_len / 2 &&
-		    ports_len <= (int)ARRAY_SIZE(cg_uni_port)) {
-			memcpy(cg_uni_port, ports, ports_len);
-			cg_uni_port_n = (u8)ports_len;
-		} else {
-			dev_warn(dev,
-				 "/omci-uni has no usable ethernet-uni-ports (%d bytes for %d UNIs): the administrative state will be modelled and NEVER APPLIED\n",
-				 ports_len, pptp_len / 2);
-		}
-	}
-	what = omci_onu_declare_equipment(onu, cg_of_prop, np, &why);
-	if (what)
-		dev_err(dev, "/omci-uni %s REFUSED: %s -- that part keeps its default\n",
-			what, why);
+	omci_onu_declare_panel(onu, cg_of_prop, np, cg_uni_port,
+			       ARRAY_SIZE(cg_uni_port), &cg_uni_port_n, &d);
 	of_node_put(np);
+	if (d.unis_why)
+		dev_err(dev, "/omci-uni REFUSED: %s -- keeping the single-UNI default\n",
+			d.unis_why);
+	if (d.unis && !cg_uni_port_n)
+		dev_warn(dev,
+			 "/omci-uni has no usable ethernet-uni-ports (%d bytes for %d UNIs): the administrative state will be modelled and NEVER APPLIED\n",
+			 d.ports_len, d.unis);
+	if (d.part)
+		dev_err(dev, "/omci-uni %s REFUSED: %s -- that part keeps its default\n",
+			d.part, d.part_why);
 }
 
 /* ★ ONE ARMING SITE FOR THE RESPONDER.  Two callers had grown the same three

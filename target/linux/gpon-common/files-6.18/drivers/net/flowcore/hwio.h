@@ -34,9 +34,7 @@ static inline void hwio_wr(const struct hwio *io, u32 off, u32 val)
 static inline void hwio_rmw(const struct hwio *io, u32 off, u8 msb, u8 lsb,
 			    u32 val)
 {
-	u32 mask = gpon_field_mask(msb, lsb);   /* the ONE owner, in gpon/ */
-
-	hwio_wr(io, off, (hwio_rd(io, off) & ~mask) | ((val << lsb) & mask));
+	hwio_wr(io, off, gpon_field_set(hwio_rd(io, off), msb, lsb, val));
 }
 
 #endif /* _HWIO_H */

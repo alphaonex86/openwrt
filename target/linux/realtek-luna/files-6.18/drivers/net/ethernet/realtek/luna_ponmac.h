@@ -41,9 +41,7 @@ struct luna_ops {
 static inline void luna_rfwr(const struct luna_ops *o, u32 phys,
 				u8 msb, u8 lsb, u32 val)
 {
-	u32 mask = gpon_field_mask(msb, lsb);   /* the ONE owner, in gpon/ */
-
-	o->wr(phys, (o->rd(phys) & ~mask) | ((val << lsb) & mask));
+	o->wr(phys, gpon_field_set(o->rd(phys), msb, lsb, val));
 }
 
 /* Bring-up entry points. rev = LUNA_REV_A or the HW ... -- dev/MEASURED-luna_ponmac.h.md sec 3. */

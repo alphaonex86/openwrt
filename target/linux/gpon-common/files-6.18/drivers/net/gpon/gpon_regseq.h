@@ -32,6 +32,13 @@ static inline u32 gpon_field_mask(u8 msb, u8 lsb)
 	     : (((1u << (msb - lsb + 1)) - 1u) << lsb);
 }
 
+static inline u32 gpon_field_set(u32 word, u8 msb, u8 lsb, u32 val)
+{
+	u32 mask = gpon_field_mask(msb, lsb);
+
+	return (word & ~mask) | ((val << lsb) & mask);
+}
+
 struct gpon_regseq_io {
 	u32  (*rd)(u32 addr);
 	void (*wr)(u32 addr, u32 val);

@@ -302,22 +302,11 @@ static int luna_flow_block_cb(enum tc_setup_type type, void *data, void *cookie)
 	if (type != TC_SETUP_CLSFLOWER || !ep || !ep->flow)
 		return -EOPNOTSUPP;
 	mutex_lock(&luna_flow_mutex);
-	switch (f->command) {
-	case FLOW_CLS_REPLACE:
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+	if (f->command == FLOW_CLS_REPLACE)
 		ep->flow->offered++;
 #endif
-		ret = gpon_flow_offload_replace(ep->flow->fo, f, cookie);
-		break;
-	case FLOW_CLS_DESTROY:
-		ret = gpon_flow_offload_destroy(ep->flow->fo, f);
-		break;
-	case FLOW_CLS_STATS:
-		ret = gpon_flow_offload_stats(ep->flow->fo, f);
-		break;
-	default:
-		ret = -EOPNOTSUPP;
-	}
+	ret = gpon_flow_offload_tc(ep->flow->fo, f, cookie);
 	if (ret && ret != -EOPNOTSUPP && ret != -ENOENT &&
 	    ret != -EEXIST && ret != -EAGAIN && ret != -ENOSPC)
 		pr_warn_ratelimited("luna-flow: operation %u failed: %d\n", f->command, ret);

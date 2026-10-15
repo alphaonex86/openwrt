@@ -448,3 +448,18 @@ int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 	f->stats.lastused = lastused;
 	return 0;
 }
+
+int gpon_flow_offload_tc(struct gpon_flow_offload *fo, struct flow_cls_offload *f,
+			 struct net_device *blockdev)
+{
+	switch (f->command) {
+	case FLOW_CLS_REPLACE:
+		return gpon_flow_offload_replace(fo, f, blockdev);
+	case FLOW_CLS_DESTROY:
+		return gpon_flow_offload_destroy(fo, f);
+	case FLOW_CLS_STATS:
+		return gpon_flow_offload_stats(fo, f);
+	default:
+		return -EOPNOTSUPP;
+	}
+}

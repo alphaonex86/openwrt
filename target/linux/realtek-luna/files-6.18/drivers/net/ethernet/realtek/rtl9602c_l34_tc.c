@@ -337,27 +337,10 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 		return -EOPNOTSUPP;
 
 	mutex_lock(&rtl9602c_l34_tc_mutex);
-	switch (f->command) {
-	case FLOW_CLS_REPLACE:
-		/* ★ WHO REFUSED IS NOW MEASURED, NOT INFERRED.  This used to watch
-		 * whether its own counters moved during the call and attribute the
-		 * remainder to the core -- which could name the culprit but never
-		 * the CAUSE, because eleven of the core's refusals are one errno.
-		 * CONFIG_GPON_FLOW_DIAG names them at the point of refusal
-		 * (gpon_flow_offload_diag(), rendered in the flowdump node). */
+	/* who refused is named by CONFIG_GPON_FLOW_DIAG at the point of refusal */
+	if (f->command == FLOW_CLS_REPLACE)
 		ep->l34.offered++;
-		err = gpon_flow_offload_replace(ep->fo, f, dev);
-		break;
-	case FLOW_CLS_DESTROY:
-		err = gpon_flow_offload_destroy(ep->fo, f);
-		break;
-	case FLOW_CLS_STATS:
-		err = gpon_flow_offload_stats(ep->fo, f);
-		break;
-	default:
-		err = -EOPNOTSUPP;
-		break;
-	}
+	err = gpon_flow_offload_tc(ep->fo, f, dev);
 	mutex_unlock(&rtl9602c_l34_tc_mutex);
 	return err;
 }

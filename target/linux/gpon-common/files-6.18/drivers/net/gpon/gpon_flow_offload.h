@@ -108,6 +108,9 @@ int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f);
 int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 			    struct flow_cls_offload *f);
+/* One TC_SETUP_CLSFLOWER command, dispatched to the verb above. */
+int gpon_flow_offload_tc(struct gpon_flow_offload *fo, struct flow_cls_offload *f,
+			 struct net_device *blockdev);
 
 /* Decode a rule's ACTIONS. Split out of replace() so a family ...
  * dev/MEASURED-gpon_flow_offload.h.md sec 8. */

@@ -2402,23 +2402,10 @@ static int cn_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
 		return -EOPNOTSUPP;
 
 	mutex_lock(&cn_flow_offload_mutex);
-	switch (f->command) {
-	case FLOW_CLS_REPLACE:
-		err = gpon_flow_offload_replace(cn_fo, f, cb_priv);
-		/* every REPLACE outcome passes here: a refusal is counted, never
-		 * silent (see the refusal-ledger comment above cn_flow_install) */
+	err = gpon_flow_offload_tc(cn_fo, f, cb_priv);
+	/* every REPLACE outcome passes here: a refusal is counted, never silent */
+	if (f->command == FLOW_CLS_REPLACE)
 		cn_flow_refused_account(err);
-		break;
-	case FLOW_CLS_DESTROY:
-		err = gpon_flow_offload_destroy(cn_fo, f);
-		break;
-	case FLOW_CLS_STATS:
-		err = gpon_flow_offload_stats(cn_fo, f);
-		break;
-	default:
-		err = -EOPNOTSUPP;
-		break;
-	}
 	mutex_unlock(&cn_flow_offload_mutex);
 	return err;
 }

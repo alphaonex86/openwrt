@@ -23,6 +23,11 @@ static u32 get32(const u8 *p)
 	return p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24;
 }
 
+static u32 get32be(const u8 *p)
+{
+	return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+}
+
 u32 ocl_crc32(u32 crc, const u8 *p, size_t n)
 {
 	int k;
@@ -98,4 +103,16 @@ const char *ocl_kind_name(u8 kind)
 	static const char *const names[] = { "?", "boot", "clean", "panic", "pretimeout", "unclean" };
 
 	return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "?";
+}
+
+int ocl_behind_our_kernel(const u8 *uimage_hdr, const char *release, u64 kernel_ofs, u64 region_ofs)
+{
+	char name[33];
+	const char *ver;
+
+	memcpy(name, uimage_hdr + 32, 32);
+	name[32] = 0;
+	ver = strstr(name, "OpenWrt Linux-");
+	return get32be(uimage_hdr) == 0x27051956u && ver && !strcmp(ver + 14, release) &&
+	       kernel_ofs + 64 + get32be(uimage_hdr + 12) <= region_ofs;
 }

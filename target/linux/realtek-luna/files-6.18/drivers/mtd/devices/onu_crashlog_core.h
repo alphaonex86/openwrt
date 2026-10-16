@@ -11,6 +11,7 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
 #endif
 
 #define OCL_MAGIC	"ONUCRSH1"
@@ -44,5 +45,6 @@ size_t ocl_bytes(size_t text_len);
 size_t ocl_encode(u8 *out, size_t cap, const struct ocl_rec *r);
 int ocl_parse(const u8 *p, size_t avail, struct ocl_rec *r);
 const char *ocl_kind_name(u8 kind);
+int ocl_behind_our_kernel(const u8 *uimage_hdr, const char *release, u64 kernel_ofs, u64 region_ofs);
 
 #endif

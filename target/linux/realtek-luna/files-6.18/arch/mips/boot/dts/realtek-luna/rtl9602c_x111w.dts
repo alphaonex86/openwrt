@@ -175,7 +175,11 @@
 		};
 		partition@80000 {
 			label = "k0";
-			reg = <0x080000 0x300000>;	/* 3M kernel bank 0 */
+			reg = <0x080000 0x2f0000>;	/* 3M kernel bank 0, less its crashlog tail */
+		};
+		partition@370000 {
+			label = "crashlog";
+			reg = <0x370000 0x010000>;	/* 64K: onu_crashlog records, operator 2026-10-16 */
 		};
 		partition@380000 {
 			label = "r0";

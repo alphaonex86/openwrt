@@ -40,11 +40,11 @@ vendor (stock) firmware and on our OpenWrt image.
 4. Fill `bundle.json` (next to this guide):
    - `board`: `<SoC>/<brand>/<model>`, brand and model as printed on the case; write `?` for the SoC if
      you do not know it (the boot log in the bundle usually names it, and we fill it in);
-   - `declared_by`: your GitHub handle (leave `"?"` if you contact us by email only: we assign an id);
+   - `declared_by`: leave `"?"` and we assign an id; put your GitHub handle only if you want it on record;
    - `declaration`: what you can see on the case, one key per item; `null` means it does not exist, `"?"` means
      you do not know;
-   - `provenance.consent`: `publish-with-credit` (results published, your handle credited),
-     `publish-anonymous` (results published, no name) or `private` (results kept private);
+   - `provenance.consent`: `private` (the default: results kept private) unless you want them published,
+     `publish-with-credit` (your handle credited) or `publish-anonymous` (no name);
    - `provenance.isp`, `olt_vendor`, `olt_model`, `olt_version`: what you know, else `"?"`.
 5. Add it to the bundle: `tar rf gpon-bundle-<...>.tar bundle.json`.
 
@@ -57,8 +57,8 @@ files, or send them by email to contact@herman-brule.com.
 
 The bundle holds your MAC addresses, the ONU serial number and possibly service settings the OLT sent to your
 ONU. We keep bundles private. Your email address, the console login and the label MAC are stored apart from
-everything else and never published. Published results follow your consent: with credit, anonymous, or not at
-all.
+everything else and never published. Nothing is published unless your bundle.json says so; the default is
+private.
 
 ## What we do with it
 

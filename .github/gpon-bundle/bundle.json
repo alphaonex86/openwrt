@@ -1,6 +1,6 @@
 {
  "board": "<SOC>/<BRAND>/<MODEL>",
- "declared_by": "<GitHub handle or contrib-N>",
+ "declared_by": "?",
  "stock_dump": [],
  "declaration": {
   "LAN_PANEL_PORTS": "?",
@@ -21,7 +21,7 @@
   "PART_VOICE": "?"
  },
  "provenance": {
-  "consent": "publish-with-credit",
+  "consent": "private",
   "isp": "?",
   "olt_vendor": "?",
   "olt_model": "?",

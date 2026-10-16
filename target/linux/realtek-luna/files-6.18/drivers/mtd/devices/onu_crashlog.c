@@ -3,8 +3,8 @@
  * Crash records on the reserved "crashlog" partition, read back after any reset:
  * a boot record per boot, a clean record per orderly reboot, the kernel log tail on
  * panic. A boot record left without either is an unclean end (power cut or watchdog).
- * The region is written only when it is ours: our magic, fully erased, or the free
- * tail of a partition whose uImage is OpenWrt and ends before it.
+ * The region is written only when it is the free tail of a partition holding THIS
+ * OpenWrt release's kernel: never behind a vendor kernel, however erased.
  */
 #include <linux/kernel.h>
 #include <linux/kmsg_dump.h>
@@ -21,7 +21,6 @@
 #include <linux/vmalloc.h>
 #include "onu_crashlog_core.h"
 
-#define UIMAGE_MAGIC	0x27051956
 #define KEEP_RECORDS	6
 #define MIN_FREE	(16 * OCL_PAGE)
 
@@ -118,17 +117,13 @@ static bool tail_of_our_image(struct mtd_info *mtd)
 	struct mtd_info *img = get_mtd_device_nm(image);
 	u8 hdr[64];
 	size_t got = 0;
-	bool ok = false;
+	bool ok;
 
 	if (IS_ERR(img))
 		return false;
-	if (!mtd_read(img, 0, sizeof(hdr), &got, hdr) && got == sizeof(hdr)) {
-		u32 magic = (u32)hdr[0] << 24 | hdr[1] << 16 | hdr[2] << 8 | hdr[3];
-		u32 size = (u32)hdr[12] << 24 | hdr[13] << 16 | hdr[14] << 8 | hdr[15];
-
-		ok = magic == UIMAGE_MAGIC && strnstr((char *)hdr + 32, "OpenWrt", 32) &&
-		     mtd_get_master_ofs(img, 0) + sizeof(hdr) + size <= mtd_get_master_ofs(mtd, 0);
-	}
+	ok = !mtd_read(img, 0, sizeof(hdr), &got, hdr) && got == sizeof(hdr) &&
+	     ocl_behind_our_kernel(hdr, init_utsname()->release, mtd_get_master_ofs(img, 0),
+				   mtd_get_master_ofs(mtd, 0));
 	put_mtd_device(img);
 	return ok;
 }
@@ -206,14 +201,9 @@ static void ocl_attach(struct mtd_info *mtd)
 		off += r.bytes;
 	}
 	ocl.end = off;
-	ocl.owned = off > 0 || !foreign;
-	if (!ocl.owned && tail_of_our_image(mtd)) {
-		ocl.owned = !erase_all();
-		foreign = false;
-		pr_info("onu_crashlog: claimed %s, the free tail of an OpenWrt %s\n", mtd->name, image);
-	}
+	ocl.owned = tail_of_our_image(mtd);
 	if (!ocl.owned) {
-		pr_warn("onu_crashlog: %s holds data that is not ours, nothing is written\n", mtd->name);
+		pr_warn("onu_crashlog: %s is not behind this OpenWrt's %s, nothing is written\n", mtd->name, image);
 		return;
 	}
 	if ((foreign || ocl.size - ocl.end < MIN_FREE) && compact(off))
@@ -265,7 +255,8 @@ static int ocl_show(struct seq_file *m, void *v)
 
 static int __init ocl_init(void)
 {
-	proc_create_single("onu_crashlog", 0444, NULL, ocl_show);
+	if (!proc_create_single("onu_crashlog", 0444, NULL, ocl_show))
+		pr_err("onu_crashlog: /proc/onu_crashlog not created, the records stay unreadable\n");
 	register_mtd_user(&notifier);
 	return 0;
 }

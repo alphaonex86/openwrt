@@ -379,13 +379,18 @@ static const char *mib_value(const uint8_t *d, long n, const char *key)
 	return hit;
 }
 
-/* Extract Value of <... Name="key" ... Value="val" ...> from a buffer. */
+static const char *chain_value(const uint8_t *buf, long len, const char *key);
+
+/* Extract Value of <... Name="key" ... Value="val" ...> from a buffer; a key
+ * "TABLE.idx.field" names one row of a vendor chain (chain_value). */
 static const char *xml_value(const uint8_t *buf, long len, const char *key)
 {
 	static char out[256];
 	char pat[96];
 	int pl = snprintf(pat, sizeof pat, "Name=\"%s\"", key);
 	long i;
+	if (strchr(key, '.'))
+		return chain_value(buf, len, key);
 	for (i = 0; i + pl <= len; i++) {
 		if (memcmp(buf + i, pat, pl))
 			continue;
@@ -399,6 +404,35 @@ static const char *xml_value(const uint8_t *buf, long len, const char *key)
 		memcpy(out, v, e - v);
 		out[e - v] = 0;
 		return out;
+	}
+	return NULL;
+}
+
+/* One field of one row of a vendor chain: the row is a <Dir Name="TABLE">
+ * element whose first token is <!--index=IDX-->, and SSID and key are read
+ * from the SAME row so they can never be paired across two networks. */
+static const char *chain_value(const uint8_t *buf, long len, const char *key)
+{
+	char table[64], idx[16], field[64], dir[96], mark[32];
+	const uint8_t *p = buf, *end = buf + len;
+	int dl, ml;
+
+	if (sscanf(key, "%63[^.].%15[^.].%63s", table, idx, field) != 3)
+		return NULL;
+	dl = snprintf(dir, sizeof dir, "<Dir Name=\"%s\">", table);
+	ml = snprintf(mark, sizeof mark, "<!--index=%s-->", idx);
+	while (p < end && (p = memmem(p, end - p, dir, dl))) {
+		const uint8_t *body = p + dl;
+		const uint8_t *close = memmem(body, end - body, "</Dir>", 6);
+
+		if (!close)
+			return NULL;
+		while (body < close && (*body == ' ' || *body == '\t' ||
+					*body == '\r' || *body == '\n'))
+			body++;
+		if (close - body >= ml && !memcmp(body, mark, ml))
+			return xml_value(body + ml, close - body - ml, field);
+		p = close;
 	}
 	return NULL;
 }
@@ -468,31 +502,37 @@ static const struct family *jffs2_family(const uint8_t *d, uint32_t n)
  *   The *_bak.xml files are the PREVIOUS generation -- current-vs-backup is a
  *   semantic this reader must keep, not a pair of interchangeable names. */
 enum famrole { F_HW, F_SW };
-struct map { const char *verb; enum famrole role; const char *key; int is_mac; };
+struct map { const char *verb; enum famrole role; const char *key; int is_mac; int secret; };
 static const struct map MAP[] = {
-	{ "mac",           F_HW, "ELAN_MAC_ADDR",     1 },
-	{ "wlan_mac",      F_HW, "WLAN_MAC_ADDR",     1 },
-	{ "sn",            F_HW, "GPON_SN",           0 },
-	{ "oui",           F_HW, "OUI",               0 },
-	{ "vendor_id",     F_HW, "PON_VENDOR_ID",     0 },
-	{ "model",         F_HW, "GPON_ONU_MODEL",    0 },
-	{ "hw_ver",        F_HW, "HW_HWVER",          0 },
-	{ "wlan_cck_a",    F_HW, "HW_WLAN0_TX_POWER_CCK_A",     0 },
-	{ "wlan_cck_b",    F_HW, "HW_WLAN0_TX_POWER_CCK_B",     0 },
-	{ "wlan_ht40_a",   F_HW, "HW_WLAN0_TX_POWER_HT40_1S_A", 0 },
-	{ "wlan_ht40_b",   F_HW, "HW_WLAN0_TX_POWER_HT40_1S_B", 0 },
-	{ "wlan_thermal",  F_HW, "HW_WLAN0_11N_THER",           0 },
-	{ "wlan_xcap",     F_HW, "HW_WLAN0_11N_XCAP",           0 },
-	{ "wlan_reg_domain", F_HW, "HW_WLAN0_REG_DOMAIN",       0 },
-	{ "mac_key",       F_HW, "MAC_KEY",           0 },
-	{ "loid",          F_SW,    "LOID",              0 },
-	{ "loid_passwd",   F_SW,    "LOID_PASSWD",       0 },
-	{ "ploam_passwd",  F_SW,    "GPON_PLOAM_PASSWD", 0 },
-	{ "olt_mode",      F_SW,    "OMCI_OLT_MODE",     0 },
-	{ "sw_ver1",       F_SW,    "OMCI_SW_VER1",      0 },
-	{ "sw_ver2",       F_SW,    "OMCI_SW_VER2",      0 },
-	{ "product_code",  F_SW,    "OMCI_VENDOR_PRODUCT_CODE", 0 },
-	{ NULL, F_HW, NULL, 0 }
+	{ "mac",           F_HW, "ELAN_MAC_ADDR",     1, 0 },
+	{ "wlan_mac",      F_HW, "WLAN_MAC_ADDR",     1, 0 },
+	{ "sn",            F_HW, "GPON_SN",           0, 0 },
+	{ "oui",           F_HW, "OUI",               0, 0 },
+	{ "vendor_id",     F_HW, "PON_VENDOR_ID",     0, 0 },
+	{ "model",         F_HW, "GPON_ONU_MODEL",    0, 0 },
+	{ "hw_ver",        F_HW, "HW_HWVER",          0, 0 },
+	{ "wlan_cck_a",    F_HW, "HW_WLAN0_TX_POWER_CCK_A",     0, 0 },
+	{ "wlan_cck_b",    F_HW, "HW_WLAN0_TX_POWER_CCK_B",     0, 0 },
+	{ "wlan_ht40_a",   F_HW, "HW_WLAN0_TX_POWER_HT40_1S_A", 0, 0 },
+	{ "wlan_ht40_b",   F_HW, "HW_WLAN0_TX_POWER_HT40_1S_B", 0, 0 },
+	{ "wlan_thermal",  F_HW, "HW_WLAN0_11N_THER",           0, 0 },
+	{ "wlan_xcap",     F_HW, "HW_WLAN0_11N_XCAP",           0, 0 },
+	{ "wlan_reg_domain", F_HW, "HW_WLAN0_REG_DOMAIN",       0, 0 },
+	{ "mac_key",       F_HW, "MAC_KEY",           0, 0 },
+	{ "loid",          F_SW,    "LOID",              0, 0 },
+	{ "loid_passwd",   F_SW,    "LOID_PASSWD",       0, 0 },
+	{ "ploam_passwd",  F_SW,    "GPON_PLOAM_PASSWD", 0, 0 },
+	{ "olt_mode",      F_SW,    "OMCI_OLT_MODE",     0, 0 },
+	{ "sw_ver1",       F_SW,    "OMCI_SW_VER1",      0, 0 },
+	{ "sw_ver2",       F_SW,    "OMCI_SW_VER2",      0, 0 },
+	{ "product_code",  F_SW,    "OMCI_VENDOR_PRODUCT_CODE", 0, 0 },
+	/* The stock AP of this unit: the first row of the vendor's SSID chain,
+	 * else its flat pair. A key is a secret: `all` never prints it. */
+	{ "wlan_ssid",      F_SW, "WLAN_MBSSIB_TBL.0.ssid",   0, 0 },
+	{ "wlan_psk",       F_SW, "WLAN_MBSSIB_TBL.0.wpaPSK", 0, 1 },
+	{ "wlan_ssid_flat", F_SW, "SSID",                     0, 0 },
+	{ "wlan_psk_flat",  F_SW, "WLAN_WPA_PSK",             0, 1 },
+	{ NULL, F_HW, NULL, 0, 0 }
 };
 
 static int mtd_path_by_name(const char *name, char *out, size_t n);
@@ -860,7 +900,7 @@ static int do_all(const char *part)
 		for (m = MAP; m->verb; m++) {
 			const char *val;
 
-			if (m->role != roles[r])
+			if (m->role != roles[r] || m->secret)
 				continue;
 			val = fam ? (flen >= 0 ? xml_value(filebuf, flen, m->key) : NULL)
 				  : mib_value(partbuf, (long)got, m->key);
@@ -890,7 +930,8 @@ int main(int argc, char **argv)
 			"vendor_id|model|hw_ver|mac_key|loid|loid_passwd|ploam_passwd|"
 			"wlan_cck_a|wlan_cck_b|wlan_ht40_a|wlan_ht40_b|wlan_thermal|"
 			"wlan_xcap|wlan_reg_domain|"
-			"olt_mode|sw_ver1|sw_ver2|product_code|all|"
+			"olt_mode|sw_ver1|sw_ver2|product_code|wlan_ssid|wlan_psk|"
+			"wlan_ssid_flat|wlan_psk_flat|all|"
 			"optical_cal|laser_cal|bosa_cal <outfile>>\n");
 		return 2;
 	}

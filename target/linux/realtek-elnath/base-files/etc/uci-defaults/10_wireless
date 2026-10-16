@@ -112,15 +112,15 @@ case "$mac" in
 	;;
 esac
 suffix="${mac#??????}"
-[ "${#key_2g}" -ge 8 ] || key_2g="12345678"
-[ "${#key_5g}" -ge 8 ] || key_5g="12345678"
-# ONE SSID + ONE key on BOTH bands so a phone band-steers 2.4G<->5G as a
-# single network. SSID = ONU-<last-3-MAC-octets> uppercase
-# (98:c7:a4:6c:af:cb -> ONU-6CAFCB); stock's HS-* names are NOT reused, but
-# the stock volume still supplies the wpaPSK. A shared SSID needs a shared
-# key -- per-band PSKs would break band-steering (both stock keys match here).
-ssid="ONU-$(echo "$suffix" | tr 'a-f' 'A-F')"
-key="$key_2g"
+# ONE SSID + ONE key on BOTH bands so a phone picks the band itself: the unit's
+# stock 2.4G name and key (operator 2026-10-16), else ONU-<last-3-MAC-octets>
+# uppercase and a random per-unit key -- never a fleet-wide literal.
+if [ -n "$ssid_2g" ] && [ "${#key_2g}" -ge 8 ]; then
+	ssid="$ssid_2g"; key="$key_2g"
+else
+	ssid="ONU-$(echo "$suffix" | tr 'a-f' 'A-F')"
+	key=$(head -c 32 /dev/urandom | sha256sum | cut -c1-16)
+fi
 # ---------------------------------------------------------------------------
 # ★ REGULATORY DOMAIN = BO (Bolivia) -- operator directive 2026-07-26.
 # The units are deployed in Bolivia, so the regulatory domain is BOLIVIA, and

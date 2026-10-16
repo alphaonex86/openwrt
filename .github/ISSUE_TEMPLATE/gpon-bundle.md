@@ -11,8 +11,8 @@ Thank you. Everything below is read-only on your board; .github/gpon-bundle/READ
 2. On a stock board, optionally: `sh gpon_bundle.sh --binaries > binaries.tar` from a PC session, and attach it.
 3. Fill .github/gpon-bundle/bundle.json and attach it (or append it: `tar rf <bundle>.tar bundle.json`):
    - `board`: brand and model exactly as printed on the case
-   - `declared_by`: your GitHub handle
-   - `provenance.consent`: publish-with-credit, publish-anonymous or private
+   - `declared_by`: leave `"?"`, we assign an id (put your GitHub handle only if you want it on record)
+   - `provenance.consent`: `private` unless you want the results published (`publish-with-credit` or `publish-anonymous`)
    - `provenance.isp`, `provenance.olt_vendor`, `provenance.olt_model`, `provenance.olt_version`: what you know
    - `declaration`: what you can see on the case; `null` when it does not exist, `"?"` when you do not know
 
@@ -25,7 +25,7 @@ The skeleton, generated from our declaration tool:
 ```json
 {
  "board": "<SOC>/<BRAND>/<MODEL>",
- "declared_by": "<GitHub handle or contrib-N>",
+ "declared_by": "?",
  "stock_dump": [],
  "declaration": {
   "LAN_PANEL_PORTS": "?",
@@ -46,7 +46,7 @@ The skeleton, generated from our declaration tool:
   "PART_VOICE": "?"
  },
  "provenance": {
-  "consent": "publish-with-credit",
+  "consent": "private",
   "isp": "?",
   "olt_vendor": "?",
   "olt_model": "?",

@@ -15,9 +15,13 @@
 /* One baseline G.988 PDU, local so this header needs no ME model to include. */
 #define GPON_OLT_PDU		48
 
-/* 128 exchanges, against a MEASURED 187-message burst: an overflow is loud
- * (`dropped`).  Cost: the Kconfig help and MEASURED sec 6. */
+/* Records per ring (CONFIG_GPON_OLT_DIAG_RECORDS; 256 when the host builds the
+ * core).  A field provisioning was 680: an overflow is loud (`dropped`). */
+#ifdef CONFIG_GPON_OLT_DIAG_RECORDS
+#define GPON_OLT_RECORDS	CONFIG_GPON_OLT_DIAG_RECORDS
+#else
 #define GPON_OLT_RECORDS	256
+#endif
 
 /* COULD NOT ASK.  `enum gpon_ostate` starts at 1, so 0 is free; renders `-`. */
 #define GPON_OLT_OSTATE_UNKNOWN	0

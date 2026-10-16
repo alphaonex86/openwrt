@@ -202,6 +202,18 @@ config GPON_OLT_DIAG
 	  must shed every byte sets this to n and the facility is ABSENT, not
 	  silenced.  The default is the operator's to flip.
 
+config GPON_OLT_DIAG_RECORDS
+	int "Records per far-end capture ring (OMCI and PLOAM)"
+	depends on GPON_OLT_DIAG
+	range 16 4096
+	default 256
+	help
+	  Each record is 64 B of BSS per ring (plus a 16 B header); Luna keeps two
+	  rings (OMCI and PLOAM), Cortina one.  256 holds a lab provisioning; the
+	  field X111W on our image needed 680 on 2026-10-02 (records=256
+	  dropped=424), so a field build sets 1024 (build-openwrt.py variant
+	  "field"): 65552 B per ring.  diag_cost.py states the cost per value.
+
 config GPON_OMCI_DIAG
 	bool "GPON OMCI per-message diagnostics (message type, ME, Get masks)"
 	depends on GPON_CORE

@@ -41,6 +41,7 @@ static struct {
 	struct mutex lock;
 } ocl = { .lock = __MUTEX_INITIALIZER(ocl.lock) };
 
+static struct mtd_info *ocl_img, *ocl_region;
 static u8 rec_buf[16 * OCL_PAGE];
 static char text_buf[OCL_MAX_TEXT];
 
@@ -112,20 +113,14 @@ static bool all_erased(const u8 *p, size_t n)
 }
 
 /* The free tail of an OpenWrt kernel partition is ours to claim; a vendor image's is not. */
-static bool tail_of_our_image(struct mtd_info *mtd)
+static bool tail_of_our_image(struct mtd_info *img, struct mtd_info *mtd)
 {
-	struct mtd_info *img = get_mtd_device_nm(image);
 	u8 hdr[64];
 	size_t got = 0;
-	bool ok;
 
-	if (IS_ERR(img))
-		return false;
-	ok = !mtd_read(img, 0, sizeof(hdr), &got, hdr) && got == sizeof(hdr) &&
-	     ocl_behind_our_kernel(hdr, init_utsname()->release, mtd_get_master_ofs(img, 0),
-				   mtd_get_master_ofs(mtd, 0));
-	put_mtd_device(img);
-	return ok;
+	return !mtd_read(img, 0, sizeof(hdr), &got, hdr) && got == sizeof(hdr) &&
+	       ocl_behind_our_kernel(hdr, init_utsname()->release, mtd_get_master_ofs(img, 0),
+				     mtd_get_master_ofs(mtd, 0));
 }
 
 static int erase_all(void)
@@ -175,7 +170,7 @@ static int compact(size_t scanned)
 	return ret;
 }
 
-static void ocl_attach(struct mtd_info *mtd)
+static void ocl_attach(struct mtd_info *img, struct mtd_info *mtd)
 {
 	struct ocl_rec r = { 0 }, last = { 0 };
 	size_t got = 0, off = 0;
@@ -201,7 +196,7 @@ static void ocl_attach(struct mtd_info *mtd)
 		off += r.bytes;
 	}
 	ocl.end = off;
-	ocl.owned = tail_of_our_image(mtd);
+	ocl.owned = tail_of_our_image(img, mtd);
 	if (!ocl.owned) {
 		pr_warn("onu_crashlog: %s is not behind this OpenWrt's %s, nothing is written\n", mtd->name, image);
 		return;
@@ -222,17 +217,26 @@ static void ocl_attach(struct mtd_info *mtd)
 		ocl.size, ocl.boot_seq);
 }
 
+/* Called with mtd_table_mutex held: no get_mtd_device*() here, it would deadlock the boot. */
 static void ocl_add(struct mtd_info *mtd)
 {
-	if (ocl.mtd || strcmp(mtd->name, partition))
+	if (!strcmp(mtd->name, image))
+		ocl_img = mtd;
+	else if (!strcmp(mtd->name, partition))
+		ocl_region = mtd;
+	if (ocl.mtd || !ocl_img || !ocl_region)
 		return;
 	mutex_lock(&ocl.lock);
-	ocl_attach(mtd);
+	ocl_attach(ocl_img, ocl_region);
 	mutex_unlock(&ocl.lock);
 }
 
 static void ocl_remove(struct mtd_info *mtd)
 {
+	if (mtd == ocl_img)
+		ocl_img = NULL;
+	if (mtd == ocl_region)
+		ocl_region = NULL;
 }
 
 static struct mtd_notifier notifier = { .add = ocl_add, .remove = ocl_remove };

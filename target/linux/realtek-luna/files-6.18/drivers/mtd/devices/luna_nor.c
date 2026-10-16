@@ -142,6 +142,22 @@ static int wait_idle(struct luna_nor *nor, unsigned int timeout_ms)
 	}
 }
 
+/* The same wait for a panic: no jiffies, no sleep. */
+static int wait_idle_atomic(struct luna_nor *nor, unsigned int timeout_us)
+{
+	u8 sr;
+	int ret;
+
+	for (;;) {
+		ret = read_sr(nor, &sr);
+		if (ret || !(sr & SR_WIP))
+			return ret;
+		if (!timeout_us--)
+			return -ETIMEDOUT;
+		udelay(1);
+	}
+}
+
 static int luna_nor_read(struct mtd_info *mtd, loff_t from, size_t len,
 			 size_t *retlen, u_char *buf)
 {
@@ -154,13 +170,11 @@ static int luna_nor_read(struct mtd_info *mtd, loff_t from, size_t len,
 	return 0;
 }
 
-static int luna_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
-			  size_t *retlen, const u_char *buf)
+static int program(struct luna_nor *nor, loff_t to, size_t len, size_t *retlen,
+		   const u_char *buf, bool in_panic)
 {
-	struct luna_nor *nor = mtd->priv;
 	int ret = 0;
 
-	mutex_lock(&nor->lock);
 	while (len && !ret) {
 		size_t chunk = min_t(size_t, len, NOR_PAGE - (to & (NOR_PAGE - 1)));
 
@@ -168,7 +182,7 @@ static int luna_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
 		if (!ret)
 			ret = nor_cmd(nor, OP_PP, to, buf, NULL, chunk);
 		if (!ret)
-			ret = wait_idle(nor, 20);
+			ret = in_panic ? wait_idle_atomic(nor, 20000) : wait_idle(nor, 20);
 		if (!ret) {
 			to += chunk;
 			buf += chunk;
@@ -176,10 +190,28 @@ static int luna_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
 			*retlen += chunk;
 		}
 	}
+	return ret;
+}
+
+static int luna_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
+			  size_t *retlen, const u_char *buf)
+{
+	struct luna_nor *nor = mtd->priv;
+	int ret;
+
+	mutex_lock(&nor->lock);
+	ret = program(nor, to, len, retlen, buf, false);
 	mutex_unlock(&nor->lock);
 	if (ret)
 		dev_err(&mtd->dev, "program at 0x%llx failed: %d\n", (u64)to, ret);
 	return ret;
+}
+
+/* A panic owns the machine: no lock, only already-erased pages are programmed. */
+static int luna_nor_panic_write(struct mtd_info *mtd, loff_t to, size_t len,
+				size_t *retlen, const u_char *buf)
+{
+	return program(mtd->priv, to, len, retlen, buf, true);
 }
 
 static int luna_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
@@ -249,6 +281,7 @@ static int luna_nor_probe(struct platform_device *pdev)
 		nor->mtd.type = MTD_NORFLASH;
 		nor->mtd.flags = MTD_CAP_NORFLASH;
 		nor->mtd._write = luna_nor_write;
+		nor->mtd._panic_write = luna_nor_panic_write;
 		nor->mtd._erase = luna_nor_erase;
 	} else {
 		nor->mtd.type = MTD_ROM;

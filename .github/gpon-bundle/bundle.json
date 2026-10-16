@@ -1,0 +1,30 @@
+{
+ "board": "<SOC>/<BRAND>/<MODEL>",
+ "declared_by": "<GitHub handle or contrib-N>",
+ "stock_dump": [],
+ "declaration": {
+  "LAN_PANEL_PORTS": "?",
+  "WIFI_BANDS": "?",
+  "WIFI_MAX_STD": "?",
+  "LED_PANEL_LABELS": "?",
+  "FIBER_SOCKET_LABEL": "?",
+  "LABEL_MAC": "?",
+  "STOCK_SSID_2G": "?",
+  "STOCK_SSID_5G": "?",
+  "STOCK_CON_LOGIN": "?",
+  "PART_SOC": "?",
+  "PART_PON_OPTIC": "?",
+  "PART_WIFI": "?",
+  "PART_ETH": "?",
+  "PART_FLASH": "?",
+  "PART_LEDS": "?",
+  "PART_VOICE": "?"
+ },
+ "provenance": {
+  "consent": "publish-with-credit",
+  "isp": "?",
+  "olt_vendor": "?",
+  "olt_model": "?",
+  "olt_version": "?"
+ }
+}

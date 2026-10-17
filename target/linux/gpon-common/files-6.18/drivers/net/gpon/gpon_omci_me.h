@@ -204,6 +204,11 @@ struct omci_onu {
 	/* ★ ME 11 #1/#2, PER INSTANCE. Expected and Sensed type are ...
 	 * dev/MEASURED-gpon_omci_me.h.md sec 6. */
 	u8	uni_type[OMCI_UNI_MAX];
+	/* ME 11 #1/#8/#10 as the OLT last wrote them, per instance; a MIB reset
+	 * restores expected = sensed, 1518 and 0xffff. */
+	u8	uni_expected[OMCI_UNI_MAX];
+	u16	uni_max_frame[OMCI_UNI_MAX];
+	u16	uni_pause[OMCI_UNI_MAX];
 	/* the equipment slots; survives omci_onu_reinit() like the panel */
 	struct omci_slot	slots[OMCI_SLOT_MAX];
 	u8	slots_n;
@@ -453,6 +458,10 @@ bool omci_onu_declare_unis(struct omci_onu *o,
  * hardcoded for every UNI before the declaration existed, so a board that
  * declares no types behaves exactly as it did. */
 #define OMCI_UNI_TYPE_DEFAULT	47
+#define OMCI_UNI_MAX_FRAME_DEFAULT	1518
+/* The largest frame the NIC's 2048-octet RX buffer carries whole. */
+#define OMCI_UNI_MAX_FRAME_LIMIT	2000
+#define OMCI_UNI_PAUSE_DEFAULT	0xffff
 
 /* What a board's declaration turned out to be. */
 enum omci_uni_decl {

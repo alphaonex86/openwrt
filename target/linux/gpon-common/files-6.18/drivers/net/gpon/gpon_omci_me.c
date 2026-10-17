@@ -213,6 +213,8 @@ enum omci_attr_dyn {
 	 * dev/MEASURED-gpon_omci_me.c.md sec 7. */
 	OMCI_DYN_UNI_EXPECTED,	/* ME 11 #1: the expected plug-in type */
 	OMCI_DYN_UNI_TYPE,	/* ME 11 #2: the SENSED type -- the capability */
+	OMCI_DYN_UNI_MAX_FRAME,	/* ME 11 #8: as the OLT set it */
+	OMCI_DYN_UNI_PAUSE,	/* ME 11 #10: as the OLT set it */
 	OMCI_DYN_UNIG_ADMIN,	/* ME 264 #2: the same, for UNI-G */
 	OMCI_DYN_UNIG_CAP,	/* ME 264 #3: management capability, per
 				 * instance -- the extra UNI-G each board
@@ -384,9 +386,9 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(11,  5, 1, OMCI_DYN_UNI_ADMIN),	/* #5  Admin state */
 	A_C(11,  6, 1, 1),			/* #6  Op state */
 	A_C(11,  7, 1, 0),			/* #7  Config ind */
-	A_CW(11,  8, 2, 1518),			/* #8  Max frame size */
+	A_D(11,  8, 2, OMCI_DYN_UNI_MAX_FRAME),	/* #8  Max frame size */
 	A_CW(11,  9, 1, 0),			/* #9  DTE/DCE ind */
-	A_CW(11, 10, 2, 0xffff),		/* #10 Pause time */
+	A_D(11, 10, 2, OMCI_DYN_UNI_PAUSE),	/* #10 Pause time */
 	A_CW(11, 11, 1, 2),			/* #11 Bridged/IP ind */
 	A_CW(11, 12, 1, 0),			/* #12 ARC */
 	A_CW(11, 13, 1, 0),			/* #13 ARC interval */
@@ -983,6 +985,18 @@ bool omci_uni_apply_run(const struct omci_uni_apply_ops *ops, void *sh,
 /* A MIB-Reset returns every UNI to unlocked.  ⚠ AND FLAGS THE ONES THAT WERE
  * LOCKED: a port the OLT held down and then reset the MIB out from under must
  * come back up, and the changed word is the only thing that says so. */
+/* ME 11 #1/#8/#10 back to what the ONU reports before any OLT wrote them. */
+static void omci_uni_defaults(struct omci_onu *o)
+{
+	u8 i;
+
+	for (i = 0; i < OMCI_UNI_MAX; i++) {
+		o->uni_expected[i] = o->uni_type[i];
+		o->uni_max_frame[i] = OMCI_UNI_MAX_FRAME_DEFAULT;
+		o->uni_pause[i] = OMCI_UNI_PAUSE_DEFAULT;
+	}
+}
+
 static void omci_uni_reset(struct omci_uni_inv *inv)
 {
 	u8 i;
@@ -1201,6 +1215,7 @@ void omci_me_reset_values(struct omci_onu *o)
 
 	omci_uni_reset(&o->pptp_eth_uni);
 	omci_uni_reset(&o->uni_g);
+	omci_uni_defaults(o);
 	/* A MIB-Reset drops the provisioned store, and the ME 171 rows live
 	 * OUTSIDE it: leaving them would serve the previous session's
 	 * subscriber VLAN to an OLT that has just told us to forget
@@ -1269,11 +1284,22 @@ bool omci_store_create(struct omci_onu *o, u16 class_id, u16 inst,
 
 /* Can this ONU actually realise the value the OLT asks for in ...
  * dev/MEASURED-gpon_omci_me.c.md sec 25. */
-static bool omci_set_value_realisable(const struct omci_attr *a, const u8 *v)
+static bool omci_set_value_realisable(const struct omci_onu *o, int pptp_slot,
+				      const struct omci_attr *a, const u8 *v)
 {
 	u32 want = 0;
 	unsigned int i;
 
+	/* ME 11, G.988 writable: #1 autosense (0) or the type this port is, #8
+	 * any size the datapath carries whole, #10 any pause time. */
+	if (a->class_id == OMCI_ME_PPTP_ETH_UNI && a->attr == 1)
+		return v[0] == 0 || (pptp_slot >= 0 && v[0] == o->uni_type[pptp_slot]);
+	if (a->class_id == OMCI_ME_PPTP_ETH_UNI && a->attr == 8) {
+		want = ((u32)v[0] << 8) | v[1];
+		return want >= OMCI_UNI_MAX_FRAME_DEFAULT && want <= OMCI_UNI_MAX_FRAME_LIMIT;
+	}
+	if (a->class_id == OMCI_ME_PPTP_ETH_UNI && a->attr == 10)
+		return true;
 	/* An administrative state is locked or unlocked, and nothing else. */
 	if ((a->class_id == OMCI_ME_PPTP_ETH_UNI && a->attr == 5) ||
 	    (a->class_id == OMCI_ME_UNI_G && a->attr == 2))
@@ -1311,6 +1337,16 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 			gpon_mac_filter_row_set(&o->vlan, inst, v);
 		else
 			o->vlan.attr_owed++;
+	} else if (a->class_id == OMCI_ME_PPTP_ETH_UNI && a->attr == 1)
+		o->uni_expected[pptp_slot] = v[0];
+	else if (a->class_id == OMCI_ME_PPTP_ETH_UNI && (a->attr == 8 || a->attr == 10)) {
+		u16 val = ((u16)v[0] << 8) | v[1];
+		u16 *slot = a->attr == 8 ? &o->uni_max_frame[pptp_slot] : &o->uni_pause[pptp_slot];
+
+		/* accepted and served; the switch is not reprogrammed: COUNTED */
+		if (val != (a->attr == 8 ? OMCI_UNI_MAX_FRAME_DEFAULT : OMCI_UNI_PAUSE_DEFAULT))
+			o->vlan.attr_owed++;
+		*slot = val;
 	} else if (a->class_id == OMCI_ME_PPTP_ETH_UNI)
 		omci_uni_accept(&o->pptp_eth_uni, pptp_slot, v[0]);
 	else if (a->class_id == OMCI_ME_UNI_G)
@@ -1351,7 +1387,8 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		    (a->access & OMCI_ACCESS_WRITE_UNCHANGED) ||
 		    /* ME 11 #5 and ME 264 #2, the administrative states. Both are ...
 		     * dev/MEASURED-gpon_omci_me.c.md sec 26. */
-		    (pptp_slot >= 0 && a->attr == 5) ||
+		    (pptp_slot >= 0 && (a->attr == 1 || a->attr == 5 ||
+					a->attr == 8 || a->attr == 10)) ||
 		    (unig_slot >= 0 && a->attr == 2) ||
 		    (class_id == OMCI_ME_TCONT && inst >= 0x8000 &&
 		     inst < 0x8000 + o->cap.tcont_n && a->attr == 1))
@@ -1376,7 +1413,7 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	for (a = first, pos = 0; a && a->class_id == class_id; a++) {
 		if (!a->attr || !(mask & OMCI_ATTR_BIT(a->attr)))
 			continue;
-		if (!omci_set_value_realisable(a, values + pos)) {
+		if (!omci_set_value_realisable(o, pptp_slot, a, values + pos)) {
 			*failed = mask;
 			return OMCI_RC_ATTR_FAILED;
 		}
@@ -1540,8 +1577,18 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		case OMCI_DYN_UNI_TYPE: {
 			int slot = omci_uni_slot(&o->pptp_eth_uni, inst);
 
-			/* Equal today -- see the note on the selectors above. */
-			val = slot < 0 ? OMCI_UNI_TYPE_DEFAULT : o->uni_type[slot];
+			/* Equal until an OLT writes #1 -- see the note on the selectors above. */
+			val = slot < 0 ? OMCI_UNI_TYPE_DEFAULT :
+			      a->v == OMCI_DYN_UNI_EXPECTED ? o->uni_expected[slot] : o->uni_type[slot];
+			break;
+		}
+		case OMCI_DYN_UNI_MAX_FRAME:
+		case OMCI_DYN_UNI_PAUSE: {
+			int slot = omci_uni_slot(&o->pptp_eth_uni, inst);
+
+			val = a->v == OMCI_DYN_UNI_MAX_FRAME ?
+			      (slot < 0 ? OMCI_UNI_MAX_FRAME_DEFAULT : o->uni_max_frame[slot]) :
+			      (slot < 0 ? OMCI_UNI_PAUSE_DEFAULT : o->uni_pause[slot]);
 			break;
 		}
 		case OMCI_DYN_UNIG_CAP: {
@@ -1858,6 +1905,7 @@ bool omci_onu_declare_unis(struct omci_onu *o,
 		o->uni_type[i] = i < pptp_n && pptp_type ?
 				 pptp_type[i] : OMCI_UNI_TYPE_DEFAULT;
 	}
+	omci_uni_defaults(o);
 	omci_build_mib(o);
 	if (o->rows_dropped) {
 		/* ⚠ A PANEL THAT DOES NOT FIT IS PUT BACK, NOT LEFT INSTALLED
@@ -1866,6 +1914,7 @@ bool omci_onu_declare_unis(struct omci_onu *o,
 		o->uni_g = was_unig;
 		memcpy(o->uni_g_mgmt_cap, was_cap, sizeof(was_cap));
 		memcpy(o->uni_type, was_type, sizeof(was_type));
+		omci_uni_defaults(o);
 		omci_build_mib(o);
 		return false;
 	}

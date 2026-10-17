@@ -338,14 +338,17 @@
 			partition@40000 {
 				label = "env";
 				reg = <0x040000 0x002000>;	/* 8K -- U-Boot env */
+				read-only;
 			};
 			partition@42000 {
 				label = "env2";
 				reg = <0x042000 0x002000>;	/* 8K -- U-Boot env backup */
+				read-only;
 			};
 			partition@44000 {
 				label = "config";
 				reg = <0x044000 0x040000>;	/* 256K */
+				read-only;
 			};
 			partition@84000 {
 				label = "k0";

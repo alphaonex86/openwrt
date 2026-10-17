@@ -48,6 +48,7 @@
 # takes the FIRST matching rule -- a leftover `allow` would silently outrank the
 # `deny` this file exists to enforce, with nothing to see in the config.
 # A count is not a structure; loop until there are none left.
+[ -x /usr/sbin/miniupnpd ] || exit 0
 while uci -q delete upnpd.@perm_rule[-1]; do :; done
 
 uci -q batch <<-EOF

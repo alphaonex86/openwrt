@@ -91,11 +91,18 @@ provision() {
 	config_get olt     identity omci_olt_mode
 	config_get vid     identity pon_vendor_id
 
-	if [ "$source" = "factory" ] && [ -x "$RTK" ]; then
+	if [ -x "$RTK" ]; then
 		rtk_load "$part"
-		mac=${RTK_mac:-}
-		oui=${RTK_oui:-}
-		sn=${RTK_sn:-}
+		# manual: a value left empty keeps the factory one (cloning only the serial keeps the MAC).
+		if [ "$source" = "factory" ]; then
+			mac=${RTK_mac:-}
+			oui=${RTK_oui:-}
+			sn=${RTK_sn:-}
+		else
+			[ -n "$mac" ] || mac=${RTK_mac:-}
+			[ -n "$oui" ] || oui=${RTK_oui:-}
+			[ -n "$sn" ]  || sn=${RTK_sn:-}
+		fi
 		[ -n "$vid" ]     || vid=${RTK_vendor_id:-}
 		# SW-block params: adopt the factory value only where the installer left UCI empty.
 		[ -n "$loid" ]    || loid=${RTK_loid:-}
@@ -271,15 +278,14 @@ stage_gn_cal() {
 }
 
 # The PLOAM password stock sends: LuCI/UCI first, else this unit's factory MIB, where an
-# EMPTY value is sent as ten zero octets as stock does; only a MIB without the key (or a
-# non-factory source) keeps the driver's default. Written before the serial, whose write
+# EMPTY value is sent as ten zero octets as stock does; only a MIB without the key keeps
+# the driver's default. Written before the serial, whose write
 # starts ranging. The newline is what lets an empty value reach the driver at all.
 set_password() {
-	local part="$1" source pw p
-	config_get source identity source factory
+	local part="$1" pw p
 	config_get pw identity ploam_passwd
 	if [ -z "$pw" ]; then
-		[ "$source" = factory ] && rtk_need "$part" && [ -n "${RTK_HAS_ploam_passwd:-}" ] &&
+		rtk_need "$part" && [ -n "${RTK_HAS_ploam_passwd:-}" ] &&
 			pw=${RTK_ploam_passwd:-} || {
 			log "no PLOAM password in this unit's MIB - the driver keeps its default"
 			return 0
@@ -297,14 +303,12 @@ set_password() {
 # ours (owrt_version). An empty value keeps the driver's build default.
 # Refusals are logged, never fatal: the serial still ranges.
 set_omci_identity() {
-	local part="$1" source name val
-	config_get source identity source factory
+	local part="$1" name val
 	for name in $OMCI_ID_NAMES; do
 		config_get val identity "$name"
 		case "$name" in
 		sw_ver1|sw_ver2) [ -n "$val" ] || val=$(owrt_version 2>/dev/null) ;;
-		*) [ -n "$val" ] || [ "$source" != factory ] ||
-			{ rtk_need "$part"; eval "val=\${RTK_$name:-}"; } ;;
+		*) [ -n "$val" ] || { rtk_need "$part"; eval "val=\${RTK_$name:-}"; } ;;
 		esac
 		[ -n "$val" ] || continue
 		[ -w "$OMCI_ID_DIR/onu_$name" ] || {
@@ -351,7 +355,7 @@ try_identity() {
 	config_get source identity source factory
 	config_get part storage config_part config
 	config_get sn identity sn
-	if [ "$source" = factory ]; then
+	if [ "$source" = factory ] || [ -z "$sn" ]; then
 		rtk_load "$part"
 		sn=${RTK_sn:-}
 	fi

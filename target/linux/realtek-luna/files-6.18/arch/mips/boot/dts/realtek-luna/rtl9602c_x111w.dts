@@ -177,16 +177,14 @@
 			label = "k0";
 			reg = <0x080000 0x2f0000>;	/* 3M kernel bank 0, less its crashlog tail */
 		};
-		partition@370000 {
-			label = "crashlog";
-			reg = <0x370000 0x010000>;	/* 64K: onu_crashlog records, operator 2026-10-16 */
-		};
 		partition@380000 {
 			label = "r0";
 			reg = <0x380000 0x4c0000>;	/* 4864K rootfs bank 0 */
 			/* Mark r0 as the squashfs root: MTD_SPLIT_SQUASHFS_ROOT +
-			 * MTD_ROOTFS_ROOT_DEV then set ROOT_DEV (no root= needed from
-			 * U-Boot) and carve the rootfs_data overlay child -- without this
+			 * MTD_ROOTFS_ROOT_DEV then set ROOT_DEV -- but the vendor U-Boot
+			 * still passes root=31:5 and it wins, so r0 must stay mtd5: every
+			 * partition we add is declared after r1 -- and carve the
+			 * rootfs_data overlay child -- without this
 			 * the kernel has no root device and VFS panics at mount. Bank 0 is
 			 * the flash target. ★ AND IT IS THE ACTIVE ONE SINCE 2026-08-21:
 			 * our image was written here and COMMITTED (sw_active=0,
@@ -208,6 +206,10 @@
 			label = "r1";
 			reg = <0xb40000 0x4c0000>;	/* 4864K rootfs bank 1 */
 			read-only;
+		};
+		partition@370000 {
+			label = "crashlog";	/* declared last: see r0 */
+			reg = <0x370000 0x010000>;	/* 64K: onu_crashlog records, operator 2026-10-16 */
 		};
 	};
 };

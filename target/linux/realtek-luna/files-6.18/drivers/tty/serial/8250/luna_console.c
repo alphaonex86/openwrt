@@ -24,6 +24,7 @@
 #include <linux/init.h>
 #include <linux/irq_work.h>
 #include <linux/kthread.h>
+#include <linux/onu_console_ring.h>
 #include <linux/panic.h>
 #include <linux/reboot.h>
 #include <linux/serial_8250.h>
@@ -33,14 +34,13 @@
 #include <linux/wait.h>
 
 #include "8250.h"
-#include "luna_console_ring.h"
 
 #define LUNA_CON_RING_BYTES	(64 * 1024)
 #define LUNA_CON_BYTE_US	87	/* one 8N1 character at 115200 */
 #define LUNA_CON_SPIN_US	10000	/* bound on a synchronous wait for THRE */
 
 static unsigned char luna_con_buf[LUNA_CON_RING_BYTES];
-static struct luna_con_ring luna_con_ring = {
+static struct onu_con_ring luna_con_ring = {
 	.buf = luna_con_buf,
 	.mask = LUNA_CON_RING_BYTES - 1,
 };
@@ -74,7 +74,7 @@ static unsigned int luna_con_load_fifo(struct uart_8250_port *up, int *eol)
 	if (!(serial_lsr_in(up) & UART_LSR_THRE))
 		return 0;
 	room = luna_con_fifo_on(up) ? min_t(unsigned int, up->tx_loadsz, sizeof(chunk)) : 1;
-	n = luna_con_ring_get_line(&luna_con_ring, chunk, room, eol);
+	n = onu_con_ring_get_line(&luna_con_ring, chunk, room, eol);
 	for (i = 0; i < n; i++)
 		serial_port_out(&up->port, UART_TX, chunk[i]);
 	return n;
@@ -102,7 +102,7 @@ static unsigned int luna_con_drain_step(struct uart_8250_port *up)
 		n = luna_con_load_fifo(up, &eol);
 		if (n)
 			luna_con_in_line = !eol;
-		if (!luna_con_ring_used(&luna_con_ring))
+		if (!onu_con_ring_used(&luna_con_ring))
 			luna_con_in_line = false;	/* a record without '\n' ends here */
 		if (!luna_con_in_line && luna_con_tx_owed) {
 			luna_con_tx_owed = false;
@@ -137,7 +137,7 @@ static void luna_con_write_sync(const char *s, unsigned int n)
 		locked = uart_port_trylock_irqsave(&up->port, &flags);
 	else
 		uart_port_lock_irqsave(&up->port, &flags);
-	while (luna_con_ring_get(&luna_con_ring, &c, 1))
+	while (onu_con_ring_get(&luna_con_ring, &c, 1))
 		luna_con_spin_byte(up, c);
 	for (i = 0; i < n; i++) {
 		if (s[i] == '\n')
@@ -161,7 +161,7 @@ static void luna_con_write(struct console *co, const char *s, unsigned int n)
 		luna_con_write_sync(s, n);
 		return;
 	}
-	if (luna_con_ring_put(&luna_con_ring, s, n))
+	if (onu_con_ring_put(&luna_con_ring, s, n))
 		irq_work_queue(&luna_con_kick_work);
 }
 
@@ -169,8 +169,8 @@ static int luna_con_drain(void *unused)
 {
 	while (!kthread_should_stop()) {
 		wait_event_interruptible(luna_con_wq, kthread_should_stop() ||
-					 luna_con_ring_used(&luna_con_ring));
-		while (luna_con_ring_used(&luna_con_ring) && !kthread_should_stop()) {
+					 onu_con_ring_used(&luna_con_ring));
+		while (onu_con_ring_used(&luna_con_ring) && !kthread_should_stop()) {
 			unsigned int us = max(luna_con_drain_step(luna_con_up), 1u) * LUNA_CON_BYTE_US;
 
 			usleep_range(us, us + 100);

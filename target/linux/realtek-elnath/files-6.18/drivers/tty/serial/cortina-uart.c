@@ -14,6 +14,11 @@
 #include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/console.h>
+#include <linux/irq_work.h>
+#include <linux/kthread.h>
+#include <linux/onu_console_ring.h>
+#include <linux/panic.h>
+#include <linux/reboot.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -57,6 +62,8 @@
 #define PORT_CORTINA		130
 
 static struct uart_port cortina_uart_port;
+static bool cortina_con_in_line;	/* port lock: a kernel line is on the wire */
+static bool cortina_con_tx_owed;	/* port lock: the tty asked to send meanwhile */
 
 static u32 cortina_uart_info(struct uart_port *port)
 {
@@ -105,6 +112,10 @@ static void cortina_uart_stop_tx(struct uart_port *port)
 
 static void cortina_uart_start_tx(struct uart_port *port)
 {
+	if (cortina_con_in_line) {
+		cortina_con_tx_owed = true;
+		return;
+	}
 	cortina_uart_irq_enable(port, UINT_TX_EMPTY);
 	cortina_uart_tx_chars(port);
 }
@@ -279,13 +290,30 @@ static void cortina_uart_console_putchar(struct uart_port *port,
 #endif
 
 #ifdef CONFIG_SERIAL_CORTINA_CONSOLE
-static struct uart_driver cortina_uart_driver;
+/*
+ * The console only copies into a ring; a thread puts one line at a time into
+ * the TX FIFO while the tty is idle, and the tty's start_tx waits for that
+ * line's end. A synchronous console holds the port lock with IRQs off for
+ * ~87 us a character: one line cost the GPON path 8 ms (kernel_console_async,
+ * 2026-10-16). Panic, oops, sysrq and shutdown stay synchronous.
+ */
+#define CORTINA_CON_RING_BYTES	(64 * 1024)
+#define CORTINA_CON_BYTE_US	87	/* one 8N1 character at 115200 */
 
-static void cortina_uart_console_write(struct console *co, const char *s,
-				       unsigned int count)
+static struct uart_driver cortina_uart_driver;
+static unsigned char cortina_con_buf[CORTINA_CON_RING_BYTES];
+static struct onu_con_ring cortina_con_ring = {
+	.buf = cortina_con_buf,
+	.mask = CORTINA_CON_RING_BYTES - 1,
+};
+static DECLARE_WAIT_QUEUE_HEAD(cortina_con_wq);
+static bool cortina_con_async;
+
+static void cortina_con_write_sync(struct uart_port *port, const char *s,
+				   unsigned int count)
 {
-	struct uart_port *port = &cortina_uart_port;
 	unsigned long flags;
+	unsigned char c;
 	int locked = 1;
 
 	if (port->sysrq)
@@ -295,11 +323,92 @@ static void cortina_uart_console_write(struct console *co, const char *s,
 	else
 		uart_port_lock_irqsave(port, &flags);
 
+	while (onu_con_ring_get(&cortina_con_ring, &c, 1))
+		cortina_uart_console_putchar(port, c);
 	uart_console_write(port, s, count, cortina_uart_console_putchar);
 
 	if (locked)
 		uart_port_unlock_irqrestore(port, flags);
 }
+
+static void cortina_con_kick(struct irq_work *w)
+{
+	wake_up(&cortina_con_wq);
+}
+
+static DEFINE_IRQ_WORK(cortina_con_kick_work, cortina_con_kick);
+
+static void cortina_uart_console_write(struct console *co, const char *s,
+				       unsigned int count)
+{
+	struct uart_port *port = &cortina_uart_port;
+
+	if (!READ_ONCE(cortina_con_async) || port->sysrq || oops_in_progress ||
+	    panic_in_progress()) {
+		cortina_con_write_sync(port, s, count);
+		return;
+	}
+	if (onu_con_ring_put(&cortina_con_ring, s, count))
+		irq_work_queue(&cortina_con_kick_work);
+}
+
+/* One FIFO load of a kernel line, never past its end, while the tty is idle.
+ * -> bytes worth of wire time to sleep */
+static unsigned int cortina_con_drain_step(struct uart_port *port)
+{
+	unsigned char chunk[CORTINA_UART_FIFOSIZE];
+	unsigned int n = 0, i;
+	unsigned long flags;
+	int eol;
+
+	uart_port_lock_irqsave(port, &flags);
+	if (cortina_con_in_line || !(readl(port->membase + UINT_EN) & UINT_TX_EMPTY)) {
+		if (cortina_uart_info(port) & UINFO_TX_EMPTY) {
+			n = onu_con_ring_get_line(&cortina_con_ring, chunk, sizeof(chunk), &eol);
+			for (i = 0; i < n; i++)
+				writel(chunk[i], port->membase + UTX_DATA);
+			if (n)
+				cortina_con_in_line = !eol;
+		}
+		if (!onu_con_ring_used(&cortina_con_ring))
+			cortina_con_in_line = false;	/* a record without '\n' ends here */
+		if (!cortina_con_in_line && cortina_con_tx_owed) {
+			cortina_con_tx_owed = false;
+			cortina_uart_start_tx(port);
+		}
+	} else {
+		n = CORTINA_UART_FIFOSIZE;	/* the tty is sending: one FIFO of its time */
+	}
+	uart_port_unlock_irqrestore(port, flags);
+	return n;
+}
+
+static int cortina_con_drain(void *unused)
+{
+	while (!kthread_should_stop()) {
+		wait_event_interruptible(cortina_con_wq, kthread_should_stop() ||
+					 onu_con_ring_used(&cortina_con_ring));
+		while (onu_con_ring_used(&cortina_con_ring) && !kthread_should_stop()) {
+			unsigned int us = max(cortina_con_drain_step(&cortina_uart_port), 1u) *
+					  CORTINA_CON_BYTE_US;
+
+			usleep_range(us, us + 100);
+		}
+	}
+	return 0;
+}
+
+static int cortina_con_reboot(struct notifier_block *nb, unsigned long action, void *data)
+{
+	WRITE_ONCE(cortina_con_async, false);
+	cortina_con_write_sync(&cortina_uart_port, "", 0);
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block cortina_con_reboot_nb = {
+	.notifier_call = cortina_con_reboot,
+	.priority = INT_MIN,
+};
 
 static int cortina_uart_console_setup(struct console *co, char *options)
 {
@@ -329,6 +438,28 @@ static struct console cortina_uart_console = {
 };
 
 #define CORTINA_UART_CONSOLE	(&cortina_uart_console)
+
+static int __init cortina_con_async_init(void)
+{
+	struct task_struct *t;
+
+	if (!cortina_uart_port.membase || !(cortina_uart_console.flags & CON_ENABLED)) {
+		pr_err("cortina-uart: no enabled ttyS console -- printk stays synchronous\n");
+		return -ENODEV;
+	}
+	t = kthread_run(cortina_con_drain, NULL, "cortina-console");
+	if (IS_ERR(t)) {
+		pr_err("cortina-uart: drain thread not started (%ld) -- printk stays synchronous\n",
+		       PTR_ERR(t));
+		return PTR_ERR(t);
+	}
+	register_reboot_notifier(&cortina_con_reboot_nb);
+	WRITE_ONCE(cortina_con_async, true);
+	pr_info("cortina-uart: ttyS%d console asynchronous, %u-byte ring\n",
+		cortina_uart_console.index, CORTINA_CON_RING_BYTES);
+	return 0;
+}
+late_initcall(cortina_con_async_init);
 #else
 #define CORTINA_UART_CONSOLE	NULL
 #endif /* CONFIG_SERIAL_CORTINA_CONSOLE */

@@ -156,21 +156,37 @@ struct omci_identity {
 	u8 loid[24];		/* ONU-G #10, CTC LoID #2      LOID */
 	u8 loid_passwd[12];	/* ONU-G #11, CTC LoID #3      LOID_PASSWD */
 	u8 operator_id[4];	/* CTC LoID #1 */
+	u8 omcc_version[1];	/* ONU2-G #2, baseline codes only; 0 = the far end's */
+	u8 farend[8];		/* "" = detected, else a far-end profile's name */
 	u8 zeros[25];		/* all-zero source, == its longest consumer */
 };
 
-/* The members a unit provisions (operator_id and zeros are not identity). */
+/* THE list of what a unit provisions: the enum, the wire layout, the names and
+ * each family's interface (/proc/gpon "id", Luna's onu_<name> parameters, the
+ * omci_id_fields line userspace iterates) all derive from it.
+ * X(id, name, member, numeric) */
+#define OMCI_ID_LIST(X)							\
+	X(VENDOR,	vendor_id,	vendor_id,		false)	\
+	X(HW_VERSION,	hw_ver,		onu_g_version,		false)	\
+	X(SW_VERSION0,	sw_ver1,	sw_bank0_version,	false)	\
+	X(SW_VERSION1,	sw_ver2,	sw_bank1_version,	false)	\
+	X(EQUIPMENT,	model,		equipment_id,		false)	\
+	X(PRODUCT_CODE,	product_code,	product_code,		true)	\
+	X(LOID,		loid,		loid,			false)	\
+	X(LOID_PASSWD,	loid_passwd,	loid_passwd,		false)	\
+	X(OMCC_VERSION,	omcc_version,	omcc_version,		true)	\
+	X(FAREND,	farend,		farend,			false)
+
 enum omci_id_field {
-	OMCI_ID_VENDOR,
-	OMCI_ID_HW_VERSION,
-	OMCI_ID_SW_VERSION0,
-	OMCI_ID_SW_VERSION1,
-	OMCI_ID_EQUIPMENT,
-	OMCI_ID_PRODUCT_CODE,
-	OMCI_ID_LOID,
-	OMCI_ID_LOID_PASSWD,
+#define OMCI_ID_ENUM(id, name, member, numeric) OMCI_ID_##id,
+	OMCI_ID_LIST(OMCI_ID_ENUM)
+#undef OMCI_ID_ENUM
 	OMCI_ID_FIELDS
 };
+
+/* The /proc/gpon line userspace reads the field names from, in list order. */
+#define OMCI_ID_WORD(id, name, member, numeric) " " #name
+#define OMCI_ID_FIELDS_LINE "omci_id_fields:" OMCI_ID_LIST(OMCI_ID_WORD)
 
 /* How many instances of ONE administratively-controlled UNI class this model
  * carries.  MEASURED in the two boards' own captured stock MIBs: ME 11 has 4
@@ -221,6 +237,8 @@ struct omci_onu {
 	u16	extra_me[OMCI_EXTRA_ME_MAX][2];	/* class, instance */
 	u8	extra_me_n;
 	u8	olt_g[OMCI_OLT_G_LEN];
+	u8	olt_vendor_seen[4];	/* ME 131 #1 as last written; survives MIB-Reset */
+	u8	farend;			/* enum omci_farend, chosen at each MIB-Reset */
 	u8	wan_mac[6];		/* the WAN netdev's, set by the shell */
 	bool	wan_mac_set;		/* unset: ME 134 #2 is not answered */
 	/* MIB-Upload rows the row table had no room for.  ⚠ THE BUILDER DROPS
@@ -329,15 +347,32 @@ static inline void omci_onu_set_sn(struct omci_onu *o, const u8 sn[8])
 void omci_id_default(struct omci_identity *id);
 
 /* Provision one identity member from @len bytes, zero-padded to its wire size.
- * Refused (false, member unchanged) when @len exceeds it, or is not exactly 2
- * for the product code.  @id NULL only validates. */
+ * Refused (false, member unchanged) when @len exceeds it, when a numeric member
+ * is not given its exact size, or an OMCC version announces the extended
+ * message set this core does not serve.  @id NULL only validates. */
 bool omci_id_set(struct omci_identity *id, enum omci_id_field f,
 		 const u8 *val, unsigned int len);
 
 /* The same from text, as a provisioning script hands it over: @s up to its
- * first newline, and the product code in hex (stock's MIB "31" is 0x0031). */
+ * first newline, a numeric member as strtol(s, NULL, 0) reads it (stock's MIB
+ * product code "31" is 0x001f). */
 bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
 		     const char *s);
+
+/* What a vendor's OLT needs of the ONU beyond G.988 -- the OMCC version it is
+ * shown, the MEs it provisions on every ONU -- in ONE table for every board,
+ * chosen at each MIB-Reset from, in order: the unit's identity "farend" (the
+ * operator's choice), its own vendor (a clone), the vendor the OLT last wrote in
+ * ME 131.  A board never carries a protocol adaptation of its own. */
+enum omci_farend { OMCI_FAREND_GENERIC, OMCI_FAREND_ZTE, OMCI_FAREND_N };
+
+/* The far end this ONU answers as, by name ("generic", "zte"). */
+const char *omci_farend_name(const struct omci_onu *o);
+
+/* The field named @name provisioned from text. -> the field, or OMCI_ID_FIELDS
+ * when the name is unknown or the value refused.  @id NULL only validates. */
+enum omci_id_field omci_id_set_named(struct omci_identity *id, const char *name,
+				     const char *s);
 
 /* Each field's name, the rtk_factory verb that reads it from the MIB. */
 extern const char *const omci_id_names[OMCI_ID_FIELDS];

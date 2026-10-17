@@ -49,7 +49,7 @@ MAC=$(ev GPON_MAC);  [ -n "$MAC" ] || MAC=$(cat /sys/class/net/eth0/address 2>/d
 SN=$(ev GPON_SN);    [ -n "$SN" ]  || SN=$(g sn)
 LOID=$(ev GPON_LOID)
 OUI=$(ev GPON_OUI)
-OLTMODE=$(ev OMCI_OLT_MODE)
+FAREND=$(sed -n 's/^omci_farend: //p' /proc/gpon 2>/dev/null)
 PROVSRC=$(uci -q get gpon.identity.source 2>/dev/null)
 
 # GPON / fiber
@@ -126,7 +126,7 @@ printf "Uptime    : %s | load %s | mem %s\n" "$UP" "$LOAD" "$MEMU"
 echo   "-- Identity (provisioning source: ${PROVSRC:-?}) --"
 printf "MAC       : %s\n" "${MAC:-MISSING}"
 printf "SN        : %s\n" "${SN:-MISSING}"
-printf "LOID      : %s   OUI: %s   OLT-mode: %s\n" "${LOID:-?}" "${OUI:-?}" "${OLTMODE:-?}"
+printf "LOID      : %s   OUI: %s   far end: %s\n" "${LOID:-?}" "${OUI:-?}" "${FAREND:-?}"
 echo   "-- GPON / Fiber --"
 printf "ONU state : O%s%s  [%s]\n" "$ST" "${STNAME:+ ($STNAME)}" "$( [ $ONLINE = yes ] && echo ONLINE || echo offline )"
 printf "RX power  : %s dBm     TX power: %s dBm     LOS: %s\n" "$RXDBM" "$TXDBM" "${LOS:-?}"

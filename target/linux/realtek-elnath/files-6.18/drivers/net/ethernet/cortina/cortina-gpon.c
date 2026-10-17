@@ -3101,6 +3101,7 @@ static int cg_proc_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "gpon-mac @ phys 0x%llx + 0x%x\n",
 		   (unsigned long long)CG_PON_WINDOW_PHYS, CG_GPON_MAC_OFF);
+	seq_puts(m, OMCI_ID_FIELDS_LINE "\n");
 	seq_printf(m, "vendor-id      = 0x%08x (\"%s\")\n",
 		   cg_mac_rd(cg, CG_REG_VENDOR), vendor);
 	seq_printf(m, "vendor-spec    = 0x%08x\n", cg_mac_rd(cg, CG_REG_VENDOR_SPEC));
@@ -3154,6 +3155,7 @@ static int cg_proc_show(struct seq_file *m, void *v)
 		   readl(cg->pon + CG_PUC_GLOBAL_LNK_TYPE) >> 16);
 	spin_unlock(&cg->puc_cnt_lock);
 	cg_show_gpon_mib(m, cg);
+	seq_printf(m, "omci_farend: %s\n", cg->omci ? omci_farend_name(cg->omci) : "-");
 	seq_printf(m, "omci_resp      = %s tx=%u fail=%u ds_crc ok=%u bad=%u",
 		   cg->omci_active ? "armed" : "off",
 		   cg->omci_tx, cg->omci_tx_fail,
@@ -3375,20 +3377,16 @@ static ssize_t cg_proc_write(struct file *file, const char __user *ubuf,
 	 * omci_app takes from the unit's MIB (names: omci_id_names[]). */
 	if (strncmp(p, "id ", 3) == 0) {
 		char *name = p + 3, *val = strchr(name, ' ');
-		unsigned int f;
 
 		if (val)
 			*val++ = '\0';
-		for (f = 0; f < OMCI_ID_FIELDS; f++)
-			if (!strcmp(name, omci_id_names[f]))
-				break;
-		if (f == OMCI_ID_FIELDS || !omci_id_set_str(NULL, f, val ?: ""))
+		if (omci_id_set_named(NULL, name, val ?: "") == OMCI_ID_FIELDS)
 			return -EINVAL;
 		spin_lock_bh(&cg->omci_lock);
 		if (!cg->omci_id_set)
 			omci_id_default(&cg->omci_id);
 		cg->omci_id_set = true;
-		omci_id_set_str(&cg->omci_id, f, val ?: "");
+		omci_id_set_named(&cg->omci_id, name, val ?: "");
 		if (cg->omci_initialized)
 			cg->omci->id = cg->omci_id;
 		spin_unlock_bh(&cg->omci_lock);

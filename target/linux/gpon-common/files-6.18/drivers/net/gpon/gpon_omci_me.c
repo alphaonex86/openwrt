@@ -118,6 +118,7 @@ static const struct omci_identity omci_id_default_bytes = {
 	.product_code	  = { 0x00, 0x1f },	/* stock's MIB "31", as it reads it */
 	.loid		  = { 'u', 's', 'e', 'r' },
 	.operator_id	  = { 'C', 'T', 'C' },
+	/* .omcc_version 0: the far end's (generic: 0x80, G.984.4 baseline, the stocks' own) */
 	/* .zeros and the tails above are 0 by omission — C zero-fills what a
 	 * designated initializer does not name. */
 };
@@ -139,11 +140,14 @@ OMCI_ID_ASSERT(product_code, 2);	/* ONU2-G #3 */
 OMCI_ID_ASSERT(loid, 24);		/* ONU-G #10 / CTC LoID #2 */
 OMCI_ID_ASSERT(loid_passwd, 12);	/* ONU-G #11 / CTC LoID #3 */
 OMCI_ID_ASSERT(operator_id, 4);		/* CTC #1 */
+OMCI_ID_ASSERT(omcc_version, 1);	/* ONU2-G #2 */
+OMCI_ID_ASSERT(farend, 8);
 OMCI_ID_ASSERT(zeros, 25);		/* == its longest consumer, VEIP #3 */
 /* every member is a u8 array, so equality here also proves no padding crept
- * in: the flat 119-byte pool plus product code (2) and LoID password (12) */
-_Static_assert(sizeof(struct omci_identity) == 133,
-	       "omci_identity is not the 133-byte pool the OLT reads");
+ * in: the flat 119-byte pool plus product code (2), LoID password (12), OMCC
+ * version (1) and the far-end choice (8) */
+_Static_assert(sizeof(struct omci_identity) == 142,
+	       "omci_identity is not the 142-byte pool the OLT reads");
 
 /* Where a descriptor row takes its value bytes from. */
 enum omci_attr_src {
@@ -240,6 +244,7 @@ enum omci_attr_dyn {
 	OMCI_DYN_GEM_N,		/* ONU2-G #9 */
 	OMCI_DYN_WAN_MAC,	/* the WAN netdev's MAC, could-not-ask until set */
 	OMCI_DYN_CTC,		/* ME 65529 #2..#5, as the board declares them */
+	OMCI_DYN_OMCC,		/* ONU2-G #2: the identity's, else the far end's */
 };
 
 /* One modelled attribute. Rows of the same class are ...
@@ -320,10 +325,10 @@ static const struct omci_attr omci_attrs[] = {
 
 	/* ---- ME 257 ONU2-G (inst 0) ---- */
 	A_ID(257,  1, equipment_id),		/* #1  Equipment ID */
-	A_C(257,  2,  1, 0x80),			/* #2  OMCC version: G.984.4,
-						 * BASELINE only — devid 0x0b is
-						 * not served, and the two must
-						 * stay consistent */
+	A_D(257,  2,  1, OMCI_DYN_OMCC),	/* #2  OMCC version: BASELINE
+						 * only -- devid 0x0b is not
+						 * served, omci_id_set refuses
+						 * an extended code */
 	A_ID(257,  3, product_code),		/* #3  Vendor product code */
 	A_C(257,  4,  1, 0x01),			/* #4  Security capability */
 	A_C(257,  5,  1, 0x01),			/* #5  Security mode */
@@ -1114,29 +1119,71 @@ static void omci_anig_alarms_refresh(struct omci_onu *o)
 		OMCI_ANIG_RX_HIGH | OMCI_ANIG_TX_LOW | OMCI_ANIG_TX_HIGH)) | bits;
 }
 
-#define OMCI_ID_FIELD(member) \
-	{ offsetof(struct omci_identity, member), OMCI_ID_SIZEOF(member) }
-static const struct { u8 off, size; } omci_id_fields[OMCI_ID_FIELDS] = {
-	[OMCI_ID_VENDOR]	= OMCI_ID_FIELD(vendor_id),
-	[OMCI_ID_HW_VERSION]	= OMCI_ID_FIELD(onu_g_version),
-	[OMCI_ID_SW_VERSION0]	= OMCI_ID_FIELD(sw_bank0_version),
-	[OMCI_ID_SW_VERSION1]	= OMCI_ID_FIELD(sw_bank1_version),
-	[OMCI_ID_EQUIPMENT]	= OMCI_ID_FIELD(equipment_id),
-	[OMCI_ID_PRODUCT_CODE]	= OMCI_ID_FIELD(product_code),
-	[OMCI_ID_LOID]		= OMCI_ID_FIELD(loid),
-	[OMCI_ID_LOID_PASSWD]	= OMCI_ID_FIELD(loid_passwd),
+static const struct { u8 off, size; bool numeric; } omci_id_fields[OMCI_ID_FIELDS] = {
+#define OMCI_ID_ROW(id, name, member, numeric)				\
+	[OMCI_ID_##id] = { offsetof(struct omci_identity, member),	\
+			   OMCI_ID_SIZEOF(member), numeric },
+	OMCI_ID_LIST(OMCI_ID_ROW)
+#undef OMCI_ID_ROW
 };
 
 const char *const omci_id_names[OMCI_ID_FIELDS] = {
-	[OMCI_ID_VENDOR]	= "vendor_id",
-	[OMCI_ID_HW_VERSION]	= "hw_ver",
-	[OMCI_ID_SW_VERSION0]	= "sw_ver1",
-	[OMCI_ID_SW_VERSION1]	= "sw_ver2",
-	[OMCI_ID_EQUIPMENT]	= "model",
-	[OMCI_ID_PRODUCT_CODE]	= "product_code",
-	[OMCI_ID_LOID]		= "loid",
-	[OMCI_ID_LOID_PASSWD]	= "loid_passwd",
+#define OMCI_ID_NAME(id, name, member, numeric) [OMCI_ID_##id] = #name,
+	OMCI_ID_LIST(OMCI_ID_NAME)
+#undef OMCI_ID_NAME
 };
+
+/* G.988 ONU2-G #2 codes that announce the baseline message set only. */
+static bool omci_omcc_baseline(u8 code)
+{
+	return (code >= 0x80 && code <= 0x86) || (code >= 0xa0 && code <= 0xa3);
+}
+
+/* ---- Far-end adaptations: the ONE table (gpon_omci_me.h enum omci_farend) ---- */
+static const struct omci_farend_profile {
+	const char *name;
+	u8 vendor[4];		/* the OLT-G / identity vendor that selects it */
+	u8 omcc_version;	/* ONU2-G #2 when the identity leaves it to the far end */
+	u16 me[2][2];		/* class, instance this far end provisions on every ONU */
+} omci_farends[OMCI_FAREND_N] = {
+	[OMCI_FAREND_GENERIC] = { "generic", { 0 }, 0x80 },
+	/* AXS's ZTE OLT (DC3, 2026-10-17) Sets ME 138 #0 and ME 340 on the VEIP of a
+	 * ZTE F670L, whose own binaries announce OMCC 0xa2 (V1.1.20P3N4D/P3N6B). */
+	[OMCI_FAREND_ZTE] = { "zte", { 'Z', 'T', 'E', 'G' }, 0xa2,
+		{ { OMCI_ME_VOIP_CONFIG, 0 }, { OMCI_ME_TR069_SERVER, OMCI_VEIP_INST } } },
+};
+
+static enum omci_farend omci_farend_detect(const struct omci_onu *o)
+{
+	unsigned int f;
+
+	for (f = 0; f < OMCI_FAREND_N; f++)
+		if (o->id.farend[0] && !strncmp((const char *)o->id.farend, omci_farends[f].name,
+						sizeof(o->id.farend)))
+			return f;
+	for (f = OMCI_FAREND_GENERIC + 1; f < OMCI_FAREND_N; f++)
+		if (!memcmp(o->id.vendor_id, omci_farends[f].vendor, 4) ||
+		    !memcmp(o->olt_vendor_seen, omci_farends[f].vendor, 4))
+			return f;
+	return OMCI_FAREND_GENERIC;
+}
+
+const char *omci_farend_name(const struct omci_onu *o)
+{
+	return omci_farends[o->farend < OMCI_FAREND_N ? o->farend : 0].name;
+}
+
+static bool omci_farend_known(const u8 *val, unsigned int len)
+{
+	unsigned int f;
+
+	if (!len)
+		return true;
+	for (f = 0; f < OMCI_FAREND_N; f++)
+		if (strlen(omci_farends[f].name) == len && !memcmp(val, omci_farends[f].name, len))
+			return true;
+	return false;
+}
 
 void omci_id_default(struct omci_identity *id)
 {
@@ -1149,7 +1196,9 @@ bool omci_id_set(struct omci_identity *id, enum omci_id_field f,
 	u8 *dst;
 
 	if ((unsigned int)f >= OMCI_ID_FIELDS || len > omci_id_fields[f].size ||
-	    (f == OMCI_ID_PRODUCT_CODE && len != 2))
+	    (omci_id_fields[f].numeric && len != omci_id_fields[f].size) ||
+	    (f == OMCI_ID_OMCC_VERSION && val[0] && !omci_omcc_baseline(val[0])) ||
+	    (f == OMCI_ID_FAREND && !omci_farend_known(val, len)))
 		return false;
 	if (!id)
 		return true;
@@ -1163,15 +1212,16 @@ bool omci_id_set(struct omci_identity *id, enum omci_id_field f,
 bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
 		     const char *s)
 {
-	unsigned int len = 0, code = 0, base = 10, digit;
+	unsigned int len = 0, code = 0, base = 10, digit, size, i;
 	u8 be[2];
 
 	while (s[len] && s[len] != '\n')
 		len++;
-	if (f != OMCI_ID_PRODUCT_CODE)
+	if ((unsigned int)f >= OMCI_ID_FIELDS || !omci_id_fields[f].numeric)
 		return omci_id_set(id, f, (const u8 *)s, len);
 	/* strtol(s, NULL, 0), as stock's omci_app reads OMCI_VENDOR_PRODUCT_CODE:
 	 * "31" is 0x001f on the field X111W's wire. */
+	size = omci_id_fields[f].size;
 	if (s[0] == '0' && (s[1] | 0x20) == 'x') {
 		base = 16;
 		s += 2;
@@ -1193,12 +1243,23 @@ bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
 		if (digit >= base)
 			return false;
 		code = code * base + digit;
-		if (code > 0xffff)
+		if (code >> (8 * size))
 			return false;
 	}
-	be[0] = (u8)(code >> 8);
-	be[1] = (u8)code;
-	return omci_id_set(id, f, be, 2);
+	for (i = 0; i < size; i++)
+		be[i] = (u8)(code >> (8 * (size - 1 - i)));
+	return omci_id_set(id, f, be, size);
+}
+
+enum omci_id_field omci_id_set_named(struct omci_identity *id, const char *name,
+				     const char *s)
+{
+	unsigned int f;
+
+	for (f = 0; f < OMCI_ID_FIELDS; f++)
+		if (!strcmp(name, omci_id_names[f]))
+			return omci_id_set_str(id, f, s) ? f : OMCI_ID_FIELDS;
+	return OMCI_ID_FIELDS;
 }
 
 void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level)
@@ -1207,6 +1268,20 @@ void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level)
 	o->anig_tx_level = tx_level;
 	o->anig_live = true;
 	omci_anig_alarms_refresh(o);
+}
+
+static void omci_build_mib(struct omci_onu *o);
+
+/* The far end is chosen again at each MIB-Reset, where the OLT re-learns the MIB. */
+static void omci_farend_refresh(struct omci_onu *o)
+{
+	enum omci_farend f = omci_farend_detect(o);
+
+	if (f == o->farend)
+		return;
+	o->farend = f;
+	if (o->nrows)
+		omci_build_mib(o);
 }
 
 void omci_me_reset_values(struct omci_onu *o)
@@ -1232,6 +1307,7 @@ void omci_me_reset_values(struct omci_onu *o)
 	o->anig_threshold[0] = o->anig_threshold[1] = 0xff;
 	o->anig_threshold[2] = o->anig_threshold[3] = 0x81;
 	omci_anig_alarms_refresh(o);
+	omci_farend_refresh(o);
 }
 
 /* How many octets of DENSE attribute body @class_id's ...
@@ -1322,8 +1398,11 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		return;			/* validated equal to what we serve */
 	if (a->src == OMCI_SRC_STORE)
 		memcpy(e->body + a->v, v, a->size);
-	else if (a->src == OMCI_SRC_OLT_G)
+	else if (a->src == OMCI_SRC_OLT_G) {
 		memcpy(o->olt_g + a->v, v, a->size);
+		if (a->v == 0 && a->size >= sizeof(o->olt_vendor_seen))
+			memcpy(o->olt_vendor_seen, v, sizeof(o->olt_vendor_seen));
+	}
 	else if (a->src == OMCI_SRC_ANIG_THRESHOLD)
 		o->anig_threshold[a->v] = v[0];
 	else if (a->src == OMCI_SRC_TBL) {
@@ -1625,6 +1704,10 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		case OMCI_DYN_CTC:
 			val = o->cap.ctc[a->attr - 2];
 			break;
+		case OMCI_DYN_OMCC:
+			val = o->id.omcc_version[0] ? o->id.omcc_version[0] :
+			      omci_farends[o->farend].omcc_version;
+			break;
 		case OMCI_DYN_IP_HOST_MAC: {
 			int i = omci_ip_host_index(o, inst);
 
@@ -1729,6 +1812,7 @@ enum omci_mi {
 				 * T-CONT from 0x8000 when the board declares
 				 * its capacity */
 	OMCI_MI_EXTRA,		/* the board's further single MEs, any class */
+	OMCI_MI_FAREND,		/* the far end's MEs a board does not carry */
 };
 
 /* Every auto-instantiated ME the OLT reads back.  The OLT counts the ME 11
@@ -1758,6 +1842,7 @@ static const struct {
 	{ OMCI_ME_TRAFFIC_SCHED, 0, OMCI_MI_SCHED },
 	{ OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_MI_ONE },
 	{ 0, 0, OMCI_MI_EXTRA },
+	{ 0, 0, OMCI_MI_FAREND },
 };
 
 static u16 omci_mi_count(const struct omci_onu *o, u8 from)
@@ -1781,6 +1866,8 @@ static u16 omci_mi_count(const struct omci_onu *o, u8 from)
 		return (u16)(8 * o->cap.dsq_n + (o->cap.usq ? omci_usq_total(o) : 0));
 	case OMCI_MI_EXTRA:
 		return o->extra_me_n;
+	case OMCI_MI_FAREND:
+		return omci_farends[o->farend].me[1][0] ? 2 : omci_farends[o->farend].me[0][0] ? 1 : 0;
 	default:
 		return 1;
 	}
@@ -1808,6 +1895,8 @@ static u16 omci_mi_inst(const struct omci_onu *o, u8 from, u16 inst, u16 i)
 		return i < ds_q ? i : (u16)(0x8000 + i - ds_q);
 	case OMCI_MI_EXTRA:
 		return o->extra_me[i][1];
+	case OMCI_MI_FAREND:
+		return omci_farends[o->farend].me[i][1];
 	default:
 		return inst;
 	}
@@ -1867,10 +1956,15 @@ static void omci_build_mib(struct omci_onu *o)
 	for (c = 0; c < sizeof(omci_mib_classes) / sizeof(omci_mib_classes[0]); c++) {
 		u8 from = omci_mib_classes[c].from;
 
-		for (i = 0; i < omci_mi_count(o, from); i++)
-			omci_pack_rows(o, from == OMCI_MI_EXTRA ? o->extra_me[i][0] :
-					  omci_mib_classes[c].class_id,
-				       omci_mi_inst(o, from, omci_mib_classes[c].inst, i));
+		for (i = 0; i < omci_mi_count(o, from); i++) {
+			u16 cls = from == OMCI_MI_EXTRA ? o->extra_me[i][0] :
+				  from == OMCI_MI_FAREND ? omci_farends[o->farend].me[i][0] :
+				  omci_mib_classes[c].class_id;
+			u16 inst = omci_mi_inst(o, from, omci_mib_classes[c].inst, i);
+
+			if (from != OMCI_MI_FAREND || !omci_row_listed(o, cls, inst))
+				omci_pack_rows(o, cls, inst);
+		}
 	}
 	for (i = 1; i < o->nrows; i++) {
 		struct omci_mib_row r = o->rows[i];

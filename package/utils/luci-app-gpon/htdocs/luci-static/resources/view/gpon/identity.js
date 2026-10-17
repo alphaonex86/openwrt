@@ -26,7 +26,7 @@ function parseKV(text) {
 
 /* Read the per-field factory values (what is in effect when a field is empty /
  * source=Factory) so we can show them as input placeholders + a copyable table. */
-var FAC_KEYS = ['sn', 'mac', 'loid', 'loid_passwd', 'ploam_passwd', 'olt_mode', 'vendor_id'];
+var FAC_KEYS = ['sn', 'mac', 'loid', 'loid_passwd', 'ploam_passwd', 'vendor_id'];
 
 function factoryRead(key) {
 	return fs.exec('/usr/sbin/rtk_factory', ['-p', 'config', key])
@@ -104,13 +104,6 @@ return view.extend({
 		o.password = true;
 		o.placeholder = fac.ploam_passwd || '';
 
-		o = s.option(form.ListValue, 'omci_olt_mode', _('OMCI OLT Mode'));
-		o.value('', _('Use factory value') + (fac.olt_mode ? ' (' + fac.olt_mode + ')' : ''));
-		o.value('0', _('0 - Default'));
-		o.value('1', _('1 - Huawei'));
-		o.value('2', _('2 - ZTE'));
-		o.value('3', _('3 - Customized'));
-
 		o = s.option(form.Value, 'pon_vendor_id', _('PON Vendor ID'),
 			_('4 chars, e.g. XPON; empty = factory value'));
 		o.placeholder = fac.vendor_id || '';
@@ -181,7 +174,6 @@ return view.extend({
 			[ _('LOID'), fac.loid ],
 			[ _('LOID Password'), fac.loid_passwd ],
 			[ _('PLOAM Password'), fac.ploam_passwd ],
-			[ _('OMCI OLT Mode'), fac.olt_mode ],
 			[ _('PON Vendor ID'), fac.vendor_id ]
 		];
 		var facDiv = E('div', { 'class': 'cbi-section' }, [

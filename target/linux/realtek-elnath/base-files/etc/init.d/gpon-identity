@@ -101,11 +101,14 @@ BOSA_CAL_DST=/lib/firmware/rtkbosa_k.bin
 # staging bugs were caught. Nothing reassigns them here.
 GPON_PROC=/proc/gpon
 CFG_VOLUME=ubi0:ubi_Config
-# The OMCI identity stock's omci_app takes from the MIB, as <name>:<MIB key>;
-# <name> is also the UCI key gpon.identity.<name> and the driver's "id" field.
+# Where this board's MIB keeps the OMCI identity fields, as <name>:<MIB key>; the
+# fields themselves are the driver's list (omci_id_fields).
 OMCI_ID_KEYS="vendor_id:PON_VENDOR_ID hw_ver:HW_HWVER model:GPON_ONU_MODEL
 sw_ver1:OMCI_SW_VER1 sw_ver2:OMCI_SW_VER2 product_code:OMCI_VENDOR_PRODUCT_CODE
 loid:LOID loid_passwd:LOID_PASSWD"
+
+# One field's value out of this board's MIB, as read into $ident below.
+ident_value() { printf '%s' "$ident" | sed -n "s/^$1 //p"; }
 
 # START=11 runs BEFORE /etc/init.d/log, so syslog may not be listening yet:
 # mirror every message into the kernel ring too, where it lands next to the
@@ -148,7 +151,7 @@ stage_bosa_cal() {
 # fallback was applied); non-zero = TRANSIENT, ask again later.
 try_set() {
 	local mnt="/tmp/.gpon_identity"
-	local sn="" mac="" pwd="" pwd_seen=0 upwd="" src="" mounted=0 cal=1 ident="" key name val
+	local sn="" mac="" pwd="" pwd_seen=0 src="" mounted=0 cal=1 ident="" key val manual=0
 
 	[ -e "$GPON_PROC" ] || {
 		say "no $GPON_PROC - the cortina-gpon driver has not probed yet; will retry" err
@@ -204,7 +207,9 @@ try_set() {
 	fi
 	rmdir "$mnt" 2>/dev/null
 
-	# The driver validates too; check here so the fallback can take over.
+	# A clone's serial (source=manual) outranks the board's; the driver validates both.
+	val=$(gpon_serial "$sn")
+	[ "$val" = "$sn" ] || { sn=$val; manual=1; }
 	case "$sn" in
 	????[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])
 		src="board (ubi0:ubi_Config config_hs.xml GPON_SN)" ;;
@@ -241,34 +246,18 @@ try_set() {
 		return 1
 	}
 
-	# The PLOAM password stock sends, before the serial whose write starts ranging:
-	# LuCI/UCI first, else this unit's MIB, where an EMPTY value is sent as ten zero
-	# octets as stock does; only a MIB without the key keeps the driver's default.
-	if upwd=$(uci -q get gpon.identity.ploam_passwd) && [ -n "$upwd" ]; then
-		pwd=$upwd
-		pwd_seen=1
-	fi
-	if [ "$pwd_seen" = 0 ]; then
-		say "this unit's MIB carries no GPON_PLOAM_PASSWD - the driver keeps its default"
-	else
+	[ "$manual" = 1 ] && src="manual (gpon.identity.sn)"
+
+	# The PLOAM password before the serial whose write starts ranging (onu-identity.sh).
+	if pwd=$(gpon_ploam_password "$pwd_seen" "$pwd"); then
 		echo "password $pwd" > "$GPON_PROC" 2>/dev/null ||
 			say "the driver refused PLOAM password (0..10 printable characters)" err
+	else
+		say "this unit's MIB carries no GPON_PLOAM_PASSWD - the driver keeps its default"
 	fi
 
-	# The OMCI identity, LuCI/UCI first, also before the serial; the software
-	# version is ours (owrt_version), never the vendor's MIB.
-	for key in $OMCI_ID_KEYS; do
-		name=${key%%:*}
-		case "$name" in
-		sw_ver1|sw_ver2) val=$(uci -q get "gpon.identity.$name" ||
-			owrt_version 2>/dev/null) ;;
-		*) val=$(uci -q get "gpon.identity.$name" ||
-			printf '%s' "$ident" | sed -n "s/^$name //p") ;;
-		esac
-		[ -n "$val" ] || continue
-		echo "id $name $val" > "$GPON_PROC" 2>/dev/null ||
-			say "the driver refused OMCI $name '$val'" err
-	done
+	# The OMCI identity before the serial (onu-identity.sh omci_id_apply).
+	omci_id_apply ident_value | while read -r msg; do say "$msg" err; done
 
 	if echo "sn $sn" > "$GPON_PROC" 2>/dev/null; then
 		say "GPON serial number $sn from $src" "" always

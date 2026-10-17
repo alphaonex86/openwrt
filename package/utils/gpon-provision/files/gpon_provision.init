@@ -16,10 +16,6 @@ GPON_SN_PATHS="/sys/module/luna_gpon/parameters/onu_sn
 /sys/module/gpon_rtl9602c/parameters/onu_sn
 /sys/module/gpon/parameters/onu_sn"
 GPON_PWD_PATHS="/sys/module/luna_gpon/parameters/onu_password"
-# The OMCI identity stock's omci_app takes from the MIB: rtk_factory verb = UCI
-# key gpon.identity.<name> = driver parameter onu_<name>.
-OMCI_ID_NAMES="vendor_id hw_ver sw_ver1 sw_ver2 model product_code loid loid_passwd"
-OMCI_ID_DIR=/sys/module/luna_gpon/parameters
 # This unit's WiFi cal from its MIB (HW_WLAN0_*): rtk_factory verb wlan_<x> ->
 # rtl8192fe parameter unit_<x>. All or nothing: the driver needs the whole set.
 WIFI_CAL_VERBS="wlan_cck_a wlan_cck_b wlan_ht40_a wlan_ht40_b wlan_thermal wlan_xcap wlan_reg_domain"
@@ -76,7 +72,7 @@ apply_mac() {
 }
 
 provision() {
-	local source part base mac oui sn loid loid_pw ploam olt vid
+	local source part base mac oui sn loid loid_pw ploam vid
 
 	config_load gpon
 	config_get source identity source factory
@@ -88,7 +84,6 @@ provision() {
 	config_get loid    identity loid
 	config_get loid_pw identity loid_passwd
 	config_get ploam   identity ploam_passwd
-	config_get olt     identity omci_olt_mode
 	config_get vid     identity pon_vendor_id
 
 	if [ -x "$RTK" ]; then
@@ -108,7 +103,6 @@ provision() {
 		[ -n "$loid" ]    || loid=${RTK_loid:-}
 		[ -n "$loid_pw" ] || loid_pw=${RTK_loid_passwd:-}
 		[ -n "$ploam" ]   || ploam=${RTK_ploam_passwd:-}
-		[ -n "$olt" ]     || olt=${RTK_olt_mode:-}
 	fi
 
 	mac=$(echo "$mac" | tr 'A-F' 'a-f')
@@ -149,11 +143,10 @@ provision() {
 		echo "GPON_LOID=$loid"
 		echo "GPON_LOID_PASSWD=$loid_pw"
 		echo "GPON_PLOAM_PASSWD=$ploam"
-		echo "OMCI_OLT_MODE=$olt"
 		echo "PON_VENDOR_ID=$vid"
 	} > "$ENVFILE"
 
-	log "provisioned: MAC=$mac SN=${sn:-?} OLT_MODE=${olt:-?} (source=$source)"
+	log "provisioned: MAC=$mac SN=${sn:-?} (source=$source)"
 
 	set_wifi_cal "$part"
 
@@ -282,15 +275,12 @@ stage_gn_cal() {
 # the driver's default. Written before the serial, whose write
 # starts ranging. The newline is what lets an empty value reach the driver at all.
 set_password() {
-	local part="$1" pw p
-	config_get pw identity ploam_passwd
-	if [ -z "$pw" ]; then
-		rtk_need "$part" && [ -n "${RTK_HAS_ploam_passwd:-}" ] &&
-			pw=${RTK_ploam_passwd:-} || {
-			log "no PLOAM password in this unit's MIB - the driver keeps its default"
-			return 0
-		}
-	fi
+	local pw p
+	rtk_need "$1"
+	pw=$(gpon_ploam_password "${RTK_HAS_ploam_passwd:+1}" "${RTK_ploam_passwd:-}") || {
+		log "no PLOAM password in this unit's MIB - the driver keeps its default"
+		return 0
+	}
 	for p in $GPON_PWD_PATHS; do
 		[ -w "$p" ] || continue
 		printf '%s\n' "$pw" > "$p" && { log "PLOAM password handed to the driver"; return 0; }
@@ -299,25 +289,12 @@ set_password() {
 	done
 }
 
-# LuCI/UCI first, else this unit's MIB -- except the software version, which is
-# ours (owrt_version). An empty value keeps the driver's build default.
-# Refusals are logged, never fatal: the serial still ranges.
+# The OMCI identity (onu-identity.sh omci_id_apply): LuCI/UCI first, else this
+# unit's MIB, read once by rtk_factory. Refusals are logged, never fatal.
+rtk_mib_value() { eval "printf '%s' \"\${RTK_$1:-}\""; }
 set_omci_identity() {
-	local part="$1" name val
-	for name in $OMCI_ID_NAMES; do
-		config_get val identity "$name"
-		case "$name" in
-		sw_ver1|sw_ver2) [ -n "$val" ] || val=$(owrt_version 2>/dev/null) ;;
-		*) [ -n "$val" ] || { rtk_need "$part"; eval "val=\${RTK_$name:-}"; } ;;
-		esac
-		[ -n "$val" ] || continue
-		[ -w "$OMCI_ID_DIR/onu_$name" ] || {
-			log "no driver parameter onu_$name; OMCI $name keeps the build default"
-			continue
-		}
-		printf '%s' "$val" > "$OMCI_ID_DIR/onu_$name" ||
-			log "OMCI $name '$val' refused by the driver"
-	done
+	rtk_need "$1"
+	omci_id_apply rtk_mib_value | while read -r msg; do log "$msg"; done
 }
 
 # Before the radio starts (hw_init applies it), so this unit calibrates with its
@@ -352,13 +329,9 @@ try_identity() {
 	local part source sn p backend
 
 	config_load gpon
-	config_get source identity source factory
 	config_get part storage config_part config
-	config_get sn identity sn
-	if [ "$source" = factory ] || [ -z "$sn" ]; then
-		rtk_load "$part"
-		sn=${RTK_sn:-}
-	fi
+	rtk_load "$part"
+	sn=$(gpon_serial "${RTK_sn:-}")
 	[ -n "$sn" ] || { log "no GPON serial available; will retry"; return 1; }
 
 	backend=$(optics_backend)
@@ -393,8 +366,20 @@ retry_identity() {
 	done
 }
 
+# A board whose GPON driver takes no Luna serial parameter applies its identity
+# through its own family service (gpon-identity on Cortina), from the same policy.
+luna_gpon_present() {
+	local p
+	for p in $GPON_SN_PATHS; do [ -e "$p" ] && return 0; done
+	return 1
+}
+
 start_service() {
 	provision
+	luna_gpon_present || {
+		log "no Luna GPON serial parameter: this board's identity is its family service's"
+		return 0
+	}
 	try_identity && return 0
 	procd_open_instance identity
 	procd_set_param command /bin/sh /etc/init.d/gpon_provision --retry-identity
@@ -407,6 +392,7 @@ start_service() {
 # changes -> re-provision live, no reboot.
 reload_service() {
 	restart || return $?
+	[ ! -x /etc/init.d/gpon-identity ] || /etc/init.d/gpon-identity restart
 	if [ -x /etc/init.d/omci ]; then
 		/etc/init.d/omci reload 2>/dev/null
 	fi

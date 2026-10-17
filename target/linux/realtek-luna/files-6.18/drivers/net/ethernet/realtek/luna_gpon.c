@@ -5342,6 +5342,7 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 	u32 state  = status & GPON_ONU_STATE_MASK;
 
 	luna_omci_seq_show(s);
+	seq_puts(s, OMCI_ID_FIELDS_LINE "\n");
 	if (is_9607c)
 		luna_c7_diag(&rtl9602c_r960_ops, s);
 	seq_printf(s, "optics: backend=%s gn_cal_ready=%u upstream_ready=%u error=%d\n",
@@ -7393,18 +7394,11 @@ static const struct kernel_param_ops onu_omci_id_ops = {
 	.set = onu_omci_id_param_set,
 	.get = param_get_charp,
 };
-#define LUNA_OMCI_ID_PARAM(name, f)					\
-	module_param_cb(onu_##name, &onu_omci_id_ops, &onu_omci_id[f], 0644); \
+#define LUNA_OMCI_ID_PARAM(id, name, member, numeric)			\
+	module_param_cb(onu_##name, &onu_omci_id_ops, &onu_omci_id[OMCI_ID_##id], 0644); \
 	MODULE_PARM_DESC(onu_##name, "OMCI identity " #name			\
-			 " (the unit's MIB value; unset = the build default)")
-LUNA_OMCI_ID_PARAM(vendor_id, OMCI_ID_VENDOR);
-LUNA_OMCI_ID_PARAM(hw_ver, OMCI_ID_HW_VERSION);
-LUNA_OMCI_ID_PARAM(sw_ver1, OMCI_ID_SW_VERSION0);
-LUNA_OMCI_ID_PARAM(sw_ver2, OMCI_ID_SW_VERSION1);
-LUNA_OMCI_ID_PARAM(model, OMCI_ID_EQUIPMENT);
-LUNA_OMCI_ID_PARAM(product_code, OMCI_ID_PRODUCT_CODE);
-LUNA_OMCI_ID_PARAM(loid, OMCI_ID_LOID);
-LUNA_OMCI_ID_PARAM(loid_passwd, OMCI_ID_LOID_PASSWD);
+			 " (the unit's MIB value; unset = the build default)");
+OMCI_ID_LIST(LUNA_OMCI_ID_PARAM)
 
 /* Two units of one board may run stocks that announce different counts, so
  * the unit's own arrives here, pinned beside its serial in its boot
@@ -7838,14 +7832,17 @@ static void luna_vlan_service_show(struct seq_file *s)
 static void luna_omci_seq_show(struct seq_file *s)
 {
 	char resp[320] = "";
+	const char *farend = "-";
 	unsigned long flags;
 	u32 queued, count, overflow, closed, accepted, resets, tx_errors;
 
 	spin_lock_irqsave(&luna_omci_lock, flags);
-	if (luna_omci.onu)
+	if (luna_omci.onu) {
 		omci_resp_fmt(luna_omci.onu, READ_ONCE(luna_activation_ready),
 			      READ_ONCE(luna_omci.tx_sent), READ_ONCE(luna_omci.tx_errors),
 			      resp, sizeof(resp));
+		farend = omci_farend_name(luna_omci.onu);
+	}
 	queued = luna_omci.queued;
 	count = luna_omci.count;
 	overflow = luna_omci.overflow;
@@ -7855,6 +7852,7 @@ static void luna_omci_seq_show(struct seq_file *s)
 	tx_errors = READ_ONCE(luna_omci.tx_errors);
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	seq_puts(s, resp);
+	seq_printf(s, "omci_farend: %s\n", farend);
 	seq_printf(s, "omci_queue: queued=%u pending=%u overflow=%u closed=%u accepted=%u resets=%u tx_errors=%u\n",
 		   queued, count, overflow, closed, accepted, resets, tx_errors);
 	luna_vlan_service_show(s);

@@ -54,7 +54,8 @@ config KERNEL_MAC80211_DEBUGFS
 	  Expose wireless queues and counters when mac80211 is built.
 
 config KERNEL_CFG80211_DEBUGFS
-	bool
+	bool "cfg80211 debugfs directory (a driver's own debugfs, e.g. rtw89 read_reg)"
+	select KERNEL_DEBUG_FS
 	default n
 
 config KERNEL_ARM_PMU

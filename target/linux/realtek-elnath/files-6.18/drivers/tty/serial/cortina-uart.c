@@ -62,8 +62,7 @@
 #define PORT_CORTINA		130
 
 static struct uart_port cortina_uart_port;
-static bool cortina_con_in_line;	/* port lock: a kernel line is on the wire */
-static bool cortina_con_tx_owed;	/* port lock: the tty asked to send meanwhile */
+static struct onu_con_gate cortina_con_gate;	/* port lock */
 
 static u32 cortina_uart_info(struct uart_port *port)
 {
@@ -110,14 +109,16 @@ static void cortina_uart_stop_tx(struct uart_port *port)
 	cortina_uart_irq_disable(port, UINT_TX_EMPTY);
 }
 
-static void cortina_uart_start_tx(struct uart_port *port)
+static void cortina_uart_tx_run(struct uart_port *port)
 {
-	if (cortina_con_in_line) {
-		cortina_con_tx_owed = true;
-		return;
-	}
 	cortina_uart_irq_enable(port, UINT_TX_EMPTY);
 	cortina_uart_tx_chars(port);
+}
+
+static void cortina_uart_start_tx(struct uart_port *port)
+{
+	if (onu_con_gate_tty(&cortina_con_gate))
+		cortina_uart_tx_run(port);
 }
 
 static void cortina_uart_stop_rx(struct uart_port *port)
@@ -359,23 +360,17 @@ static unsigned int cortina_con_drain_step(struct uart_port *port)
 	unsigned char chunk[CORTINA_UART_FIFOSIZE];
 	unsigned int n = 0, i;
 	unsigned long flags;
-	int eol;
+	int eol = 0;
 
 	uart_port_lock_irqsave(port, &flags);
-	if (cortina_con_in_line || !(readl(port->membase + UINT_EN) & UINT_TX_EMPTY)) {
+	if (onu_con_gate_kernel(&cortina_con_gate, readl(port->membase + UINT_EN) & UINT_TX_EMPTY)) {
 		if (cortina_uart_info(port) & UINFO_TX_EMPTY) {
 			n = onu_con_ring_get_line(&cortina_con_ring, chunk, sizeof(chunk), &eol);
 			for (i = 0; i < n; i++)
 				writel(chunk[i], port->membase + UTX_DATA);
-			if (n)
-				cortina_con_in_line = !eol;
 		}
-		if (!onu_con_ring_used(&cortina_con_ring))
-			cortina_con_in_line = false;	/* a record without '\n' ends here */
-		if (!cortina_con_in_line && cortina_con_tx_owed) {
-			cortina_con_tx_owed = false;
-			cortina_uart_start_tx(port);
-		}
+		if (onu_con_gate_loaded(&cortina_con_gate, &cortina_con_ring, n, eol))
+			cortina_uart_tx_run(port);
 	} else {
 		n = CORTINA_UART_FIFOSIZE;	/* the tty is sending: one FIFO of its time */
 	}

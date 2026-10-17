@@ -8,7 +8,7 @@
  * deadline (98 deactivations, 2026-10-07). nbcon does not help without
  * PREEMPT_RT: its printer thread writes under the same port lock.
  *
- * This console only copies into a ring (luna_console_ring.h). A thread puts
+ * This console only copies into a ring (onu_console_ring.h). A thread puts
  * the ring into the UART FIFO when it is empty and sleeps while it drains, so
  * the port lock is held for one FIFO load. Panic, oops and shutdown write
  * synchronously so the last lines still reach the wire. At late_initcall it
@@ -51,8 +51,7 @@ static DECLARE_WAIT_QUEUE_HEAD(luna_con_wq);
 static bool luna_con_sync;
 static const struct uart_ops *luna_con_port_ops;
 static struct uart_ops luna_con_ops;
-static bool luna_con_in_line;	/* port lock */
-static bool luna_con_tx_owed;	/* port lock */
+static struct onu_con_gate luna_con_gate;	/* port lock */
 
 static bool luna_con_fifo_on(struct uart_8250_port *up)
 {
@@ -83,11 +82,8 @@ static unsigned int luna_con_load_fifo(struct uart_8250_port *up, int *eol)
 /* The tty's start_tx: deferred while a kernel line is on the wire. Port lock held. */
 static void luna_con_start_tx(struct uart_port *port)
 {
-	if (luna_con_in_line) {
-		luna_con_tx_owed = true;
-		return;
-	}
-	luna_con_port_ops->start_tx(port);
+	if (onu_con_gate_tty(&luna_con_gate))
+		luna_con_port_ops->start_tx(port);
 }
 
 /* One step of the drain thread. -> bytes worth of time to sleep */
@@ -98,16 +94,10 @@ static unsigned int luna_con_drain_step(struct uart_8250_port *up)
 	int eol;
 
 	uart_port_lock_irqsave(&up->port, &flags);
-	if (luna_con_in_line || !(up->ier & UART_IER_THRI)) {
+	if (onu_con_gate_kernel(&luna_con_gate, up->ier & UART_IER_THRI)) {
 		n = luna_con_load_fifo(up, &eol);
-		if (n)
-			luna_con_in_line = !eol;
-		if (!onu_con_ring_used(&luna_con_ring))
-			luna_con_in_line = false;	/* a record without '\n' ends here */
-		if (!luna_con_in_line && luna_con_tx_owed) {
-			luna_con_tx_owed = false;
+		if (onu_con_gate_loaded(&luna_con_gate, &luna_con_ring, n, eol))
 			luna_con_port_ops->start_tx(&up->port);
-		}
 	} else {
 		n = up->tx_loadsz;	/* the tty is sending: one FIFO of its time */
 	}

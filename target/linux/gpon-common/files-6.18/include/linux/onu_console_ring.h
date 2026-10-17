@@ -130,4 +130,42 @@ static inline unsigned int onu_con_ring_get_line(struct onu_con_ring *r, unsigne
 	return n;
 }
 
+/*
+ * The kernel and the tty share one UART. A kernel line starts only while the
+ * tty transmitter is idle and runs to its '\n'; a tty start asked meanwhile is
+ * owed and released at the line's end. The UART's port lock serializes all three.
+ */
+struct onu_con_gate {
+	int in_line;	/* a kernel line is on the wire */
+	int tx_owed;	/* the tty asked to start meanwhile */
+};
+
+/* The tty's start_tx. -> 1 when the tty may start now. */
+static inline int onu_con_gate_tty(struct onu_con_gate *g)
+{
+	if (g->in_line)
+		g->tx_owed = 1;
+	return !g->in_line;
+}
+
+/* May the drain load kernel bytes, given whether the tty is transmitting? */
+static inline int onu_con_gate_kernel(const struct onu_con_gate *g, int tty_busy)
+{
+	return g->in_line || !tty_busy;
+}
+
+/* After a kernel load of @n bytes. -> 1 when the owed tty start must run now. */
+static inline int onu_con_gate_loaded(struct onu_con_gate *g, struct onu_con_ring *r,
+				      unsigned int n, int eol)
+{
+	if (n)
+		g->in_line = !eol;
+	if (!onu_con_ring_used(r))
+		g->in_line = 0;	/* a record without '\n' ends here */
+	if (g->in_line || !g->tx_owed)
+		return 0;
+	g->tx_owed = 0;
+	return 1;
+}
+
 #endif /* ONU_CONSOLE_RING_H */

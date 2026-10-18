@@ -275,7 +275,8 @@ static void luna_mon_unregister(void)
 #ifdef CONFIG_GPON_OLT_DIAG
 /* The PLOAM half of the far end's conversation: the OMCI ring's codec and
  * clock, in a ring of its own because the OMCI burst alone overflows that one. */
-static struct gpon_olt_capture luna_ploam_cap;
+GPON_OLT_CAPTURE(luna_ploam_cap, GPON_OLT_RECORDS);
+GPON_OLT_CAPTURE(luna_ploam_unknown, GPON_OLT_PLOAM_UNKNOWN_RECORDS);
 static DEFINE_SPINLOCK(luna_ploam_cap_lock);
 #endif
 
@@ -7080,7 +7081,10 @@ static void luna_data_alloc_changed(void *sh, u16 alloc, bool assigned)
 /* The far end's own conversation.  Written under luna_omci_lock (the lock that
  * already serializes this shell's OMCI path) and read one record at a time, so
  * /proc/oltcap never holds it across a whole dump. */
-static struct gpon_olt_capture luna_olt_cap;
+GPON_OLT_CAPTURE(luna_olt_prov, GPON_OLT_LEDGER_RECORDS);
+GPON_OLT_CAPTURE(luna_olt_unknown, GPON_OLT_UNKNOWN_RECORDS);
+GPON_OLT_CAPTURE(luna_olt_cap, GPON_OLT_RECORDS, .ledger = &luna_olt_prov,
+			.unknown = &luna_olt_unknown, .described = omci_class_described);
 
 static int olt_capture_show(struct seq_file *s, struct gpon_olt_capture *c,
 			    spinlock_t *lock)
@@ -7116,6 +7120,21 @@ static int olt_capture_show(struct seq_file *s, struct gpon_olt_capture *c,
 static int oltcap_proc_show(struct seq_file *s, void *v)
 {
 	return olt_capture_show(s, &luna_olt_cap, &luna_omci_lock);
+}
+
+static int gpon_prov_proc_show(struct seq_file *s, void *v)
+{
+	return olt_capture_show(s, &luna_olt_prov, &luna_omci_lock);
+}
+
+static int gpon_unknown_proc_show(struct seq_file *s, void *v)
+{
+	return olt_capture_show(s, &luna_olt_unknown, &luna_omci_lock);
+}
+
+static int ploam_unknown_proc_show(struct seq_file *s, void *v)
+{
+	return olt_capture_show(s, &luna_ploam_unknown, &luna_ploam_cap_lock);
 }
 
 static int ploamcap_proc_show(struct seq_file *s, void *v)
@@ -8560,6 +8579,32 @@ static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
 			(unsigned int)ev, a, b);
 }
 
+/* What the PLOAM core does not handle: the rate-limited report, and the whole
+ * message kept per type so it can be read and replayed. */
+static void luna_op_unsupported(void *sh, const char *kind, int cls, u32 val,
+				const char *want, const u8 *data, unsigned int len)
+{
+#ifdef CONFIG_GPON_OLT_DIAG
+	struct gpon_olt_rec r = { 0 };
+	unsigned long flags;
+#endif
+
+	gpon_unsup_report(kind, cls, val, want, data, len);
+#ifdef CONFIG_GPON_OLT_DIAG
+	if (!data || !len)
+		return;
+	r.t_us = div_u64(luna_ds_rx_ns ? luna_ds_rx_ns : ktime_get_boottime_ns(), 1000);
+	r.ostate = (u8)luna_ploam.state;
+	r.dir = GPON_OLT_DS;
+	r.len = len > GPON_OLT_PDU ? GPON_OLT_PDU : (u8)len;
+	memcpy(r.pdu, data, r.len);
+	spin_lock_irqsave(&luna_ploam_cap_lock, flags);
+	r.seq = luna_ploam_cap.seq;
+	gpon_olt_ploam_unknown_note(&luna_ploam_unknown, &r);
+	spin_unlock_irqrestore(&luna_ploam_cap_lock, flags);
+#endif
+}
+
 static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.ploam_tx	= luna_op_ploam_tx,
 	.boh_write	= luna_op_boh_write,
@@ -8584,6 +8629,7 @@ static const struct gpon_ploam_ops luna_ploam_ops __maybe_unused = {
 	.data_alloc_changed = luna_data_alloc_changed,
 	.arm_dying_gasp	= luna_op_arm_dying_gasp,
 	.trace		= luna_op_trace,
+	.unsupported	= luna_op_unsupported,
 };
 
 static void gpon_fsm_handle(const u8 *m)
@@ -9707,6 +9753,9 @@ skip_bosa_init:
 	proc_create_single("swdump", 0444, NULL, swdump_proc_show);
 #ifdef CONFIG_GPON_OLT_DIAG
 	proc_create_single("oltcap", 0444, NULL, oltcap_proc_show);
+	proc_create_single("gpon_prov", 0444, NULL, gpon_prov_proc_show);
+	proc_create_single("gpon_unknown", 0444, NULL, gpon_unknown_proc_show);
+	proc_create_single("ploam_unknown", 0444, NULL, ploam_unknown_proc_show);
 	proc_create_single("ploamcap", 0444, NULL, ploamcap_proc_show);
 #endif
 
@@ -9901,6 +9950,9 @@ static void __exit rtl9602c_gpon_exit(void)
 	remove_proc_entry("swdump", NULL);
 #ifdef CONFIG_GPON_OLT_DIAG
 	remove_proc_entry("oltcap", NULL);
+	remove_proc_entry("gpon_prov", NULL);
+	remove_proc_entry("gpon_unknown", NULL);
+	remove_proc_entry("ploam_unknown", NULL);
 	remove_proc_entry("ploamcap", NULL);
 #endif
 	if (ponip_base)

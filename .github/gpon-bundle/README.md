@@ -4,6 +4,18 @@ You run an ONU on an OLT we have no access to. One read-only script on the ONU c
 itself and about that OLT; we turn it into an offline test case, so our open firmware adapts to your OLT without
 anyone touching it again.
 
+## On our OpenWrt image: nothing to copy
+
+The script is built in. On the PON page (Network > PON), "Support for a new OLT" asks for the ISP and, if you know
+them, the OLT model and firmware, then "Download the bundle" saves the `.tar`. From a shell: `gpon-bundle /tmp`.
+Two more tools on the image answer the questions a new OLT raises, and their results go into the bundle:
+
+- `gpon-omci-view`: what the OLT configured over OMCI (its identity, the management address, VLANs, the TR-069
+  server, GEM ports, what we do not model, and anything this ONU refused). The PON page shows it too.
+  `gpon-omci-view --unknown`: every kind of OMCI or PLOAM message the ONU did not identify since boot.
+- `gpon-wan-discover`: how the ISP serves the internet: DHCP or PPPoE on each VLAN, and public addresses the ISP
+  routes to this ONU. "Find the internet WAN" on the PON page runs it; nothing changes until you press Apply.
+
 ## What you run, and what it never does
 
 `gpon_bundle.sh` is a POSIX shell script that needs only the board's own shell and busybox. It works on the
@@ -26,6 +38,9 @@ vendor (stock) firmware and on our OpenWrt image.
 - The device tree blob (`/sys/firmware/fdt`) and the kernel log.
 - On our image: `/proc/gpon`, `/proc/gpon_log`, `/proc/gpon_timing`, `/proc/gpon_health`, the OMCI exchange
   (`/proc/oltcap`), the PLOAM exchange (`/proc/ploamcap`, Realtek Luna only) and the register dumps.
+- On our image also: what the OLT provisioned (`/proc/gpon_prov`, kept after the OMCI ring forgets it), the
+  latest exchange of each kind the ONU did not identify (`/proc/gpon_unknown`, `/proc/ploam_unknown`: periodic
+  polls, tests, power levels a live capture misses), their decoding, the last WAN discovery, the VLAN devices, routes and addresses (no configuration file, so no password).
 - On stock firmware: the vendor OMCI log, the vendor PON state (`diag ... get onu-state`), the OMCI device mode,
   and the md5 of each OMCI program and library.
 - The script itself, so we know which version ran.

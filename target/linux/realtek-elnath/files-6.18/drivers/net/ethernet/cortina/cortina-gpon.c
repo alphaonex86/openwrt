@@ -455,6 +455,8 @@ struct cortina_gpon {
 	int optical_init_error;
 #ifdef CONFIG_GPON_OLT_DIAG
 	struct proc_dir_entry *oltcap_proc;	/* the far-end capture dump */
+	struct proc_dir_entry *prov_proc;	/* the provisioning ledger */
+	struct proc_dir_entry *unknown_proc;	/* what this ONU did not identify */
 #endif
 
 	/* post-O5 servicing (ISR top half -> event ring -> work bottom half) */
@@ -2376,7 +2378,10 @@ static void cg_veip_avc_work(struct work_struct *work)
 /* The far end's own conversation.  Written and read under cg->omci_lock, the
  * lock that already serializes this shell's OMCI path; the reader copies ONE
  * record at a time so /proc/oltcap never holds it across a whole dump. */
-static struct gpon_olt_capture cg_olt_cap;
+GPON_OLT_CAPTURE(cg_olt_prov, GPON_OLT_LEDGER_RECORDS);
+GPON_OLT_CAPTURE(cg_olt_unknown, GPON_OLT_UNKNOWN_RECORDS);
+GPON_OLT_CAPTURE(cg_olt_cap, GPON_OLT_RECORDS, .ledger = &cg_olt_prov,
+			.unknown = &cg_olt_unknown, .described = omci_class_described);
 
 /* The PON-MAC numbers its states from 0 (0 = O1), the core enum from 1.  A
  * value the MAC does not name maps to COULD NOT ASK, never to a state. */
@@ -2387,7 +2392,7 @@ static u8 cg_olt_ostate(struct cortina_gpon *cg)
 	return st < 7 ? (u8)(st + 1) : GPON_OLT_OSTATE_UNKNOWN;
 }
 
-static int cg_oltcap_show(struct seq_file *s, void *v)
+static int cg_capture_show(struct seq_file *s, struct gpon_olt_capture *c)
 {
 	struct cortina_gpon *cg = READ_ONCE(cg_singleton);
 	char line[160];
@@ -2396,8 +2401,8 @@ static int cg_oltcap_show(struct seq_file *s, void *v)
 	if (!cg)
 		return 0;
 	spin_lock_bh(&cg->omci_lock);
-	n = gpon_olt_capture_count(&cg_olt_cap);
-	gpon_olt_diag_header(&cg_olt_cap, line, sizeof(line));
+	n = gpon_olt_capture_count(c);
+	gpon_olt_diag_header(c, line, sizeof(line));
 	spin_unlock_bh(&cg->omci_lock);
 	seq_printf(s, "%s\n", line);
 	for (i = 0; i < n; i++) {
@@ -2407,7 +2412,7 @@ static int cg_oltcap_show(struct seq_file *s, void *v)
 		const struct gpon_olt_rec *q;
 
 		spin_lock_bh(&cg->omci_lock);
-		q = gpon_olt_capture_at(&cg_olt_cap, i);
+		q = gpon_olt_capture_at(c, i);
 		if (q)
 			r = *q;
 		spin_unlock_bh(&cg->omci_lock);
@@ -2417,6 +2422,21 @@ static int cg_oltcap_show(struct seq_file *s, void *v)
 			seq_printf(s, "%s\n", line);
 	}
 	return 0;
+}
+
+static int cg_oltcap_show(struct seq_file *s, void *v)
+{
+	return cg_capture_show(s, &cg_olt_cap);
+}
+
+static int cg_prov_show(struct seq_file *s, void *v)
+{
+	return cg_capture_show(s, &cg_olt_prov);
+}
+
+static int cg_unknown_show(struct seq_file *s, void *v)
+{
+	return cg_capture_show(s, &cg_olt_unknown);
 }
 #endif /* CONFIG_GPON_OLT_DIAG */
 
@@ -3607,6 +3627,8 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 		dev_warn(dev, "cannot expose cached GPON health status\n");
 #ifdef CONFIG_GPON_OLT_DIAG
 	cg->oltcap_proc = proc_create_single("oltcap", 0444, NULL, cg_oltcap_show);
+	cg->prov_proc = proc_create_single("gpon_prov", 0444, NULL, cg_prov_show);
+	cg->unknown_proc = proc_create_single("gpon_unknown", 0444, NULL, cg_unknown_show);
 #endif
 	platform_set_drvdata(pdev, cg);
 	dev_info(dev, "cortina-gpon phase-0 probe complete (/proc/gpon)\n");
@@ -3631,6 +3653,14 @@ static void cortina_gpon_remove(struct platform_device *pdev)
 		cg->proc = NULL;
 	}
 #ifdef CONFIG_GPON_OLT_DIAG
+	if (cg->prov_proc) {
+		proc_remove(cg->prov_proc);
+		cg->prov_proc = NULL;
+	}
+	if (cg->unknown_proc) {
+		proc_remove(cg->unknown_proc);
+		cg->unknown_proc = NULL;
+	}
 	if (cg->oltcap_proc) {
 		proc_remove(cg->oltcap_proc);
 		cg->oltcap_proc = NULL;

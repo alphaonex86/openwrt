@@ -16,7 +16,7 @@ define Package/gpon-provision
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=Per-board GPON ONU provisioning (MAC/SN from factory partition)
-  DEPENDS:=+zlib
+  DEPENDS:=+zlib +PACKAGE_ppp:pppoe-discovery
 endef
 
 define Package/gpon-provision/description
@@ -40,6 +40,9 @@ endef
 define Package/gpon-provision/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/rtk_factory $(1)/usr/sbin/rtk_factory
+	$(INSTALL_BIN) ./files/gpon-omci-view $(1)/usr/sbin/gpon-omci-view
+	$(INSTALL_BIN) ./files/gpon-wan-discover $(1)/usr/sbin/gpon-wan-discover
+	$(INSTALL_BIN) ./files/gpon-bundle $(1)/usr/sbin/gpon-bundle
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/gpon_provision.init $(1)/etc/init.d/gpon_provision
 	$(INSTALL_DIR) $(1)/etc/config

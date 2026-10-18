@@ -23,6 +23,12 @@
 #define GPON_OLT_RECORDS	256
 #endif
 
+/* The tables beside the ring, a fixed size each: one entry per kind, so the OLT's periodic traffic
+ * cannot flood them, and a full one keeps the first and counts the rest in `dropped`. */
+#define GPON_OLT_LEDGER_RECORDS		256
+#define GPON_OLT_UNKNOWN_RECORDS	64
+#define GPON_OLT_PLOAM_UNKNOWN_RECORDS	32
+
 /* COULD NOT ASK.  `enum gpon_ostate` starts at 1, so 0 is free; renders `-`. */
 #define GPON_OLT_OSTATE_UNKNOWN	0
 
@@ -55,12 +61,24 @@ struct gpon_olt_rec {
 
 /* Caller-owned: the core allocates nothing, and the owner serializes access. */
 struct gpon_olt_capture {
-	struct gpon_olt_rec rec[GPON_OLT_RECORDS];
+	struct gpon_olt_rec *rec;	/* caller-owned storage of `depth` records */
+	u32 depth;
 	u32 head;		/* next slot to write                         */
 	u32 stored;		/* records currently held, <= GPON_OLT_RECORDS */
 	u32 seq;		/* next sequence number                        */
 	u32 dropped;		/* overwritten by the ring -- never silent     */
+	/* Fed by gpon_olt_capture_exchange(), or NULL: the last Create/Set per (class,
+	 * instance, mask) with our answer, and the last exchange of each kind this ONU
+	 * did not identify (no answer, an error, or a class it holds no model of). */
+	struct gpon_olt_capture *ledger;
+	struct gpon_olt_capture *unknown;
+	bool (*described)(u16 class_id);	/* the ME model; NULL counts every class as modelled */
 };
+
+/* A static capture with its storage: GPON_OLT_CAPTURE(x, n, .ledger = &y); */
+#define GPON_OLT_CAPTURE(name, n, ...)						\
+	static struct gpon_olt_rec name##_rec[n];				\
+	static struct gpon_olt_capture name = { .rec = name##_rec, .depth = (n), ##__VA_ARGS__ }
 
 void gpon_olt_capture_reset(struct gpon_olt_capture *c);
 
@@ -75,12 +93,19 @@ void gpon_olt_capture_exchange(struct gpon_olt_capture *c, u64 t_us, u8 ostate,
 			       const u8 *req, unsigned int req_len,
 			       const u8 *resp, int resp_len);
 
+void gpon_olt_ledger_note(struct gpon_olt_capture *l, const struct gpon_olt_rec *req,
+			  const struct gpon_olt_rec *resp);
+/* A downstream PLOAM this ONU does not handle, kept per type. */
+void gpon_olt_ploam_unknown_note(struct gpon_olt_capture *u, const struct gpon_olt_rec *ds);
+
 /* Oldest-first, so a reader walks the conversation in order. */
 unsigned int gpon_olt_capture_count(const struct gpon_olt_capture *c);
 const struct gpon_olt_rec *gpon_olt_capture_at(const struct gpon_olt_capture *c,
 					       unsigned int i);
 
-/* ONE record as one text line, no trailing newline.  Returns the count written.
+/* ONE record as one text line, no trailing newline.  Returns the count written,
+ * 0 for an empty record (a table entry the shell answered with nothing).
+ *
  * Format (positional, version-tagged, lossless):
  *	olt1 <seq> <t_us> <d|u> <ostate|-> <len> <0|1> <2*len hex>
  */

@@ -1527,6 +1527,12 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	return OMCI_RC_OK;
 }
 
+/* Does the ONU hold a descriptor of this class (not just the vendor range policy)? */
+bool omci_class_described(u16 class_id)
+{
+	return omci_me_find(class_id) != NULL;
+}
+
 /* Does the ONU model this class at all (either a descriptor or the vendor
  * range policy)? */
 bool omci_class_modelled(u16 class_id)

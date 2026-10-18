@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # What a GPON ONU tells about itself and the OLT it ranges on, collected read-only into one tar.
 # Usage: sh gpon_bundle.sh [output-dir]   (default /tmp). OMCI-simulate/CONTRIBUTE-A-BUNDLE.md explains it.
+#        sh gpon_bundle.sh --stdout > bundle.tar   the same tar on stdout (our image: gpon-bundle, the PON page)
 #        sh gpon_bundle.sh --binaries > binaries.tar   the stock OMCI binaries, streamed: nothing staged in RAM
 set -u
 PREFIX=${PREFIX:-}
@@ -12,6 +13,8 @@ if [ "${1:-}" = "--binaries" ]; then
 	cd "$PREFIX/" && tar cf - $protocol
 	exit $?
 fi
+STDOUT=
+[ "${1:-}" = "--stdout" ] && { STDOUT=1; shift; }
 OUT=${1:-/tmp}
 B="$OUT/gpon-bundle.$$"
 mkdir "$B" || exit 1
@@ -49,9 +52,18 @@ fi
 
 if [ -n "$protocol" ]; then (cd "$PREFIX/" && md5sum $protocol) > "$B/protocol.md5" 2>&1; fi
 
-for f in gpon gpon_log gpon_timing gpon_health oltcap ploamcap swdump pidump bosadump; do
+for f in gpon gpon_log gpon_timing gpon_health oltcap ploamcap gpon_prov gpon_unknown ploam_unknown swdump pidump bosadump; do
 	grab "/proc/$f" "gpon-$f.txt"
 done
+if command -v gpon-omci-view > /dev/null 2>&1; then
+	step omci-provisioning.txt gpon-omci-view
+	step omci-not-identified.txt gpon-omci-view --unknown
+fi
+grab /tmp/gpon/wan-discover.txt wan-discover.txt
+grab /tmp/gpon/bundle.json bundle.json
+grab /proc/net/vlan/config network-vlan.txt
+grab /proc/net/route network-route.txt
+grab /proc/net/fib_trie network-addresses.txt
 
 if command -v diag > /dev/null 2>&1; then
 	step diag-gpon-onu-state.txt diag gpon get onu-state
@@ -84,6 +96,12 @@ if command -v omcicli > /dev/null 2>&1; then
 fi
 
 (cd "$B" && md5sum *) > "$B/manifest.md5" 2> /dev/null || note "manifest.md5 incomplete: no md5sum"
+if [ -n "$STDOUT" ]; then
+	tar cf - -C "$B" .
+	rc=$?
+	rm -r "$B"
+	exit $rc
+fi
 NAME="gpon-bundle-$(date +%Y%m%d-%H%M%S 2> /dev/null)-$$.tar"
 tar cf "$OUT/$NAME" -C "$B" . || { echo "no tar archive: copy the directory $B instead"; exit 1; }
 rm -r "$B"

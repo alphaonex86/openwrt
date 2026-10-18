@@ -1,0 +1,113 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# What the ISP offers on the WAN: DHCP or PPPoE per VLAN, and public addresses routed to this ONU.
+# Usage: gpon-wan-discover [-s seconds] [vid ...]   untagged + the VIDs the OLT provisioned + the ones given;
+#                                                   adds VLAN devices and an nft table, removed on exit
+#        gpon-wan-discover --apply-routed <ipv4>    the ISP routes <ipv4> to us: add it to the WAN, LAN leaves from it
+#        gpon-wan-discover --apply-dhcp <vid>       the WAN becomes DHCP on <vid> (0 = untagged)
+base=$(uci -q get network.wan.device); base=${base%%.*}; base=${base:-gpon0}
+out=/tmp/gpon/wan-discover.txt
+
+apply_routed() {
+	case "$1" in *.*.*.*) ;; *) echo "usage: --apply-routed <ipv4>" >&2; exit 2;; esac
+	[ "$(uci -q get network.wan.proto)" = static ] || { echo "the WAN is not static: a routed address needs the static WAN the OLT provisioned" >&2; exit 1; }
+	cur=$(uci -q get network.wan.ipaddr)
+	case "$cur" in
+	*/*) ;;
+	*)	eval "$(ipcalc.sh "$cur" "$(uci -q get network.wan.netmask)")"
+		uci -q delete network.wan.ipaddr; uci -q delete network.wan.netmask
+		uci add_list network.wan.ipaddr="$cur/$PREFIX";;
+	esac
+	first=$(uci -q get network.wan.ipaddr | cut -d' ' -f1)
+	eval "$(ipcalc.sh "$first")"
+	uci -q del_list network.wan.ipaddr="$1/32"; uci add_list network.wan.ipaddr="$1/32"
+	uci -q delete firewall.gpon_routed
+	uci set firewall.gpon_routed=nat
+	uci set firewall.gpon_routed.name="ISP-routed public address"
+	uci set firewall.gpon_routed.family=ipv4
+	uci set firewall.gpon_routed.src=wan
+	uci set firewall.gpon_routed.dest_ip="!$NETWORK/$PREFIX"
+	uci set firewall.gpon_routed.target=SNAT
+	uci set firewall.gpon_routed.snat_ip="$1"
+	uci add_list firewall.gpon_routed.proto=all
+	uci commit network && uci commit firewall && ifup wan && /etc/init.d/firewall reload
+}
+
+apply_dhcp() {
+	case "$1" in ''|*[!0-9]*) echo "usage: --apply-dhcp <vid>" >&2; exit 2;; esac
+	d=$base; [ "$1" -gt 0 ] && d=$base.$1
+	uci set network.wan.device="$d" && uci set network.wan.proto=dhcp && uci commit network && ifup wan
+}
+
+case "${1:-}" in
+--apply-routed) apply_routed "$2"; exit $?;;
+--apply-dhcp) apply_dhcp "$2"; exit $?;;
+esac
+
+secs=60
+[ "${1:-}" = "-s" ] && { secs=$2; shift 2; }
+mkdir -p /tmp/gpon
+[ -d "/sys/class/net/$base" ] || { echo "no WAN netdev $base" >&2; exit 1; }
+t0=$(cut -d. -f1 /proc/uptime)
+vids=$( { echo 0; for v in "$@"; do echo "$v"; done
+	gpon-omci-view 2> /dev/null | grep -E '^VLAN (filter|rule)' | grep -oE 'VID [0-9]+|[0-9]+\(prio' | grep -oE '[0-9]+'; } | sort -n -u)
+made=
+cleanup() {
+	nft delete table inet gpon_discover 2> /dev/null
+	for d in $made; do ip link del "$d" 2> /dev/null; done
+	rm -f "$lease" "$lease.sh"
+}
+trap cleanup EXIT INT TERM
+nft -f - <<EOF || echo "nft table not created: routed addresses are not observed" >&2
+table inet gpon_discover {
+	set routed { type ifname . ipv4_addr; flags dynamic; size 64; }
+	chain pre {
+		type filter hook prerouting priority -300; policy accept;
+		iifname != "$base*" return
+		fib daddr type { local, broadcast, multicast } return
+		add @routed { iifname . ip daddr }
+	}
+}
+EOF
+lease=/tmp/gpon/wan-discover.lease
+printf '#!/bin/sh\n[ "$1" = bound ] && echo "$ip/$mask router $router dns $dns lease ${lease}s" > "$LEASE_OUT"\nexit 0\n' > "$lease.sh"
+chmod +x "$lease.sh"
+{
+	echo "WAN discovery on $base, VLANs: $(echo $vids)"
+	for v in $vids; do
+		d=$base; [ "$v" -gt 0 ] && d=$base.$v
+		if [ ! -d "/sys/class/net/$d" ]; then
+			if ip link add link "$base" name "$d" type vlan id "$v" && ip link set "$d" up; then
+				made="$made $d"
+			else
+				echo "VLAN $v: device $d could not be created"; continue
+			fi
+		fi
+		rm -f "$lease"
+		LEASE_OUT=$lease udhcpc -i "$d" -n -q -t 3 -T 2 -s "$lease.sh" > /dev/null 2>&1
+		dhcp=$(cat "$lease" 2> /dev/null)
+		if command -v pppoe-discovery > /dev/null; then
+			pado=$(pppoe-discovery -I "$d" -t 2 -a 2 2> /dev/null | sed -n 's/^Access-Concentrator: *//p' | head -1)
+			pppoe=${pado:+offered by \"$pado\"}
+		else
+			pppoe="not probed (pppoe-discovery is not installed)"
+		fi
+		echo "VLAN $v ($d): DHCP ${dhcp:-no offer}; PPPoE ${pppoe:-no offer}"
+		[ -n "$dhcp" ] && echo "  -> internet by DHCP on VLAN $v: gpon-wan-discover --apply-dhcp $v"
+		[ -n "$pado" ] && echo "  -> internet by PPPoE on VLAN $v: set the ISP's username and password on the WAN"
+	done
+	left=$((secs - $(cut -d. -f1 /proc/uptime) + t0))
+	[ "$left" -gt 0 ] && sleep "$left"
+	routed=$(nft list set inet gpon_discover routed 2> /dev/null | tr -d '\n\t"' | sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' | tr ',' '\n' | sed 's/ \. / /; s/^ *//; s/ *$//')
+	if [ -n "$routed" ]; then
+		echo "$routed" | while read -r dev addr; do
+			echo "Routed to this ONU but not configured: $addr on $dev"
+			echo "  -> the ISP routes $addr here: gpon-wan-discover --apply-routed $addr"
+		done
+	else
+		echo "Routed to this ONU but not configured: none seen in ${secs}s"
+	fi
+	echo "WAN addresses configured: $(ip -4 -o addr show 2> /dev/null | awk -v b="$base" 'index($2, b) == 1 { printf "%s on %s  ", $4, $2 }')"
+} > "$out"
+cat "$out"
+grep -q -- '->' "$out" || echo "No offer and nothing routed: the ISP may push the internet by TR-069 (ACS in gpon-omci-view)"

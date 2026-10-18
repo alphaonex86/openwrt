@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# ubus `gpon`, the same on every ONU family: status (the normalised summary),
-# detail (the driver's own text) and capture (one /proc node, for download).
+# ubus `gpon`, the same on every ONU family: status (the normalised summary), detail (the driver's
+# own text), capture (one /proc node), provisioning (what the OLT configured), the WAN discovery and
+# its apply, and the bundle's declaration.
 . /usr/share/libubox/jshn.sh
 
 health() { sed -n "s/^$1: *//p" /proc/gpon_health 2>/dev/null | head -1; }
@@ -17,6 +18,8 @@ state_name() {
 
 # Luna reports LOS in /proc/gpon_health; Cortina's health says -1 and its
 # /proc/gpon alarm word says it instead. Empty = could not tell.
+discovering() { [ -s /tmp/gpon/wan-discover.pid ] && kill -0 "$(cat /tmp/gpon/wan-discover.pid)" 2> /dev/null; }
+
 los_now() {
 	local los
 	los=$(health los)
@@ -29,7 +32,7 @@ los_now() {
 
 case "$1" in
 list)
-	echo '{ "status": {}, "detail": {}, "capture": { "name": "str" } }'
+	echo '{ "status": {}, "detail": {}, "capture": { "name": "str" }, "provisioning": {}, "wan_discover": { "seconds": 32 }, "wan_result": {}, "apply": { "action": "str", "value": "str" }, "bundle_meta": { "isp": "str", "olt_model": "str", "olt_version": "str", "consent": "str" } }'
 	;;
 call)
 	case "$2" in
@@ -68,7 +71,7 @@ call)
 		json_get_var name name
 		json_init
 		case "$name" in
-		gpon|gpon_health|gpon_log|oltcap|ploamcap)
+		gpon|gpon_health|gpon_log|oltcap|ploamcap|gpon_prov|gpon_unknown|ploam_unknown)
 			if [ -r "/proc/$name" ]; then
 				json_add_boolean available 1
 				json_add_string text "$(cat "/proc/$name" 2>/dev/null)"
@@ -78,6 +81,75 @@ call)
 			;;
 		*) json_add_boolean available 0 ;;
 		esac
+		json_dump
+		;;
+	provisioning)
+		json_init
+		json_add_string text "$(gpon-omci-view 2>&1)"
+		json_add_string unknown "$(gpon-omci-view --unknown 2>&1)"
+		json_dump
+		;;
+	wan_discover)
+		read -r input
+		json_load "$input"
+		json_get_var secs seconds
+		case "$secs" in ''|*[!0-9]*) secs=60 ;; esac
+		started=0
+		if ! discovering; then
+			mkdir -p /tmp/gpon
+			rm -f /tmp/gpon/wan-discover.txt
+			(gpon-wan-discover -s "$secs" > /dev/null 2>&1; rm -f /tmp/gpon/wan-discover.pid) < /dev/null > /dev/null 2>&1 &
+			echo $! > /tmp/gpon/wan-discover.pid
+			started=1
+		fi
+		json_init
+		json_add_boolean started "$started"
+		json_dump
+		;;
+	wan_result)
+		json_init
+		json_add_boolean running "$(discovering && echo 1 || echo 0)"
+		json_add_string text "$(cat /tmp/gpon/wan-discover.txt 2> /dev/null)"
+		json_dump
+		;;
+	apply)
+		read -r input
+		json_load "$input"
+		json_get_var action action
+		json_get_var value value
+		case "$action" in
+		routed|dhcp) out=$(gpon-wan-discover "--apply-$action" "$value" 2>&1); rc=$? ;;
+		*) out="unknown action"; rc=2 ;;
+		esac
+		json_init
+		json_add_int rc "$rc"
+		json_add_string output "$out"
+		json_dump
+		;;
+	bundle_meta)
+		read -r input
+		json_load "$input"
+		json_get_var isp isp
+		json_get_var olt_model olt_model
+		json_get_var olt_version olt_version
+		json_get_var consent consent
+		case "$consent" in publish-with-credit|publish-anonymous) ;; *) consent=private ;; esac
+		mkdir -p /tmp/gpon
+		json_init
+		json_add_string board "?"
+		json_add_string declared_by "?"
+		json_add_object declaration
+		json_close_object
+		json_add_object provenance
+		json_add_string consent "$consent"
+		json_add_string isp "${isp:-?}"
+		json_add_string olt_vendor "$(sed -n 's/^omci_olt_vendor: //p' /proc/gpon 2> /dev/null)"
+		json_add_string olt_model "${olt_model:-?}"
+		json_add_string olt_version "${olt_version:-?}"
+		json_close_object
+		json_dump > /tmp/gpon/bundle.json
+		json_init
+		json_add_boolean ok 1
 		json_dump
 		;;
 	esac

@@ -198,7 +198,12 @@ config GPON_OLT_DIAG
 	  the ring symbol is 16400 B of BSS (GPON_OLT_RECORDS 256 * 64 B + a 16 B
 	  header) in the one GPON driver an image builds, and the formatter is
 	  3764 B of text on taroko / 3648 B on interaptiv -- the largest of the five
-	  members, because it carries a PARSER as well as a renderer.  A build that
+	  members, because it carries a PARSER as well as a renderer.  Beside the
+	  ring, fixed tables the OLT's polling cannot evict (64 B a record): the
+	  provisioning ledger (256 records), the last exchange of each kind the ONU
+	  did not identify (64), and on Luna the PLOAM types it does not handle (32)
+	  -- 20 KiB more on Cortina, 22 KiB on Luna; /proc/gpon_prov, /proc/gpon_unknown
+	  and /proc/ploam_unknown.  A build that
 	  must shed every byte sets this to n and the facility is ABSENT, not
 	  silenced.  The default is the operator's to flip.
 

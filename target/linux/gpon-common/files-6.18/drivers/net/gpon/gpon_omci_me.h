@@ -368,6 +368,7 @@ enum omci_farend { OMCI_FAREND_GENERIC, OMCI_FAREND_ZTE, OMCI_FAREND_N };
 
 /* The far end this ONU answers as, by name ("generic", "zte"). */
 const char *omci_farend_name(const struct omci_onu *o);
+int omci_farend_fmt(const struct omci_onu *o, char *out, size_t sz);
 
 /* The field named @name provisioned from text. -> the field, or OMCI_ID_FIELDS
  * when the name is unknown or the value refused.  @id NULL only validates. */

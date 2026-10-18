@@ -7831,8 +7831,7 @@ static void luna_vlan_service_show(struct seq_file *s)
 
 static void luna_omci_seq_show(struct seq_file *s)
 {
-	char resp[320] = "";
-	const char *farend = "-";
+	char resp[320] = "", far[96];
 	unsigned long flags;
 	u32 queued, count, overflow, closed, accepted, resets, tx_errors;
 
@@ -7841,8 +7840,8 @@ static void luna_omci_seq_show(struct seq_file *s)
 		omci_resp_fmt(luna_omci.onu, READ_ONCE(luna_activation_ready),
 			      READ_ONCE(luna_omci.tx_sent), READ_ONCE(luna_omci.tx_errors),
 			      resp, sizeof(resp));
-		farend = omci_farend_name(luna_omci.onu);
 	}
+	omci_farend_fmt(luna_omci.onu, far, sizeof(far));
 	queued = luna_omci.queued;
 	count = luna_omci.count;
 	overflow = luna_omci.overflow;
@@ -7852,7 +7851,7 @@ static void luna_omci_seq_show(struct seq_file *s)
 	tx_errors = READ_ONCE(luna_omci.tx_errors);
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	seq_puts(s, resp);
-	seq_printf(s, "omci_farend: %s\n", farend);
+	seq_puts(s, far);
 	seq_printf(s, "omci_queue: queued=%u pending=%u overflow=%u closed=%u accepted=%u resets=%u tx_errors=%u\n",
 		   queued, count, overflow, closed, accepted, resets, tx_errors);
 	luna_vlan_service_show(s);

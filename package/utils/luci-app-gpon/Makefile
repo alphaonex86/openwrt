@@ -16,16 +16,16 @@ define Package/luci-app-gpon
   SECTION:=luci
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
-  TITLE:=GPON ONU provisioning UI
+  TITLE:=PON page: state, diagnosis, identity, far end, captures
   DEPENDS:=+luci-base +gpon-provision +luci-mod-status
   PKGARCH:=all
 endef
 
 define Package/luci-app-gpon/description
-  LuCI page to view/edit this unit's GPON identity (/etc/config/gpon): SN, LOID,
-  LOID password, PLOAM password, MAC. Save & Apply re-provisions live via the
-  gpon_provision reload trigger (no reboot). Factory MAC/SN are shown read-only
-  unless source is set to manual.
+  The PON page, the same on every ONU family: fiber state and why the ONU is not
+  (or not steadily) at O5, the editable GPON identity and OLT mode, the driver's
+  state by category, and the OMCI/PLOAM captures a new OLT is supported from.
+  Its ubus backend `gpon` also feeds the status page card.
 endef
 
 define Build/Compile
@@ -33,8 +33,8 @@ endef
 
 define Package/luci-app-gpon/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/gpon
-	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/gpon/identity.js \
-		$(1)/www/luci-static/resources/view/gpon/identity.js
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/gpon/pon.js \
+		$(1)/www/luci-static/resources/view/gpon/pon.js
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/status/include
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/status/include/35_gpon.js \
 		$(1)/www/luci-static/resources/view/status/include/35_gpon.js
@@ -45,10 +45,7 @@ define Package/luci-app-gpon/install
 		$(1)/www/luci-static/resources/tools/onu-health.js
 	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
 	$(INSTALL_BIN) ./root/usr/libexec/rpcd/onu-health $(1)/usr/libexec/rpcd/onu-health
-	# The rpcd 'gpon' status backend (usr/libexec/rpcd/gpon) is shipped by the
-	# target base-files (its actively-maintained copy), so it is NOT installed
-	# here -- doing so collided with base-files. The separate onu-health backend
-	# reads cached GPON state and standard wireless station counters only.
+	$(INSTALL_BIN) ./root/usr/libexec/rpcd/gpon $(1)/usr/libexec/rpcd/gpon
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-gpon.json \
 		$(1)/usr/share/luci/menu.d/luci-app-gpon.json

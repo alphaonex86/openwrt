@@ -22,7 +22,7 @@ return baseclass.extend({
 			[ _('ONU state'), E('span', { 'class': d.online ? 'label success' : 'label warning' }, [ state ]) ],
 			[ _('RX power'),  ((d.optic_rx_dbm || 'n/a')) + ' dBm' ],
 			[ _('TX power'),  ((d.optic_tx_dbm || 'n/a')) + ' dBm' ],
-			[ _('Signal'),    d.los ? _('LOS (no fiber light)') : _('OK') ]
+			[ _('Signal'),    d.los === true ? _('LOS (no fiber light)') : d.los === false ? _('OK') : _('unknown') ]
 		];
 
 		var t = E('table', { 'class': 'table' });

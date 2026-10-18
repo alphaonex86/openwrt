@@ -1,10 +1,11 @@
 {
 	"luci-app-gpon": {
-		"description": "Grant access to GPON ONU provisioning",
+		"description": "Grant access to the PON page: state, identity, captures",
 		"read": {
 			"uci": [ "gpon" ],
 			"ubus": {
-				"gpon": [ "status" ],
+				"gpon": [ "status", "detail", "capture" ],
+				"network.interface.wan": [ "status" ],
 				"onu-health": [ "status" ]
 			},
 			"file": {

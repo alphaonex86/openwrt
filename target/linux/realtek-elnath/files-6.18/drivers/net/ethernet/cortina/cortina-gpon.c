@@ -3155,7 +3155,12 @@ static int cg_proc_show(struct seq_file *m, void *v)
 		   readl(cg->pon + CG_PUC_GLOBAL_LNK_TYPE) >> 16);
 	spin_unlock(&cg->puc_cnt_lock);
 	cg_show_gpon_mib(m, cg);
-	seq_printf(m, "omci_farend: %s\n", cg->omci ? omci_farend_name(cg->omci) : "-");
+	{
+		char far[96];
+
+		omci_farend_fmt(cg->omci, far, sizeof(far));
+		seq_puts(m, far);
+	}
 	seq_printf(m, "omci_resp      = %s tx=%u fail=%u ds_crc ok=%u bad=%u",
 		   cg->omci_active ? "armed" : "off",
 		   cg->omci_tx, cg->omci_tx_fail,

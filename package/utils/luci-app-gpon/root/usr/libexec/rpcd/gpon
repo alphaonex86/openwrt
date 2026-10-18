@@ -1,0 +1,85 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# ubus `gpon`, the same on every ONU family: status (the normalised summary),
+# detail (the driver's own text) and capture (one /proc node, for download).
+. /usr/share/libubox/jshn.sh
+
+health() { sed -n "s/^$1: *//p" /proc/gpon_health 2>/dev/null | head -1; }
+first_int() { sed -n "s/.*$1\(-\{0,1\}[0-9][0-9]*\).*/\1/p" /proc/gpon 2>/dev/null | head -1; }
+cdbm_to_dbm() { [ -n "$1" ] && awk -v c="$1" 'BEGIN { printf "%.1f", c / 100.0 }' || echo "n/a"; }
+
+state_name() {
+	case "$1" in
+	1) echo Initial ;; 2) echo Standby ;; 3) echo Serial-Number ;; 4) echo Ranging ;;
+	5) echo Operation ;; 6) echo POPUP ;; 7) echo Emergency-Stop ;; *) echo unknown ;;
+	esac
+}
+
+# Luna reports LOS in /proc/gpon_health; Cortina's health says -1 and its
+# /proc/gpon alarm word says it instead. Empty = could not tell.
+los_now() {
+	local los
+	los=$(health los)
+	case "$los" in 0|1) echo "$los"; return ;; esac
+	los=$(sed -n 's/.*optic_los=\([01]\).*/\1/p' /proc/gpon 2>/dev/null | head -1)
+	[ -n "$los" ] && { echo "$los"; return; }
+	grep -q '^alarm .*(LOS/LOF!)' /proc/gpon 2>/dev/null && { echo 1; return; }
+	grep -q '^alarm .*(no alarm' /proc/gpon 2>/dev/null && echo 0
+}
+
+case "$1" in
+list)
+	echo '{ "status": {}, "detail": {}, "capture": { "name": "str" } }'
+	;;
+call)
+	case "$2" in
+	status)
+		st=$(health onu_state)
+		los=$(los_now)
+		json_init
+		json_add_int onu_state "${st:-0}"
+		json_add_string onu_state_name "$(state_name "$st")"
+		json_add_boolean online "$([ "$st" = 5 ] && echo 1 || echo 0)"
+		json_add_boolean driver_ready "$([ "$(health driver_ready)" = 1 ] && echo 1 || echo 0)"
+		ie=$(health init_error); json_add_int init_error "${ie:-0}"
+		json_add_string optics_backend "$(health optics_backend)"
+		[ -n "$los" ] && json_add_boolean los "$los"
+		if [ "$los" = 1 ]; then
+			json_add_string optic_rx_dbm "n/a"
+			json_add_string optic_tx_dbm "n/a"
+		else
+			json_add_string optic_rx_dbm "$(cdbm_to_dbm "$(first_int 'optic_rx_cdbm: *')")"
+			json_add_string optic_tx_dbm "$(cdbm_to_dbm "$(first_int 'tx_cdbm=')")"
+		fi
+		json_add_string farend "$(sed -n 's/^omci_farend: //p' /proc/gpon 2>/dev/null)"
+		json_add_string farends "$(sed -n 's/^omci_farends: //p' /proc/gpon 2>/dev/null)"
+		json_add_string olt_vendor "$(sed -n 's/^omci_olt_vendor: //p' /proc/gpon 2>/dev/null)"
+		json_dump
+		;;
+	detail)
+		json_init
+		json_add_string gpon "$(cat /proc/gpon 2>/dev/null)"
+		json_add_string health "$(cat /proc/gpon_health 2>/dev/null)"
+		json_dump
+		;;
+	capture)
+		read -r input
+		json_load "$input"
+		json_get_var name name
+		json_init
+		case "$name" in
+		gpon|gpon_health|gpon_log|oltcap|ploamcap)
+			if [ -r "/proc/$name" ]; then
+				json_add_boolean available 1
+				json_add_string text "$(cat "/proc/$name" 2>/dev/null)"
+			else
+				json_add_boolean available 0
+			fi
+			;;
+		*) json_add_boolean available 0 ;;
+		esac
+		json_dump
+		;;
+	esac
+	;;
+esac

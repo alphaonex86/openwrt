@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* TIER: CORE (prefix gpon_) — protocol only. NEVER touches ...
  * dev/MEASURED-gpon_omci_me.c.md sec 1. */
+#include <linux/kernel.h>
 #include <linux/string.h>
 
 #include "gpon_common.h"	/* GPON_GEM_BIDIR -- G.988 ME 268 direction 3 */
@@ -1171,6 +1172,22 @@ static enum omci_farend omci_farend_detect(const struct omci_onu *o)
 const char *omci_farend_name(const struct omci_onu *o)
 {
 	return omci_farends[o->farend < OMCI_FAREND_N ? o->farend : 0].name;
+}
+
+/* Every family's /proc/gpon: the profile in force, every name the identity
+ * "farend" accepts, and the vendor the OLT last wrote in ME 131. */
+int omci_farend_fmt(const struct omci_onu *o, char *out, size_t sz)
+{
+	unsigned int f;
+	int pos = scnprintf(out, sz, "omci_farend: %s\nomci_farends:",
+			    o ? omci_farend_name(o) : "-");
+
+	for (f = 0; f < OMCI_FAREND_N; f++)
+		pos += scnprintf(out + pos, sz - pos, " %s", omci_farends[f].name);
+	if (o && o->olt_vendor_seen[0])
+		return pos + scnprintf(out + pos, sz - pos, "\nomci_olt_vendor: %.4s\n",
+				       (const char *)o->olt_vendor_seen);
+	return pos + scnprintf(out + pos, sz - pos, "\nomci_olt_vendor: -\n");
 }
 
 static bool omci_farend_known(const u8 *val, unsigned int len)

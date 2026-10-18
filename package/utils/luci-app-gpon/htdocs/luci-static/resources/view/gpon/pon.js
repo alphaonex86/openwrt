@@ -212,7 +212,7 @@ function showDiscovery(out, acts, btn) {
 	});
 }
 
-function discoveryBox() {
+function discoveryBox(atBoot) {
 	var out = E('pre', { 'style': 'white-space:pre-wrap' }, [ _('Not run yet.') ]), acts = E('div', {});
 	var btn = E('button', { 'class': 'cbi-button cbi-button-action', 'click': function() {
 		btn.disabled = true;
@@ -222,6 +222,7 @@ function discoveryBox() {
 	return E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Find the internet WAN') ]),
 		E('div', { 'class': 'cbi-section-descr' }, [
 			_('For a new ISP: what the fibre offers, per VLAN. Nothing changes until you press an Apply button.') ]),
+		E('p', {}, [ E('strong', {}, [ _('At boot: ') ]), atBoot || _('nothing was needed (the WAN had a route) or automatic WAN is off.') ]),
 		btn, out, acts ]);
 }
 
@@ -237,7 +238,8 @@ return view.extend({
 			L.resolveDefault(callDetail(), {}),
 			L.resolveDefault(callWan(), {}),
 			fs.exec('/usr/sbin/rtk_factory', [ '-p', 'config', 'sn' ]).catch(function() { return {}; }),
-			L.resolveDefault(callProv(), {})
+			L.resolveDefault(callProv(), {}),
+			L.resolveDefault(callDiscovered(), {})
 		]);
 	},
 
@@ -286,6 +288,13 @@ return view.extend({
 			if (/passwd/.test(f[0]))
 				o.password = true;
 		});
+
+		s = m.section(form.NamedSection, 'wan_auto', 'wan_auto', _('Automatic WAN'),
+			_('At boot, a WAN with no default route that nobody set by hand takes the one unambiguous answer ' +
+			  'of the WAN detector. It never changes a WAN that works or that you set.'));
+		o = s.option(form.Flag, 'enabled', _('Enabled'));
+		o.default = '1';
+		o.rmempty = false;
 
 		var cats = categorise(detail.gpon), names = CATEGORIES.map(function(c) { return c[0]; }).concat([ OTHER ]);
 		var detailBox = E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Driver state by category') ]) ]
@@ -341,7 +350,7 @@ return view.extend({
 			return E([], [
 				E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Fiber (GPON)') ]), sumBox ]),
 				E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Why not O5, or not steadily') ]), diagBox ]),
-				provBox, unknownBox, discoveryBox(), form_node, detailBox, dlBox
+				provBox, unknownBox, discoveryBox((data[6] || {}).auto), form_node, detailBox, dlBox
 			]);
 		});
 	}

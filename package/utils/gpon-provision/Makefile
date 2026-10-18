@@ -45,6 +45,7 @@ define Package/gpon-provision/install
 	$(INSTALL_BIN) ./files/gpon-bundle $(1)/usr/sbin/gpon-bundle
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/gpon_provision.init $(1)/etc/init.d/gpon_provision
+	$(INSTALL_BIN) ./files/gpon_wan_auto.init $(1)/etc/init.d/gpon_wan_auto
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/gpon.config $(1)/etc/config/gpon
 endef

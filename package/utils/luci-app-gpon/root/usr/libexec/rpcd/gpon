@@ -110,6 +110,7 @@ call)
 		json_init
 		json_add_boolean running "$(discovering && echo 1 || echo 0)"
 		json_add_string text "$(cat /tmp/gpon/wan-discover.txt 2> /dev/null)"
+		json_add_string auto "$(cat /tmp/gpon/wan-auto.txt 2> /dev/null)"
 		json_dump
 		;;
 	apply)

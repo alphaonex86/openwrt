@@ -32,6 +32,7 @@
 #define OP_RDSR			0x05
 #define OP_PP			0x02
 #define OP_BE_64K		0xd8
+#define OP_SE_4K		0x20
 #define SR_WIP			BIT(0)
 #define SR_BP			GENMASK(4, 2)
 
@@ -43,6 +44,7 @@ struct luna_nor {
 	void __iomem *window;
 	void __iomem *regs;
 	struct mutex lock;
+	u8 erase_op;
 };
 
 /* readl/writel are native-endian on Luna (luna_wdt relies on it too); ioread32be swaps. */
@@ -227,16 +229,16 @@ static int luna_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
 	int ret = 0;
 
 	mutex_lock(&nor->lock);
-	for (; addr < end && !ret; addr += NOR_BLOCK) {
+	for (; addr < end && !ret; addr += mtd->erasesize) {
 		ret = nor_cmd(nor, OP_WREN, -1, NULL, NULL, 0);
 		if (!ret)
-			ret = nor_cmd(nor, OP_BE_64K, addr, NULL, NULL, 0);
+			ret = nor_cmd(nor, nor->erase_op, addr, NULL, NULL, 0);
 		if (!ret)
 			ret = wait_idle(nor, 3000);
 	}
 	mutex_unlock(&nor->lock);
 	if (ret) {
-		instr->fail_addr = addr - NOR_BLOCK;
+		instr->fail_addr = addr - mtd->erasesize;
 		dev_err(&mtd->dev, "erase at 0x%llx failed: %d\n", (u64)instr->fail_addr, ret);
 	}
 	return ret;
@@ -275,7 +277,12 @@ static int luna_nor_probe(struct platform_device *pdev)
 
 	nor->mtd.name = dev_name(&pdev->dev);
 	nor->mtd.size = resource_size(res);
-	nor->mtd.erasesize = NOR_BLOCK;
+	/* A board whose partitions sit on 4 KiB boundaries (G24W: config ends at
+	 * 0x84000) declares erase-size: a 64 KiB erase there would reach into the
+	 * partition before. */
+	if (of_property_read_u32(np, "erase-size", &nor->mtd.erasesize) || nor->mtd.erasesize != SZ_4K)
+		nor->mtd.erasesize = NOR_BLOCK;
+	nor->erase_op = nor->mtd.erasesize == SZ_4K ? OP_SE_4K : OP_BE_64K;
 	nor->mtd.writesize = 1;
 	nor->mtd.writebufsize = NOR_PAGE;
 	nor->mtd.owner = THIS_MODULE;

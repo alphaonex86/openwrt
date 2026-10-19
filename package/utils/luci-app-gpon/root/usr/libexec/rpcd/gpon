@@ -57,6 +57,9 @@ call)
 		json_add_string farend "$(sed -n 's/^omci_farend: //p' /proc/gpon 2>/dev/null)"
 		json_add_string farends "$(sed -n 's/^omci_farends: //p' /proc/gpon 2>/dev/null)"
 		json_add_string olt_vendor "$(sed -n 's/^omci_olt_vendor: //p' /proc/gpon 2>/dev/null)"
+		ol=$(health o5_lost)
+		[ -n "$ol" ] && json_add_int o5_lost "$ol" &&
+			json_add_string o5_last "$(sed -n 's/^o5_lost: *[0-9]* //p' /proc/gpon 2>/dev/null)"
 		json_dump
 		;;
 	detail)

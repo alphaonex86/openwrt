@@ -26,7 +26,12 @@ enum ocl_kind {
 	OCL_PANIC = 3,
 	OCL_PRETIMEOUT = 4,
 	OCL_UNCLEAN = 5,
+	OCL_GPON = 6,
 };
+
+/* What a compaction keeps: the newest crash records and, apart, the newest GPON notes. */
+#define OCL_KEEP_CRASH	6
+#define OCL_KEEP_GPON	48
 
 struct ocl_rec {
 	u32 seq;
@@ -45,6 +50,7 @@ size_t ocl_bytes(size_t text_len);
 size_t ocl_encode(u8 *out, size_t cap, const struct ocl_rec *r);
 int ocl_parse(const u8 *p, size_t avail, struct ocl_rec *r);
 const char *ocl_kind_name(u8 kind);
+size_t ocl_keep(const u8 *log, size_t used, size_t *offs, size_t cap);
 int ocl_behind_our_kernel(const u8 *uimage_hdr, const char *release, u64 kernel_ofs, u64 region_ofs);
 
 #endif

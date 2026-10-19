@@ -42,6 +42,8 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/of.h>
+#include <linux/onu_crashlog.h>	/* every O5 loss kept in the unit's flash */
+#include <linux/time.h>		/* time64_to_tm: the O5 loss in UTC */
 #include <linux/of_address.h>	/* of_address_to_resource: the board's reserved PBO pools */
 #include <linux/of_irq.h>
 #include <linux/interrupt.h>
@@ -1195,6 +1197,74 @@ static u32 gpon_rerange_cnt;
 static u32 gpon_last_outage_ms;
 static unsigned long gpon_rerange_start_j;
 static unsigned long gpon_rerange_last_log_j;
+
+/* Every O5 loss with its UTC time and the last decisive core event before it, kept in the crash
+ * records at most once a minute (operator, 2026-10-19: an OLT re-ranging us, maybe daily at a fixed
+ * hour, must not go unseen in the lab or the field). */
+#define O5LOSS_SPACING_S	60
+struct o5loss_rec {
+	time64_t at;
+	u32 up_s, held_s, ev_age_s, a, b, unknown;
+	int ev;			/* -1: no decisive core event since O5 */
+};
+static struct {
+	spinlock_t lock;
+	u32 losses, saved;
+	unsigned long since_j, ev_j, saved_j;
+	struct o5loss_rec now, lost;
+} o5loss = { .lock = __SPIN_LOCK_UNLOCKED(o5loss.lock), .now.ev = -1, .lost.ev = -1 };
+static void o5loss_save(struct work_struct *w);
+static const char *o5loss_ev_name(int ev, char *b, size_t n);
+static DECLARE_DELAYED_WORK(o5loss_work, o5loss_save);
+
+static void o5loss_arm(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&o5loss.lock, flags);
+	o5loss.since_j = jiffies;
+	o5loss.now.ev = -1;
+	o5loss.now.unknown = 0;
+	spin_unlock_irqrestore(&o5loss.lock, flags);
+}
+
+static void o5loss_event(int ev, u32 a, u32 b)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&o5loss.lock, flags);
+	o5loss.now.ev = ev;
+	o5loss.now.a = a;
+	o5loss.now.b = b;
+	o5loss.ev_j = jiffies;
+	spin_unlock_irqrestore(&o5loss.lock, flags);
+}
+
+static void o5loss_note(void)
+{
+	unsigned long flags, wait = 0;
+
+	spin_lock_irqsave(&o5loss.lock, flags);
+	o5loss.losses++;
+	o5loss.lost = o5loss.now;
+	o5loss.lost.at = ktime_get_real_seconds();
+	o5loss.lost.up_s = ktime_get_boottime_seconds();
+	o5loss.lost.held_s = (jiffies - o5loss.since_j) / HZ;
+	o5loss.lost.ev_age_s = o5loss.now.ev < 0 ? 0 : (jiffies - o5loss.ev_j) / HZ;
+	if (o5loss.saved_j && time_before(jiffies, o5loss.saved_j + O5LOSS_SPACING_S * HZ))
+		wait = o5loss.saved_j + O5LOSS_SPACING_S * HZ - jiffies;
+	spin_unlock_irqrestore(&o5loss.lock, flags);
+	schedule_delayed_work(&o5loss_work, wait);
+}
+
+static void o5loss_utc(char *b, size_t n, time64_t t)
+{
+	struct tm tm;
+
+	time64_to_tm(t, 0, &tm);
+	scnprintf(b, n, "%04ld-%02d-%02dT%02d:%02d:%02dZ", tm.tm_year + 1900, tm.tm_mon + 1,
+		  tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
 
 /* last DS PLOAM type drained this cycle, surfaced on the periodic O5 line */
 static u8 gpon_last_ds_type;
@@ -5396,6 +5466,23 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 			   luna_ploam.omcc_installed, gpon_data_installed, gpon_data_gem_solicited,
 			   gpon_data_gem_port, gpon_data_alloc, gpon_data_tcont_installed);
 	}
+	{
+		char at[24] = "never", nm[12];
+		struct o5loss_rec r;
+		unsigned long flags;
+		u32 losses, saved;
+
+		spin_lock_irqsave(&o5loss.lock, flags);
+		r = o5loss.lost;
+		losses = o5loss.losses;
+		saved = o5loss.saved;
+		spin_unlock_irqrestore(&o5loss.lock, flags);
+		if (losses)
+			o5loss_utc(at, sizeof(at), r.at);
+		seq_printf(s, "o5_lost:     %u recorded=%u last=%s held=%us last_core_event=%s a=%u b=%u %us_before unknown_ploam_in_o5=%u\n",
+			   losses, saved, at, r.held_s, o5loss_ev_name(r.ev, nm, sizeof(nm)), r.a, r.b,
+			   r.ev_age_s, r.unknown);
+	}
 	seq_printf(s, "onu_id:      %u\n",
 		   (status >> GPON_ONU_ID_SHIFT) & GPON_ONU_ID_MASK);
 	seq_printf(s, "eqd:         inframe=%u multiframe=%u\n",
@@ -8061,6 +8148,10 @@ static void gpon_fsm_set_state(u8 st)
 	gpon_field(GPON_GTC_DS_ONU_ID_STATUS, 3, 0, st);
 	if (gpon_fsm_state != st)
 		luna_log("ONU state O%u -> O%u\n", gpon_fsm_state, st);
+	if (prev == 5 && st != 5)
+		o5loss_note();
+	else if (st == 5 && prev != 5)
+		o5loss_arm();
 	if (prev != st)
 		gpon_los_run = 0;	/* fresh LOS debounce window on every transition */
 	gpon_fsm_state = st;
@@ -8346,6 +8437,46 @@ static const char * const luna_ev_name[] = {
 	[GPON_PLOAM_EV_O5_UNGRANTED]	= "O5_UNGRANTED",
 };
 
+static const char *o5loss_ev_name(int ev, char *b, size_t n)
+{
+	if (ev < 0)
+		return "none";
+	if ((unsigned int)ev < ARRAY_SIZE(luna_ev_name) && luna_ev_name[ev])
+		return luna_ev_name[ev];
+	scnprintf(b, n, "ev%d", ev);
+	return b;
+}
+
+static void o5loss_save(struct work_struct *w)
+{
+	static char text[256];
+	char at[24], nm[12];
+	struct o5loss_rec r;
+	unsigned long flags;
+	u32 losses, saved;
+	int ret;
+
+	spin_lock_irqsave(&o5loss.lock, flags);
+	r = o5loss.lost;
+	losses = o5loss.losses;
+	saved = o5loss.saved;
+	spin_unlock_irqrestore(&o5loss.lock, flags);
+	o5loss_utc(at, sizeof(at), r.at);
+	scnprintf(text, sizeof(text), "event=gpon-o5-lost\nlosses=%u not_recorded_before=%u\n"
+		  "at=%s uptime=%us o5_held=%us\nlast_core_event=%s a=%u b=%u %us_before unknown_ploam_in_o5=%u\n",
+		  losses, losses - saved - 1, at, r.up_s, r.held_s, o5loss_ev_name(r.ev, nm, sizeof(nm)),
+		  r.a, r.b, r.ev_age_s, r.unknown);
+	ret = onu_crashlog_note(text);
+	spin_lock_irqsave(&o5loss.lock, flags);
+	if (!ret) {
+		o5loss.saved = losses;
+		o5loss.saved_j = jiffies;
+	}
+	spin_unlock_irqrestore(&o5loss.lock, flags);
+	if (ret && ret != -ENODEV)
+		luna_log("O5 loss #%u not kept in flash (%d)\n", losses, ret);
+}
+
 /* The events that DECIDE activation, and therefore speak whatever `trace` says.
  * Everything else is per-message chatter. */
 static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
@@ -8566,6 +8697,8 @@ static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
 	(void)sh;
 	if (p != GPON_PDIAG_NONE)	/* the core FSM path: the WHEN is the core's event */
 		luna_ploam_diag(p);
+	if (ev != GPON_PLOAM_EV_STATE && luna_ev_is_decisive(ev))
+		o5loss_event(ev, a, b);
 	if (!core_trace)
 		return;
 	if (!luna_ev_is_decisive(ev) && !trace)
@@ -8584,12 +8717,15 @@ static void luna_op_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
 static void luna_op_unsupported(void *sh, const char *kind, int cls, u32 val,
 				const char *want, const u8 *data, unsigned int len)
 {
+	unsigned long flags;
 #ifdef CONFIG_GPON_OLT_DIAG
 	struct gpon_olt_rec r = { 0 };
-	unsigned long flags;
 #endif
 
 	gpon_unsup_report(kind, cls, val, want, data, len);
+	spin_lock_irqsave(&o5loss.lock, flags);
+	o5loss.now.unknown++;
+	spin_unlock_irqrestore(&o5loss.lock, flags);
 #ifdef CONFIG_GPON_OLT_DIAG
 	if (!data || !len)
 		return;
@@ -9123,12 +9259,12 @@ static int luna_health_show(struct seq_file *s, void *v)
 	mutex_lock(&bosa_lock);
 	active = luna_driver_ready && luna_activation_ready && !luna_stopping;
 	seq_printf(s, "driver_ready: %u\nactivation_ready: %u\ninit_error: %d\n"
-		   "onu_state: %u\nlos: %d\noptics_backend: %s\n",
+		   "onu_state: %u\nlos: %d\noptics_backend: %s\no5_lost: %u\n",
 		   luna_driver_ready && !luna_stopping, active,
 		   luna_optical_init_error, READ_ONCE(gpon_fsm_state),
 		   active ? READ_ONCE(luna_health_los) : -1,
 		   optics_self_managed ? "self-managed" : bosa_regs_live() ? "RTL8290B" :
-		   bosa_gn_identified ? "GN25L95" : "unknown");
+		   bosa_gn_identified ? "GN25L95" : "unknown", READ_ONCE(o5loss.losses));
 	mutex_unlock(&bosa_lock);
 	return 0;
 }
@@ -9939,6 +10075,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	/* OUTSIDE bosa_lock, and after the producers: the worker holds that
 	 * mutex for its whole apply, so cancelling under it would deadlock. */
 	cancel_delayed_work_sync(&luna_uni_apply_work);
+	cancel_delayed_work_sync(&o5loss_work);
 	proc_remove(luna_health_proc);
 	luna_health_proc = NULL;
 	remove_proc_entry("gpon", NULL);

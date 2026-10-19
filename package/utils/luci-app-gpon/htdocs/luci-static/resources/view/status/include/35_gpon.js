@@ -24,6 +24,11 @@ return baseclass.extend({
 			[ _('TX power'),  ((d.optic_tx_dbm || 'n/a')) + ' dBm' ],
 			[ _('Signal'),    d.los === true ? _('LOS (no fiber light)') : d.los === false ? _('OK') : _('unknown') ]
 		];
+		if (d.o5_lost != null)
+			rows.push([ _('Link lost since boot'), d.o5_lost
+				? E('span', { 'class': 'label warning', 'title': d.o5_last || '' },
+					[ _('%d time(s), last at %s').format(d.o5_lost, ((d.o5_last || '').match(/last=(\S+)/) || [])[1] || '?') ])
+				: _('never') ]);
 
 		var t = E('table', { 'class': 'table' });
 		rows.forEach(function(r) {

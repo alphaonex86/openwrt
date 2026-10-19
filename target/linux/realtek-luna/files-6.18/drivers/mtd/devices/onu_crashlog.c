@@ -3,6 +3,7 @@
  * Crash records on the reserved "crashlog" partition, read back after any reset:
  * a boot record per boot, a clean record per orderly reboot, the kernel log tail on
  * panic. A boot record left without either is an unclean end (power cut or watchdog).
+ * A driver adds a note it must not lose (a GPON O5 loss) through onu_crashlog_note().
  * The region is written only when it is the free tail of a partition holding THIS
  * OpenWrt release's kernel: never behind a vendor kernel, however erased.
  */
@@ -12,6 +13,7 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/onu_crashlog.h>
 #include <linux/proc_fs.h>
 #include <linux/reboot.h>
 #include <linux/seq_file.h>
@@ -21,7 +23,6 @@
 #include <linux/vmalloc.h>
 #include "onu_crashlog_core.h"
 
-#define KEEP_RECORDS	6
 #define MIN_FREE	(16 * OCL_PAGE)
 
 static char partition[32] = "crashlog";
@@ -44,6 +45,7 @@ static struct {
 static struct mtd_info *ocl_img, *ocl_region;
 static u8 rec_buf[16 * OCL_PAGE];
 static char text_buf[OCL_MAX_TEXT];
+static char note_buf[512];
 
 static size_t build_text(char *b, size_t n, const char *event)
 {
@@ -133,22 +135,15 @@ static int erase_all(void)
 	return ret;
 }
 
-/* Keep the last KEEP_RECORDS non-routine records, erase, write them back in order. */
+/* Erase, then write back what ocl_keep() chooses, in order. */
 static int compact(size_t scanned)
 {
-	size_t keep[KEEP_RECORDS], nkeep = 0, off, i;
+	static size_t keep[OCL_KEEP_CRASH + OCL_KEEP_GPON];
+	size_t nkeep = ocl_keep(ocl.mirror, scanned, keep, ARRAY_SIZE(keep)), i;
 	struct ocl_rec r;
 	u8 *copy;
 	int ret;
 
-	for (off = 0; off < scanned && ocl_parse(ocl.mirror + off, ocl.size - off, &r) == OCL_RECORD;
-	     off += r.bytes) {
-		if (r.kind == OCL_BOOT || r.kind == OCL_CLEAN)
-			continue;
-		if (nkeep == KEEP_RECORDS)
-			memmove(keep, keep + 1, sizeof(keep[0]) * --nkeep);
-		keep[nkeep++] = off;
-	}
 	copy = vmalloc(ocl.size);
 	if (!copy)
 		return -ENOMEM;
@@ -216,6 +211,25 @@ static void ocl_attach(struct mtd_info *img, struct mtd_info *mtd)
 	pr_info("onu_crashlog: %s, %zu of %zu bytes used, boot seq %u\n", mtd->name, ocl.end,
 		ocl.size, ocl.boot_seq);
 }
+
+/* Kept like a crash record, and never in the room a panic record needs. */
+int onu_crashlog_note(const char *event)
+{
+	size_t len, room;
+	int ret = -ENODEV;
+
+	mutex_lock(&ocl.lock);
+	if (ocl.owned) {
+		len = build_text(note_buf, sizeof(note_buf), event);
+		room = ocl_bytes(len) + MIN_FREE;
+		ret = ocl.end + room > ocl.size ? compact(ocl.end) : 0;
+		if (!ret)
+			ret = ocl.end + room > ocl.size ? -ENOSPC : append(OCL_GPON, note_buf, len, false);
+	}
+	mutex_unlock(&ocl.lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(onu_crashlog_note);
 
 /* Called with mtd_table_mutex held: no get_mtd_device*() here, it would deadlock the boot. */
 static void ocl_add(struct mtd_info *mtd)

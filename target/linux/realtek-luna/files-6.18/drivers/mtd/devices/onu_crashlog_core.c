@@ -100,9 +100,30 @@ int ocl_parse(const u8 *p, size_t avail, struct ocl_rec *r)
 
 const char *ocl_kind_name(u8 kind)
 {
-	static const char *const names[] = { "?", "boot", "clean", "panic", "pretimeout", "unclean" };
+	static const char *const names[] = { "?", "boot", "clean", "panic", "pretimeout", "unclean", "gpon" };
 
 	return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "?";
+}
+
+/* The offsets, in log order, of the records a compaction writes back: never a boot or clean
+ * record, the newest OCL_KEEP_CRASH of the others, and the newest OCL_KEEP_GPON GPON notes, so a
+ * re-ranging OLT can never push a crash out. */
+size_t ocl_keep(const u8 *log, size_t used, size_t *offs, size_t cap)
+{
+	size_t off, n = 0, crash = 0, gpon = 0;
+	struct ocl_rec r;
+
+	for (off = 0; off < used && ocl_parse(log + off, used - off, &r) == OCL_RECORD; off += r.bytes)
+		*(r.kind == OCL_GPON ? &gpon : &crash) += r.kind != OCL_BOOT && r.kind != OCL_CLEAN;
+	for (off = 0; off < used && ocl_parse(log + off, used - off, &r) == OCL_RECORD; off += r.bytes) {
+		if (r.kind == OCL_BOOT || r.kind == OCL_CLEAN)
+			continue;
+		if (r.kind == OCL_GPON ? gpon-- > OCL_KEEP_GPON : crash-- > OCL_KEEP_CRASH)
+			continue;
+		if (n < cap)
+			offs[n++] = off;
+	}
+	return n;
 }
 
 int ocl_behind_our_kernel(const u8 *uimage_hdr, const char *release, u64 kernel_ofs, u64 region_ofs)

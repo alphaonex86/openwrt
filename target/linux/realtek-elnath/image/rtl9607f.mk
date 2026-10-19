@@ -9,6 +9,14 @@ define Device/realtek_rtl9607f_x400axf
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-elnath
   SOC := rtl9607f
   KERNEL_LOADADDR := 0x0c000000
+  # A bank of the vendor's UBI, its own volume sizes: ubi_k0/k1 6200k (its U-Boot reads 6 MiB of it at
+  # 0x5000000 and bootm's the FIT), ubi_r0/r1 25668k (root=31:8/31:11). check-size fails the BUILD.
+  KERNEL_SIZE := 6200k
+  IMAGE_SIZE := 25668k
+  IMAGES := kernel.bin rootfs.bin sysupgrade.bin
+  IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
+  IMAGE/rootfs.bin := append-rootfs | check-size
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   # IPv4 HGU router layer (same pattern as realtek-luna/hsgq_x111w):
   #   dnsmasq   - LAN DHCPv4 pool + DNS forwarder (default variant = no DHCPv6;
   #               prod is IPv4-only). Ships the standard /etc/config/dhcp

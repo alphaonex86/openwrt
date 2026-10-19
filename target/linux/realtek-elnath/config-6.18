@@ -651,8 +651,8 @@ CONFIG_TOOLS_SUPPORT_RELR=y
 CONFIG_UNION_FIND=y
 # SPI-NAND factory-provisioning read path: the per-board MAC (ELAN_MAC_ADDR)
 # and GPON_SN live in config_hs.xml on the stock ubi_Config UBI volume.
-# Cortina QSPI controller + SPI-NAND core + UBI/UBIFS, attached/mounted
-# READ-ONLY (all DTS partitions carry read-only; NAND is never written).
+# Cortina QSPI controller + SPI-NAND core + UBI/UBIFS. ubi_device is writable since 2026-10-19 (our
+# image in bank 0's volumes); gluebi gives each volume the mtdblock the vendor's root=31:8 names.
 CONFIG_MTD=y
 CONFIG_MTD_OF_PARTS=y
 CONFIG_MTD_SPI_NAND=y
@@ -660,6 +660,7 @@ CONFIG_MTD_UBI=y
 CONFIG_MTD_UBI_BEB_LIMIT=20
 CONFIG_MTD_UBI_BLOCK=y
 CONFIG_MTD_UBI_FASTMAP=y
+CONFIG_MTD_UBI_GLUEBI=y
 CONFIG_MTD_UBI_WL_THRESHOLD=4096
 CONFIG_SPI=y
 CONFIG_SPI_MASTER=y

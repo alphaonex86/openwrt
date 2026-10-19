@@ -6,7 +6,7 @@ ARCH:=aarch64
 BOARD:=realtek-elnath
 BOARDNAME:=Realtek Elnath GPON ONU
 DEVICE_TYPE:=basic
-FEATURES:=ramdisk squashfs gpio fpu
+FEATURES:=ramdisk squashfs gpio fpu nand
 SUBTARGETS:=rtl9607f
 
 KERNEL_PATCHVER:=6.18

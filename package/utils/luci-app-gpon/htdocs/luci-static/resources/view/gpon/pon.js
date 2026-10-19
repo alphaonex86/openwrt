@@ -276,7 +276,7 @@ return view.extend({
 		o = s.taboption('ploam', form.Value, 'pon_vendor_id', _('PON vendor ID'), _('4 characters, e.g. XPON'));
 
 		o = s.taboption('omci', form.ListValue, 'farend', _('OLT mode'),
-			_('Automatic follows the OLT the ONU detects (its vendor in ME 131) or a cloned identity\'s vendor. Force a mode only to diagnose.'));
+			_('Automatic follows a cloned identity\'s vendor, else the OLT once it names itself in ME 131: that OLT\'s MEs at once, its OMCC version at the next MIB reset. Force a mode when the OLT needs it before naming itself, e.g. its OMCC version in the first MIB upload; it applies at the next MIB reset.'));
 		o.value('', _('Automatic (now: %s)').format(st.farend || '—'));
 		(st.farends || '').split(/\s+/).filter(Boolean).forEach(function(n) { o.value(n, n); });
 		[ [ 'vendor_id', _('Vendor ID (ONU-G)') ], [ 'model', _('Equipment ID (model)') ],

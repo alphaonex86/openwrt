@@ -272,12 +272,15 @@
 	 * dump before the first boot (sn=XPON23B3CE90, ploam=1234567890,
 	 * mac=5c:19:23:b3:ce:90).
 	 *
-	 * NOTE there is deliberately NO `linux,rootfs` on r0: this image runs
-	 * from RAM, and booting from flash is a later, separate step.
+	 * Flash-bootable since 2026-10-19 (operator: every model whose flash holds
+	 * our image): reads through the window, erase/program through the SPI-F
+	 * PIO block luna_nor drives on the X111W -- the vendor's luna_norsf_g3
+	 * uses the same block. r0 carries `linux,rootfs`; a RAM boot ignores it.
 	 */
 	spi_nor: flash@14000000 {
-		compatible = "mtd-rom";
-		reg = <0x14000000 0x1000000>;	/* 16 MiB: JEDEC 5E4018 + the partition sum */
+		compatible = "realtek,luna-spi-nor";
+		reg = <0x14000000 0x1000000>,	/* 16 MiB: JEDEC 5E4018 + the partition sum */
+		      <0x18001200 0x10>;
 		/*
 		 * 4: the width the vendor map declares (tier 3). It does not
 		 * alter the read path -- map_rom copies with memcpy_fromio at
@@ -352,15 +355,21 @@
 			};
 			partition@84000 {
 				label = "k0";
-				reg = <0x084000 0x334000>;	/* 3280K kernel */
+				reg = <0x084000 0x31c000>;	/* 3184K kernel; then the 64K-aligned crashlog */
 			};
 			partition@3b8000 {
 				label = "r0";
-				reg = <0x3b8000 0xaa0000>;	/* 10880K rootfs */
+				reg = <0x3b8000 0xaa0000>;	/* 10880K rootfs; mtd5, as the vendor's root=31:5 */
+				linux,rootfs;
 			};
 			partition@e58000 {
 				label = "framework1";
-				reg = <0xe58000 0x1a8000>;	/* 1696K */
+				reg = <0xe58000 0x1a8000>;	/* 1696K, the vendor's: never written */
+				read-only;
+			};
+			partition@3a0000 {
+				label = "crashlog";	/* declared last: r0 stays mtd5 */
+				reg = <0x3a0000 0x010000>;	/* 64K: onu_crashlog records; 32K unused before r0 */
 			};
 		};
 	};

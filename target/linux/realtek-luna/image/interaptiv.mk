@@ -37,18 +37,18 @@ define Device/lanly_g24w
   DEVICE_DTS := rtl9603cvd_g24w
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9603cvd
-  # Flash partition sizes MEASURED from the live device /proc/mtd:
-  #   k0 = 0x334000 (3280k) kernel, r0 = 0xaa0000 (10880k) rootfs.
-  # KERNEL_SIZE auto-fires check-size on the kernel (image.mk), so a kernel
-  # that would not fit k0 fails the BUILD instead of being discovered on the
-  # device. IMAGE_SIZE records the measured rootfs bound for the same reason.
-  # NOTE these duplicate the DTS partition table by hand -- nothing in the
-  # build checks the two agree, so they are changed together or not at all.
-  KERNEL_SIZE := 3280k
+  # Flash partition sizes MEASURED from the live device /proc/mtd, one bank:
+  #   k0 = 0x31c000 (3184k) kernel at 0x84000, then the 64k-aligned crashlog (0x3a0000),
+  #   r0 = 0xaa0000 (10880k) rootfs at 0x3b8000 (operator 2026-10-19: flash every
+  #   model whose flash holds our image; the stock kept in results/stock_firmware).
+  # check-size fails the BUILD when either overflows; dts_vs_measured FLASH_PLAN
+  # checks these against the DTS.
+  KERNEL_SIZE := $(call flash_kernel_size,3184k)
   IMAGE_SIZE := 10880k
-  # Device/Default leaves IMAGES empty, so this builds the initramfs uImage only
-  # -- no flashable artifact is produced for a SINGLE-BANK board whose only k0
-  # holds the stock ORACLE. Do not "fix" that.
+  IMAGES := kernel.bin rootfs.bin sysupgrade.bin
+  IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
+  IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   #
   # ★★★ THE PACKAGE SET IS DECLARED HERE, NOT IN A .config (2026-08-27).
   #

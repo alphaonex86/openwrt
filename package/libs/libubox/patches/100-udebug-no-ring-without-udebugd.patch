@@ -1,0 +1,32 @@
+From: Herman Brule <brule.herman@confiared.com>
+Subject: udebug: no ring without udebugd
+
+Only udebugd reads a ring. Without it procd, netifd and logd still mapped six
+96 KB rings that filled page by page: 576 KB of Shmem on a 32 MB ONU, read by
+nobody. udebug_buf_init now keeps no ring when /usr/sbin/udebugd is absent; the
+entry functions already return early on a ring with no header, and
+udebug_buf_free now does too.
+
+--- a/udebug.c	2026-10-18 18:47:26.594320676 -0400
++++ b/udebug.c	2026-10-18 18:47:26.605474550 -0400
+@@ -457,6 +457,10 @@
+ 
+ 	udebug_init_page_size();
+ 	INIT_LIST_HEAD(&buf->list);
++	/* only udebugd reads a ring: without it, keep no RAM for one */
++	if (access("/usr/sbin/udebugd", X_OK))
++		return -1;
++
+ 	if (size < page_size)
+ 		size = page_size;
+ 	while(size > 1U << order)
+@@ -682,6 +686,9 @@
+ {
+ 	struct udebug *ctx = buf->ctx;
+ 
++	if (!buf->hdr)
++		return;
++
+ 	if (!list_empty(&buf->list) && buf->list.prev)
+ 		list_del(&buf->list);
+ 

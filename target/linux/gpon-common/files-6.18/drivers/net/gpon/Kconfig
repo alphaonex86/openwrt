@@ -66,6 +66,21 @@ config GPON_CORE
 	  driver set to =m would fail modpost with "undefined!" on those symbols;
 	  the fix then is EXPORT_SYMBOL_GPL in the core, not a change here.
 
+config OLT_ZTE
+	bool "Serve ZTE OLTs"
+	depends on GPON_CORE
+	default y
+	help
+	  What only a ZTE OLT needs of the ONU: the "zte" far-end profile
+	  (OMCC 0xa2, ME 138 and ME 340 on the VEIP), ZTE's vendor MEs 247
+	  (extended ONU-G) and 65294 (SNTP), and PLOAM 0x81 (ZTE's
+	  Disable_Serial_Number).  Off, a ZTE OLT's messages are unknown to
+	  this image: they land in /proc/gpon_unknown and /proc/ploam_unknown,
+	  and a board declaring ME 247 or 65294 is refused at boot.
+
+	  Operator, 2026-10-18: each OLT vendor's support is one
+	  CONFIG_OLT_<VENDOR>, so a small ONU carries only the OLTs it meets.
+
 config GPON_FLOW_OFFLOAD
 	bool
 	depends on GPON_CORE

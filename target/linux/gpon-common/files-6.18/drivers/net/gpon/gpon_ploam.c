@@ -476,7 +476,9 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 		break;
 
 	case PLM_DS_DISABLE_SN:
+#ifdef CONFIG_OLT_ZTE
 	case PLM_DS_DISABLE_SN_ZTE:
+#endif
 		/* G.984.3 9.2.3.6, 10.2.5.1 i/j: broadcast only; a disable of our
 		 * serial number is O7 and silence until an enable, 0x0f = enable
 		 * every disabled ONU.  dev/MEASURED-gpon_ploam.c.md sec 18. */

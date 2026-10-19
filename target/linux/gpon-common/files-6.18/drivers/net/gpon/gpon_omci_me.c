@@ -728,6 +728,7 @@ static const struct omci_attr omci_attrs[] = {
 	 * 65294 from the G24W and X100DG stocks, whose X111W plugin has no
 	 * table to decode); values are the plugins' defaults.  The subscriber's
 	 * WiFi names and keys are NOT served here: zeros. ==== */
+#ifdef CONFIG_OLT_ZTE
 	/* ---- ME 247 extended ONU-G (mib_ExtendedOnuGZTE) ---- */
 	A_C(247, 1, 2, 0),
 	A_C(247, 2, 2, 0),
@@ -745,6 +746,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(247, 14, 2, 0),
 	A_C(247, 15, 2, 0),
 	A_C(247, 16, 1, 0),			/* #16 Reset default */
+#endif
 	/* ---- ME 252 WLAN profile (mib_WlanCfgProfile) ---- */
 	A_C(252, 1, 1, 0),			/* #1  WLAN type */
 	A_C(252, 2, 1, 1),			/* #2  2.4 GHz admin */
@@ -792,6 +794,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(373, 11, 2, 0xe000),
 	A_C(373, 12, 2, 0xc000),
 	A_C(373, 13, 1, 1),
+#ifdef CONFIG_OLT_ZTE
 	/* ---- ME 65294 SNTP (mib_MeZteSntp) ---- */
 	A_CW(65294, 1, 2, 0),			/* #1  Time zone */
 	A_CW(65294, 2, 4, 0),			/* #2  Master server */
@@ -799,6 +802,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(65294, 4, 4, 0),			/* #4  Interval */
 	A_CW(65294, 5, 1, 0),
 	A_CW(65294, 6, 1, 0),
+#endif
 	/* ---- ME 65352 ONU support (mib_hsg_onu_support) ---- */
 	A_ZERO(65352, 1, 16),
 	/* ---- ME 65363 ONU (mib_FHOnu) ---- */
@@ -1148,10 +1152,12 @@ static const struct omci_farend_profile {
 	u16 me[2][2];		/* class, instance this far end provisions on every ONU */
 } omci_farends[OMCI_FAREND_N] = {
 	[OMCI_FAREND_GENERIC] = { "generic", { 0 }, 0x80 },
+#ifdef CONFIG_OLT_ZTE
 	/* AXS's ZTE OLT (DC3, 2026-10-17) Sets ME 138 #0 and ME 340 on the VEIP of a
 	 * ZTE F670L, whose own binaries announce OMCC 0xa2 (V1.1.20P3N4D/P3N6B). */
 	[OMCI_FAREND_ZTE] = { "zte", { 'Z', 'T', 'E', 'G' }, 0xa2,
 		{ { OMCI_ME_VOIP_CONFIG, 0 }, { OMCI_ME_TR069_SERVER, OMCI_VEIP_INST } } },
+#endif
 };
 
 static enum omci_farend omci_farend_detect(const struct omci_onu *o)

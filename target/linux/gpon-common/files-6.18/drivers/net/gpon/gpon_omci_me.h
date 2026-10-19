@@ -364,7 +364,13 @@ bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
  * chosen at each MIB-Reset from, in order: the unit's identity "farend" (the
  * operator's choice), its own vendor (a clone), the vendor the OLT last wrote in
  * ME 131.  A board never carries a protocol adaptation of its own. */
-enum omci_farend { OMCI_FAREND_GENERIC, OMCI_FAREND_ZTE, OMCI_FAREND_N };
+enum omci_farend {
+	OMCI_FAREND_GENERIC,
+#ifdef CONFIG_OLT_ZTE
+	OMCI_FAREND_ZTE,
+#endif
+	OMCI_FAREND_N
+};
 
 /* The far end this ONU answers as, by name ("generic", "zte"). */
 const char *omci_farend_name(const struct omci_onu *o);

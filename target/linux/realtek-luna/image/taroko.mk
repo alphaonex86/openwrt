@@ -15,13 +15,13 @@ define Device/hsgq_x111w
   DEVICE_DTS := rtl9602c_x111w
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9602c
-  # NAND persistent image (raw MTD; the vendor fwu.sh flashes a uImage -> k0 and a
+  # NOR persistent image (raw MTD; the vendor fwu.sh flashes a uImage -> k0 and a
   # squashfs -> r0). Partition sizes from the live device /proc/mtd:
-  #   k0 = 0x300000 (3072k) kernel, r0 = 0x4c0000 (4864k) rootfs.
+  #   k0 = 0x2f0000 (3008k) kernel, its bank's last 64k the crashlog; r0 = 0x4c0000 (4864k) rootfs.
   # SIZE GUARD: KERNEL_SIZE auto-fires check-size on the kernel (image.mk), and the
   # explicit check-size on kernel.bin/rootfs.bin makes the BUILD fail if either
   # overflows its partition -- an oversize image is never written to the device.
-  KERNEL_SIZE := $(call flash_kernel_size,3072k)
+  KERNEL_SIZE := $(call flash_kernel_size,3008k)
   IMAGE_SIZE := 4864k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
@@ -56,10 +56,11 @@ define Device/vsol_v2801rgw
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9602c
   # One bank on an 8 MiB Winbond EF4017, from the unit's own /proc/mtd and U-Boot env:
-  #   k0 = 0x280000 (2560k) kernel at 0xa0000, r0 = 0x4e0000 (4992k) rootfs at 0x320000.
+  #   k0 = 0x290000 (2624k) kernel at 0xa0000, the 64k crashlog at 0x330000,
+  #   r0 = 0x4c0000 (4864k) rootfs at 0x340000 (operator 2026-10-18: a crashlog on every model).
   # check-size fails the BUILD when either overflows: an oversize image never reaches a unit.
-  KERNEL_SIZE := $(call flash_kernel_size,2560k)
-  IMAGE_SIZE := 4992k
+  KERNEL_SIZE := $(call flash_kernel_size,2624k)
+  IMAGE_SIZE := 4864k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size

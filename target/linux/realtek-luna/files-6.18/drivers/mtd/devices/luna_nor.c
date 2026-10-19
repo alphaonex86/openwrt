@@ -207,11 +207,16 @@ static int luna_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
 	return ret;
 }
 
-/* A panic owns the machine: no lock, only already-erased pages are programmed. */
+/*
+ * A panic owns the machine: no lock, only already-erased pages are programmed. An erase or a
+ * program it interrupted must end first, or the chip ignores the write and the record is lost.
+ */
 static int luna_nor_panic_write(struct mtd_info *mtd, loff_t to, size_t len,
 				size_t *retlen, const u_char *buf)
 {
-	return program(mtd->priv, to, len, retlen, buf, true);
+	int ret = wait_idle_atomic(mtd->priv, 3000000);
+
+	return ret ? ret : program(mtd->priv, to, len, retlen, buf, true);
 }
 
 static int luna_nor_erase(struct mtd_info *mtd, struct erase_info *instr)

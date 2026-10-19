@@ -135,12 +135,16 @@
 		};
 		partition@a0000 {
 			label = "k0";
-			reg = <0x0a0000 0x280000>;	/* 2560K kernel (img0_kernel) */
+			reg = <0x0a0000 0x290000>;	/* 2624K kernel (img0_kernel), the crashlog behind it */
 		};
-		partition@320000 {
+		partition@340000 {
 			label = "r0";
-			reg = <0x320000 0x4e0000>;	/* 4992K rootfs + overlay */
+			reg = <0x340000 0x4c0000>;	/* 4864K rootfs + overlay; stays mtd5 */
 			linux,rootfs;
+		};
+		partition@330000 {
+			label = "crashlog";	/* declared last, so r0 keeps its index */
+			reg = <0x330000 0x010000>;	/* 64K: onu_crashlog records, operator 2026-10-18 */
 		};
 	};
 };

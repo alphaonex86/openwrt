@@ -83,11 +83,14 @@
 	realtek,wan-mac-offset = <1>;	/* stock nas0_0 is LAN+1 (98:c7:a4:29:a2:8f) */
 };
 
-/* Its own 8 MiB SPI-NOR, from its own U-Boot mtdparts, READ-ONLY through the
- * memory-mapped window: the provisioning reads this unit's identity and laser
- * calibration from "config", and nothing here can write the flash. */
+/* Its own 8 MiB SPI-NOR (A14017). OpenWrt runs from it in ONE bank laid over both of the vendor's:
+ * our 2 MB kernel does not fit its 1328K k0 (operator, 2026-10-19: "todos los que caben"); the stock
+ * stays whole in results/stock_firmware. The vendor b0 boots img0_kernel (0x80000) with root=31:5, so
+ * k0 starts there and r0 is mtd5; the crashlog sits right behind k0 and is declared last. A RAM boot
+ * maps its own rootfs through phram and names it root=/dev/mtdblock0, which wins over linux,rootfs. */
 &spi_nor {
-	reg = <0x14000000 0x800000>;
+	compatible = "realtek,luna-spi-nor";
+	reg = <0x14000000 0x800000>, <0x18001200 0x10>;
 
 	partitions {
 		compatible = "fixed-partitions";
@@ -116,23 +119,16 @@
 		};
 		partition@80000 {
 			label = "k0";
-			reg = <0x080000 0x14c000>;
-			read-only;
+			reg = <0x080000 0x220000>;	/* 2176K kernel */
 		};
-		partition@1cc000 {
+		partition@2b0000 {
 			label = "r0";
-			reg = <0x1cc000 0x274000>;
-			read-only;
+			reg = <0x2b0000 0x550000>;	/* 5440K rootfs + rootfs_data, to the chip's end */
+			linux,rootfs;
 		};
-		partition@440000 {
-			label = "k1";
-			reg = <0x440000 0x14c000>;
-			read-only;
-		};
-		partition@58c000 {
-			label = "r1";
-			reg = <0x58c000 0x274000>;
-			read-only;
+		partition@2a0000 {
+			label = "crashlog";	/* declared last: r0 stays mtd5 */
+			reg = <0x2a0000 0x010000>;	/* 64K: onu_crashlog records */
 		};
 	};
 };

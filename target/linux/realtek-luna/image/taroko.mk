@@ -73,11 +73,15 @@ define Device/hsgq_x100dg
   DEVICE_DTS := rtl9601d_x100dg
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9601d
-  # 32 MB of RAM cannot unpack a 10 MB initramfs: the dev loop boots the squashfs pair
-  # from RAM through phram instead (no size check: RAM only, not the 8 MB flash layout).
-  IMAGES := kernel.bin rootfs.bin
-  IMAGE/kernel.bin := append-kernel
-  IMAGE/rootfs.bin := append-rootfs
+  # 32 MB of RAM cannot unpack a 10 MB initramfs: the dev loop boots the squashfs pair from RAM
+  # through phram. The same pair is its flash image: one bank over both of the vendor's 8 MiB,
+  #   k0 = 0x220000 (2176k) at 0x80000, the 64k crashlog at 0x2a0000, r0 = 0x550000 (5440k) at 0x2b0000.
+  KERNEL_SIZE := $(call flash_kernel_size,2176k)
+  IMAGE_SIZE := 5440k
+  IMAGES := kernel.bin rootfs.bin sysupgrade.bin
+  IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
+  IMAGE/rootfs.bin := append-rootfs | check-size
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   # gpon-provision: its SN, MAC and RTL8290B laser cal come from its own config partition.
   DEVICE_PACKAGES := -iw gpon-provision
 endef

@@ -9,9 +9,10 @@ define Device/realtek_rtl9607f_x400axf
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-elnath
   SOC := rtl9607f
   KERNEL_LOADADDR := 0x0c000000
-  # A bank of the vendor's UBI, its own volume sizes: ubi_k0/k1 6200k (its U-Boot reads 6 MiB of it at
-  # 0x5000000 and bootm's the FIT), ubi_r0/r1 25668k (root=31:8/31:11). check-size fails the BUILD.
-  KERNEL_SIZE := 6200k
+  # A bank of the vendor's UBI: its U-Boot's b1/b2 read pfl_kernel*_sz = 0x600000 of ubi_k0/k1 (a 6200k
+  # volume) to 0x5000000 and bootm the FIT, so a kernel past 6144k would boot truncated; ubi_r0/r1 25668k
+  # (root=31:8/31:11). check-size fails the BUILD.
+  KERNEL_SIZE := 6144k
   IMAGE_SIZE := 25668k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)

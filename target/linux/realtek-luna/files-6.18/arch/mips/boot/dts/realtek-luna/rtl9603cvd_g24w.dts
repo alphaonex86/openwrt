@@ -261,12 +261,8 @@
 	 *   JEDEC id 5E4018 (both loader lines): capacity byte 0x18 ->
 	 *     2^24 = 16 MiB, which the partition sum below also gives.
 	 *
-	 * READ-ONLY by construction (map_rom, MTD_CAP_ROM): program and erase
-	 * live behind the PIO block, for which this tree has no driver.
-	 * Nothing in this node can write flash.
-	 *
 	 * WHAT IT IS FOR: gpon-provision's rtk_factory reads the vendor MIB
-	 * (JFFS2, lastgood_hs.xml) out of `config` and hands GPON_SN /
+	 * (JFFS2, config_hs.xml) out of `config` and hands GPON_SN /
 	 * GPON_PLOAM_PASSWD / ELAN_MAC_ADDR to the driver -- the SAME chain
 	 * the X111W uses, PROVEN offline on x86 against this unit's own mtd3
 	 * dump before the first boot (sn=XPON23B3CE90, ploam=1234567890,
@@ -291,7 +287,8 @@
 		/*
 		 * MEASURED, and DIFFERENT from the X111W's declaration: this
 		 * board's /proc/mtd reports erasesize 0x1000 (4 KiB) on every
-		 * partition. It is load-bearing even on a read-only mapping --
+		 * partition, and luna_nor erases in these sectors (opcode 0x20).
+		 * It was load-bearing on the earlier read-only mapping too --
 		 * map_rom falls back to the WHOLE CHIP as one erase block when
 		 * this property is absent, which makes the squashfs splitter
 		 * round a rootfs past the end of every partition and publish

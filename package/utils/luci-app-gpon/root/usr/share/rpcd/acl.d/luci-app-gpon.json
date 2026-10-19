@@ -4,7 +4,7 @@
 		"read": {
 			"uci": [ "gpon" ],
 			"ubus": {
-				"gpon": [ "status", "detail", "capture", "provisioning", "wan_result" ],
+				"gpon": [ "status", "detail", "capture", "provisioning", "wan_result", "crash" ],
 				"network.interface.wan": [ "status" ],
 				"onu-health": [ "status" ]
 			},

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # ubus `gpon`, the same on every ONU family: status (the normalised summary), detail (the driver's
 # own text), capture (one /proc node), provisioning (what the OLT configured), the WAN discovery and
-# its apply, and the bundle's declaration.
+# its apply, the bundle's declaration, and the unit's crash records.
 . /usr/share/libubox/jshn.sh
 
 health() { sed -n "s/^$1: *//p" /proc/gpon_health 2>/dev/null | head -1; }
@@ -32,7 +32,7 @@ los_now() {
 
 case "$1" in
 list)
-	echo '{ "status": {}, "detail": {}, "capture": { "name": "str" }, "provisioning": {}, "wan_discover": { "seconds": 32 }, "wan_result": {}, "apply": { "action": "str", "value": "str" }, "bundle_meta": { "isp": "str", "olt_model": "str", "olt_version": "str", "consent": "str" } }'
+	echo '{ "status": {}, "detail": {}, "capture": { "name": "str" }, "provisioning": {}, "wan_discover": { "seconds": 32 }, "wan_result": {}, "apply": { "action": "str", "value": "str" }, "bundle_meta": { "isp": "str", "olt_model": "str", "olt_version": "str", "consent": "str" }, "crash": {} }'
 	;;
 call)
 	case "$2" in
@@ -81,6 +81,20 @@ call)
 			;;
 		*) json_add_boolean available 0 ;;
 		esac
+		json_dump
+		;;
+	crash)
+		json_init
+		if [ -r /proc/onu_crashlog ]; then
+			json_add_boolean available 1
+			json_add_string text "$(cat /proc/onu_crashlog)"
+		else
+			json_add_boolean available 0
+		fi
+		. /etc/openwrt_release 2>/dev/null
+		json_add_string release "$DISTRIB_DESCRIPTION $DISTRIB_REVISION"
+		json_add_string model "$(cat /tmp/sysinfo/model 2>/dev/null)"
+		json_add_string kernel "$(uname -r)"
 		json_dump
 		;;
 	provisioning)

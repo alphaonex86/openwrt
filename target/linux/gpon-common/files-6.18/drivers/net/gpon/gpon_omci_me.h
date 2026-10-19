@@ -238,7 +238,8 @@ struct omci_onu {
 	u8	extra_me_n;
 	u8	olt_g[OMCI_OLT_G_LEN];
 	u8	olt_vendor_seen[4];	/* ME 131 #1 as last written; survives MIB-Reset */
-	u8	farend;			/* enum omci_farend, chosen at each MIB-Reset */
+	u8	farend;			/* enum omci_farend: its MEs; MIB-Reset and ME 131 */
+	u8	omcc_farend;		/* the one whose OMCC version was uploaded */
 	u8	wan_mac[6];		/* the WAN netdev's, set by the shell */
 	bool	wan_mac_set;		/* unset: ME 134 #2 is not answered */
 	/* MIB-Upload rows the row table had no room for.  ⚠ THE BUILDER DROPS
@@ -361,9 +362,10 @@ bool omci_id_set_str(struct omci_identity *id, enum omci_id_field f,
 
 /* What a vendor's OLT needs of the ONU beyond G.988 -- the OMCC version it is
  * shown, the MEs it provisions on every ONU -- in ONE table for every board,
- * chosen at each MIB-Reset from, in order: the unit's identity "farend" (the
- * operator's choice), its own vendor (a clone), the vendor the OLT last wrote in
- * ME 131.  A board never carries a protocol adaptation of its own. */
+ * chosen at each MIB-Reset, and again for its MEs when the OLT writes ME 131,
+ * from, in order: the unit's identity "farend" (the operator's choice), its own
+ * vendor (a clone), the vendor the OLT last wrote in ME 131.  A board never
+ * carries a protocol adaptation of its own. */
 enum omci_farend {
 	OMCI_FAREND_GENERIC,
 #ifdef CONFIG_OLT_ZTE

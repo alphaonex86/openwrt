@@ -1295,7 +1295,9 @@ void omci_onu_set_optical(struct omci_onu *o, u16 rx_level, u16 tx_level)
 
 static void omci_build_mib(struct omci_onu *o);
 
-/* The far end is chosen again at each MIB-Reset, where the OLT re-learns the MIB. */
+/* The far end is chosen at each MIB-Reset, and again when the OLT names itself
+ * in ME 131: AXS's ZTE OLT writes ZTEG there only after its one MIB-Reset, then
+ * Sets the MEs its profile adds (DC3 capture, 2026-10-18). */
 static void omci_farend_refresh(struct omci_onu *o)
 {
 	enum omci_farend f = omci_farend_detect(o);
@@ -1331,6 +1333,7 @@ void omci_me_reset_values(struct omci_onu *o)
 	o->anig_threshold[2] = o->anig_threshold[3] = 0x81;
 	omci_anig_alarms_refresh(o);
 	omci_farend_refresh(o);
+	o->omcc_farend = o->farend;
 }
 
 /* How many octets of DENSE attribute body @class_id's ...
@@ -1423,8 +1426,10 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		memcpy(e->body + a->v, v, a->size);
 	else if (a->src == OMCI_SRC_OLT_G) {
 		memcpy(o->olt_g + a->v, v, a->size);
-		if (a->v == 0 && a->size >= sizeof(o->olt_vendor_seen))
+		if (a->v == 0 && a->size >= sizeof(o->olt_vendor_seen)) {
 			memcpy(o->olt_vendor_seen, v, sizeof(o->olt_vendor_seen));
+			omci_farend_refresh(o);
+		}
 	}
 	else if (a->src == OMCI_SRC_ANIG_THRESHOLD)
 		o->anig_threshold[a->v] = v[0];
@@ -1735,7 +1740,7 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 			break;
 		case OMCI_DYN_OMCC:
 			val = o->id.omcc_version[0] ? o->id.omcc_version[0] :
-			      omci_farends[o->farend].omcc_version;
+			      omci_farends[o->omcc_farend].omcc_version;
 			break;
 		case OMCI_DYN_IP_HOST_MAC: {
 			int i = omci_ip_host_index(o, inst);

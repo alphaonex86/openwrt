@@ -374,12 +374,30 @@ luna_gpon_present() {
 	return 1
 }
 
+# A U-Boot that sets its own boot script at every boot (X111W, G24W) never passes our command line, so
+# the unit's own OMCI counts are read back from the boot script the field flasher saved in its env.
+capacity_from_env() {
+	local cap=${CAPACITY_PARAM:-/sys/module/luna_gpon/parameters/onu_capacity} d m flag v best=
+	[ -w "$cap" ] && [ -z "$(cat "$cap")" ] || return 0
+	for d in ${MTD_CLASS:-/sys/class/mtd}/mtd*; do
+		case "$(cat "$d/name" 2>/dev/null)" in env|env2) ;; *) continue ;; esac
+		m=${MTD_DEV:-/dev}/${d##*/}
+		flag=$(dd if="$m" bs=1 skip=4 count=1 2>/dev/null | hexdump -e '1/1 "%u"')
+		v=$(tr '\0' '\n' < "$m" | sed -nE 's/^(b0|boot_owrt)=.*luna_gpon\.onu_capacity=([0-9]+,[0-9]+,[0-9]+).*/\2/p' | head -1)
+		[ -n "$v" ] && { [ "$flag" = 1 ] || [ -z "$best" ]; } && best=$v
+	done
+	[ -n "$best" ] || return 0
+	echo "$best" > "$cap" && log "OMCI counts $best from the boot script saved in the U-Boot env" ||
+		log "OMCI counts $best from the U-Boot env REFUSED by the driver"
+}
+
 start_service() {
 	provision
 	luna_gpon_present || {
 		log "no Luna GPON serial parameter: this board's identity is its family service's"
 		return 0
 	}
+	capacity_from_env
 	try_identity && return 0
 	procd_open_instance identity
 	procd_set_param command /bin/sh /etc/init.d/gpon_provision --retry-identity

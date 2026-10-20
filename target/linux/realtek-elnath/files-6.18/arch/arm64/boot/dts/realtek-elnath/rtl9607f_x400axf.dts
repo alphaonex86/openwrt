@@ -22,7 +22,8 @@
 		 * per-board factory provisioning (ubi_Config/config_hs.xml:
 		 * ELAN_MAC_ADDR, GPON_SN). ubi_device is writable: our image lives
 		 * in bank 1's volumes (ubi_k1, ubi_r1), the vendor's U-Boot boots
-		 * it with `run b2` (root=31:11, gluebi); bank 0 keeps the stock,
+		 * it with `run b2`, whose root=31:11 our kernel ignores (CONFIG_CMDLINE_FORCE: ubiblock on ubi_r1;
+		 * mainline makes no mtdblock of a gluebi volume); bank 0 keeps the stock,
 		 * and stays what a plain power-up boots. */
 		bootargs = "earlycon console=ttyS0,115200 rootfstype=squashfs ubi.mtd=ubi_device";
 	};

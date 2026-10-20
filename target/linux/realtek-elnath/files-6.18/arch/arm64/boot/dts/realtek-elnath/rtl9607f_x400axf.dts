@@ -6,7 +6,9 @@
 
 / {
 	model = "HSGQ X400AXF (Realtek RTL9607F Elnath)";
-	compatible = "hsgq,x400axf", "realtek,rtl9607f";
+	/* "realtek,9607f" last: the vendor U-Boot boots a FIT configuration only when its fdt names the
+	 * compatible of the U-Boot's own tree (bank 1 trial boot, 2026-10-19: "Could not find configuration node") */
+	compatible = "hsgq,x400axf", "realtek,rtl9607f", "realtek,9607f";
 
 
 	aliases {

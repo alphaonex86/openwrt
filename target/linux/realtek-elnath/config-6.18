@@ -305,7 +305,7 @@ CONFIG_RTW89_DEBUGFS=y
 # RTW89_CORE selects WANT_DEV_COREDUMP -> DEV_COREDUMP goes default-y (closure)
 CONFIG_WANT_DEV_COREDUMP=y
 CONFIG_DEV_COREDUMP=y
-CONFIG_EXTRA_FIRMWARE="rtw89/rtw8852c_fw-2.bin rtw89/rtw8192xb_fw-2.bin"
+CONFIG_EXTRA_FIRMWARE="rtw89/rtw8852c_fw-2.bin rtw89/rtw8192xb_fw-2.bin regulatory.db regulatory.db.p7s"
 CONFIG_EXTRA_FIRMWARE_DIR="firmware"
 # CONFIG_MAC80211_MESSAGE_TRACING is not set
 # --- PCI/PCIe closure (auto-added: enabling PCIE_DW/CORTINA exposes these NEW kernel symbols) ---

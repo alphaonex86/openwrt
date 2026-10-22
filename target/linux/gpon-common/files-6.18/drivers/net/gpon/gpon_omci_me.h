@@ -794,6 +794,10 @@ struct omci_data_binding {
 
 /* Caller holds the same serialization as input/reset for this entire copy.
  * Selection remains the first eligible GEM, even if its T-CONT is unresolved. */
+/* Every VID the OLT provisioned over OMCI -- ME 84 filter lists, ME 171 filters and treatments -- into a
+ * GPON_VLAN_WORDS bitmap the caller zeroed. */
+void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids);
+
 void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 				u16 mcast_gem, struct omci_data_binding *binding);
 

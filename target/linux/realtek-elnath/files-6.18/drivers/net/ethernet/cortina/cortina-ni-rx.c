@@ -6,6 +6,7 @@
 #include "cortina_ni_rx_logic.h"	/* hoisted logic */
 #include "cortina_ni_rx_geom.h"	/* RX pool + frame geometry, host-tested */
 #include "cortina_l3fe_logic.h"	/* l3fe_wan_mac_derive(): the ONE WAN-MAC = LAN-MAC + 1 */
+#include "gpon_omci_vlan.h"	/* gpon_vlan_census_note(), gpon_vlan_frame_vid() */
 #include <linux/crc32.h>	/* ★ TEMP DIAG rx_frag_tap - revert with it */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -300,6 +301,8 @@ EXPORT_SYMBOL_GPL(cortina_ni_pon_rx_hook_set);
 /* DS PON DATA (WAN) consumer: de-encapsulated data-GEM frames ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 20. */
 static struct net_device *cortina_ni_pon_wan_ndev;
+struct gpon_vlan_census cortina_vlan_census;
+EXPORT_SYMBOL_GPL(cortina_vlan_census);
 
 void cortina_ni_pon_wan_ndev_set(struct net_device *ndev)
 {
@@ -1044,6 +1047,7 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 				rx->wan_l3_frames++;
 			else
 				rx->wan_frames++;
+			gpon_vlan_census_note(&cortina_vlan_census, GPON_VLAN_RX, gpon_vlan_frame_vid(buf + off, len));
 			skb = napi_alloc_skb(&rx->napi, len);
 			if (unlikely(!skb)) {
 				rx->drop_nobuf++;

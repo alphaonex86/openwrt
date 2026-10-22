@@ -1,0 +1,59 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The WAN VLANs that differ from what the OLT provisioned over OMCI (operator, 2026-10-22):
+#   leak-tx <vids>        this ONU sent a VLAN the OLT did not provision
+#   unexpected-rx <vids>  the OLT sent a VLAN it did not provision
+#   unhandled <vids>      the OLT provisioned a VLAN no WAN interface here carries
+#   untagged-tx <n>       untagged frames sent while the OLT provisions VLANs
+#   nohandler-rx <dev>=<n>  frames the WAN received that no protocol here handles (the kernel's rx_nohandler)
+# Usage: gpon-vlan-check [--log] [census-file [vlan-config-file]]
+# Exit 1 on any finding; --log sends each finding to syslog once.
+log=0
+[ "${1:-}" = "--log" ] && { log=1; shift; }
+census=${1:-/proc/gpon_vlan}
+vconf=${2:-/proc/net/vlan/config}
+[ -r "$census" ] || { echo "COULD NOT ASK: $census is absent" >&2; exit 2; }
+wan=$(uci -q get network.wan.device)
+findings=$(awk -v wan="${wan%%.*}" '
+	function expand(list, set,    n, parts, i, r) {
+		n = split(list, parts, ",")
+		for (i = 1; i <= n; i++) {
+			if (split(parts[i], r, "-") == 2) { for (v = r[1]; v <= r[2]; v++) set[v] = 1 }
+			else if (parts[i] ~ /^[0-9]+$/) set[parts[i]] = 1
+		}
+	}
+	function show(name, set,    v, out) {
+		out = ""
+		for (v = 0; v < 4096; v++) if (v in set) out = out (out == "" ? "" : ",") v
+		if (out != "") print name " " out
+	}
+	FILENAME != vconf && $1 == "vlan1" && $2 == "provisioned" { expand($3, prov) }
+	FILENAME != vconf && $1 == "vlan1" && $2 == "tx" { txu = $5 }
+	FILENAME != vconf && $1 == "vlan1" && $2 == "unexpected-rx" { expand($3, urx) }
+	FILENAME != vconf && $1 == "vlan1" && $2 == "unexpected-tx" { expand($3, utx) }
+	FILENAME == vconf && $2 == "|" && $5 == wan { have[$3] = 1 }
+	END {
+		for (v in prov) if (!(v in have)) miss[v] = 1
+		show("leak-tx", utx)
+		show("unexpected-rx", urx)
+		show("unhandled", miss)
+		for (v in prov) { if (txu > 0) print "untagged-tx " txu; break }
+	}' vconf="$vconf" "$census" "$vconf" 2> /dev/null)
+for dev in /sys/class/net/${wan%%.*} /sys/class/net/${wan%%.*}.*; do
+	n=$(cat "$dev/statistics/rx_nohandler" 2> /dev/null) || continue
+	[ "${n:-0}" -gt 0 ] && findings="${findings:+$findings
+}nohandler-rx ${dev##*/}=$n"
+done
+[ -n "$findings" ] || exit 0
+echo "$findings"
+if [ $log = 1 ]; then
+	seen=/tmp/gpon-vlan.seen
+	echo "$findings" | while read -r kind what; do
+		[ "$kind" = untagged-tx ] && what=seen
+		[ "$kind" = nohandler-rx ] && what=${what%%=*}
+		grep -qx "$kind $what" "$seen" 2> /dev/null && continue
+		echo "$kind $what" >> "$seen"
+		logger -t gpon-vlan -p daemon.warn "$kind $what"
+	done
+fi
+exit 1

@@ -2968,6 +2968,36 @@ static bool omci_wan_gem_inst(const struct omci_onu *o, u16 vid, u16 *ctp)
 	return false;
 }
 
+void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids)
+{
+	struct gpon_ext_vlan_row r;
+	u16 i, k;
+
+	for (i = 0; i < OMCI_STORE_MAX; i++) {
+		const struct omci_me_inst *f = &o->store[i];
+
+		if (!f->used || f->class_id != OMCI_ME_VLAN_TAG_FILTER || f->blen < 26)
+			continue;
+		for (k = 0; k < f->body[25] && k < 12; k++)
+			gpon_vlan_set(vids, ((u16)f->body[2 * k] << 8 | f->body[2 * k + 1]) & OMCI_VID_MASK);
+	}
+	for (i = 0; i < GPON_EXT_VLAN_MAX; i++) {
+		if (!o->vlan.ext[i].used)
+			continue;
+		for (k = 0; k < o->vlan.ext[i].nrow && k < GPON_EXT_VLAN_ROWS; k++) {
+			gpon_ext_vlan_row_decode(o->vlan.ext[i].row[k], &r);
+			if (r.f_out_pri != GPON_VLAN_PRI_NONE)
+				gpon_vlan_set(vids, r.f_out_vid);
+			if (r.f_in_pri != GPON_VLAN_PRI_NONE)
+				gpon_vlan_set(vids, r.f_in_vid);
+			if (r.t_out_pri != GPON_VLAN_TPRI_NONE)
+				gpon_vlan_set(vids, r.t_out_vid);
+			if (r.t_in_pri != GPON_VLAN_TPRI_NONE)
+				gpon_vlan_set(vids, r.t_in_vid);
+		}
+	}
+}
+
 void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 				u16 mcast_gem, struct omci_data_binding *binding)
 {

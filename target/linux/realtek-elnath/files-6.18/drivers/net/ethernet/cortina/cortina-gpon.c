@@ -20,6 +20,7 @@
 #include <linux/ktime.h>	/* the far-end capture timestamps its records */
 #include <linux/math64.h>	/* div_u64: ns -> us without a 64-bit divide */
 #include <linux/ratelimit.h>
+#include <linux/if_vlan.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -453,6 +454,7 @@ struct cortina_gpon {
 	struct proc_dir_entry *proc;
 	struct proc_dir_entry *health_proc;
 	int optical_init_error;
+	struct proc_dir_entry *vlan_proc;	/* the WAN VLAN census */
 #ifdef CONFIG_GPON_OLT_DIAG
 	struct proc_dir_entry *oltcap_proc;	/* the far-end capture dump */
 	struct proc_dir_entry *prov_proc;	/* the provisioning ledger */
@@ -2443,6 +2445,27 @@ static int cg_unknown_show(struct seq_file *s, void *v)
 }
 #endif /* CONFIG_GPON_OLT_DIAG */
 
+static int cg_vlan_show(struct seq_file *s, void *v)
+{
+	struct cortina_gpon *cg = READ_ONCE(cg_singleton);
+	static DEFINE_MUTEX(show_lock);
+	static u64 prov[GPON_VLAN_WORDS];
+	static char out[2048];
+
+	if (!cg || !IS_REACHABLE(CONFIG_CORTINA_NI))
+		return 0;
+	mutex_lock(&show_lock);
+	memset(prov, 0, sizeof(prov));
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci)
+		omci_vlan_provisioned(cg->omci, prov);
+	spin_unlock_bh(&cg->omci_lock);
+	gpon_vlan_census_render(&cortina_vlan_census, prov, out, sizeof(out));
+	seq_puts(s, out);
+	mutex_unlock(&show_lock);
+	return 0;
+}
+
 /* Every caller sends with cg->omci_lock released. */
 static void cg_capture_own(struct cortina_gpon *cg, const u8 *pdu48)
 {
@@ -2979,6 +3002,8 @@ static netdev_tx_t cg_wan_xmit(struct sk_buff *skb, struct net_device *ndev)
 		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
+	gpon_vlan_census_note(&cortina_vlan_census, GPON_VLAN_TX, skb_vlan_tag_present(skb) ? skb_vlan_tag_get_id(skb) :
+			      gpon_vlan_frame_vid(skb->data, skb_headlen(skb)));
 	return cortina_ni_pon_data_tx(skb, ndev);
 }
 
@@ -3644,6 +3669,7 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 	cg->prov_proc = proc_create_single("gpon_prov", 0444, NULL, cg_prov_show);
 	cg->unknown_proc = proc_create_single("gpon_unknown", 0444, NULL, cg_unknown_show);
 #endif
+	cg->vlan_proc = proc_create_single("gpon_vlan", 0444, NULL, cg_vlan_show);
 	platform_set_drvdata(pdev, cg);
 	dev_info(dev, "cortina-gpon phase-0 probe complete (/proc/gpon)\n");
 	return 0;
@@ -3665,6 +3691,10 @@ static void cortina_gpon_remove(struct platform_device *pdev)
 	if (cg->proc) {
 		proc_remove(cg->proc);
 		cg->proc = NULL;
+	}
+	if (cg->vlan_proc) {
+		proc_remove(cg->vlan_proc);
+		cg->vlan_proc = NULL;
 	}
 #ifdef CONFIG_GPON_OLT_DIAG
 	if (cg->prov_proc) {

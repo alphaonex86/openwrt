@@ -1244,4 +1244,127 @@ gpon_vlan_commit_inst(struct gpon_vlan_model *m,
 	}
 }
 
+/* The VLANs on the WAN wire, per direction (operator, 2026-10-22: an unexpected VLAN is never passed by).
+ * One bit per VID, so a frame costs a test and at most one OR; an untagged frame is counted. */
+#define GPON_VLAN_WORDS		64
+enum gpon_vlan_census_dir { GPON_VLAN_RX = 0, GPON_VLAN_TX = 1 };
+
+struct gpon_vlan_census {
+	u64	vid[2][GPON_VLAN_WORDS];
+	u32	untagged[2];
+};
+
+/* The outer VID of an Ethernet frame, or -1 when it carries no 802.1Q/802.1ad tag. */
+static inline int gpon_vlan_frame_vid(const u8 *f, unsigned int len)
+{
+	u16 tpid;
+
+	if (!f || len < 16)
+		return -1;
+	tpid = (u16)f[12] << 8 | f[13];
+	if (tpid != 0x8100 && tpid != 0x88a8 && tpid != 0x9100)
+		return -1;
+	return (f[14] & 0x0f) << 8 | f[15];
+}
+
+static inline void gpon_vlan_census_note(struct gpon_vlan_census *c, unsigned int dir, int vid)
+{
+	u64 bit;
+
+	if (vid < 0) {
+		c->untagged[dir & 1]++;
+		return;
+	}
+	bit = 1ULL << (vid & 63);
+	if (!(c->vid[dir & 1][(vid >> 6) & 63] & bit))
+		c->vid[dir & 1][(vid >> 6) & 63] |= bit;
+}
+
+static inline void gpon_vlan_set(u64 *v, unsigned int vid)
+{
+	if (vid < 4096)
+		v[vid >> 6] |= 1ULL << (vid & 63);
+}
+
+static inline bool gpon_vlan_has(const u64 *v, unsigned int vid)
+{
+	return vid < 4096 && (v[vid >> 6] >> (vid & 63) & 1);
+}
+
+static inline unsigned int gpon_vlan_put(char *out, unsigned int at, unsigned int sz, const char *s)
+{
+	while (*s && at + 1 < sz)
+		out[at++] = *s++;
+	if (sz)
+		out[at < sz ? at : sz - 1] = 0;
+	return at;
+}
+
+static inline unsigned int gpon_vlan_put_u(char *out, unsigned int at, unsigned int sz, u32 n)
+{
+	char d[11];
+	unsigned int k = sizeof(d) - 1;
+
+	d[k] = 0;
+	do {
+		d[--k] = '0' + n % 10;
+		n /= 10;
+	} while (n && k);
+	return gpon_vlan_put(out, at, sz, d + k);
+}
+
+/* " a,b-c" of the VIDs in @v, or " none". */
+static inline unsigned int gpon_vlan_put_list(char *out, unsigned int at, unsigned int sz, const u64 *v)
+{
+	unsigned int vid = 0, lo, n = 0;
+
+	while (vid < 4096) {
+		if (!gpon_vlan_has(v, vid)) {
+			vid++;
+			continue;
+		}
+		lo = vid;
+		while (vid + 1 < 4096 && gpon_vlan_has(v, vid + 1))
+			vid++;
+		at = gpon_vlan_put(out, at, sz, n++ ? "," : " ");
+		at = gpon_vlan_put_u(out, at, sz, lo);
+		if (vid > lo) {
+			at = gpon_vlan_put(out, at, sz, "-");
+			at = gpon_vlan_put_u(out, at, sz, vid);
+		}
+		vid++;
+	}
+	return n ? at : gpon_vlan_put(out, at, sz, " none");
+}
+
+/* /proc/gpon_vlan: what the OLT provisioned, what crossed the wire, and what crossed it unprovisioned.
+ * An OLT that provisions no VLAN (a transparent one) makes nothing unexpected. -> chars written */
+static inline unsigned int gpon_vlan_census_render(const struct gpon_vlan_census *c, const u64 *prov,
+						   char *out, unsigned int sz)
+{
+	static const char *const name[2] = { "rx", "tx" };
+	u64 odd[GPON_VLAN_WORDS];
+	unsigned int at = 0, d, w;
+	bool any = false;
+
+	for (w = 0; w < GPON_VLAN_WORDS; w++)
+		any |= prov[w] != 0;
+	at = gpon_vlan_put(out, at, sz, "vlan1 provisioned");
+	at = gpon_vlan_put_list(out, at, sz, prov);
+	for (d = 0; d < 2; d++) {
+		at = gpon_vlan_put(out, at, sz, "\nvlan1 ");
+		at = gpon_vlan_put(out, at, sz, name[d]);
+		at = gpon_vlan_put_list(out, at, sz, c->vid[d]);
+		at = gpon_vlan_put(out, at, sz, " untagged ");
+		at = gpon_vlan_put_u(out, at, sz, c->untagged[d]);
+	}
+	for (d = 0; d < 2; d++) {
+		for (w = 0; w < GPON_VLAN_WORDS; w++)
+			odd[w] = any ? c->vid[d][w] & ~prov[w] : 0;
+		at = gpon_vlan_put(out, at, sz, d ? "\nvlan1 unexpected-tx" : "\nvlan1 unexpected-rx");
+		at = gpon_vlan_put_list(out, at, sz, odd);
+	}
+	return gpon_vlan_put(out, at, sz, "\n");
+}
+
 #endif /* GPON_OMCI_VLAN_H */

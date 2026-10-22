@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Every minute: a WAN VLAN not as the OLT provisioned it goes to syslog once (gpon-vlan-check).
+
+START=99
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /bin/sh -c 'while sleep 60; do /usr/sbin/gpon-vlan-check --log > /dev/null; done'
+	procd_set_param respawn
+	procd_close_instance
+}

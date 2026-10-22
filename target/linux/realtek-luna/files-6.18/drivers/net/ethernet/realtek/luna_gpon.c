@@ -53,6 +53,7 @@
 #include "gpon_lat.h"		/* gpon_lat_add(): the OMCI turnaround record */
 #include <linux/etherdevice.h>
 #include "luna_gpon_nic.h"
+#include "luna_wan_vlan.h"
 #include "luna_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
 #include "luna_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
 
@@ -7544,6 +7545,28 @@ static void luna_omci_turnaround(u64 rx_ns)
 
 /* /proc/gpon_timing: this boot's activation timeline and the OMCI turnaround,
  * read by the suite's gpon_timing benchmark. */
+struct gpon_vlan_census luna_vlan_census;
+EXPORT_SYMBOL(luna_vlan_census);
+
+static int gpon_vlan_proc_show(struct seq_file *s, void *v)
+{
+	static DEFINE_MUTEX(show_lock);
+	static u64 prov[GPON_VLAN_WORDS];
+	static char out[2048];
+	unsigned long flags;
+
+	mutex_lock(&show_lock);
+	memset(prov, 0, sizeof(prov));
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (luna_omci.onu)
+		omci_vlan_provisioned(luna_omci.onu, prov);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	gpon_vlan_census_render(&luna_vlan_census, prov, out, sizeof(out));
+	seq_puts(s, out);
+	mutex_unlock(&show_lock);
+	return 0;
+}
+
 static int luna_timing_show(struct seq_file *s, void *v)
 {
 	struct {
@@ -9993,6 +10016,7 @@ skip_bosa_init:
 	mutex_unlock(&bosa_lock);
 
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
+	proc_create_single("gpon_vlan", 0444, NULL, gpon_vlan_proc_show);
 	proc_create_single("gpon_log", 0444, NULL, luna_log_show);
 	proc_create_single("gpon_timing", 0444, NULL, luna_timing_show);
 	luna_mon_register();
@@ -10190,6 +10214,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	cancel_delayed_work_sync(&o5loss_work);
 	proc_remove(luna_health_proc);
 	luna_health_proc = NULL;
+	remove_proc_entry("gpon_vlan", NULL);
 	remove_proc_entry("gpon", NULL);
 	remove_proc_entry("gpon_log", NULL);
 	remove_proc_entry("gpon_timing", NULL);

@@ -24,6 +24,7 @@
 #include "gpon_omci_diag.h"
 #include "gpon_omci_me.h"	/* the common OMCI ME store + context */
 #include "luna_gpon_nic.h"
+#include "luna_wan_vlan.h"
 #include "luna_eth_mib.h"
 #include "luna_gmac_logic.h"	/* family GMAC ring packings (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
@@ -1042,6 +1043,7 @@ static netdev_tx_t rtl9602c_eth_wan_xmit(struct sk_buff *skb, struct net_device 
 
 	if (skb_put_padto(skb, ETH_ZLEN))	/* pad runts to the min Ethernet frame; frees skb on error */
 		return NETDEV_TX_OK;
+	luna_vlan_note(GPON_VLAN_TX, skb);
 	len = skb->len;
 
 	da = dma_map_single(ep->dev, skb->data, len, DMA_TO_DEVICE);
@@ -1440,6 +1442,8 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 			/* The switch CPU port prepends a 2-byte offset word ahead of ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 74. */
 			skb_pull(skb, RX_CPU_PREFIX);
+			if (rdev == ep->wan_ndev)
+				luna_vlan_note(GPON_VLAN_RX, skb);
 			if (!netif_running(rdev)) {
 				rdev->stats.rx_dropped++;
 				dev_kfree_skb_any(skb);

@@ -363,6 +363,8 @@ int cortina_ni_pon_tx(const u8 *pdu, unsigned int len);
 /* DS PON DATA (WAN) delivery: frames whose RX HEADER_A.lspid ...
  * dev/MEASURED-cortina-ni.h.md sec 35. */
 void cortina_ni_pon_wan_ndev_set(struct net_device *ndev);
+/* Every WAN frame's VID, both directions; cortina-gpon renders /proc/gpon_vlan. */
+extern struct gpon_vlan_census cortina_vlan_census;
 
 /* Print BOTH directions' CPU-forward counters (US ... -- dev/MEASURED-cortina-ni.h.md sec 14. */
 struct seq_file;

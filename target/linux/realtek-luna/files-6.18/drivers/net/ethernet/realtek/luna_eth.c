@@ -55,6 +55,7 @@
 #include "luna_gmac_logic.h"	/* family GMAC ring packings + this shell's hoisted RX verdicts (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
 #include "luna_gpon_nic.h"	/* the GPON<->NIC glue -- this shell now IMPLEMENTS it */
+#include "luna_wan_vlan.h"
 #include "luna_eth_mib.h"
 #include "luna_flow.h"
 #include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN.
@@ -1742,6 +1743,8 @@ static int eth_rx(struct luna_eth *ep, int budget)
 				rdev->stats.rx_dropped++;
 				dev_kfree_skb_any(skb);
 			} else {
+				if (rdev == ep->wan_ndev)
+					luna_vlan_note(GPON_VLAN_RX, skb);
 				/* NAPI poll context: use the receive path, not netif_rx. */
 				skb->protocol = eth_type_trans(skb, rdev);
 				rdev->stats.rx_packets++;
@@ -2116,6 +2119,7 @@ static netdev_tx_t luna_eth_wan_xmit(struct sk_buff *skb,
 {
 	struct luna_eth *ep = *(struct luna_eth **)netdev_priv(ndev);
 
+	luna_vlan_note(GPON_VLAN_TX, skb);
 	/* The SAME cpu-tag direct-TX pair the OMCC uses, with the data stream in
 	 * place of the OMCC's -- the whole point of the family helpers carrying a
 	 * stream id rather than a hard-coded flow. */

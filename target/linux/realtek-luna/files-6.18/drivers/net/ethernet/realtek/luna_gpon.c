@@ -145,6 +145,8 @@ static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
 #define GPON_OMCC_PHYS_QID	((unsigned int)swc->omcc_phys_qid)
 #define GPON_OMCC_TCONT		16	/* the OMCC's T-CONT index; same on both dies */
 #define GPON_DATA_TCONT		8	/* the WAN data GEM's own T-CONT; see GPON_DATA_ALLOC */
+#define LUNA_IDLE_TCONT_FIRST	9	/* the pool answering the grants of allocs with no flow */
+#define LUNA_IDLE_TCONT_N	7
 
 /* PLOAM message path (G.984.3 management channel driving the ...
  * dev/MEASURED-luna_gpon.c.md sec 4. */
@@ -388,6 +390,8 @@ MODULE_PARM_DESC(onu_password, "G.984.3 PLOAM Password: up to 10 printable chara
  * management activation. Keep the existing parameter name for compatibility;
  * Alloc-ID 0xfff is assignable and cannot serve as an invalid entry value. */
 static bool alloc_cam_park = true;
+static u16 luna_idle_alloc[LUNA_IDLE_TCONT_N];	/* the alloc each idle T-CONT holds, 0 = free */
+static u16 luna_data_tcont_alloc;		/* the alloc GPON_DATA_TCONT holds, 0 = none */
 module_param(alloc_cam_park, bool, 0644);
 MODULE_PARM_DESC(alloc_cam_park, "clean unused GTC allocation entries before management activation");
 
@@ -5375,6 +5379,8 @@ static int gpon_alloc_cam_clear_others(u8 keep)
 		if (rc)
 			return rc;
 	}
+	memset(luna_idle_alloc, 0, sizeof(luna_idle_alloc));
+	luna_data_tcont_alloc = 0;
 	return 0;
 }
 
@@ -5728,11 +5734,19 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 		 * accept the OLT's operational BWMAP grant on that alloc-id. */
 		{
 			int a16 = gpon_alloc_cam_read(16);
+			u8 t;
 
 			if (a16 < 0)
-				seq_printf(s, "us_alloc: tc16=READ-FAILED rc=%d\n", a16);
+				seq_printf(s, "us_alloc: tc16=READ-FAILED rc=%d", a16);
 			else
-				seq_printf(s, "us_alloc: tc16=alloc0x%x hit%u\n", a16 & 0xfff, !!(a16 & BIT(16)));
+				seq_printf(s, "us_alloc: tc16=alloc0x%x hit%u", a16 & 0xfff, !!(a16 & BIT(16)));
+			for (t = 0; t < 32; t++) {	/* every other bound entry: one alloc, one T-CONT */
+				int a = t == 16 ? 0 : gpon_alloc_cam_read(t);
+
+				if (a > 0 && (a & BIT(16)))
+					seq_printf(s, " tc%u=alloc0x%x", t, a & 0xfff);
+			}
+			seq_putc(s, '\n');
 		}
 		/* bwmap: what the GTC BWMAP capture engine holds -- which ...
 		 * dev/MEASURED-luna_gpon.c.md sec 185. */
@@ -7141,18 +7155,90 @@ static void luna_omci_identity_reset(const u8 sn[8])
 
 static int gpon_avc_sent;	/* OMCI oper-state AVCs emitted this O5 (reset on re-range) */
 
+/* ★★ EVERY ASSIGNED ALLOC ANSWERS ITS GRANTS. Entel's ZTE (2026-10-22) assigned
+ * four data allocs, one per service, and deactivated the ONU ~37 s into every O5
+ * while only the WAN's was bound: an alloc granted and never burst on is an ONU
+ * fault to that OLT. An alloc this ONU carries no flow on goes to a T-CONT of
+ * this pool, which answers its grants with idle GEM; the WAN's stays on
+ * GPON_DATA_TCONT, and one alloc is never in two CAM entries. */
+
+static void luna_idle_slot_free(unsigned int i)
+{
+	if (luna_cam_xact(true, GPON_GTC_CAM_OP_CLEAN, LUNA_IDLE_TCONT_FIRST + i, NULL, NULL))
+		return;
+	pi_packed_set(PI_PON_TCONT_EN, LUNA_IDLE_TCONT_FIRST + i, 1, 0);
+	luna_idle_alloc[i] = 0;
+}
+
+static void luna_idle_release(u16 alloc)
+{
+	unsigned int i;
+
+	for (i = 0; i < LUNA_IDLE_TCONT_N; i++)
+		if (alloc && luna_idle_alloc[i] == alloc)
+			luna_idle_slot_free(i);
+}
+
+static bool luna_idle_holds(u16 alloc)
+{
+	unsigned int i;
+
+	for (i = 0; i < LUNA_IDLE_TCONT_N; i++)
+		if (luna_idle_alloc[i] == alloc)
+			return true;
+	return false;
+}
+
+static void luna_idle_tconts_sync(void)
+{
+	u16 omcc = gpon_omcc_alloc ? gpon_omcc_alloc : luna_ploam.onu_id;
+	unsigned int i, w;
+
+	for (i = 0; i < LUNA_IDLE_TCONT_N; i++) {
+		u16 a = luna_idle_alloc[i];
+
+		if (a && (a == omcc || a == luna_data_tcont_alloc ||
+			  !gpon_ploam_data_alloc_known(&luna_ploam, a)))
+			luna_idle_slot_free(i);
+	}
+	for (w = 0; w < ARRAY_SIZE(luna_ploam.data_alloc_assigned); w++) {
+		u32 bits = luna_ploam.data_alloc_assigned[w];
+
+		while (bits) {
+			u16 a = (u16)(w * 32 + __ffs(bits));
+
+			bits &= bits - 1;
+			if (a == omcc || a == luna_data_tcont_alloc || luna_idle_holds(a))
+				continue;
+			for (i = 0; i < LUNA_IDLE_TCONT_N && luna_idle_alloc[i]; i++)
+				;
+			if (i == LUNA_IDLE_TCONT_N) {
+				pr_warn_ratelimited("luna-gpon: alloc 0x%x granted, no idle T-CONT left to answer it\n", a);
+				return;
+			}
+			if (luna_alloc_cam_write(LUNA_IDLE_TCONT_FIRST + i, a) < 0)
+				return;
+			pi_packed_set(PI_PON_TCONT_EN, LUNA_IDLE_TCONT_FIRST + i, 1, 1);
+			luna_idle_alloc[i] = a;
+		}
+	}
+}
+
 /* ★★★ THE ALLOC-ID -> T-CONT BIND BELONGS TO Assign_Alloc-ID. ...
  * dev/MEASURED-luna_gpon.c.md sec 212. */
 static void luna_data_tcont_from_assign(u16 alloc, bool assigned)
 {
 	enum gpon_gem_us_bind bind;
 
-	if (!assigned || !data_tcont)
+	if (!assigned || !data_tcont || luna_data_tcont_alloc) {
+		luna_idle_tconts_sync();	/* the first data alloc takes the data T-CONT, the rest idle */
 		return;
+	}
 	bind = gpon_gem_us_tcont_decide(alloc, luna_ploam.onu_id,
 					READ_ONCE(luna_data.armed.alloc_bound));
 	if (bind == GPON_GEM_US_BIND_TCONT) {
 		gpon_install_tcont(GPON_DATA_TCONT, alloc);
+		luna_idle_tconts_sync();
 		return;
 	}
 	luna_log("Alloc 0x%x NOT bound to the data T-CONT: %s\n",
@@ -7580,11 +7666,15 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 
 	/* The alloc CAM's own registers and 5-bit index mask come from luna_gpon_chip;
 	 * the transaction is the same shared helper as the three DS GEM-port binds. */
+	if (tcont == GPON_DATA_TCONT)
+		luna_idle_release(alloc);
 	rc = luna_alloc_cam_write(tcont, alloc);
 	if (rc < 0) {
 		pr_err("luna-gpon: T-CONT alloc bind timeout\n");
 		return rc;
 	}
+	if (tcont == GPON_DATA_TCONT)
+		luna_data_tcont_alloc = alloc;
 
 	/* PON-MAC US scheduler activation. The GTC alloc CAM above ...
 	 * dev/MEASURED-luna_gpon.c.md sec 218. */
@@ -7751,6 +7841,7 @@ static int luna_data_retire(void)
 		if (rc)
 			return rc;
 		luna_data.alloc_dirty = false;
+		luna_data_tcont_alloc = 0;
 	}
 	memset(&luna_data.armed, 0, sizeof(luna_data.armed));
 	gpon_data_tcont_installed = false;
@@ -7861,6 +7952,8 @@ out:
 	if (rc && rc != luna_data.error)
 		pr_warn("luna-gpon: data reconciliation failed rc=%d; ownership retained\n", rc);
 	luna_data.error = rc;
+	if (want.omcc_up)
+		luna_idle_tconts_sync();
 }
 
 static void luna_omci_service(void)

@@ -16,6 +16,7 @@ if [ "${1:-}" = "--unknown" ]; then
 	exec awk -v om="$om" -v pl="$pl" -v plok="$plok" '
 function hx(s,   i, v) { v = 0; s = tolower(s); for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1; return v }
 function by(h, o) { return hx(substr(h, o * 2 + 1, 2)) }
+function vendor(c) { return (c >= 240 && c <= 255) || (c >= 350 && c <= 399) || c >= 65280 }
 function lost(hdr) { return match(hdr, /dropped=[0-9]+/) ? substr(hdr, RSTART + 8, RLENGTH - 8) + 0 : 0 }
 BEGIN {
 	split("success processing-error not-supported parameter-error unknown-ME unknown-instance busy - - attribute-failed", RC, " ")
@@ -33,8 +34,8 @@ $1 != "olt1" || NF != 8 { next }
 FILENAME == pl { ty = by($8, 1); np++; P[np] = sprintf("  PLOAM 0x%02x %s, last at %.1f s: %s", ty, (PN[ty] != "" ? PN[ty] : "not in G.984.3"), $3 / 1e6, $8); next }
 $4 == "d" { h = $8; mt = and(by(h, 2), 31); n++
 	D[n] = (MT[mt] != "" ? MT[mt] : "type " mt) " ME " hx(substr(h, 9, 4)) " #0x" substr(h, 13, 4) (mt == 8 || mt == 9 ? " mask 0x" substr(h, 17, 4) : "")
-	T[n] = $3; M[n] = mt; A[n] = "no answer"; next }
-$4 == "u" && n { rc = by($8, 8); A[n] = (rc && (M[n] < 11 || M[n] > 14)) ? (RC[rc + 1] != "" ? RC[rc + 1] : "result " rc) : "answered, but this ONU holds no model of this class (vendor-range policy)" }
+	T[n] = $3; M[n] = mt; K[n] = hx(substr(h, 9, 4)); A[n] = "no answer"; next }
+$4 == "u" && n { rc = by($8, 8); A[n] = (rc && (M[n] < 11 || M[n] > 14)) ? (RC[rc + 1] != "" ? RC[rc + 1] : "result " rc) : vendor(K[n]) ? "answered by the vendor-range policy: this ONU holds no model of this vendor class" : "answered, but this ONU holds no model of this G.988 class: a later Get or Set will not answer like the vendor firmware" }
 END {
 	if (n) { print "Not identified by this ONU (the latest of each kind; " om " replays them):"
 		for (i = 1; i <= n; i++) printf "  %s, last at %.1f s: %s\n", D[i], T[i] / 1e6, A[i] }

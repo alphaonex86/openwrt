@@ -53,7 +53,7 @@
  * rc=9, the OLT abandons provisioning THERE and never reaches the data
  * T-CONT/GEM, so the board holds O5 with no WAN while the OLT shows
  * `fail`/`Initial`/`Laser out`.  One number for both families now: the store is
- * 32 bytes an entry, so the whole array is 4 kB.
+ * 38 bytes an entry, so the whole array is 4864 B.
  * ⚠ It said 47 instances / six ports / 65 slots and "ME 50/79/84" until later
  * the same day: both read off the capture the overflow itself TRUNCATED.
  * Pinned by rtl9607c-test/omci_olt_script_fits_test, whose fixture is GENERATED
@@ -64,7 +64,8 @@
 
 /* A dynamic ME instance the OLT provisioned (Create). Stored ...
  * dev/MEASURED-gpon_omci_me.h.md sec 2. */
-#define OMCI_STORE_BODY 26
+/* 32: ME 309's writable attributes end at octet 31 (stock mib_McastOperProf). */
+#define OMCI_STORE_BODY 32
 
 struct omci_me_inst {
 	u16	class_id;
@@ -137,6 +138,11 @@ struct omci_slot {
 /* Further single MEs a board's stock reports, as (class, instance) pairs. */
 #define OMCI_EXTRA_ME_MAX 32
 
+/* The 12-bit VLAN ID of a TCI. */
+#define OMCI_VID_MASK 0x0fff
+/* ME 47 #3 TP type of a bridge port on a GEM interworking TP (G.988 9.3.4). */
+#define OMCI_BRIDGE_TP_GEM_IW 5
+
 /* ME 131 OLT-G as the OLT last wrote it: vendor (4), equipment ID (20),
  * version (14), time of day (14). */
 #define OMCI_OLT_G_LEN 52
@@ -158,6 +164,7 @@ struct omci_identity {
 	u8 operator_id[4];	/* CTC LoID #1 */
 	u8 omcc_version[1];	/* ONU2-G #2, baseline codes only; 0 = the far end's */
 	u8 farend[8];		/* "" = detected, else a far-end profile's name */
+	u8 wan_vlan[2];		/* big-endian VID of the WAN service; 0 = the first data GEM */
 	u8 zeros[25];		/* all-zero source, == its longest consumer */
 };
 
@@ -175,7 +182,8 @@ struct omci_identity {
 	X(LOID,		loid,		loid,			false)	\
 	X(LOID_PASSWD,	loid_passwd,	loid_passwd,		false)	\
 	X(OMCC_VERSION,	omcc_version,	omcc_version,		true)	\
-	X(FAREND,	farend,		farend,			false)
+	X(FAREND,	farend,		farend,			false)	\
+	X(WAN_VLAN,	wan_vlan,	wan_vlan,		true)
 
 enum omci_id_field {
 #define OMCI_ID_ENUM(id, name, member, numeric) OMCI_ID_##id,
@@ -374,6 +382,9 @@ enum omci_farend {
 	OMCI_FAREND_N
 };
 
+/* Does this far end assign the data Alloc-ID by ME 262 alone (no Assign_Alloc-ID)? */
+bool omci_farend_alloc_by_omci(const struct omci_onu *o);
+
 /* The far end this ONU answers as, by name ("generic", "zte"). */
 const char *omci_farend_name(const struct omci_onu *o);
 int omci_farend_fmt(const struct omci_onu *o, char *out, size_t sz);
@@ -419,6 +430,15 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * table; 52 is PM history, and getting
 					 * that backwards turns the cheapest row
 					 * in the gap list into a datapath repair */
+/* The PM, threshold and multicast MEs every lab and production OLT creates (2026-10-21) */
+#define OMCI_ME_ETH_PM		24	/* mib_EthPmHistoryData */
+#define OMCI_ME_ETH_PM2		89	/* mib_EthPmData2 */
+#define OMCI_ME_THRESHOLD1	273	/* mib_ThresholdData1 */
+#define OMCI_ME_THRESHOLD2	274	/* mib_ThresholdData2 */
+#define OMCI_ME_ETH_PM3		296	/* mib_EthPmData3 */
+#define OMCI_ME_MCAST_OPER_PROF	309	/* mib_McastOperProf */
+#define OMCI_ME_ETH_EXT_PM	334	/* mib_EthExtPmData */
+#define OMCI_ME_GEM_CTP_PM	341	/* mib_GemPortNetworkCtpPMHD */
 /* The VLAN / CLASSIFICATION half of the same service model.  Widths and access
  * extracted the same way, from the same plugins, and MEASURED IDENTICAL on both
  * Luna dies (X111W RTL9602C 3.18 and G24W RTL9603CVD 4.4) — the one difference

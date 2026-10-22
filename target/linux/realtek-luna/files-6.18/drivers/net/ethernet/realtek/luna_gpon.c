@@ -7774,12 +7774,14 @@ static void luna_data_reconcile(void)
 	struct gpon_data_want want = { 0 };
 	enum gpon_data_plan plan;
 	unsigned long flags;
+	bool alloc_by_omci = false;
 	int rc = 0;
 
 	spin_lock_irqsave(&luna_omci_lock, flags);
 	if (luna_omci.onu) {
 		omci_data_binding_snapshot(luna_omci.onu, gpon_omcc_gem_port,
 					   GPON_MCAST_GEM, &luna_omci.binding);
+		alloc_by_omci = omci_farend_alloc_by_omci(luna_omci.onu);
 	}
 	binding = luna_omci.binding;
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
@@ -7789,7 +7791,7 @@ static void luna_data_reconcile(void)
 	want.gem = binding.gem_present ? binding.gem_port : 0;
 	want.alloc = binding.alloc_id;
 	want.alloc_known = binding.gem_present && binding.alloc_known &&
-		(want.alloc == want.omcc_alloc ||
+		(want.alloc == want.omcc_alloc || alloc_by_omci ||
 		 gpon_ploam_data_alloc_known(&luna_ploam, want.alloc));
 	/* Presence here includes submitted-but-uncertain hardware ownership, not
 	 * a false claim that the original CAM installation completed. */

@@ -85,6 +85,9 @@ omci_id_apply() {
 		case "$name" in
 		sw_ver1|sw_ver2) [ -n "$val" ] || val=$(owrt_version 2>/dev/null) ;;
 		farend) ;;	# empty = the driver detects it; written even empty, so clearing works
+		wan_vlan) [ -n "$val" ] || val=$(uci -q get network.wan.device |
+			sed -n 's/^[^.]*\.\([0-9]\{1,4\}\)$/\1/p')
+			[ -n "$val" ] || val=0 ;;	# the WAN's VID picks its data GEM; 0 = the first
 		*) [ -n "$val" ] || val=$("$mib" "$name") ;;
 		esac
 		[ -n "$val" ] || [ "$name" = farend ] || continue

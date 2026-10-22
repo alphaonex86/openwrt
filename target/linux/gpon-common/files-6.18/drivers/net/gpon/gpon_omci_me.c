@@ -143,12 +143,13 @@ OMCI_ID_ASSERT(loid_passwd, 12);	/* ONU-G #11 / CTC LoID #3 */
 OMCI_ID_ASSERT(operator_id, 4);		/* CTC #1 */
 OMCI_ID_ASSERT(omcc_version, 1);	/* ONU2-G #2 */
 OMCI_ID_ASSERT(farend, 8);
+OMCI_ID_ASSERT(wan_vlan, 2);
 OMCI_ID_ASSERT(zeros, 25);		/* == its longest consumer, VEIP #3 */
 /* every member is a u8 array, so equality here also proves no padding crept
  * in: the flat 119-byte pool plus product code (2), LoID password (12), OMCC
- * version (1) and the far-end choice (8) */
-_Static_assert(sizeof(struct omci_identity) == 142,
-	       "omci_identity is not the 142-byte pool the OLT reads");
+ * version (1), the far-end choice (8) and the WAN VLAN (2) */
+_Static_assert(sizeof(struct omci_identity) == 144,
+	       "omci_identity is not the 144-byte pool the OLT reads");
 
 /* Where a descriptor row takes its value bytes from. */
 enum omci_attr_src {
@@ -531,6 +532,110 @@ static const struct omci_attr omci_attrs[] = {
 	A_CNT(52, 5, 4, 11),		/* #5 MTU exceeded disc    MtuExceededDiscard */
 	A_CNT(52, 6, 4, 15),		/* #6 received frames      ReceivedFrameCounter */
 	A_CNT(52, 7, 4, 19),		/* #7 received+discarded   ReceivedAndDiscardedCounter */
+
+	/* ==== The PM, threshold and multicast MEs every lab and production OLT creates
+	 * (captures 2026-10-02..16); widths and access from the stock X111W's own plugins
+	 * (OMCI-simulate/me_attr_table.py on M225-260618). Counters: OMCI_SRC_CNT. ==== */
+	/* ---- ME 24 Ethernet PM history data (mib_EthPmHistoryData) ---- */
+	A_ST(24, 1, 1, 0, 1),		/* #1  IntEndTime */
+	A_ST(24, 2, 2, 1, 7),		/* #2  ThresholdID */
+	A_CNT(24, 3, 4, 3),		/* #3  FCSErrors */
+	A_CNT(24, 4, 4, 7),		/* #4  ExcCollision */
+	A_CNT(24, 5, 4, 11),		/* #5  LateCollision */
+	A_CNT(24, 6, 4, 15),		/* #6  FrameTooLongs */
+	A_CNT(24, 7, 4, 19),		/* #7  RxBufOverflow */
+	A_CNT(24, 8, 4, 23),		/* #8  TxBufOverflow */
+	A_CNT(24, 9, 4, 27),		/* #9  SingleCollision */
+	A_CNT(24, 10, 4, 31),		/* #10 MultiCollision */
+	A_CNT(24, 11, 4, 35),		/* #11 SQECounter */
+	A_CNT(24, 12, 4, 39),		/* #12 TxDeferred */
+	A_CNT(24, 13, 4, 43),		/* #13 TxInterMacErr */
+	A_CNT(24, 14, 4, 47),		/* #14 CarrierSenseErr */
+	A_CNT(24, 15, 4, 51),		/* #15 AlignmentErr */
+	A_CNT(24, 16, 4, 55),		/* #16 RxInterMacErr */
+	/* ---- ME 89 Ethernet PM history data 2 (mib_EthPmData2) ---- */
+	A_ST(89, 1, 1, 0, 1),		/* #1  IntEndTime */
+	A_ST(89, 2, 2, 1, 7),		/* #2  ThresholdID */
+	A_CNT(89, 3, 4, 3),		/* #3  PppoeFilFrm */
+	/* ---- ME 273 / 274 threshold data 1 / 2 (mib_ThresholdData1/2) ---- */
+	A_ST(273, 1, 4, 0, 7),
+	A_ST(273, 2, 4, 4, 7),
+	A_ST(273, 3, 4, 8, 7),
+	A_ST(273, 4, 4, 12, 7),
+	A_ST(273, 5, 4, 16, 7),
+	A_ST(273, 6, 4, 20, 7),
+	A_ST(273, 7, 4, 24, 7),
+	A_ST(274, 1, 4, 0, 7),
+	A_ST(274, 2, 4, 4, 7),
+	A_ST(274, 3, 4, 8, 7),
+	A_ST(274, 4, 4, 12, 7),
+	A_ST(274, 5, 4, 16, 7),
+	A_ST(274, 6, 4, 20, 7),
+	A_ST(274, 7, 4, 24, 7),
+	/* ---- ME 296 Ethernet PM history data 3 (mib_EthPmData3) ---- */
+	A_ST(296, 1, 1, 0, 1),		/* #1  IntEndTime */
+	A_ST(296, 2, 2, 1, 7),		/* #2  ThresholdID */
+	A_CNT(296, 3, 4, 3),		/* #3  DropEvents */
+	A_CNT(296, 4, 4, 7),		/* #4  Octets */
+	A_CNT(296, 5, 4, 11),		/* #5  Packets */
+	A_CNT(296, 6, 4, 15),		/* #6  BroadcastPackets */
+	A_CNT(296, 7, 4, 19),		/* #7  MulticastPackets */
+	A_CNT(296, 8, 4, 23),		/* #8  UndersizePackets */
+	A_CNT(296, 9, 4, 27),		/* #9  FragmentsPackets */
+	A_CNT(296, 10, 4, 31),		/* #10 JabbersPackets */
+	A_CNT(296, 11, 4, 35),		/* #11 Octets64 */
+	A_CNT(296, 12, 4, 39),		/* #12 Octets65to127 */
+	A_CNT(296, 13, 4, 43),		/* #13 Octets128to255 */
+	A_CNT(296, 14, 4, 47),		/* #14 Octets256to511 */
+	A_CNT(296, 15, 4, 51),		/* #15 Octets512to1023 */
+	A_CNT(296, 16, 4, 55),		/* #16 Octets1024to1518 */
+	/* ---- ME 309 multicast operations profile (mib_McastOperProf); the ACL tables
+	 * are accepted and counted (OMCI_TBL_HELD) until the IGMP model holds them ---- */
+	A_ST(309, 1, 1, 0, 7),		/* #1  IGMPVersion */
+	A_ST(309, 2, 1, 1, 7),		/* #2  IGMPFun */
+	A_ST(309, 3, 1, 2, 7),		/* #3  ImmediateLeave */
+	A_ST(309, 4, 2, 3, 7),		/* #4  UsIGMPTci */
+	A_ST(309, 5, 1, 5, 7),		/* #5  UsIGMPTagControl */
+	A_ST(309, 6, 4, 6, 7),		/* #6  UsIGMPRate */
+	A_TBL(309, 7, 24, OMCI_TBL_HELD, 3),	/* #7  DyACLTable */
+	A_TBL(309, 8, 24, OMCI_TBL_HELD, 3),	/* #8  StaticACLTable */
+	A_TBL(309, 9, 10, OMCI_TBL_HELD, 1),	/* #9  LostGroupListTable */
+	A_ST(309, 10, 1, 10, 7),	/* #10 Robustness */
+	A_ST(309, 11, 4, 11, 7),	/* #11 QuerierIpAddress */
+	A_ST(309, 12, 4, 15, 7),	/* #12 QueryInterval */
+	A_ST(309, 13, 4, 19, 7),	/* #13 QueryMaxResponseTime */
+	A_ST(309, 14, 4, 23, 3),	/* #14 LastMemberQueryInterval */
+	A_ST(309, 15, 1, 27, 3),	/* #15 UnauthorizedJoinRequestBehaviour */
+	A_ST(309, 16, 3, 28, 7),	/* #16 DownstreamIgmpMulticastTci */
+	/* ---- ME 334 Ethernet frame extended PM (mib_EthExtPmData) ---- */
+	A_ST(334, 1, 1, 0, 1),		/* #1  IntEndTime */
+	A_ST(334, 2, 16, 1, 7),		/* #2  ControlBlock */
+	A_CNT(334, 3, 4, 17),		/* #3  DropEvents */
+	A_CNT(334, 4, 4, 21),		/* #4  Octets */
+	A_CNT(334, 5, 4, 25),		/* #5  Frames */
+	A_CNT(334, 6, 4, 29),		/* #6  BroadcastPackets */
+	A_CNT(334, 7, 4, 33),		/* #7  MulticastPackets */
+	A_CNT(334, 8, 4, 37),		/* #8  CrcErrPackets */
+	A_CNT(334, 9, 4, 41),		/* #9  UndersizePackets */
+	A_CNT(334, 10, 4, 45),		/* #10 OversizePackets */
+	A_CNT(334, 11, 4, 49),		/* #11 Octets64 */
+	A_CNT(334, 12, 4, 53),		/* #12 Octets65to127 */
+	A_CNT(334, 13, 4, 57),		/* #13 Octets128to255 */
+	A_CNT(334, 14, 4, 61),		/* #14 Octets256to511 */
+	A_CNT(334, 15, 4, 65),		/* #15 Octets512to1023 */
+	A_CNT(334, 16, 4, 69),		/* #16 Octets1024to1518 */
+	A_CNT(334, 17, 4, 73),		/* #17 LastHistoryPointer */
+	/* ---- ME 341 GEM port network CTP PM history data (mib_GemPortNetworkCtpPMHD) ---- */
+	A_ST(341, 1, 1, 0, 1),		/* #1  IntervalEndTime */
+	A_ST(341, 2, 2, 1, 7),		/* #2  ThresholdData12Id */
+	A_CNT(341, 3, 4, 3),		/* #3  TxGemFrames */
+	A_CNT(341, 4, 4, 7),		/* #4  RxGemFrames */
+	A_CNT(341, 5, 8, 11),		/* #5  RxPayloadBytes */
+	A_CNT(341, 6, 8, 19),		/* #6  TxPayloadBytes */
+	A_CNT(341, 7, 4, 27),		/* #7  EncryptKeyErrors */
+	/* ---- ME 65457: a vendor class no stock plugin models; the stock X111W answers its Get
+	 * rc=0 with an empty mask (production capture 2026-10-02), and so does this. ---- */
+	A_NO_ATTRS(65457),
 
 	/* ME 78 VLAN tagging operation configuration data ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 15. */
@@ -1095,6 +1200,14 @@ bool omci_me_mutable(u16 class_id)
 	case OMCI_ME_EXT_VLAN:
 	case OMCI_ME_GEM_TRAFFIC_DESC:
 	case OMCI_ME_MCAST_GEM_IW_TP:
+	case OMCI_ME_ETH_PM:
+	case OMCI_ME_ETH_PM2:
+	case OMCI_ME_THRESHOLD1:
+	case OMCI_ME_THRESHOLD2:
+	case OMCI_ME_ETH_PM3:
+	case OMCI_ME_MCAST_OPER_PROF:
+	case OMCI_ME_ETH_EXT_PM:
+	case OMCI_ME_GEM_CTP_PM:
 		return true;
 	default:
 		return false;
@@ -1150,13 +1263,17 @@ static const struct omci_farend_profile {
 	u8 vendor[4];		/* the OLT-G / identity vendor that selects it */
 	u8 omcc_version;	/* ONU2-G #2 when the identity leaves it to the far end */
 	u16 me[2][2];		/* class, instance this far end provisions on every ONU */
+	bool alloc_by_omci;	/* the data Alloc-ID comes by ME 262 alone, never Assign_Alloc-ID */
 } omci_farends[OMCI_FAREND_N] = {
 	[OMCI_FAREND_GENERIC] = { "generic", { 0 }, 0x80 },
 #ifdef CONFIG_OLT_ZTE
 	/* AXS's ZTE OLT (DC3, 2026-10-17) Sets ME 138 #0 and ME 340 on the VEIP of a
 	 * ZTE F670L, whose own binaries announce OMCC 0xa2 (V1.1.20P3N4D/P3N6B). */
+	/* Entel's ZTE (2026-10-21) assigns only Alloc-ID = ONU-ID by PLOAM and the data
+	 * Alloc-ID by ME 262; it grants it at once and deactivates an ONU that never
+	 * bursts there, every ~40 s. */
 	[OMCI_FAREND_ZTE] = { "zte", { 'Z', 'T', 'E', 'G' }, 0xa2,
-		{ { OMCI_ME_VOIP_CONFIG, 0 }, { OMCI_ME_TR069_SERVER, OMCI_VEIP_INST } } },
+		{ { OMCI_ME_VOIP_CONFIG, 0 }, { OMCI_ME_TR069_SERVER, OMCI_VEIP_INST } }, true },
 #endif
 };
 
@@ -1173,6 +1290,11 @@ static enum omci_farend omci_farend_detect(const struct omci_onu *o)
 		    !memcmp(o->olt_vendor_seen, omci_farends[f].vendor, 4))
 			return f;
 	return OMCI_FAREND_GENERIC;
+}
+
+bool omci_farend_alloc_by_omci(const struct omci_onu *o)
+{
+	return o && o->farend < OMCI_FAREND_N && omci_farends[o->farend].alloc_by_omci;
 }
 
 const char *omci_farend_name(const struct omci_onu *o)
@@ -1341,13 +1463,24 @@ void omci_me_reset_values(struct omci_onu *o)
 u8 omci_me_dense_len(u16 class_id)
 {
 	const struct omci_attr *a;
-	unsigned int end = 0;
+	unsigned int end = 0, held = 0;
 
-	for (a = omci_me_find(class_id); a && a->class_id == class_id; a++)
-		if ((a->src == OMCI_SRC_STORE || a->src == OMCI_SRC_CNT) &&
-		    (unsigned int)a->v + a->size > end)
-			end = (unsigned int)a->v + a->size;
-	return end > OMCI_STORE_BODY ? 0 : (u8)end;
+	for (a = omci_me_find(class_id); a && a->class_id == class_id; a++) {
+		unsigned int e = (unsigned int)a->v + a->size;
+
+		if ((a->src == OMCI_SRC_STORE || a->src == OMCI_SRC_CNT) && e > end)
+			end = e;
+		if (a->src == OMCI_SRC_STORE && e > held)
+			held = e;
+	}
+	/* The layout is stock's, counters included; only what is HELD must fit. */
+	return held > OMCI_STORE_BODY || end > 0xff ? 0 : (u8)end;
+}
+
+/* The octets of a dense body actually held: counters past the body are never stored. */
+static u8 omci_held_len(u8 dlen)
+{
+	return dlen > OMCI_STORE_BODY ? OMCI_STORE_BODY : dlen;
 }
 
 /* Create carries only SBC attributes, with no mask. A class ...
@@ -1381,7 +1514,7 @@ bool omci_store_create(struct omci_onu *o, u16 class_id, u16 inst,
 		memcpy(dense + a->v, body + pos, a->size);
 		pos += a->size;
 	}
-	return omci_store_put(o, class_id, inst, dense, dlen);
+	return omci_store_put(o, class_id, inst, dense, omci_held_len(dlen));
 }
 
 /* Can this ONU actually realise the value the OLT asks for in ...
@@ -1511,7 +1644,7 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	 * blob.  Derived from the table (16 for ME 268, as it always was). */
 	if (*unsupported || (mask & ~writable) || need > len ||
 	    (need && !values) ||
-	    (dlen && (!e || e->blen != dlen))) {
+	    (dlen && (!e || e->blen != omci_held_len(dlen)))) {
 		*failed = (u16)(mask & known);
 		return OMCI_RC_ATTR_FAILED;
 	}
@@ -2765,13 +2898,13 @@ enum omci_dgem omci_dgem_classify(const u8 *body, u8 blen,
 
 	/* explicit byte math: big-endian on the wire, and this same source is
 	 * compiled for MIPS-BE, ARM64-LE and x86. */
-	g = (u16)(((u16)body[0] << 8) | body[1]) & 0x0fff;
+	g = (u16)(((u16)body[0] << 8) | body[1]) & OMCI_VID_MASK;
 
 	if (!g)
 		return OMCI_DGEM_ZERO;
-	if (g == (omcc_gem & 0x0fff))
+	if (g == (omcc_gem & OMCI_VID_MASK))
 		return OMCI_DGEM_IS_OMCC;
-	if (g == (mcast_gem & 0x0fff))
+	if (g == (mcast_gem & OMCI_VID_MASK))
 		return OMCI_DGEM_IS_MCAST;
 	if (body[4] != GPON_GEM_BIDIR)
 		return OMCI_DGEM_NOT_BIDIR;
@@ -2794,21 +2927,66 @@ const char *omci_dgem_name(enum omci_dgem v)
 	return "?";
 }
 
+static const struct omci_me_inst *omci_store_get(const struct omci_onu *o, u16 class_id,
+						 u16 inst)
+{
+	u16 i;
+
+	for (i = 0; i < OMCI_STORE_MAX; i++)
+		if (o->store[i].used && o->store[i].class_id == class_id &&
+		    o->store[i].inst == inst)
+			return &o->store[i];
+	return NULL;
+}
+
+/* The GEM CTP instance of the service whose bridge port filters @vid: ME 84 shares
+ * its ME 47's instance, whose TP (#3 type 5, #4 pointer) is a GEM IW TP (ME 266),
+ * whose #1 is the GEM CTP -- G.988 9.3.4, 9.3.11, 9.2.4.  -> false when none does. */
+static bool omci_wan_gem_inst(const struct omci_onu *o, u16 vid, u16 *ctp)
+{
+	u16 i, k;
+
+	for (i = 0; i < OMCI_STORE_MAX; i++) {
+		const struct omci_me_inst *f = &o->store[i], *bp, *iw;
+
+		if (!f->used || f->class_id != OMCI_ME_VLAN_TAG_FILTER || f->blen < 26)
+			continue;
+		for (k = 0; k < f->body[25] && k < 12; k++)
+			if ((((u16)f->body[2 * k] << 8 | f->body[2 * k + 1]) & OMCI_VID_MASK) == vid)
+				break;
+		if (k == f->body[25] || k == 12)
+			continue;
+		bp = omci_store_get(o, OMCI_ME_MAC_BRIDGE_PORT, f->inst);
+		if (!bp || bp->blen < 6 || bp->body[3] != OMCI_BRIDGE_TP_GEM_IW)
+			continue;
+		iw = omci_store_get(o, OMCI_ME_GEM_IW_TP, (u16)bp->body[4] << 8 | bp->body[5]);
+		if (!iw || iw->blen < 2)
+			continue;
+		*ctp = (u16)iw->body[0] << 8 | iw->body[1];
+		return true;
+	}
+	return false;
+}
+
 void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 				u16 mcast_gem, struct omci_data_binding *binding)
 {
-	u16 i;
+	u16 i, wan_ctp = 0, vid;
+	bool want_ctp;
 
 	if (!binding)
 		return;
 	memset(binding, 0, sizeof(*binding));
 	if (!o)
 		return;
+	vid = ((u16)o->id.wan_vlan[0] << 8 | o->id.wan_vlan[1]) & OMCI_VID_MASK;
+	want_ctp = vid && omci_wan_gem_inst(o, vid, &wan_ctp);
 	for (i = 0; i < OMCI_STORE_MAX; i++) {
 		const struct omci_me_inst *e = &o->store[i];
 		u16 port_id, tcont;
 
 		if (!e->used || e->class_id != OMCI_ME_GEM_CTP ||
+		    (want_ctp && e->inst != wan_ctp) ||
 		    omci_dgem_classify(e->body, e->blen, omcc_gem, mcast_gem,
 				       &port_id) != OMCI_DGEM_YES)
 			continue;

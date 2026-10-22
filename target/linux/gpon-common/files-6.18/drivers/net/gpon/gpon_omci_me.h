@@ -264,6 +264,8 @@ struct omci_onu {
 	 * twelve arms ever since.  A container moved without its consumers. */
 	u16	audit_reads;		/* DS OMCI reads since the OLT last PROVISIONED */
 	u8	mds_tries;		/* how far the adaptive MDS walk has stepped */
+	bool	provisioned;		/* a config applied since the last MIB-Reset: the
+					 * OLT holds our MIB, so the walk must not step */
 	/* The walk's knobs, set by the shell at init so a bisect can turn the
 	 * shipped behaviour off.  They live HERE, not in the shell's call, so
 	 * the "GET arm and nowhere else" property is inside the core where a

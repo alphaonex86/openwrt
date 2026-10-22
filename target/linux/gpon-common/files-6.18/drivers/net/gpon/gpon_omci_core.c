@@ -225,7 +225,7 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
  */
 void omci_mds_walk(struct omci_onu *o)
 {
-	if (!o->mds_adapt || !o->mds_adapt_reads)
+	if (!o->mds_adapt || !o->mds_adapt_reads || o->provisioned)
 		return;
 	if (++o->audit_reads < o->mds_adapt_reads)
 		return;
@@ -323,6 +323,7 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		/* a provisioning event is the walk's GOAL, reached: rearm it */
 		o->audit_reads = 0;
 		o->mds_tries = 0;
+		o->provisioned = false;
 		/* ★★★ AND THE VEIP OPER-UP AVC MUST BE RE-EMITTED. A MIB-Reset
 		 * dev/MEASURED-gpon_omci_core.c.md sec 12. */
 		o->avc_veip_up_sent = false;
@@ -353,9 +354,11 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		if (resp[8] == OMCI_RC_OK) {
 			if (accepted)
 				accepted->kind = OMCI_ACCEPT_CONFIG;
-			/* the OLT provisioned: the walk reached its goal */
+			/* the OLT provisioned: the walk reached its goal and stops
+			 * (an OLT auditing a provisioned MIB, 2026-10-22 Entel ZTE) */
 			o->audit_reads = 0;
 			o->mds_tries = 0;
+			o->provisioned = true;
 		}
 		break;
 	case OMCI_MT_GET_ALL_ALARMS:

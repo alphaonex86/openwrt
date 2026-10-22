@@ -82,6 +82,12 @@ struct gpon_olt_capture {
 
 void gpon_olt_capture_reset(struct gpon_olt_capture *c);
 
+/* An US OMCI PDU the ONU sends: kept unless it is a response (AK), which
+ * gpon_olt_capture_exchange() keeps with its request. So the ONU's own AVCs,
+ * alarms and Test Results are in the dump too. */
+void gpon_olt_capture_own(struct gpon_olt_capture *c, u64 t_us, u8 ostate,
+			  const u8 *pdu, unsigned int len);
+
 /* @len above GPON_OLT_PDU stores the first GPON_OLT_PDU and marks it cut. */
 void gpon_olt_capture_add(struct gpon_olt_capture *c, u64 t_us, u8 ostate,
 			  enum gpon_olt_dir dir, const u8 *pdu,

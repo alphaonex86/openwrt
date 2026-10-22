@@ -24,6 +24,13 @@ void gpon_olt_capture_reset(struct gpon_olt_capture *c)
 	c->dropped = 0;
 }
 
+void gpon_olt_capture_own(struct gpon_olt_capture *c, u64 t_us, u8 ostate,
+			  const u8 *pdu, unsigned int len)
+{
+	if (pdu && len > 2 && !(pdu[2] & 0x20))
+		gpon_olt_capture_add(c, t_us, ostate, GPON_OLT_US, pdu, len);
+}
+
 void gpon_olt_capture_add(struct gpon_olt_capture *c, u64 t_us, u8 ostate,
 			  enum gpon_olt_dir dir, const u8 *pdu,
 			  unsigned int len)

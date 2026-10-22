@@ -2204,6 +2204,8 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 
 /* US OMCI TX (Stage C): the 48-byte PDU (trailer + MIC ...
  * dev/MEASURED-cortina-gpon.c.md sec 128. */
+static void cg_capture_own(struct cortina_gpon *cg, const u8 *pdu48);
+
 static int cg_omci_tx(struct cortina_gpon *cg, const u8 *pdu48)
 {
 	int ret = -ENODEV;
@@ -2215,6 +2217,7 @@ static int cg_omci_tx(struct cortina_gpon *cg, const u8 *pdu48)
 		dev_warn_ratelimited(cg->dev, "US OMCI TX failed (%d)\n", ret);
 	} else {
 		cg->omci_tx++;
+		cg_capture_own(cg, pdu48);
 		/* The frame is on its way to the PUC; read the OMCI-specific
 		 * control-packet counter once it has arrived, while its
 		 * clear-on-read window still holds it (cg_puc_ctrl_sample). */
@@ -2439,6 +2442,17 @@ static int cg_unknown_show(struct seq_file *s, void *v)
 	return cg_capture_show(s, &cg_olt_unknown);
 }
 #endif /* CONFIG_GPON_OLT_DIAG */
+
+/* Every caller sends with cg->omci_lock released. */
+static void cg_capture_own(struct cortina_gpon *cg, const u8 *pdu48)
+{
+#ifdef CONFIG_GPON_OLT_DIAG
+	spin_lock_bh(&cg->omci_lock);
+	gpon_olt_capture_own(&cg_olt_cap, div_u64(ktime_get_boottime_ns(), 1000),
+			     cg_olt_ostate(cg), pdu48, OMCI_LEN);
+	spin_unlock_bh(&cg->omci_lock);
+#endif
+}
 
 /* Per-message OMCI trace. DEFAULT OFF. The always-on ...
  * dev/MEASURED-cortina-gpon.c.md sec 98. */

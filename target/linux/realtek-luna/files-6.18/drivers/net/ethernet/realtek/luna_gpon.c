@@ -7002,6 +7002,8 @@ void luna_omci_set_optical(u16 rx, u16 tx)
 }
 EXPORT_SYMBOL(luna_omci_set_optical);
 
+static void luna_omci_capture_own(const u8 *msg, int n);
+
 static int luna_omci_send(const u8 *msg, int n)
 {
 	int ret;
@@ -7009,10 +7011,12 @@ static int luna_omci_send(const u8 *msg, int n)
 	luna_mon_frame(GPON_MON_OMCI, 1, msg, n);
 	ret = luna_omci.tx(luna_omci.cookie, msg, n);
 
-	if (ret)
+	if (ret) {
 		luna_omci.tx_errors++;
-	else
+	} else {
 		luna_omci.tx_sent++;
+		luna_omci_capture_own(msg, n);
+	}
 	return ret;
 }
 
@@ -7229,6 +7233,19 @@ static int ploamcap_proc_show(struct seq_file *s, void *v)
 	return olt_capture_show(s, &luna_ploam_cap, &luna_ploam_cap_lock);
 }
 #endif /* CONFIG_GPON_OLT_DIAG */
+
+/* Every caller sends with luna_omci_lock released. */
+static void luna_omci_capture_own(const u8 *msg, int n)
+{
+#ifdef CONFIG_GPON_OLT_DIAG
+	unsigned long flags;
+
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	gpon_olt_capture_own(&luna_olt_cap, div_u64(ktime_get_boottime_ns(), 1000),
+			     (u8)luna_ploam.state, msg, n);
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+#endif
+}
 
 static void luna_omci_poll(void)
 {

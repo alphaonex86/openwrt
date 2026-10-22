@@ -809,7 +809,7 @@ static int rtl9602c_eth_set_mac_address(struct net_device *ndev, void *p)
 	/* Keep the WAN (gpon0) identity tracking the board MAC provisioned onto eth0
 	 * (rtk_factory), applying the stock model offset: WAN = LAN + wan_mac_offset
 	 * (see rtl9602c_wan_mac). This is the MAC the ISP/OLT identifies the ONU by. */
-	if (ep->wan_ndev) {
+	if (ep->wan_ndev && ep->wan_ndev->addr_assign_type != NET_ADDR_SET) {
 		u8 wmac[ETH_ALEN];
 
 		rtl9602c_wan_mac(wmac, ndev->dev_addr);
@@ -1093,18 +1093,29 @@ static int rtl9602c_eth_wan_open(struct net_device *ndev)
 
 	/* Set the WAN identity the OLT/ISP uses to recognise this ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 128. */
-	if (ep && ep->ndev && is_valid_ether_addr(ep->ndev->dev_addr)) {
+	/* An assigned MAC (an ISP's original ONU, cloned: operator 2026-10-22) is kept across ifup; the
+	 * board-derived one is only the default. */
+	if (ep && ep->ndev && is_valid_ether_addr(ep->ndev->dev_addr) && ndev->addr_assign_type != NET_ADDR_SET) {
 		u8 wmac[ETH_ALEN];
 
 		rtl9602c_wan_mac(wmac, ep->ndev->dev_addr);
 		eth_hw_addr_set(ndev, wmac);
-		luna_omci_set_wan_mac(wmac);
 	}
+	luna_omci_set_wan_mac(ndev->dev_addr);
 	/* RX/TX rings + NAPI are owned by eth0 (shared HW); open just enables the queue and
 	 * holds carrier up so netifd runs the DHCP client. */
 	netif_carrier_on(ndev);
 	netif_start_queue(ndev);
 	return 0;
+}
+
+static int rtl9602c_eth_wan_set_mac(struct net_device *ndev, void *addr)
+{
+	int rc = eth_mac_addr(ndev, addr);
+
+	if (!rc)
+		luna_omci_set_wan_mac(ndev->dev_addr);	/* the OLT reads the WAN MAC through OMCI too */
+	return rc;
 }
 
 static int rtl9602c_eth_wan_stop(struct net_device *ndev)
@@ -1141,7 +1152,7 @@ static const struct net_device_ops rtl9602c_eth_wan_ops = {
 	.ndo_open		= rtl9602c_eth_wan_open,
 	.ndo_stop		= rtl9602c_eth_wan_stop,
 	.ndo_start_xmit		= rtl9602c_eth_wan_xmit,
-	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_set_mac_address	= rtl9602c_eth_wan_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_vlan_rx_add_vid	= rtl9602c_wan_vid_add,
 	.ndo_vlan_rx_kill_vid	= rtl9602c_wan_vid_kill,

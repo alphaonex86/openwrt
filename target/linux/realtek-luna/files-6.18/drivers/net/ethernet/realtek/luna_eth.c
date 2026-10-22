@@ -1985,7 +1985,7 @@ static int eth_set_mac_address(struct net_device *ndev, void *addr)
 	 * board MAC is provisioned onto eth0 well after probe, and a gpon0 left
 	 * holding the placeholder it was created with would present the OLT an
 	 * address no longer related to the board's. */
-	if (ep->wan_ndev) {
+	if (ep->wan_ndev && ep->wan_ndev->addr_assign_type != NET_ADDR_SET) {
 		u8 wmac[ETH_ALEN];
 
 		luna_eth_wan_hwaddr(ep, wmac);
@@ -2130,17 +2130,26 @@ static int luna_eth_wan_open(struct net_device *ndev)
 	struct luna_eth *ep = *(struct luna_eth **)netdev_priv(ndev);
 	u8 wmac[ETH_ALEN];
 
-	if (is_valid_ether_addr(ep->ndev->dev_addr)) {
-		luna_eth_wan_hwaddr(ep, wmac);
+	if (is_valid_ether_addr(ep->ndev->dev_addr) && ndev->addr_assign_type != NET_ADDR_SET) {
+		luna_eth_wan_hwaddr(ep, wmac);	/* the default: an assigned (cloned) MAC is kept */
 		eth_hw_addr_set(ndev, wmac);
-		luna_omci_set_wan_mac(wmac);
 	}
+	luna_omci_set_wan_mac(ndev->dev_addr);
 	netif_carrier_on(ndev);
 	netif_start_queue(ndev);
 	netdev_info(ndev, "WAN up: identity %pM (eth0 %pM + %u), US stream %u, fibre port %u\n",
 		    ndev->dev_addr, ep->ndev->dev_addr, ep->c->wan_mac_offset,
 		    GPON_DATA_FLOW, ep->c->sw_map->pon_port);
 	return 0;
+}
+
+static int luna_eth_wan_set_mac(struct net_device *ndev, void *addr)
+{
+	int rc = eth_mac_addr(ndev, addr);
+
+	if (!rc)
+		luna_omci_set_wan_mac(ndev->dev_addr);	/* the OLT reads the WAN MAC through OMCI too */
+	return rc;
 }
 
 static int luna_eth_wan_stop(struct net_device *ndev)
@@ -2157,7 +2166,7 @@ static const struct net_device_ops luna_eth_wan_ops = {
 	.ndo_open		= luna_eth_wan_open,
 	.ndo_stop		= luna_eth_wan_stop,
 	.ndo_start_xmit		= luna_eth_wan_xmit,
-	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_set_mac_address	= luna_eth_wan_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 #if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)
 	.ndo_setup_tc		= luna_flow_setup_tc,

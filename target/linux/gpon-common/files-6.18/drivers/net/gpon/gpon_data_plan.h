@@ -75,7 +75,31 @@ struct gpon_data_want {
 	u16	gem;		/* ME 268 GEM Port-ID, as read */
 	u16	omcc_alloc;	/* the Alloc-ID actually bound to the OMCC T-CONT */
 	bool	omcc_up;	/* the OMCC transport is up */
+	bool	unsettled;	/* (alloc, gem) changed too recently: gpon_data_settled() */
 };
+
+/* ★★ A BINDING IS INSTALLED ONCE IT HOLDS STILL. Entel's ZTE creates four GEMs before the VLAN filters that tell
+ * the WAN's apart, so the binding moved 353 -> 354 within ms; the REPLACE that followed left the old alloc's
+ * grants unanswered and the OLT deactivated the ONU 0.4-0.7 s later (field X111W, 3 of 3 boots, 2026-10-23). */
+struct gpon_data_settle {
+	u16	alloc, gem;
+	bool	alloc_known, seen;
+	u32	since;
+};
+
+/* Has @want held the same (alloc, gem) for @need ticks at @now? Time is the caller's. */
+static inline bool gpon_data_settled(struct gpon_data_settle *s, const struct gpon_data_want *want,
+				     u32 now, u32 need)
+{
+	if (!s->seen || s->alloc != want->alloc || s->gem != want->gem || s->alloc_known != want->alloc_known) {
+		s->seen = true;
+		s->alloc = want->alloc;
+		s->gem = want->gem;
+		s->alloc_known = want->alloc_known;
+		s->since = now;
+	}
+	return now - s->since >= need;
+}
 
 /* The verdict.  Five outcomes, because "do nothing" and "do nothing YET" are
  * different facts and a shell that collapses them cannot say why the data path
@@ -162,6 +186,8 @@ gpon_data_plan_decide(const struct gpon_data_armed *armed,
 		return stale ? GPON_DATA_TEARDOWN : GPON_DATA_WAIT;
 	if (!want->omcc_up)
 		return GPON_DATA_WAIT;
+	if (want->unsettled)
+		return armed->installed && !stale ? GPON_DATA_KEEP : GPON_DATA_WAIT;
 	if (stale)
 		return GPON_DATA_REPLACE;
 	if (armed->installed)

@@ -3074,6 +3074,7 @@ void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 				       &port_id) != OMCI_DGEM_YES)
 			continue;
 		binding->gem_present = true;
+		binding->provisional = vid && !want_ctp;
 		binding->gem_inst = e->inst;
 		binding->gem_port = port_id;
 		binding->direction = e->body[4];

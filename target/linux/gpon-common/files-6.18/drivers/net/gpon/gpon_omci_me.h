@@ -785,6 +785,7 @@ const char *omci_dgem_name(enum omci_dgem v);
 struct omci_data_binding {
 	bool gem_present;
 	bool alloc_known;
+	bool provisional;	/* a WAN VLAN is declared and no filter names it yet: the first GEM, for now */
 	u8 direction;
 	u16 gem_inst;
 	u16 gem_port;

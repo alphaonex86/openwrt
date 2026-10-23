@@ -150,6 +150,7 @@ static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
 #define LUNA_IDLE_TCONT_N	7
 #define LUNA_SVC_FLOW_FIRST	4	/* pool T-CONT 9 + i carries its service on flow 4 + i */
 #define LUNA_SVC_VIDS		12	/* VIDs the services publish to the WAN TX path */
+#define LUNA_DATA_SETTLE_TICKS	50	/* ~0.5 s of polls: the binding holds still before it is installed */
 
 /* PLOAM message path (G.984.3 management channel driving the ...
  * dev/MEASURED-luna_gpon.c.md sec 4. */
@@ -8054,6 +8055,7 @@ static void luna_data_reconcile(void)
 	struct omci_data_binding binding;
 	struct omci_vlan_service svc[LUNA_SVC_VIDS];
 	unsigned int nsvc = 0;
+	static struct gpon_data_settle settle;
 	struct gpon_data_armed visible = luna_data.armed;
 	struct gpon_data_want want = { 0 };
 	enum gpon_data_plan plan;
@@ -8083,6 +8085,8 @@ static void luna_data_reconcile(void)
 	 * a false claim that the original CAM installation completed. */
 	if (luna_data_dirty())
 		visible.alloc_bound = true;
+	want.unsettled = binding.provisional &&
+			 !gpon_data_settled(&settle, &want, gpon_fsm_ticks, LUNA_DATA_SETTLE_TICKS);
 	plan = gpon_data_plan_decide(&visible, &want);
 #ifdef CONFIG_GPON_GEM_DIAG
 	luna_gem_diag_report(&visible, &want, &binding);

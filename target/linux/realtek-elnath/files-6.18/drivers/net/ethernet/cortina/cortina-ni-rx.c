@@ -93,12 +93,12 @@ MODULE_PARM_DESC(rx_decoupled_bringup,
 		 "drive the datapath bring-up from the 1Hz poll so LAN ports come up without an eth0 cable (default on)");
 
 /* ★ build88: A/B which CPU-EPP ring NAPI reads descriptors from - 0 = the LOW ring at
- * PADDR(0x7200)=0x0bc48000 (default/current); 1 = the HIGH ring at PADDR_HI(0x7220)=
+ * PADDR(0x7200)=0x0bc48000 (default/current); 1 = CPU port 1's ring at PADDR_START(1,q)(0x7220)=
  * 0x0bc4a000.  The engine advances wptr but the LOW ring reads poison, so the engine
  * may write descriptors into the HIGH ring; set rx_ring_hi=1 to test reading it. */
 static bool rx_ring_hi;
 module_param(rx_ring_hi, bool, 0644);
-MODULE_PARM_DESC(rx_ring_hi, "NAPI reads the HIGH (PADDR_HI 0x0bc4a000) CPU-EPP ring instead of the LOW one");
+MODULE_PARM_DESC(rx_ring_hi, "NAPI reads CPU port 1's ring (0x0bc4a000) instead of CPU port 0's");
 
 /* ★ FBM pool ENABLE/FILL/PRELOAD gate - DEFAULT OFF because ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 7. */
@@ -3642,10 +3642,8 @@ static void cortina_ni_rx_epp_init(struct cortina_ni *ni)
 
 		writel(vphys, ni_base(ni) +
 		       CA_NI_QM_EPP64_PADDR_START(CA_NI_RX_CPU_PORT, i));
-		/* ★★★ build80: the SECOND per-voq ring buffer (PADDR_HI = PADDR + 0x2000).
-		 * Stock sets it; ours was 0 -> the writeback engine wrote ZERO descriptors. */
 		writel(vphys + CA_NI_RX_RING_HI_OFFSET, ni_base(ni) +
-		       CA_NI_QM_EPP64_PADDR_HI(i));
+		       CA_NI_QM_EPP64_PADDR_START(CA_NI_RX_WB_CPU_PORT, i));
 
 		/* adopt the HW write pointer (0 after reset) as this voq's start */
 		wptr = cortina_ni_rx_wptr_voq(ni, i);
@@ -5010,7 +5008,7 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 
 		/* ★ DECISIVE: dump BOTH per-voq rings' voq0 first 16 entries - LOW =
 		 * PADDR(0x7200)=0x0bc48000 (where NAPI reads) vs HIGH =
-		 * PADDR_HI(0x7220)=0x0bc4a000.  wptr advanced 38 while NAPI's LOW read
+		 * PADDR_START(1,q)(0x7220)=0x0bc4a000.  wptr advanced 38 while NAPI's LOW read
 		 * poison, so the engine's real descriptors are in whichever is NOT deadbeef. */
 		{
 			unsigned int hi = CA_NI_RX_RING_HI_OFFSET / sizeof(__le64);

@@ -1818,24 +1818,11 @@ enum cortina_ni_win {
  *     ring, 24-bit meaningful, wrapping at the ring size (0x400). --- */
 #define CA_NI_QM_EPP64_WRPTR(p, q)	(0x7000 + 4 * (8 * (p) + (q)))
 #define CA_NI_QM_EPP64_RDPTR(p, q)	(0x7100 + 4 * (8 * (p) + (q)))
+/* 8 CPU ports x 8 voqs: stock programs ports 0..3 (live read, 2026-10-22). */
 #define CA_NI_QM_EPP64_PADDR_START(p, q) (0x7200 + 4 * (8 * (p) + (q)))
-/* ★★★ build80: the SECOND per-voq CPU-EPP64 ring buffer (PADDR_HI @0x7220), = PADDR +
- * 0x2000.  Stock live capture: without PADDR_HI the writeback engine writes ZERO
- * descriptors (wptr advances but every slot stays poison/0).  Per-voq, same 0x400
- * stride as PADDR: voq q -> 0x7220+q*4 = ring_base+0x2000+q*0x400. */
-/* ★★ PER-VOQ, ONE CPU PORT -- the signature says so now.  It used to take
- * (p, q) with the same 8*p term as PADDR_START, which made PADDR_HI(0,q)
- * numerically identical to PADDR_START(1,q) and produced EIGHT open
- * collisions in ni_reg_alias_test.  The p dimension was fiction: the note
- * above already states "voq q -> 0x7220+q*4", and the driver only ever
- * passes CA_NI_RX_CPU_PORT (= 0).  Narrowing it to (q) removes the phantom
- * aliasing and makes a p=1 caller a COMPILE ERROR instead of a silent
- * overlap.
- * ⚠ NOT proven, and left alone: whether PADDR_START's own p dimension is
- * real.  If it is, 0x7220 is genuinely two registers and the hardware
- * resolves it one way -- but nothing here uses p>0, so nothing depends on
- * the answer today. */
-#define CA_NI_QM_EPP64_PADDR_HI(q)	(0x7220 + 4 * (q))
+/* CPU port 1 (stock's eth1): the writeback engine fills its rings, so they are
+ * programmed too, at ring_base + 0x2000 like stock (build80: zero descriptors without). */
+#define CA_NI_RX_WB_CPU_PORT		1
 #define CA_NI_RX_RING_HI_OFFSET		0x2000u
 #define  CA_NI_QM_EPP64_PTR		GENMASK(23, 0)
 
@@ -1850,8 +1837,7 @@ enum cortina_ni_win {
  * it and cannot admit (0x6900=0).  8 per-voq rings laid out contiguously in the
  * reserved DDR region; ring[voq*128 + slot].  NAPI drains all 8. */
 #define CA_NI_RX_VOQ_COUNT		8
-/* build80: 0x4000 = the LOW PADDR ring (0x2000) + the HIGH PADDR_HI ring (0x2000).
- * The memremap + poison must cover BOTH so the PADDR_HI buffers are valid poisoned DDR. */
+/* 0x4000 = CPU port 0's rings + CPU port 1's rings, both memremapped and poisoned. */
 #define CA_NI_RX_RING_TOTAL_BYTES	(2 * CA_NI_RX_VOQ_COUNT * CA_NI_RX_RING_BYTES) /* 0x4000 */
 #define CA_NI_RX_RING_SLOTS_PER_VOQ	CA_NI_RX_EPP_PER_VOQ	/* __le64 slots per voq */
 /* RMU0 drop counters (Elnath, from the 0x6900 anchor) - bisect: climb => frame

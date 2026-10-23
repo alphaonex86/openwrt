@@ -50,6 +50,7 @@ size_t ocl_bytes(size_t text_len);
 size_t ocl_encode(u8 *out, size_t cap, const struct ocl_rec *r);
 int ocl_parse(const u8 *p, size_t avail, struct ocl_rec *r);
 const char *ocl_kind_name(u8 kind);
+int ocl_ended_unclean(u8 last_kind);
 size_t ocl_keep(const u8 *log, size_t used, size_t *offs, size_t cap);
 int ocl_behind_our_kernel(const u8 *uimage_hdr, const char *release, u64 kernel_ofs, u64 region_ofs);
 

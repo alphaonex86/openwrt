@@ -98,6 +98,12 @@ int ocl_parse(const u8 *p, size_t avail, struct ocl_rec *r)
 	return OCL_RECORD;
 }
 
+/* A boot ended unclean when its last record says neither an orderly reboot nor a crash. */
+int ocl_ended_unclean(u8 last_kind)
+{
+	return last_kind && last_kind != OCL_CLEAN && last_kind != OCL_PANIC && last_kind != OCL_PRETIMEOUT;
+}
+
 const char *ocl_kind_name(u8 kind)
 {
 	static const char *const names[] = { "?", "boot", "clean", "panic", "pretimeout", "unclean", "gpon" };

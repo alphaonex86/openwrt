@@ -2,7 +2,7 @@
 /*
  * Crash records on the reserved "crashlog" partition, read back after any reset:
  * a boot record per boot, a clean record per orderly reboot, the kernel log tail on
- * panic. A boot record left without either is an unclean end (power cut or watchdog).
+ * panic. A boot that ends without either is an unclean end (power cut or watchdog).
  * A driver adds a note it must not lose (a GPON O5 loss) through onu_crashlog_note().
  * The region is written only when it is the free tail of a partition holding THIS
  * OpenWrt release's kernel: never behind a vendor kernel, however erased.
@@ -198,11 +198,12 @@ static void ocl_attach(struct mtd_info *img, struct mtd_info *mtd)
 	}
 	if ((foreign || ocl.size - ocl.end < MIN_FREE) && compact(off))
 		pr_err("onu_crashlog: %s could not be compacted\n", mtd->name);
-	if (last.kind == OCL_BOOT) {
+	if (ocl_ended_unclean(last.kind)) {
 		size_t n = scnprintf(text_buf, sizeof(text_buf),
 				     "previous boot seq=%u ended without a reboot record or a panic: "
-				     "power cut or watchdog\n%.*s", last.seq, (int)min_t(u16, last.len, 512),
-				     (const char *)last.text);
+				     "power cut or watchdog; its last record seq=%u kind=%s:\n%.*s",
+				     last.boot_seq, last.seq, ocl_kind_name(last.kind),
+				     (int)min_t(u16, last.len, 512), (const char *)last.text);
 		append(OCL_UNCLEAN, text_buf, n, false);
 	}
 	append(OCL_BOOT, text_buf, build_text(text_buf, sizeof(text_buf), "event=boot\n"), false);

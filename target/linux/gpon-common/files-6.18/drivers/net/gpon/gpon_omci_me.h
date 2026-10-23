@@ -801,6 +801,21 @@ void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids);
 void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 				u16 mcast_gem, struct omci_data_binding *binding);
 
+/* One service the OLT bridged on a VLAN (Entel's ZTE: one GEM and T-CONT per VLAN): the VID its bridge
+ * port filters, the data GEM carrying it, and the Alloc-ID of that GEM's T-CONT (alloc_known false until
+ * ME 262 names it). */
+struct omci_vlan_service {
+	u16 vid;
+	u16 gem_port;
+	u16 alloc_id;
+	bool alloc_known;
+};
+
+/* Every (VID, data GEM) pair ME 84 -> ME 47 -> ME 266 -> ME 268 resolves to, at most @max, in store
+ * order. Caller holds the store's serialization. -> the count written. */
+unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
+				struct omci_vlan_service *svc, unsigned int max);
+
 /* Walk the provisioned store and return the WAN data GEM Port-ID, if the OLT
  * has created one.  -> false when it has not, which is the NORMAL state before
  * provisioning and must never be read as a failure. */

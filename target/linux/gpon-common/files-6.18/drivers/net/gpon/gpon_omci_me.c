@@ -2942,30 +2942,83 @@ static const struct omci_me_inst *omci_store_get(const struct omci_onu *o, u16 c
 /* The GEM CTP instance of the service whose bridge port filters @vid: ME 84 shares
  * its ME 47's instance, whose TP (#3 type 5, #4 pointer) is a GEM IW TP (ME 266),
  * whose #1 is the GEM CTP -- G.988 9.3.4, 9.3.11, 9.2.4.  -> false when none does. */
+static bool omci_filter_ctp(const struct omci_onu *o, const struct omci_me_inst *f, u16 *ctp)
+{
+	const struct omci_me_inst *bp, *iw;
+
+	bp = omci_store_get(o, OMCI_ME_MAC_BRIDGE_PORT, f->inst);
+	if (!bp || bp->blen < 6 || bp->body[3] != OMCI_BRIDGE_TP_GEM_IW)
+		return false;
+	iw = omci_store_get(o, OMCI_ME_GEM_IW_TP, (u16)bp->body[4] << 8 | bp->body[5]);
+	if (!iw || iw->blen < 2)
+		return false;
+	*ctp = (u16)iw->body[0] << 8 | iw->body[1];
+	return true;
+}
+
+static u16 omci_filter_vid(const struct omci_me_inst *f, u16 k)
+{
+	return ((u16)f->body[2 * k] << 8 | f->body[2 * k + 1]) & OMCI_VID_MASK;
+}
+
+static bool omci_is_vlan_filter(const struct omci_me_inst *f)
+{
+	return f->used && f->class_id == OMCI_ME_VLAN_TAG_FILTER && f->blen >= 26;
+}
+
 static bool omci_wan_gem_inst(const struct omci_onu *o, u16 vid, u16 *ctp)
 {
 	u16 i, k;
 
 	for (i = 0; i < OMCI_STORE_MAX; i++) {
-		const struct omci_me_inst *f = &o->store[i], *bp, *iw;
+		const struct omci_me_inst *f = &o->store[i];
 
-		if (!f->used || f->class_id != OMCI_ME_VLAN_TAG_FILTER || f->blen < 26)
+		if (!omci_is_vlan_filter(f))
 			continue;
 		for (k = 0; k < f->body[25] && k < 12; k++)
-			if ((((u16)f->body[2 * k] << 8 | f->body[2 * k + 1]) & OMCI_VID_MASK) == vid)
-				break;
-		if (k == f->body[25] || k == 12)
-			continue;
-		bp = omci_store_get(o, OMCI_ME_MAC_BRIDGE_PORT, f->inst);
-		if (!bp || bp->blen < 6 || bp->body[3] != OMCI_BRIDGE_TP_GEM_IW)
-			continue;
-		iw = omci_store_get(o, OMCI_ME_GEM_IW_TP, (u16)bp->body[4] << 8 | bp->body[5]);
-		if (!iw || iw->blen < 2)
-			continue;
-		*ctp = (u16)iw->body[0] << 8 | iw->body[1];
-		return true;
+			if (omci_filter_vid(f, k) == vid && omci_filter_ctp(o, f, ctp))
+				return true;
 	}
 	return false;
+}
+
+/* The Alloc-ID ME 262 gave the T-CONT a GEM CTP (#2) names. -> false while none is written. */
+static bool omci_ctp_alloc(const struct omci_onu *o, const struct omci_me_inst *e, u16 *alloc)
+{
+	u16 tcont = ((u16)e->body[2] << 8) | e->body[3];
+
+	if (tcont < 0x8000 || tcont >= 0x8000 + o->cap.tcont_n ||
+	    !(o->tcont_alloc_written & (1u << (tcont - 0x8000))))
+		return false;
+	*alloc = o->tcont_alloc[tcont - 0x8000];
+	return true;
+}
+
+unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
+				struct omci_vlan_service *svc, unsigned int max)
+{
+	unsigned int n = 0;
+	u16 i, k;
+
+	for (i = 0; o && i < OMCI_STORE_MAX; i++) {
+		const struct omci_me_inst *f = &o->store[i], *e;
+		u16 ctp, port_id, alloc = 0;
+		bool alloc_known;
+
+		if (!omci_is_vlan_filter(f) || !omci_filter_ctp(o, f, &ctp))
+			continue;
+		e = omci_store_get(o, OMCI_ME_GEM_CTP, ctp);
+		if (!e || omci_dgem_classify(e->body, e->blen, omcc_gem, mcast_gem, &port_id) != OMCI_DGEM_YES)
+			continue;
+		alloc_known = omci_ctp_alloc(o, e, &alloc);
+		for (k = 0; k < f->body[25] && k < 12 && n < max; k++, n++) {
+			svc[n].vid = omci_filter_vid(f, k);
+			svc[n].gem_port = port_id;
+			svc[n].alloc_id = alloc;
+			svc[n].alloc_known = alloc_known;
+		}
+	}
+	return n;
 }
 
 void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids)
@@ -2976,10 +3029,10 @@ void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids)
 	for (i = 0; i < OMCI_STORE_MAX; i++) {
 		const struct omci_me_inst *f = &o->store[i];
 
-		if (!f->used || f->class_id != OMCI_ME_VLAN_TAG_FILTER || f->blen < 26)
+		if (!omci_is_vlan_filter(f))
 			continue;
 		for (k = 0; k < f->body[25] && k < 12; k++)
-			gpon_vlan_set(vids, ((u16)f->body[2 * k] << 8 | f->body[2 * k + 1]) & OMCI_VID_MASK);
+			gpon_vlan_set(vids, omci_filter_vid(f, k));
 	}
 	for (i = 0; i < GPON_EXT_VLAN_MAX; i++) {
 		if (!o->vlan.ext[i].used)
@@ -3013,7 +3066,7 @@ void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 	want_ctp = vid && omci_wan_gem_inst(o, vid, &wan_ctp);
 	for (i = 0; i < OMCI_STORE_MAX; i++) {
 		const struct omci_me_inst *e = &o->store[i];
-		u16 port_id, tcont;
+		u16 port_id;
 
 		if (!e->used || e->class_id != OMCI_ME_GEM_CTP ||
 		    (want_ctp && e->inst != wan_ctp) ||
@@ -3024,13 +3077,8 @@ void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 		binding->gem_inst = e->inst;
 		binding->gem_port = port_id;
 		binding->direction = e->body[4];
-		tcont = ((u16)e->body[2] << 8) | e->body[3];
-		binding->tcont_inst = tcont;
-		if (tcont >= 0x8000 && tcont < 0x8000 + o->cap.tcont_n &&
-		    (o->tcont_alloc_written & (1u << (tcont - 0x8000)))) {
-			binding->alloc_known = true;
-			binding->alloc_id = o->tcont_alloc[tcont - 0x8000];
-		}
+		binding->tcont_inst = ((u16)e->body[2] << 8) | e->body[3];
+		binding->alloc_known = omci_ctp_alloc(o, e, &binding->alloc_id);
 		return;
 	}
 }

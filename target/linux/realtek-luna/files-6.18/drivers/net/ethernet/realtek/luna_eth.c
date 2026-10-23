@@ -2125,7 +2125,7 @@ static netdev_tx_t luna_eth_wan_xmit(struct sk_buff *skb,
 	 * stream id rather than a hard-coded flow. */
 	return eth_tx_frame(ep, ndev, skb,
 			    luna_gmac_cputag_txd_word2(ep->c->sw_map->pon_port),
-			    luna_gmac_cputag_txd_word3(GPON_DATA_FLOW),
+			    luna_gmac_cputag_txd_word3(luna_wan_tx_flow(skb->data, skb_headlen(skb), false)),
 			    false);
 }
 

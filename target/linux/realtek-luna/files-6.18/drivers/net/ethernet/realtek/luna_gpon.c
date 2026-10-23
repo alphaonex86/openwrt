@@ -148,6 +148,8 @@ static_assert(GEM_US_PORT_MAP_STRIDE == 4u,
 #define GPON_DATA_TCONT		8	/* the WAN data GEM's own T-CONT; see GPON_DATA_ALLOC */
 #define LUNA_IDLE_TCONT_FIRST	9	/* the pool answering the grants of allocs with no flow */
 #define LUNA_IDLE_TCONT_N	7
+#define LUNA_SVC_FLOW_FIRST	4	/* pool T-CONT 9 + i carries its service on flow 4 + i */
+#define LUNA_SVC_VIDS		12	/* VIDs the services publish to the WAN TX path */
 
 /* PLOAM message path (G.984.3 management channel driving the ...
  * dev/MEASURED-luna_gpon.c.md sec 4. */
@@ -194,6 +196,10 @@ static void luna_omci_identity_reset(const u8 sn[8]);
 static void luna_data_suspend(void);
 static void luna_omci_seq_show(struct seq_file *s);
 static int luna_data_retire(void);
+static void luna_svc_teardown_all(void);
+static int luna_queue_drain(u8 qid);
+static void luna_queue_arm(u8 qid);
+static void luna_us_classify_edge(void);
 static bool ctrl_queue = true;
 module_param(ctrl_queue, bool, 0444);
 static bool luna_ctrl_flow_wanted(void);
@@ -392,6 +398,8 @@ MODULE_PARM_DESC(onu_password, "G.984.3 PLOAM Password: up to 10 printable chara
  * Alloc-ID 0xfff is assignable and cannot serve as an invalid entry value. */
 static bool alloc_cam_park = true;
 static u16 luna_idle_alloc[LUNA_IDLE_TCONT_N];	/* the alloc each idle T-CONT holds, 0 = free */
+static u16 luna_svc_gem[LUNA_IDLE_TCONT_N];	/* the service GEM a pool T-CONT carries, 0 = idle GEM only */
+static u32 luna_svc_vid_flow[LUNA_SVC_VIDS];	/* vid << 8 | flow, 0 = free; read lockless by the WAN TX */
 static u16 luna_data_tcont_alloc;		/* the alloc GPON_DATA_TCONT holds, 0 = none */
 module_param(alloc_cam_park, bool, 0644);
 MODULE_PARM_DESC(alloc_cam_park, "clean unused GTC allocation entries before management activation");
@@ -759,6 +767,20 @@ static u8 luna_tcont_phys_qid(u8 tcont)
 	if (tcont == GPON_OMCC_TCONT)
 		return swc->omcc_phys_qid;
 	return (u8)(swc->tcont_queue_max * (tcont / swc->tcont_group));
+}
+
+/* A pool T-CONT's service rides its own flow and its own queue of the T-CONT group: two queues per
+ * T-CONT, the data T-CONT keeping its pair (data + control). */
+static u8 luna_svc_flow(unsigned int i)
+{
+	return LUNA_SVC_FLOW_FIRST + i;
+}
+
+static u8 luna_svc_qid(unsigned int i)
+{
+	u8 tcont = LUNA_IDLE_TCONT_FIRST + i;
+
+	return luna_tcont_phys_qid(tcont) + 2 * (tcont % swc->tcont_group);
 }
 
 /* Own G24 stock tcont_{get,set,del} all apply this permutation to the alloc
@@ -5380,6 +5402,7 @@ static int gpon_alloc_cam_clear_others(u8 keep)
 		if (rc)
 			return rc;
 	}
+	luna_svc_teardown_all();
 	memset(luna_idle_alloc, 0, sizeof(luna_idle_alloc));
 	luna_data_tcont_alloc = 0;
 	return 0;
@@ -6311,6 +6334,7 @@ static u32 pi_packed_get(u32 base, unsigned int idx, unsigned int bits)
 static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
 {
 	DECLARE_BITMAP(keep, LUNA_CLASSIFY_SID_MAX) = { 0 };
+	unsigned int i;
 
 	if (!ponmac_modeset)
 		return;
@@ -6323,6 +6347,9 @@ static void rtl9602c_ponmac_modeset_gpon(bool keep_data)
 		if (luna_ctrl_flow_wanted())
 			__set_bit(GPON_CTRL_FLOW, keep);
 	}
+	for (i = 0; i < LUNA_IDLE_TCONT_N; i++)
+		if (luna_svc_gem[i])
+			__set_bit(luna_svc_flow(i), keep);
 	pi_packed_fill(PI_PON_SIDVALID, swc->classify_sid_num, 1, 0, keep);
 	pi_packed_fill(PI_PON_SID2QID, swc->classify_sid_num, 7, swc->scratch_phys_qid & 0x7f, keep);
 
@@ -7163,8 +7190,129 @@ static int gpon_avc_sent;	/* OMCI oper-state AVCs emitted this O5 (reset on re-r
  * this pool, which answers its grants with idle GEM; the WAN's stays on
  * GPON_DATA_TCONT, and one alloc is never in two CAM entries. */
 
+static void luna_svc_publish(const struct omci_vlan_service *svc, unsigned int n)
+{
+	unsigned int i, k, m = 0;
+
+	for (k = 0; k < n; k++)
+		for (i = 0; i < LUNA_IDLE_TCONT_N && m < LUNA_SVC_VIDS; i++)
+			if (luna_svc_gem[i] && luna_svc_gem[i] == svc[k].gem_port)
+				WRITE_ONCE(luna_svc_vid_flow[m++], (u32)svc[k].vid << 8 | luna_svc_flow(i));
+	while (m < LUNA_SVC_VIDS)
+		WRITE_ONCE(luna_svc_vid_flow[m++], 0);
+}
+
+static void luna_svc_teardown(unsigned int i)
+{
+	u8 tcont = LUNA_IDLE_TCONT_FIRST + i, flow = luna_svc_flow(i);
+	unsigned int k;
+
+	if (!luna_svc_gem[i])
+		return;
+	for (k = 0; k < LUNA_SVC_VIDS; k++)
+		if ((READ_ONCE(luna_svc_vid_flow[k]) & 0xff) == flow)
+			WRITE_ONCE(luna_svc_vid_flow[k], 0);
+	pi_packed_set(PI_PON_SIDVALID, flow, 1, 0);
+	gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, flow, 0);
+	if (luna_cam_xact(false, GPON_GTC_CAM_OP_CLEAN, flow, NULL, NULL))
+		pr_warn("luna-gpon: service flow %u: DS GEM %u CAM clean failed\n", flow, luna_svc_gem[i]);
+	else
+		gpon_field(GPON_GTC_DS_TRAFFIC_CFG + flow * DS_TRAFFIC_CFG_STRIDE, 4, 0, 0);
+	pi_packed_set(PI_PON_SCH_QMAP, tcont, swc->sch_qmap_bits, 0);
+	luna_log("service GEM %u off T-CONT %u\n", luna_svc_gem[i], tcont);
+	luna_svc_gem[i] = 0;
+}
+
+static void luna_svc_teardown_all(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < LUNA_IDLE_TCONT_N; i++)
+		luna_svc_teardown(i);
+}
+
+/* The pool T-CONT already answers its alloc's grants with idle GEM; give it a queue, the service's GEM
+ * both ways and a flow the WAN TX can pick by VID. The gem is recorded first: a half-done install is
+ * still torn down. */
+static int luna_svc_install(unsigned int i, u16 gem)
+{
+	u8 tcont = LUNA_IDLE_TCONT_FIRST + i, flow = luna_svc_flow(i), qid = luna_svc_qid(i);
+	int rc;
+
+	if (qid == GPON_OMCC_PHYS_QID || qid == swc->scratch_phys_qid || qid == luna_data_qid ||
+	    qid == luna_data_qid + 1 || qid > 0x7f || flow >= swc->classify_sid_num) {
+		pr_warn_ratelimited("luna-gpon: T-CONT %u: queue %u or flow %u is taken, GEM %u is not carried\n",
+				    tcont, qid, flow, gem);
+		return -EBUSY;
+	}
+	luna_svc_gem[i] = gem;
+	rc = luna_queue_drain(qid);
+	if (rc < 0)
+		return rc;
+	luna_queue_arm(qid);
+	pi_packed_set(PI_PON_SCH_QMAP, tcont, swc->sch_qmap_bits, BIT(qid % swc->tcont_queue_max));
+	if (!gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, flow, gpon_gem_us_port_id(gem)))
+		return -ENODEV;
+	rc = luna_port_cam_write(flow, gem);
+	if (rc < 0)
+		return rc;
+	gpon_wr(GPON_GTC_DS_TRAFFIC_CFG + flow * DS_TRAFFIC_CFG_STRIDE, 0x2);
+	pi_packed_set(PI_PON_SID2QID, flow, 7, qid);
+	pi_packed_set(PI_PON_SIDVALID, flow, 1, 1);
+	pi_packed_set(PI_PON_SID_Q_MAP_DS, flow, 2, 0);
+	if (relatch_us)
+		luna_us_classify_edge();
+	if (pi_packed_get(PI_PON_SIDVALID, flow, 1) != 1 || pi_packed_get(PI_PON_SID2QID, flow, 7) != qid)
+		return -EIO;
+	luna_log("service GEM %u on T-CONT %u (alloc 0x%x) flow %u queue %u\n",
+		 gem, tcont, luna_idle_alloc[i], flow, qid);
+	return 0;
+}
+
+/* ★★ EVERY SERVICE THE OLT BRIDGED IS CARRIED (operator, 2026-10-23: Entel's VLAN 100, 300 and 3816
+ * beside the WAN's 200). The WAN's GEM keeps the data T-CONT; the GEM of each other service rides the
+ * pool T-CONT that holds its alloc. */
+static void luna_services_sync(const struct omci_vlan_service *svc, unsigned int n)
+{
+	unsigned int i, k;
+
+	for (i = 0; i < LUNA_IDLE_TCONT_N; i++) {
+		u16 want = 0;
+		int rc;
+
+		for (k = 0; k < n && luna_idle_alloc[i] && !want; k++)
+			if (svc[k].alloc_known && svc[k].alloc_id == luna_idle_alloc[i])
+				want = svc[k].gem_port;
+		if (luna_svc_gem[i] == want)
+			continue;
+		luna_svc_teardown(i);
+		rc = want ? luna_svc_install(i, want) : 0;
+		if (rc) {
+			pr_warn_ratelimited("luna-gpon: service GEM %u on T-CONT %u failed (%d)\n",
+					    want, LUNA_IDLE_TCONT_FIRST + i, rc);
+			luna_svc_teardown(i);
+		}
+	}
+	luna_svc_publish(svc, n);
+}
+
+u8 luna_gpon_svc_flow(int vid)
+{
+	unsigned int i;
+	u32 e;
+
+	for (i = 0; vid > 0 && i < LUNA_SVC_VIDS; i++) {
+		e = READ_ONCE(luna_svc_vid_flow[i]);
+		if (e && e >> 8 == (u32)vid)
+			return e & 0xff;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(luna_gpon_svc_flow);
+
 static void luna_idle_slot_free(unsigned int i)
 {
+	luna_svc_teardown(i);
 	if (luna_cam_xact(true, GPON_GTC_CAM_OP_CLEAN, LUNA_IDLE_TCONT_FIRST + i, NULL, NULL))
 		return;
 	pi_packed_set(PI_PON_TCONT_EN, LUNA_IDLE_TCONT_FIRST + i, 1, 0);
@@ -7480,14 +7628,7 @@ int gpon_install_data_gem(void)
 				pi_packed_set(PI_PON_SIDVALID, GPON_CTRL_FLOW, 1, 1);
 			}
 
-			/* Re-force the US-NIC<->GMAC0 internal-MII link UP before the commit edge,
-			 * the symmetric twin of the DS re-force below: the ifup GMAC0 power-cycle
-			 * can drop this link, so the classify edge latched only ~50/50. */
-			pi_wr(PI_MEDIA_STS_US, 0x106e8400u);
-			/* commit edge: GMII_RX_EN OFF -> ON latches the classify table */
-			pi_wr(PI_IO_CMD_0_US, 0x90101050u);	/* GMII RX OFF */
-			udelay(50);
-			pi_wr(PI_IO_CMD_0_US, 0x90101070u);	/* GMII RX ON -> latch flow-1 */
+			luna_us_classify_edge();	/* the symmetric twin of the DS re-force below */
 
 			/* The classify registers are not write-protected, they latch on the edge,
 			 * so a correct readback is the definitive "committed" signal. */
@@ -7677,6 +7818,26 @@ static int luna_queue_drain(u8 qid)
 	return rc < 0 ? rc : 0;
 }
 
+/* A queue as stock arms it: PIR at its maximum, no CIR (STRICT uses PIR only), STRICT, and
+ * weight 1 even so, because a zero-weight queue is skipped by the WFQ round. */
+static void luna_queue_arm(u8 qid)
+{
+	pi_field(PI_PON_QID_PIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, 0x3ffff);
+	pi_field(PI_PON_QID_CIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, 0);
+	pi_packed_set(PI_PON_WFQ_TYPE, qid, 1, 0);
+	pi_packed_set(PI_PON_WFQ_WEIGHT, qid, 10, 1);
+}
+
+/* The US classify table latches on the GMII_RX_EN edge, with the US-NIC<->GMAC0 internal-MII link
+ * re-forced UP first: the ifup GMAC0 power-cycle can drop it, and the edge then latched ~50/50. */
+static void luna_us_classify_edge(void)
+{
+	pi_wr(PI_MEDIA_STS_US, 0x106e8400u);
+	pi_wr(PI_IO_CMD_0_US, 0x90101050u);	/* GMII RX OFF */
+	udelay(50);
+	pi_wr(PI_IO_CMD_0_US, 0x90101070u);	/* GMII RX ON -> latch */
+}
+
 static int gpon_install_tcont(u8 tcont, u16 alloc)
 {
 	int rc;
@@ -7729,19 +7890,9 @@ static int gpon_install_tcont(u8 tcont, u16 alloc)
 						/* PON_SCH_QMAP[tcont] = logical-q0; the entry is 32b
 						 * wide on the RTL9602C and 8b on the RTL9603CVD, so
 						 * `base + tcont * 4` was a per-chip fact too. */
-		pi_field(PI_PON_QID_PIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, 0x3ffff);	/* PON_QID_PIR_RATE[qid] = MAX (1 word/qid) */
-		pi_field(PI_PON_QID_CIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, 0);		/* PON_QID_CIR_RATE[qid] = 0 (live-stock; STRICT uses PIR only) */
-		pi_packed_set(PI_PON_WFQ_TYPE, qid, 1, 0);	/* PON_WFQ_TYPE[qid] = STRICT (1b packed) */
-		/* PON_WFQ_WEIGHT[qid] = 1 (10 bits/entry, 3 entries per word): stock writes
-		 * weight 1 even for a STRICT queue, because a zero-weight queue is skipped
-		 * by the WFQ round. */
-		pi_packed_set(PI_PON_WFQ_WEIGHT, qid, 10, 1);
-		if (ctrl_queue && tcont == GPON_DATA_TCONT) {
-			pi_field(PI_PON_QID_PIR_RATE + (qid + 1) * PI_QID_RATE_STRIDE, 17, 0, 0x3ffff);
-			pi_field(PI_PON_QID_CIR_RATE + (qid + 1) * PI_QID_RATE_STRIDE, 17, 0, 0);
-			pi_packed_set(PI_PON_WFQ_TYPE, qid + 1, 1, 0);
-			pi_packed_set(PI_PON_WFQ_WEIGHT, qid + 1, 10, 1);
-		}
+		luna_queue_arm(qid);
+		if (ctrl_queue && tcont == GPON_DATA_TCONT)
+			luna_queue_arm(qid + 1);
 		/* Re-issue the OMCC classifier's SID-valid bit NOW, after the ...
 		 * dev/MEASURED-luna_gpon.c.md sec 221. */
 		if (sidvalid_last && qid == GPON_OMCC_PHYS_QID) {
@@ -7901,6 +8052,8 @@ static void luna_gem_diag_report(const struct gpon_data_armed *armed,
 static void luna_data_reconcile(void)
 {
 	struct omci_data_binding binding;
+	struct omci_vlan_service svc[LUNA_SVC_VIDS];
+	unsigned int nsvc = 0;
 	struct gpon_data_armed visible = luna_data.armed;
 	struct gpon_data_want want = { 0 };
 	enum gpon_data_plan plan;
@@ -7913,6 +8066,8 @@ static void luna_data_reconcile(void)
 		omci_data_binding_snapshot(luna_omci.onu, gpon_omcc_gem_port,
 					   GPON_MCAST_GEM, &luna_omci.binding);
 		alloc_by_omci = omci_farend_alloc_by_omci(luna_omci.onu);
+		nsvc = omci_vlan_services(luna_omci.onu, gpon_omcc_gem_port, GPON_MCAST_GEM,
+					  svc, ARRAY_SIZE(svc));
 	}
 	binding = luna_omci.binding;
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
@@ -7975,8 +8130,10 @@ out:
 	if (rc && rc != luna_data.error)
 		pr_warn("luna-gpon: data reconciliation failed rc=%d; ownership retained\n", rc);
 	luna_data.error = rc;
-	if (want.omcc_up)
+	if (want.omcc_up) {
 		luna_idle_tconts_sync();
+		luna_services_sync(svc, nsvc);
+	}
 }
 
 static void luna_omci_service(void)

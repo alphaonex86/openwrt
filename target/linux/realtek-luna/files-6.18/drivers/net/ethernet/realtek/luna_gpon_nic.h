@@ -29,6 +29,8 @@ void luna_gpon_vlan_filter_ok(bool ok);
  * (luna_gpon.c ctrl_queue): an offloaded flood fills the data queue, and the PPP LCP
  * echo replies queued behind it were lost (X100DG, V2801RGW, 2026-10-04). */
 bool luna_gpon_ctrl_flow_ready(void);
+/* The flow carrying the OLT's service on @vid when it is not the WAN's own (luna_gpon.c), 0 = none. */
+u8 luna_gpon_svc_flow(int vid);
 
 /* A WAN frame the session's life depends on: PPPoE discovery, a PPP control protocol
  * (LCP, PAP, CHAP, IPCP, IPv6CP: protocol >= 0x8000) or ARP -- one 802.1Q tag allowed.

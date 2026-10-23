@@ -1077,9 +1077,7 @@ static netdev_tx_t rtl9602c_eth_wan_xmit(struct sk_buff *skb, struct net_device 
 	if (i == tx_eor_slot(ep))
 		word0 |= D_EOR;
 	ep->tx_ring[i].opts2 = rtl9602c_omci_txd_word2(0);	/* stock cputag|efid */
-	ep->tx_ring[i].opts3 = rtl9602c_omci_txd_word3(0,
-		luna_wan_control_frame(skb->data, len) && luna_gpon_ctrl_flow_ready() ?
-		GPON_CTRL_FLOW : GPON_DATA_FLOW);
+	ep->tx_ring[i].opts3 = rtl9602c_omci_txd_word3(0, luna_wan_tx_flow(skb->data, len, true));
 	ep->tx_ring[i].opts4 = 0;
 	txd_publish(ep, i, word0, true);   /* WAN: the throughput A/B may skip it */
 	spin_unlock_irqrestore(&ep->tx_lock, flags);

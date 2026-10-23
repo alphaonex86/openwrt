@@ -87,6 +87,7 @@ DEFAULT_PACKAGES := $(filter-out urngd,$(DEFAULT_PACKAGES))
 DEFAULT_PACKAGES += \
 	kmod-gpio-button-hotplug \
 	uboot-envtools \
-	iw
+	iw \
+	onu-cwmp
 
 $(eval $(call BuildTarget))

@@ -71,6 +71,20 @@ apply_mac() {
 	ip link set dev "$ifname" address "$mac" && log "set $ifname MAC $mac (live)"
 }
 
+# A bridge MAC already in the config that is a universally administered unicast address was
+# ASSIGNED (an ISP's original ONU, cloned by pon_identity_clone) and survives the reboot; only an
+# empty or random (locally administered) one is pinned to this unit's MAC.
+pin_bridge_mac() {
+	local sec
+	for sec in $(uci -q show network 2>/dev/null | \
+		     sed -n "s/^network\.\([^.=]*\)\.type='bridge'\$/\1/p"); do
+		case "$(uci -q get "network.$sec.macaddr")" in
+		[0-9a-fA-F][048cC]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+		*) uci -q set "network.$sec.macaddr=$1" ;;
+		esac
+	done
+}
+
 provision() {
 	local source part base mac oui sn loid loid_pw ploam vid
 
@@ -157,11 +171,8 @@ provision() {
 	# bridge device sections for netifd to apply (best-effort; the GPON identity
 	# exported below is the authoritative per-board data for the ONU stack).
 	if [ -n "$mac" ] && [ -f /etc/config/network ]; then
-		local sec cid
-		for sec in $(uci -q show network 2>/dev/null | \
-			     sed -n "s/^network\.\([^.=]*\)\.type='bridge'\$/\1/p"); do
-			uci -q set "network.$sec.macaddr=$mac"
-		done
+		local cid
+		pin_bridge_mac "$mac"
 		# Pin a STABLE, per-board WAN DHCP client-id (option 61 = 01:<MAC>, like a
 		# normal Ethernet host). This image RAM-boots with no persistent storage, so
 		# without this OpenWrt generates a fresh RFC4361 UUID-DUID client-id every boot;

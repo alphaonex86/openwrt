@@ -684,20 +684,6 @@ static inline void luna_eth_hw_stop(void __iomem *base)
 	udelay(10);
 }
 
-/* A bridge enslaving the CPU netdev sets promisc; accept-all-physical (RCR
- * bit0) is then REQUIRED to receive LAN-client frames whose DA is not our MAC.
- * Without it a bridged port silently forwards nothing it did not address. */
-static inline void luna_eth_set_promisc(void __iomem *base, bool on)
-{
-	u32 rcr = ioread32(base + R_RCR);
-
-	if (on)
-		rcr |= BIT(0);
-	else
-		rcr &= ~BIT(0);
-	iowrite32(rcr, base + R_RCR);
-}
-
 
 /* The DMA descriptor address bus window.  ZERO on this SoC, and it is a named
  * knob rather than a bare 0 for a measured reason:

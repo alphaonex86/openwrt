@@ -192,6 +192,10 @@ static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
  * U-Boot value 0x400f3330 is its polled-TFTP config; the stock OS reprograms
  * IO_CMD/IO_CMD1 after the IP-block reset. Bits[3:0] of IO_CMD stay 0 here (the
  * self-clearing per-ring TX_POLL kicks). */
+/* Stock RCR: AcceptAllPhys|PhysMatch|Multicast|Broadcast, set from the first program.
+ * The switch already filtered; DS OMCI arrives with its TCI where the DA sits, so an
+ * even TCI high byte without AcceptAllPhys is a foreign unicast and is dropped. */
+#define RCR_STOCK 0x0000000Fu
 #define IOCMD_STOCK	0xc059f130
 #define IOCMD1_STOCK	0x32000001
 #define IOCMD_UBOOT	0x400F3330
@@ -1758,14 +1762,11 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 {
 	struct net_device *ndev = ep->ndev;
 	unsigned int k, oring = rtl9602c_omci_hwring(omci_tx_ring);
-	u32 desnum, rcr;
+	u32 desnum;
 
 	iowrite8(0x0A, ep->base + R_CMD);	/* CMD: RxChkSum|RxJumboSupport */
 	ep_wr(ep, R_TCR, 0x00000C00);		/* TX pad ON (bit0=0) */
-	rcr = 0x0000000E;
-	if (ndev->flags & (IFF_PROMISC | IFF_ALLMULTI))
-		rcr |= BIT(0);			/* re-apply AcceptAllPhys */
-	ep_wr(ep, R_RCR, rcr);
+	ep_wr(ep, R_RCR, RCR_STOCK);
 	/* Stock O5 golden CONFIG = 0x21000000 (Rff 2k + rx-mring int split);
 	 * after a true reset the split bit must be set by us, the per-ring
 	 * IMR0/ISR1 model the driver already uses assumes it. */
@@ -2129,7 +2130,7 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rx_n));
 	/* (Reverted: a prior experiment pointed rings 1-5 at ring 0's ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 101. */
-	ep_wr(ep, R_RCR, 0x0000000E);
+	ep_wr(ep, R_RCR, RCR_STOCK);
 	ep_wr(ep, R_TCR, 0x00000C00);
 	ep_wr(ep, R_CONFIG, 0x20000000);
 	iowrite8(0x0A, ep->base + R_CMD);	/* CMD = RxChkSum|RxJumboSupport (keep working-RX baseline) */
@@ -2322,18 +2323,6 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
-/* Honour promiscuous/all-multi (the bridge enslaving eth0 requests promisc).
- * Without AcceptAllPhys the GMAC drops unicast frames whose DA != our station
- * MAC — i.e. exactly the LAN-client frames a router/bridge must receive and
- * forward. RCR bit0 = AcceptAllPhys. */
-static void rtl9602c_eth_set_rx_mode(struct net_device *ndev)
-{
-	struct rtl9602c_eth *ep = netdev_priv(ndev);
-
-	luna_eth_set_promisc(ep->base,
-				 !!(ndev->flags & (IFF_PROMISC | IFF_ALLMULTI)));
-}
-
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 /* This family's five-op table for the COMMON TC lifecycle.  Included here, not
  * at the top, because it needs `struct rtl9602c_eth` complete and the WAN ops
@@ -2348,7 +2337,6 @@ static const struct net_device_ops rtl9602c_eth_netdev_ops = {
 	.ndo_open		= rtl9602c_eth_open,
 	.ndo_stop		= rtl9602c_eth_stop,
 	.ndo_start_xmit		= rtl9602c_eth_xmit,
-	.ndo_set_rx_mode	= rtl9602c_eth_set_rx_mode,
 	.ndo_set_mac_address	= rtl9602c_eth_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 };

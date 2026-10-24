@@ -209,6 +209,11 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
 
 #define IO_CMD_ENABLE	0xc059f130
 #define IO_CMD1_ENABLE	0x32000001
+/* Stock RCR (G24W stock live read 2026-10-24; the vendor driver writes it whatever the
+ * promiscuity): AcceptAllPhys|AcceptMyPhys|AcceptMulticast|AcceptBroadcast.  The switch
+ * already filtered; DS OMCI reaches the GMAC with its TCI where a DA sits, so without
+ * AcceptAllPhys an even TCI high byte is a foreign unicast and is dropped. */
+#define RCR_STOCK	0x0000000Fu
 
 /* CPU-tag engine config. CTEN_RX (bit31) makes the MAC strip the 8-byte switch
  * tag in hardware on RX and expose the parsed ingress port in the descriptor;
@@ -1459,7 +1464,7 @@ static void eth_hw_program(struct luna_eth *ep)
 
 	iowrite8(CMD_RXCHK | CMD_RXJUMBO, ep->base + R_CMD);
 	ep_wr(ep, R_TCR, 0x00000C01);		/* IFG=3, TX enabled via IO_CMD	*/
-	ep_wr(ep, R_RCR, 0x0000000E);		/* accept broadcast + matching	*/
+	ep_wr(ep, R_RCR, RCR_STOCK);
 	ep_wr(ep, R_CONFIG, 0x21000000);
 	/* Enable the CPU-tag engine so the MAC strips the in-band 8-byte switch
 	 * tag on RX (CTEN_RX); TX stays plain (per-descriptor opts2.cputag=0 =>
@@ -1964,13 +1969,6 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 
 	return eth_tx_frame(ep, ndev, skb, opts2, 0, true);
 }
-static void eth_set_rx_mode(struct net_device *ndev)
-{
-	struct luna_eth *ep = netdev_priv(ndev);
-
-	luna_eth_set_promisc(ep->base,
-				 !!(ndev->flags & (IFF_PROMISC | IFF_ALLMULTI)));
-}
 
 /* Defined with the WAN netdev below; eth0's address setter needs it because the
  * WAN identity is derived from eth0's and must move when eth0's does. */
@@ -2100,7 +2098,6 @@ static const struct net_device_ops luna_eth_netdev_ops = {
 	.ndo_open		= eth_open,
 	.ndo_stop		= eth_stop,
 	.ndo_start_xmit		= eth_xmit,
-	.ndo_set_rx_mode	= eth_set_rx_mode,
 	.ndo_set_mac_address	= eth_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 #if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)

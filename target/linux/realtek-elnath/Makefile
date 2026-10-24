@@ -7,7 +7,7 @@ BOARD:=realtek-elnath
 BOARDNAME:=Realtek Elnath GPON ONU
 DEVICE_TYPE:=basic
 FEATURES:=ramdisk squashfs gpio fpu nand
-SUBTARGETS:=rtl9607f
+SUBTARGETS:=rtl9607f virt
 
 KERNEL_PATCHVER:=6.18
 

@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+/dts-v1/;
+
+#include "qemu-virt-10.2.dtsi"
+#include "rtl9607f_x400axf-omci-uni.dtsi"
+
+/ {
+	model = "HSGQ X400AXF (virtual, QEMU virt)";
+	compatible = "hsgq,x400axf-virt", "linux,dummy-virt";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		bootargs = "earlycon console=ttyAMA0,115200 cfg80211.ieee80211_regdom=BO";
+	};
+};

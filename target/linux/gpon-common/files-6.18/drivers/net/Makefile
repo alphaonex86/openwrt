@@ -88,6 +88,7 @@ obj-$(CONFIG_FDDI) += fddi/
 # RAM, so a separate .ko would cost loader overhead and buy nothing.
 # --- end GPON common layer ----------------------------------------------
 obj-$(CONFIG_GPON_CORE) += gpon/
+obj-$(CONFIG_PON_VIRT) += ponvirt/
 obj-$(CONFIG_HIPPI) += hippi/
 obj-$(CONFIG_HAMRADIO) += hamradio/
 obj-$(CONFIG_QCOM_IPA) += ipa/

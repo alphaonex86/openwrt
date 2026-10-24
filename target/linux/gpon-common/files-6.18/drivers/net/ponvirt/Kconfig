@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config PON_VIRT
+	bool "Virtual PON MAC (QEMU): the GPON ONU core over an Ethernet wire"
+	depends on NET && VIRTIO_NET
+	select GPON_CORE
+	select CRC32
+	help
+	  The PON MAC of a virtual ONU: the same gpon_* PLOAM, OMCI and GEM
+	  core as the boards, carried at frame level over a NIC whose far end
+	  is the host's virtual ODN (dev/virt/vodn). The WAN is gpon0. Only
+	  for the realtek-*/virt subtargets; no board has this wire.

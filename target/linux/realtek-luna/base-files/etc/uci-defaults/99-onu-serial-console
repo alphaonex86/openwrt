@@ -1,0 +1,5 @@
+#!/bin/sh
+# login.sh already logs root in without a password; an id-less respawn line gets no tty from procd, so a
+# persistent overlay that kept one (the old serial-autologin default) leaves the console without a shell
+sed -i 's|^::respawn:/bin/sh$|::askconsole:/usr/libexec/login.sh|' /etc/inittab
+exit 0

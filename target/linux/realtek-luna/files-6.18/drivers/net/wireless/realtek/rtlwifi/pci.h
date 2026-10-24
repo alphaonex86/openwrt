@@ -193,6 +193,9 @@ struct rtl_pci {
 	/*irq */
 	u8 irq_alloc;
 	u32 irq_mask[4];	/* 0-1: normal, 2: unused, 3: h2c */
+	struct tasklet_struct rx_tasklet;	/* drains the RX ring, pci.c */
+	struct sk_buff_head rx_inject;		/* driver-made frames for mac80211 */
+	bool rx_deferred;			/* RX sources masked until the ring drains */
 	u32 sys_irq_mask;
 
 	/*Bcn control register setting */
@@ -318,6 +321,17 @@ static inline u16 calc_fifo_space(u16 rp, u16 wp, u16 size)
 	if (rp <= wp)
 		return size - 1 + rp - wp;
 	return rp - wp - 1;
+}
+
+/* A frame the driver makes itself (a DELBA) enters mac80211 on the RX path's
+ * own context: ieee80211_rx and ieee80211_rx_irqsafe must not be mixed. Inline,
+ * so the rtlwifi core needs no symbol from rtl_pci. */
+static inline void rtl_pci_rx_inject(struct ieee80211_hw *hw, struct sk_buff *skb)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+
+	skb_queue_tail(&rtlpci->rx_inject, skb);
+	tasklet_schedule(&rtlpci->rx_tasklet);
 }
 
 #endif

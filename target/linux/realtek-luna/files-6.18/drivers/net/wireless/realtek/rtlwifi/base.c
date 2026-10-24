@@ -1372,7 +1372,10 @@ static void process_agg_start(struct ieee80211_hw *hw,
 			      "fake del\n",
 			      skb_delba->data,
 			      skb_delba->len);
-		ieee80211_rx_irqsafe(hw, skb_delba);
+		if (rtlpriv->rtlhal.interface == INTF_PCI)
+			rtl_pci_rx_inject(hw, skb_delba);
+		else
+			ieee80211_rx_irqsafe(hw, skb_delba);
 	}
 }
 

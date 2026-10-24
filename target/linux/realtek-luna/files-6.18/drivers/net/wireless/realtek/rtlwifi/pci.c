@@ -720,9 +720,9 @@ static void _rtl_pci_rx_to_mac80211(struct ieee80211_hw *hw,
 			       sizeof(rx_status));
 			skb_put_data(uskb, skb->data, skb->len);
 			dev_kfree_skb_any(skb);
-			ieee80211_rx_irqsafe(hw, uskb);
+			ieee80211_rx(hw, uskb);
 		} else {
-			ieee80211_rx_irqsafe(hw, skb);
+			ieee80211_rx(hw, skb);
 		}
 	}
 }
@@ -738,13 +738,14 @@ static void _rtl_pci_hs_interrupt(struct ieee80211_hw *hw)
 		       rtlpci->sys_irq_mask);
 }
 
-static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
+/* At most `budget` descriptors; -> how many were consumed. */
+static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	int rxring_idx = RTL_PCI_RX_MPDU_QUEUE;
 	struct ieee80211_rx_status rx_status = { 0 };
-	unsigned int count = rtlpci->rxringcount;
+	int done = 0;
 	u8 own;
 	u8 tmp_one = 1;
 	bool unicast;
@@ -756,7 +757,7 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 	};
 
 	/*RX NORMAL PKT */
-	while (count--) {
+	while (done < budget) {
 		struct ieee80211_hdr *hdr;
 		__le16 fc;
 		u16 len;
@@ -775,7 +776,7 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 				rtlpriv->cfg->ops->rx_desc_buff_remained_cnt(hw,
 								      hw_queue);
 			if (rx_remained_cnt == 0)
-				return;
+				return done;
 			buffer_desc = &rtlpci->rx_ring[rxring_idx].buffer_desc[
 				rtlpci->rx_ring[rxring_idx].idx];
 			pdesc = (struct rtl_rx_desc *)skb->data;
@@ -787,7 +788,7 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 							      false,
 							      HW_DESC_OWN);
 			if (own) /* wait data to be filled by hardware */
-				return;
+				return done;
 		}
 
 		/* Secure a mapped replacement before consuming the current buffer. */
@@ -919,13 +920,64 @@ new_trx_end:
 		rtlpci->rx_ring[rxring_idx].idx =
 				(rtlpci->rx_ring[rxring_idx].idx + 1) %
 				rtlpci->rxringcount;
+		done++;
 	}
+	return done;
 }
 
 /* HISRE carries TXERR and RXFOVW alone; a cleared interrupt is ours. */
 static bool _rtl_pci_irq_ours(const struct rtl_int *intvec)
 {
 	return intvec->intb || (intvec->inta && intvec->inta != 0xffff);
+}
+
+/* ★ RX IS NOT DRAINED IN HARD IRQ (2026-10-24, X111W OOM): the hard handler
+ * copied every frame and queued it on mac80211's unbounded irqsafe list, so a
+ * small-frame flood that saturates the CPU grew that list until ~80 MB of slab
+ * OOM-killed hostapd. The tasklet hands frames to mac80211 directly, a budget at
+ * a time, with the RX interrupt sources masked until the ring is empty: what is
+ * in flight is bounded by the ring, and an overrun is dropped by the chip. */
+#define RTL_PCI_RX_BUDGET 64
+
+static u32 _rtl_pci_rx_imr(struct rtl_priv *rtlpriv, int reg)
+{
+	if (reg == 0)
+		return rtlpriv->cfg->maps[RTL_IMR_ROK] |
+		       rtlpriv->cfg->maps[RTL_IMR_RDU];
+	return rtlpriv->cfg->maps[RTL_IMR_RXFOVW];
+}
+
+/* Give the RX interrupt sources back; written to the chip only if it is armed. */
+static void _rtl_pci_rx_unmask(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	unsigned long flags;
+
+	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
+	if (rtlpci->rx_deferred) {
+		rtlpci->rx_deferred = false;
+		rtlpci->irq_mask[0] |= _rtl_pci_rx_imr(rtlpriv, 0);
+		rtlpci->irq_mask[1] |= _rtl_pci_rx_imr(rtlpriv, 1);
+		if (rtlpci->irq_enabled)
+			rtlpriv->cfg->ops->enable_interrupt(hw);
+	}
+	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
+}
+
+static void _rtl_pci_rx_tasklet(struct tasklet_struct *t)
+{
+	struct rtl_pci *rtlpci = from_tasklet(rtlpci, t, rx_tasklet);
+	struct ieee80211_hw *hw = pci_get_drvdata(rtlpci->pdev);
+	struct sk_buff *skb;
+
+	while ((skb = skb_dequeue(&rtlpci->rx_inject)))
+		ieee80211_rx(hw, skb);
+	if (_rtl_pci_rx_interrupt(hw, RTL_PCI_RX_BUDGET) >= RTL_PCI_RX_BUDGET) {
+		tasklet_schedule(t);
+		return;
+	}
+	_rtl_pci_rx_unmask(hw);
 }
 
 static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
@@ -1076,21 +1128,13 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 		}
 	}
 
-	/*<3> Rx related */
-	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_ROK]) {
-		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE, "Rx ok interrupt!\n");
-		_rtl_pci_rx_interrupt(hw);
-	}
-
-	if (unlikely(intvec.inta & rtlpriv->cfg->maps[RTL_IMR_RDU])) {
-		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
-			"rx descriptor unavailable!\n");
-		_rtl_pci_rx_interrupt(hw);
-	}
-
-	if (unlikely(intvec.intb & rtlpriv->cfg->maps[RTL_IMR_RXFOVW])) {
-		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING, "rx overflow !\n");
-		_rtl_pci_rx_interrupt(hw);
+	/*<3> Rx related: drained by rx_tasklet, the RX sources masked meanwhile */
+	if ((intvec.inta & _rtl_pci_rx_imr(rtlpriv, 0)) ||
+	    (intvec.intb & _rtl_pci_rx_imr(rtlpriv, 1))) {
+		rtlpci->irq_mask[0] &= ~_rtl_pci_rx_imr(rtlpriv, 0);
+		rtlpci->irq_mask[1] &= ~_rtl_pci_rx_imr(rtlpriv, 1);
+		rtlpci->rx_deferred = true;
+		tasklet_schedule(&rtlpci->rx_tasklet);
 	}
 
 	/*<4> fw related*/
@@ -1244,6 +1288,8 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
 	rtlpci->acm_method = EACMWAY2_SW;
 
 	/*task */
+	tasklet_setup(&rtlpci->rx_tasklet, _rtl_pci_rx_tasklet);
+	skb_queue_head_init(&rtlpci->rx_inject);
 	tasklet_setup(&rtlpriv->works.irq_tasklet, _rtl_pci_irq_tasklet);
 	tasklet_setup(&rtlpriv->works.irq_prepare_bcn_tasklet,
 		     _rtl_pci_prepare_bcn_tasklet);
@@ -1946,6 +1992,8 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
 	_rtl_pci_deinit_trx_ring(hw);
 
 	synchronize_irq(rtlpci->pdev->irq);
+	tasklet_kill(&rtlpci->rx_tasklet);
+	skb_queue_purge(&rtlpci->rx_inject);
 	tasklet_kill(&rtlpriv->works.irq_tasklet);
 	cancel_work_sync(&rtlpriv->works.lps_change_work);
 }
@@ -2037,6 +2085,8 @@ static void rtl_pci_stop(struct ieee80211_hw *hw)
 
 	rtlpci->driver_is_goingto_unload = true;
 	rtlpriv->cfg->ops->disable_interrupt(hw);
+	tasklet_kill(&rtlpci->rx_tasklet);
+	_rtl_pci_rx_unmask(hw);
 	cancel_work_sync(&rtlpriv->works.lps_change_work);
 
 	spin_lock_irqsave(&rtlpriv->locks.rf_ps_lock, flags);

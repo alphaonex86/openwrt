@@ -1,0 +1,42 @@
+From: Herman Brule <contact@herman-brule.com>
+Date: Sat, 24 Oct 2026 15:10:00 -0400
+Subject: [PATCH] ubus: release the previous request prototype
+
+uc_ubus_handle_reply_common() hangs each served call's request
+prototype (its args and info objects, refcount 1) on the SHARED
+"ubus.request" type prototype with ucv_prototype_set(), which
+overwrites ->proto without releasing the one already there. Every
+call served by a ucode ubus object therefore orphans the previous
+call's prototype, and only the garbage collector could reclaim it;
+netifd never enables it.
+
+Measured on an RTL9607F board (netifd 2026.04.23, ucode 2026.04.24),
+netifd RssAnon: 600 x `ubus call network.wireless status` +2476 kB,
+600 more +2524 kB (linear), 600 x `get_validate` +2720 kB, while the
+C-served `network.interface.wan status` and `network.device status`
+stayed flat. A poller at one call a minute leaks ~250 kB/h.
+
+Release the old prototype before setting the new one. With it, the
+same 600 status calls leave netifd at 812 -> 812 kB, and hostapd's
+ucode object at 764 -> 764 kB.
+
+Signed-off-by: Herman Brule <contact@herman-brule.com>
+---
+
+--- a/lib/ubus.c
++++ b/lib/ubus.c
+@@ -2450,8 +2450,12 @@
+ 	/* fd is copied to deferred request. ensure it does not get closed early */
+ 	ubus_request_get_caller_fd(req);
+ 
+-	if (reqproto)
+-		ucv_prototype_set(ucv_prototype_get(reqobj), reqproto);
++	if (reqproto) {
++		uc_value_t *typeproto = ucv_prototype_get(reqobj);
++
++		ucv_put(ucv_prototype_get(typeproto));
++		ucv_prototype_set(typeproto, reqproto);
++	}
+ 
+ 	/* push object context, handler and request object onto stack */
+ 	uc_vm_stack_push(vm, ucv_get(this));

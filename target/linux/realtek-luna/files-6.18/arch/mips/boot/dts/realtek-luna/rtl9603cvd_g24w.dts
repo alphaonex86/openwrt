@@ -235,6 +235,20 @@
 			record-size  = <0x00004000>;	/*  16 KiB per oops/panic */
 			console-size = <0x00010000>;	/*  64 KiB rolling console */
 		};
+
+		/* Stock's PON packet pools are the two holes above (its live PON-IP
+		 * registers, four stock boots 2026-09-02 .. 10-24: MSTBASE_DS
+		 * 0x06c00000, MSTBASE_US 0x07f00000). Ours allocated 1 MiB each from
+		 * the kernel instead, while these 5 MiB sat unused. */
+		pbo_ds: stock-reserved@6c00000 {
+			no-map;
+			reg = <0x06c00000 0x00400000>;
+		};
+
+		pbo_us: stock-reserved@7f00000 {
+			no-map;
+			reg = <0x07f00000 0x00100000>;
+		};
 	};
 
 	/*
@@ -377,7 +391,9 @@
  * 9/15 read in declaration order is the wrong way round), the four sockets on
  * indices 17/5/4/13 typed to switch ports 0..3 -- the index set its own
  * LED_EN/IO_LED_EN capture enables. */
+/* US then DS, as luna_gpon reads them. */
 &gpon {
+	memory-region = <&pbo_us>, <&pbo_ds>;
 	realtek,pon-led = <15>;
 	realtek,los-led = <9>;
 	realtek,port-leds = <17 1>, <5 2>, <4 3>, <13 4>;

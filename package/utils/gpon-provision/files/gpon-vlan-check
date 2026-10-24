@@ -22,7 +22,9 @@ findings=$(awk -v wan="${wan%%.*}" '
 			else if (parts[i] ~ /^[0-9]+$/) set[parts[i]] = 1
 		}
 	}
-	function show(name, set,    v, out) {
+	function show(name, set,    v, out, n) {
+		for (v in set) n++
+		if (!n) return
 		out = ""
 		for (v = 0; v < 4096; v++) if (v in set) out = out (out == "" ? "" : ",") v
 		if (out != "") print name " " out

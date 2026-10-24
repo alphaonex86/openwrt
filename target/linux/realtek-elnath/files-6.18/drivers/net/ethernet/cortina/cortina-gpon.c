@@ -147,6 +147,13 @@
 #define CG_GPIO3_OUT_STOCK	0x00021010
 #define CG_GPIO4_CFG_STOCK	0xffffc5ff
 #define CG_GPIO4_OUT_STOCK	0x00003200
+/* Dying-gasp detector in the PERI block (stock ca-ne aal_pon_init, re-armed
+ * by its OMCC-up interrupt path): armed, the PON MAC itself sends the
+ * Dying_Gasp PLOAM when the supply fails -- no software runs that late. */
+#define CG_PERDG_CTRL		0x480
+#define CG_PERDG_INT_EN		0x488
+#define CG_PERDG_STS		0x48c
+#define CG_PERDG_ARMED		0x105
 
 /* GPON MAC register offsets within the block ... -- dev/MEASURED-cortina-gpon.c.md sec 12. */
 #define CG_REG_GPON_DS		0x000	/* DS framer thresholds; max_packet_size low */
@@ -742,6 +749,14 @@ MODULE_PARM_DESC(hw_l3_ds, "Route downstream data GEMs through L3FE at bind time
 
 /* Enable the upstream laser. ★ Proven by the ours-vs-stock ...
  * dev/MEASURED-cortina-gpon.c.md sec 40. */
+static void cg_dying_gasp_arm(struct cortina_gpon *cg)
+{
+	if (!cg->gpio)
+		return;
+	writel(CG_PERDG_ARMED, cg->gpio + CG_PERDG_CTRL);
+	writel(1, cg->gpio + CG_PERDG_INT_EN);
+}
+
 static void cg_laser_on(struct cortina_gpon *cg)
 {
 	u32 v;
@@ -2167,6 +2182,7 @@ static void cg_omcc_try_up(struct cortina_gpon *cg, u8 state)
 	case GPON_OMCC_INSTALL:
 		break;
 	}
+	cg_dying_gasp_arm(cg);
 	/* LATCH ONLY ON SUCCESS.  A failed bind leaves `omcc_up` clear, so the
 	 * next PLOAM/state event runs this again - the retry is the event
 	 * stream itself, and it costs nothing while the bind works. */
@@ -3288,6 +3304,9 @@ static int cg_proc_show(struct seq_file *m, void *v)
 	seq_printf(m, "  gpio grp3/4  : cfg3(0x36c)=0x%08x out3(0x370)=0x%08x cfg4(0x390)=0x%08x out4(0x394)=0x%08x  (stock 0xfffdef00/0x00021010/0xffffc5ff/0x00003200)\n",
 		   readl(cg->gpio + CG_PERGPIO_CFG3), readl(cg->gpio + CG_PERGPIO_OUT3),
 		   readl(cg->gpio + CG_PERGPIO_CFG4), readl(cg->gpio + CG_PERGPIO_OUT4));
+	seq_printf(m, "dying_gasp     : ctrl(0x480)=0x%08x int_en(0x488)=0x%08x sts(0x48c)=0x%08x  (stock armed 0x%03x / 1)\n",
+		   readl(cg->gpio + CG_PERDG_CTRL), readl(cg->gpio + CG_PERDG_INT_EN),
+		   readl(cg->gpio + CG_PERDG_STS), CG_PERDG_ARMED);
 	cg_bosa_proc_show(cg->dev, m);
 	/* live optical diagnostics; also refreshes the ANI-G levels the OLT reads */
 	cg_optic_sample(cg, m);
@@ -3578,6 +3597,7 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 	 * dev/MEASURED-cortina-gpon.c.md sec 119. */
 	cg->glb = devm_ioremap(dev, CG_GLB_WINDOW_PHYS, CG_GLB_WINDOW_SIZE);
 	cg->gpio = devm_ioremap(dev, CG_PERGPIO_PHYS, CG_PERGPIO_SIZE);
+	cg_dying_gasp_arm(cg);
 	if (cg->glb) {
 		dev_info(dev, "GLB reset regs (ours): EPON_CNTL=0x%08x GPON_CNTL=0x%08x PON_CNTL=0x%08x PSDS_INIT=0x%08x\n",
 			 readl(cg->glb + CG_GLB_EPON_CNTL),

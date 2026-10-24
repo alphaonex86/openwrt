@@ -76,7 +76,7 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		memset(resp + 9, 0, 31);
 		return OMCI_RC_OK;
 	}
-	rc = omci_me_fill(o, class_id, inst, mask, resp + 11, resp + 36,
+	rc = omci_me_fill(o, class_id, inst, mask, true, resp + 11, resp + 36,
 			  &rmask, &known);
 
 	if (rc == OMCI_RC_UNKNOWN_ME) {
@@ -391,7 +391,7 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 
 			omci_put_be16(resp + 8, r->class_id);
 			omci_put_be16(resp + 10, r->inst);
-			omci_me_fill(o, r->class_id, r->inst, r->mask,
+			omci_me_fill(o, r->class_id, r->inst, r->mask, false,
 				     resp + 14, resp + 40, &wmask, &wknown);
 			omci_put_be16(resp + 12, wmask);
 		} else if (seq < o->nrows + o->store_n) {
@@ -406,7 +406,7 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 				/* ★ EVERY DENSE CLASS, not just ME 268. A row that announces ...
 				 * dev/MEASURED-gpon_omci_core.c.md sec 14. */
 				if (omci_me_dense_len(e->class_id)) {
-					omci_me_fill(o, e->class_id, e->inst, 0xffff,
+					omci_me_fill(o, e->class_id, e->inst, 0xffff, false,
 						     resp + 14, resp + 40, &wmask, &wknown);
 					omci_put_be16(resp + 12, wmask);
 				}
@@ -438,8 +438,14 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		resp[8] = OMCI_RC_OK;
 		break;
 	case OMCI_MT_GET_NEXT:
-		/* Get Next walks a TABLE attribute. ⚠ THE MODEL NOW DEFINES ...
-		 * dev/MEASURED-gpon_omci_core.c.md sec 15. */
+		/* mask at msg[8..9], sequence number at msg[10..11] */
+		if (len < 12)
+			return 0;
+		resp[8] = !omci_class_modelled(class_id) ? OMCI_RC_UNKNOWN_ME :
+			  !omci_inst_exists(o, class_id, inst) ? OMCI_RC_UNKNOWN_INST :
+			  omci_me_table_next(o, class_id, inst,
+					     ((u16)msg[8] << 8) | msg[9],
+					     ((u16)msg[10] << 8) | msg[11], resp + 9);
 		break;
 	default:
 		/* A message type with no ONU-side action. Answer result 0x00 ...

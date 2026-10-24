@@ -1932,10 +1932,36 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 	return scratch + 4 - a->size;
 }
 
+/* The octets a table attribute holds now: its rows back to back. */
+static u32 omci_tbl_len(const struct omci_onu *o, const struct omci_attr *a,
+			u16 inst)
+{
+	if (a->v == OMCI_TBL_EXT_VLAN_ROW)
+		return gpon_ext_vlan_nrow(&o->vlan, inst) * a->size;
+	if (a->v == OMCI_TBL_MAC_FILTER_ROW)
+		return gpon_mac_filter_nrow(&o->vlan, inst) * a->size;
+	return 0;		/* accepted, not held: gpon_vlan_model.attr_owed */
+}
+
+/* Octet @off of a table @len long, newest row first: stock adds a row at the
+ * head and replaces one in place (X111W stock binary, 2026-10-24); the model
+ * appends, so it is read from the tail. */
+static u8 omci_tbl_byte(const struct omci_onu *o, const struct omci_attr *a,
+			u16 inst, u32 len, u32 off)
+{
+	u8 row = (u8)(len / a->size - 1 - off / a->size);
+	const u8 *raw = a->v == OMCI_TBL_EXT_VLAN_ROW ?
+			gpon_ext_vlan_raw(&o->vlan, inst, row) :
+			gpon_mac_filter_raw(&o->vlan, inst, row);
+
+	return raw ? raw[off % a->size] : 0;
+}
+
 /* the ONE generic attribute filler ---- Shared by GET and ...
  * dev/MEASURED-gpon_omci_me.c.md sec 28. */
 u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
-		u8 *v, const u8 *end, u16 *rmask_out, u16 *known_out)
+		bool table_size, u8 *v, const u8 *end, u16 *rmask_out,
+		u16 *known_out)
 {
 	const struct omci_attr *a = omci_me_find(class_id);
 	u16 rmask = 0, known = 0;
@@ -1951,6 +1977,8 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		u16 bit;
 		u8 scratch[4];
 		const u8 *bytes;
+		bool as_size = table_size && a->src == OMCI_SRC_TBL;
+		u8 width = as_size ? 4 : a->size;
 
 		if (!a->attr)			/* marker row: no attributes */
 			continue;
@@ -1958,23 +1986,57 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 		known |= bit;
 		if (!(mask & bit))
 			continue;
-		if (v + a->size > end) {
+		if (v + width > end) {
 			over = true;
 			continue;
 		}
-		bytes = omci_attr_bytes(o, a, inst, scratch);
+		if (as_size) {
+			/* G.988 Get of a table: its size, then Get next walks it */
+			u32 len = omci_tbl_len(o, a, inst);
+
+			omci_put_be16(scratch, (u16)(len >> 16));
+			omci_put_be16(scratch + 2, (u16)len);
+			bytes = scratch;
+		} else {
+			bytes = omci_attr_bytes(o, a, inst, scratch);
+		}
 		if (!bytes) {
 			over = true;
 			continue;
 		}
-		memcpy(v, bytes, a->size);
-		v += a->size;
+		memcpy(v, bytes, width);
+		v += width;
 		rmask |= bit;
 	}
 
 	*rmask_out = rmask;
 	*known_out = known;
 	return over ? OMCI_RC_ATTR_FAILED : OMCI_RC_OK;
+}
+
+/* G.988 Get next: chunk @seq of the ONE table attribute @mask names, its mask
+ * then OMCI_TBL_CHUNK octets into @out.  A seq past the end, or a mask that is
+ * not one table attribute, is 0x03 as stock answers (X111W stock binary under
+ * emulation, 2026-10-24). */
+u8 omci_me_table_next(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
+		      u16 seq, u8 *out)
+{
+	const struct omci_attr *a = omci_me_find(class_id);
+	u32 off = (u32)seq * OMCI_TBL_CHUNK, len, i;
+
+	if (!a)
+		return OMCI_RC_PARAM_ERROR;
+	while (a->class_id == class_id && !(a->attr && OMCI_ATTR_BIT(a->attr) == mask))
+		a++;
+	if (a->class_id != class_id || a->src != OMCI_SRC_TBL)
+		return OMCI_RC_PARAM_ERROR;
+	len = omci_tbl_len(o, a, inst);
+	if (off >= len)
+		return OMCI_RC_PARAM_ERROR;
+	omci_put_be16(out, mask);
+	for (i = 0; i < OMCI_TBL_CHUNK && off + i < len; i++)
+		out[2 + i] = omci_tbl_byte(o, a, inst, len, off + i);
+	return OMCI_RC_OK;
 }
 
 /* Where the instances of one auto-instantiated class come from. */

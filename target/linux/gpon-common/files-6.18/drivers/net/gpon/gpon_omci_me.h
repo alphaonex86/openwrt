@@ -708,7 +708,13 @@ void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst);
 /* the descriptor-table engine: emit @mask's attributes into [v..end) in
  * descriptor order, reporting what was emitted and what this ME models */
 u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
-		u8 *v, const u8 *end, u16 *rmask_out, u16 *known_out);
+		bool table_size, u8 *v, const u8 *end, u16 *rmask_out,
+		u16 *known_out);
+
+/* the octets of a table one Get next response carries */
+#define OMCI_TBL_CHUNK	29
+u8 omci_me_table_next(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
+		      u16 seq, u8 *out);
 
 /* does the model carry this class at all (descriptor row or vendor range)? */
 bool omci_class_modelled(u16 class_id);

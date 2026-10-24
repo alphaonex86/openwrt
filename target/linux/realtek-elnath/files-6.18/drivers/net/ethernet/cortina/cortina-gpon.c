@@ -1896,7 +1896,7 @@ static void cg_data_try_install(struct cortina_gpon *cg,
 	bool rides_omcc = false;
 	struct gpon_gem_us_range ride;
 	struct gpon_data_armed armed;
-	struct gpon_data_want want;
+	struct gpon_data_want want = { 0 };
 	enum gpon_data_plan plan;
 	u32 i;
 

@@ -304,6 +304,16 @@
 	};
 };
 
+/* The 5 GHz PA supply, "usb_vbus" in the stock tree: held high as stock does, not left to the bootloader. */
+&gpio4 {
+	pa-5g-hog {
+		gpio-hog;
+		gpios = <0x0d 0x00>;
+		output-high;
+		line-name = "pa-5g";
+	};
+};
+
 &qspi {
 	nand@0 {
 		compatible = "spi-nand";

@@ -64,6 +64,20 @@
 			record-size  = <0x00004000>;	/*  16 KiB per oops/panic */
 			console-size = <0x00010000>;	/*  64 KiB rolling console */
 		};
+
+		/* Stock's PON packet pools (its live PON-IP registers, 2026-09-18 and
+		 * 09-30: MSTBASE_DS 0x06eff000, MSTBASE_US 0x07eff000). Without the DS
+		 * pool the DS PBO has 32 SRAM pages; an O1 burst over them wedged Q0
+		 * for the whole boot (3 of 20 cold boots, 2026-10-24). */
+		pbo_ds: stock-reserved@6eff000 {
+			no-map;
+			reg = <0x06eff000 0x00101000>;
+		};
+
+		pbo_us: stock-reserved@7eff000 {
+			no-map;
+			reg = <0x07eff000 0x00101000>;
+		};
 	};
 
 	/* Board C's pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
@@ -218,6 +232,7 @@
  * 15 on switch port 0 (type 1), GE lamps indices 1 and 2 on port 1 (type 2:
  * stock drives index 2 byte-identical to index 1). */
 &gpon {
+	memory-region = <&pbo_us>, <&pbo_ds>;
 	realtek,pon-led = <12>;
 	realtek,los-led = <13>;
 	realtek,port-leds = <15 1>, <1 2>, <2 2>;

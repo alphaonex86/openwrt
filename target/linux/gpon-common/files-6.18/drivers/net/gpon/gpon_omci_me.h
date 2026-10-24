@@ -713,6 +713,7 @@ u8 omci_me_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 /* does the model carry this class at all (descriptor row or vendor range)? */
 bool omci_class_modelled(u16 class_id);
 bool omci_class_described(u16 class_id);
+u8 omci_me_attr_size(u16 class_id, u8 attr);
 
 /* a vendor-reserved (class, inst) this board does not upload?  Its stock
  * exposes only the vendor MEs it uploads, and answers any other with result 0

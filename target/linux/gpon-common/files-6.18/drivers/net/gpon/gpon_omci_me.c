@@ -1677,6 +1677,18 @@ bool omci_class_described(u16 class_id)
 	return omci_me_find(class_id) != NULL;
 }
 
+/* The wire size of one attribute the model describes, 0 when it does not: the
+ * OLT role (gpon_olt_omci.c) builds and parses with this same table. */
+u8 omci_me_attr_size(u16 class_id, u8 attr)
+{
+	const struct omci_attr *a;
+
+	for (a = omci_me_find(class_id); a && a->class_id == class_id; a++)
+		if (a->attr == attr)
+			return a->size;
+	return 0;
+}
+
 /* Does the ONU model this class at all (either a descriptor or the vendor
  * range policy)? */
 bool omci_class_modelled(u16 class_id)

@@ -634,8 +634,8 @@ static const struct gpon_swc_map gpon_swc_9603cvd = {
 	.omcc_flow = GPON_OMCC_FLOW_9603CVD,
 	/* the DS PBO DRAM pool, from the G24W's own stock live at O5 */
 	.ds_dram_order = PI_DS_DRAM_ORDER,
-	.ds_dsc_cfg = 0x1fff8007u, .ds_dscrunout = 0x1fcb0006u,
-	.ds_fc_config = 0x1f950036u,
+	.ds_dsc_cfg = 0x1fff4007u, .ds_dscrunout = 0x1fd00006u,	/* 512 B pages: PAGE_SIZE 2 */
+	.ds_fc_config = 0x1f961fb6u,
 	.sch_qmap_bits = 8,	/* register map array offset 8 -- 4 entries per word */
 	.sid_rpv_entries = 8,	/* register map array index 0..7 -- NOT 65 */
 	.classify_sid_num = 128,	/* CLASSIFY_SID_MAX 128 == PON_SID2QID/SIDVALID entries */
@@ -4571,6 +4571,8 @@ void gpon_pbo_init(void)
 {
 	bool keep_pool = READ_ONCE(luna_activation_ready) &&
 		luna_ploam.state == GPON_O5_OPERATION;
+	bool ds_dram_geometry = false;
+	u32 ds_page_size;
 
 	/* Exported like datapath_tables_init, and reached from the NIC's open on a
 	 * board whose DT disables the GPON: X100DG 2026-09-30, NULL ponip_base,
@@ -4624,6 +4626,7 @@ void gpon_pbo_init(void)
 				      (u32)virt_to_phys((void *)ds_pool));
 				pi_wr(PI_PON_DSC_CFG_DS, swc->ds_dsc_cfg);
 				pi_wr(PI_DSCRUNOUT_DS, swc->ds_dscrunout);
+				ds_dram_geometry = true;
 			} else {
 				/* ★ NO POOL ⇒ KEEP THE SMALL SRAM GEOMETRY. Writing the
 				 * DRAM-scale page counts with no pool behind them would
@@ -4673,15 +4676,18 @@ void gpon_pbo_init(void)
 	pi_field(PI_PON_US_FIFO_CTL, 5, 4, 1);		/* USFIFO_SPACE = 1       */
 	pi_field(PI_PON_US_FIFO_CTL, 3, 0, 3);		/* USFIFO_START = 3       */
 
-	/* 4. 128-byte page size everywhere (PON-IP descriptors + PONNIC pages). */
+	/* 4. Page size: US 128 B; DS as its geometry word set it, and the PONNIC
+	 * DS pages always follow the PBO's -- also at O5, where the pool is kept. */
 	if (!keep_pool) {
 		pi_field(PI_PON_DSC_CFG_US, 14, 13, 0);
-		pi_field(PI_PON_DSC_CFG_DS, 14, 13, 0);
+		if (!ds_dram_geometry)
+			pi_field(PI_PON_DSC_CFG_DS, 14, 13, 0);
 	}
+	ds_page_size = (pi_rd(PI_PON_DSC_CFG_DS) >> 13) & 3;
 	pi_field(PI_IO_CMD_1_US, 5, 4, 0);		/* RPAGE_SIZE = 128B      */
 	pi_field(PI_IO_CMD_1_US, 1, 0, 0);		/* TPAGE_SIZE = 128B      */
-	pi_field(PI_IO_CMD_1_DS, 5, 4, 0);
-	pi_field(PI_IO_CMD_1_DS, 1, 0, 0);
+	pi_field(PI_IO_CMD_1_DS, 5, 4, ds_page_size);
+	pi_field(PI_IO_CMD_1_DS, 1, 0, ds_page_size);
 	pi_field(PI_IO_CMD_1_DS, 27, 27, 1);		/* PRECISE_DMA_EN — DS precise/aligned DMA transfers; the O5 DS IO_CMD_1 value is 0x08000000. Without it the DS RX DMA never lands a frame, so filled stays 0. */
 
 	/* 5. PONNIC datapath: almost-full RX backpressure + TX ...

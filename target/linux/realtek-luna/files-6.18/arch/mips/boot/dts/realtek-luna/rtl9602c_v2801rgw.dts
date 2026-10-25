@@ -24,18 +24,21 @@
 		reg = <0x00000000 0x02f00000>, <0x03000000 0x00f00000>;
 	};
 
-	/* Own stock map and bsp_prom_meminit exclude these; purpose is unproven. */
+	/* Stock's PON packet pools: its kernel writes IP_MSTBASE_DS 0x02f00000 and
+	 * IP_MSTBASE_US 0x03f00000, the two holes of its live /proc/iomem (2026-10-06).
+	 * Without the DS pool the DS PBO runs on 32 SRAM pages, which wedged Q0 on the
+	 * X111W (3 of 20 cold boots, 2026-10-24). */
 	reserved-memory {
 		#address-cells = <1>;
 		#size-cells = <1>;
 		ranges;
 
-		stock-reserved@2f00000 {
+		pbo_ds: stock-reserved@2f00000 {
 			no-map;
 			reg = <0x02f00000 0x00100000>;
 		};
 
-		stock-reserved@3f00000 {
+		pbo_us: stock-reserved@3f00000 {
 			no-map;
 			reg = <0x03f00000 0x00100000>;
 		};
@@ -85,6 +88,7 @@
 	/* Panel map from the stock kernel (board_01_led_init, pon_led_*_spec_type_00,
 	 * libmib set_los_led_state): PON index 6, LOS index 10, the copper port's
 	 * lamp index 5 on switch port 1 (type 2). */
+	memory-region = <&pbo_us>, <&pbo_ds>;
 	realtek,pon-led = <6>;
 	realtek,los-led = <10>;
 	realtek,port-leds = <5 2>;

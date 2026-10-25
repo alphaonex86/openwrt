@@ -141,7 +141,7 @@ static int erase_all(void)
 /* Erase, then write back what ocl_keep() chooses, in order. */
 static int compact(size_t scanned)
 {
-	static size_t keep[OCL_KEEP_CRASH + OCL_KEEP_GPON];
+	static size_t keep[OCL_KEEP_MAX];
 	size_t nkeep = ocl_keep(ocl.mirror, scanned, keep, ARRAY_SIZE(keep)), i;
 	struct ocl_rec r;
 	u8 *copy;

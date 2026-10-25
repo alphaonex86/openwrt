@@ -29,9 +29,12 @@ enum ocl_kind {
 	OCL_GPON = 6,
 };
 
-/* What a compaction keeps: the newest crash records and, apart, the newest GPON notes. */
+/* What a compaction keeps: the newest crash records, apart the newest GPON notes, and the
+ * newest boot record, the record before it and the last record (how the boots began and ended). */
 #define OCL_KEEP_CRASH	6
 #define OCL_KEEP_GPON	48
+#define OCL_KEEP_BOOT	3
+#define OCL_KEEP_MAX	(OCL_KEEP_CRASH + OCL_KEEP_GPON + OCL_KEEP_BOOT)
 
 struct ocl_rec {
 	u32 seq;

@@ -111,20 +111,29 @@ const char *ocl_kind_name(u8 kind)
 	return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "?";
 }
 
-/* The offsets, in log order, of the records a compaction writes back: never a boot or clean
- * record, the newest OCL_KEEP_CRASH of the others, and the newest OCL_KEEP_GPON GPON notes, so a
- * re-ranging OLT can never push a crash out. */
+/* The offsets, in log order, of the records a compaction writes back: the newest OCL_KEEP_CRASH
+ * crash records and, apart, the newest OCL_KEEP_GPON GPON notes, so a re-ranging OLT can never push
+ * a crash out; of the rest only the newest boot record, the one before it and the last one, so a
+ * compaction never erases how the previous boot ended nor that this one began. */
 size_t ocl_keep(const u8 *log, size_t used, size_t *offs, size_t cap)
 {
-	size_t off, n = 0, crash = 0, gpon = 0;
+	size_t off, n = 0, crash = 0, gpon = 0, boot = used, before_boot = used, last = used;
 	struct ocl_rec r;
 
-	for (off = 0; off < used && ocl_parse(log + off, used - off, &r) == OCL_RECORD; off += r.bytes)
-		*(r.kind == OCL_GPON ? &gpon : &crash) += r.kind != OCL_BOOT && r.kind != OCL_CLEAN;
 	for (off = 0; off < used && ocl_parse(log + off, used - off, &r) == OCL_RECORD; off += r.bytes) {
-		if (r.kind == OCL_BOOT || r.kind == OCL_CLEAN)
-			continue;
-		if (r.kind == OCL_GPON ? gpon-- > OCL_KEEP_GPON : crash-- > OCL_KEEP_CRASH)
+		if (r.kind == OCL_BOOT) {
+			boot = off;
+			before_boot = last;
+		} else if (r.kind != OCL_CLEAN) {
+			*(r.kind == OCL_GPON ? &gpon : &crash) += 1;
+		}
+		last = off;
+	}
+	for (off = 0; off < used && ocl_parse(log + off, used - off, &r) == OCL_RECORD; off += r.bytes) {
+		int marker = r.kind == OCL_BOOT || r.kind == OCL_CLEAN;
+		int counted = !marker && (r.kind == OCL_GPON ? gpon-- <= OCL_KEEP_GPON : crash-- <= OCL_KEEP_CRASH);
+
+		if (!counted && off != boot && off != before_boot && off != last)
 			continue;
 		if (n < cap)
 			offs[n++] = off;

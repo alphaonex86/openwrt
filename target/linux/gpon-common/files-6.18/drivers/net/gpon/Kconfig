@@ -103,6 +103,15 @@ config GPON_FLOW_OFFLOAD
 	  Selected by each family's accelerator backend. Targets without an
 	  accelerator must not select this shared lifecycle.
 
+config GPON_OLT_ROLE
+	bool
+	depends on GPON_CORE
+	help
+	  The OLT side of G.984.3 activation and G.988 provisioning
+	  (gpon_olt_ploam.c, gpon_olt_omci.c).  Selected only by an OLT
+	  target; an ONU build carries none of it.  Until one exists,
+	  dev/rtl9607c-test compiles and fuzzes it on x86.
+
 config GPON_FLOW_DIAG
 	bool "GPON accelerator diagnostics (why a flow was NOT offloaded)"
 	depends on GPON_FLOW_OFFLOAD

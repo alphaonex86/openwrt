@@ -126,6 +126,10 @@
 		compatible = "realtek,rtl9602c-wdt", "realtek,rtl960x-wdt";
 		reg = <0x18003260 0xc>;
 		clocks = <&lx_clk>;
+		/* Phase-1 timeout: input 39, live on the X111W (wdt_ph1_probe, 2026-10-16)
+		 * and the vendor BSP (BSP_WDT_PH1TO_IRQ). */
+		interrupt-parent = <&intc>;
+		interrupts = <39>;
 		/* 42 s, the hardware maximum (scale 3, phase-1 31): stock's own
 		 * WDT_CTRL word 0xe7c00000. */
 		timeout-sec = <42>;

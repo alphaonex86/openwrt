@@ -118,6 +118,10 @@
 		compatible = "realtek,rtl9607c-wdt", "realtek,rtl960x-wdt";
 		reg = <0x18003260 0xc>;
 		clocks = <&lx_clk>;
+		/* Phase-1 timeout: GIC external 33 (vendor mach-rtl960xc irq.h, whose TC0 = 0
+		 * matches the timer above); live proof owed, the ISR ignores a foreign source. */
+		interrupt-parent = <&gic>;
+		interrupts = <0 33 4>;
 		timeout-sec = <30>;
 	};
 

@@ -4,6 +4,9 @@
 
 #include <linux/errno.h>
 
+/* A panic whose message starts with this is recorded as kind "pretimeout". */
+#define ONU_CRASHLOG_PRETIMEOUT_PANIC "watchdog pretimeout"
+
 #if IS_ENABLED(CONFIG_MTD_ONU_CRASHLOG)
 int onu_crashlog_note(const char *event);
 #else

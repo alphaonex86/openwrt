@@ -37,8 +37,8 @@ static struct {
 	struct mtd_info *mtd;
 	u8 *mirror;
 	size_t size, end;
-	u32 seq, boot_seq;
-	bool owned;
+	u32 seq, boot_seq, this_boot;
+	bool owned, writable;
 	struct mutex lock;
 } ocl = { .lock = __MUTEX_INITIALIZER(ocl.lock) };
 
@@ -83,12 +83,15 @@ static void ocl_dump(struct kmsg_dumper *dumper, struct kmsg_dump_detail *detail
 	struct kmsg_dump_iter iter;
 	size_t head, got = 0;
 
+	bool pre;
+
 	if (detail->reason != KMSG_DUMP_PANIC)
 		return;
-	head = build_text(text_buf, sizeof(text_buf), "event=panic\n");
+	pre = detail->description && strstarts(detail->description, ONU_CRASHLOG_PRETIMEOUT_PANIC);
+	head = build_text(text_buf, sizeof(text_buf), pre ? "event=pretimeout\n" : "event=panic\n");
 	kmsg_dump_rewind(&iter);
 	kmsg_dump_get_buffer(&iter, true, text_buf + head, sizeof(text_buf) - head, &got);
-	append(OCL_PANIC, text_buf, head + got, true);
+	append(pre ? OCL_PRETIMEOUT : OCL_PANIC, text_buf, head + got, true);
 }
 
 static struct kmsg_dumper dumper = { .dump = ocl_dump, .max_reason = KMSG_DUMP_PANIC };
@@ -170,7 +173,7 @@ static void ocl_attach(struct mtd_info *img, struct mtd_info *mtd)
 	struct ocl_rec r = { 0 }, last = { 0 };
 	size_t got = 0, off = 0;
 	bool foreign = false;
-	int kind;
+	int kind, ret;
 
 	ocl.mtd = mtd;
 	ocl.size = mtd->size;
@@ -196,6 +199,11 @@ static void ocl_attach(struct mtd_info *img, struct mtd_info *mtd)
 		pr_warn("onu_crashlog: %s is not behind this OpenWrt's %s, nothing is written\n", mtd->name, image);
 		return;
 	}
+	ocl.writable = mtd->flags & MTD_WRITEABLE;
+	if (!ocl.writable) {
+		pr_warn("onu_crashlog: %s is read-only on this boot, nothing is written\n", mtd->name);
+		return;
+	}
 	if ((foreign || ocl.size - ocl.end < MIN_FREE) && compact(off))
 		pr_err("onu_crashlog: %s could not be compacted\n", mtd->name);
 	if (ocl_ended_unclean(last.kind)) {
@@ -204,9 +212,15 @@ static void ocl_attach(struct mtd_info *img, struct mtd_info *mtd)
 				     "power cut or watchdog; its last record seq=%u kind=%s:\n%.*s",
 				     last.boot_seq, last.seq, ocl_kind_name(last.kind),
 				     (int)min_t(u16, last.len, 512), (const char *)last.text);
-		append(OCL_UNCLEAN, text_buf, n, false);
+		ret = append(OCL_UNCLEAN, text_buf, n, false);
+		if (ret)
+			pr_err("onu_crashlog: the unclean record was not written (%d)\n", ret);
 	}
-	append(OCL_BOOT, text_buf, build_text(text_buf, sizeof(text_buf), "event=boot\n"), false);
+	ret = append(OCL_BOOT, text_buf, build_text(text_buf, sizeof(text_buf), "event=boot\n"), false);
+	if (ret)
+		pr_err("onu_crashlog: the boot record was not written (%d)\n", ret);
+	else
+		ocl.this_boot = ocl.seq;
 	kmsg_dump_register(&dumper);
 	register_reboot_notifier(&reboot_nb);
 	pr_info("onu_crashlog: %s, %zu of %zu bytes used, boot seq %u\n", mtd->name, ocl.end,
@@ -262,7 +276,8 @@ static int ocl_show(struct seq_file *m, void *v)
 	size_t off = 0;
 
 	mutex_lock(&ocl.lock);
-	seq_printf(m, "region=%s owned=%d used=%zu size=%zu\n", partition, ocl.owned, ocl.end, ocl.size);
+	seq_printf(m, "region=%s owned=%d writable=%d boot=%u used=%zu size=%zu\n", partition, ocl.owned,
+		   ocl.writable, ocl.this_boot, ocl.end, ocl.size);
 	while (ocl.mirror && off < ocl.end && ocl_parse(ocl.mirror + off, ocl.end - off, &r) == OCL_RECORD) {
 		seq_printf(m, "--- seq=%u kind=%s boot=%u uptime=%us\n%.*s\n", r.seq, ocl_kind_name(r.kind),
 			   r.boot_seq, r.uptime_s, r.len, (const char *)r.text);

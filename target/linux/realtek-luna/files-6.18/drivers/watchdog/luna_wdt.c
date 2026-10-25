@@ -5,21 +5,26 @@
 #include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/err.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/onu_crashlog.h>
 #include <linux/platform_device.h>
+#include <linux/sched/debug.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
+#include <asm/irq_regs.h>
 
 /* --- the register block, offsets from its base (0x18003260 on RTL9602C) --- */
 #define LUNA_WDT_CNT			0x00
 #define LUNA_WDT_CNT_KICK		BIT(31)
 #define LUNA_WDT_INTR		0x04
+#define LUNA_WDT_INTR_PH1		BIT(31)	/* phase 1 ran out; write 1 to clear */
 #define LUNA_WDT_CTRL		0x08
 #define LUNA_WDT_CTRL_EN		BIT(31)
 #define LUNA_WDT_BLOCK_SIZE		0x0c
@@ -49,6 +54,10 @@
 /* Phase 2 is kept at its shortest. It exists so a vendor ...
  * dev/MEASURED-luna_wdt.c.md sec 3. */
 #define LUNA_WDT_PH2_TICKS		1u
+
+/* With the phase-1 interrupt wired, phase 2 gets these ticks from phase 1:
+ * the time the crash log has to land its record before the reset. */
+#define LUNA_WDT_PRE_TICKS		3u
 
 #define LUNA_WDT_MIN_TIMEOUT		1u
 #define LUNA_WDT_DEFAULT_TIMEOUT	30u
@@ -112,6 +121,16 @@ static int luna_wdt_calc_timing(unsigned long rate, unsigned int secs,
 	return -ERANGE;
 }
 
+/* Pure: hand LUNA_WDT_PRE_TICKS from phase 1 to phase 2, the total kept; a
+ * window too short to split stays as it is. */
+static void luna_wdt_split_pretimeout(struct luna_wdt_timing *t)
+{
+	if (t->ph1 < LUNA_WDT_PRE_TICKS)
+		return;
+	t->ph1 -= LUNA_WDT_PRE_TICKS;
+	t->ph2 += LUNA_WDT_PRE_TICKS;
+}
+
 /* Pure: those fields packed into the WDT_CTRL bit positions, enable excluded. */
 static u32 luna_wdt_ctrl_timing(const struct luna_wdt_timing *t,
 				   u32 reset_mode)
@@ -129,6 +148,7 @@ struct luna_wdt {
 	void __iomem		*base;
 	struct clk		*clk;
 	unsigned long		rate;
+	int			irq;		/* phase-1 interrupt, <= 0 = not wired */
 	spinlock_t		lock;		/* see kernel-doc above */
 };
 
@@ -177,6 +197,8 @@ static int luna_wdt_start(struct watchdog_device *wdd)
 	ret = luna_wdt_calc_timing(wdt->rate, wdd->timeout, &t);
 	if (ret)
 		return ret;
+	if (wdt->irq > 0)
+		luna_wdt_split_pretimeout(&t);
 
 	spin_lock_irqsave(&wdt->lock, flags);
 	ctrl = readl(wdt->base + LUNA_WDT_CTRL);
@@ -252,6 +274,23 @@ static const struct watchdog_ops luna_wdt_ops = {
 	.set_timeout	= luna_wdt_set_timeout,
 };
 
+/* Phase 1 ran out with interrupts still running: nothing fed the watchdog.
+ * Print the interrupted context and panic, so the crash log records it before
+ * phase 2 resets the chip; without this a hang leaves only "unclean". */
+static irqreturn_t luna_wdt_ph1_irq(int irq, void *dev_id)
+{
+	struct luna_wdt *wdt = dev_id;
+
+	if (!(readl(wdt->base + LUNA_WDT_INTR) & LUNA_WDT_INTR_PH1))
+		return IRQ_NONE;	/* a wrongly wired input must not panic the board */
+	writel(LUNA_WDT_INTR_PH1, wdt->base + LUNA_WDT_INTR);
+	if (get_irq_regs())
+		show_regs(get_irq_regs());
+	panic(ONU_CRASHLOG_PRETIMEOUT_PANIC ": nothing fed the watchdog within its %u s timeout",
+	      wdt->wdd.timeout);
+	return IRQ_HANDLED;
+}
+
 static int luna_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -260,7 +299,7 @@ static int luna_wdt_probe(struct platform_device *pdev)
 	resource_size_t phys;
 	unsigned int max_timeout;
 	bool adopted;
-	u32 ctrl;
+	u32 ctrl, entry_intr;
 	int ret;
 
 	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
@@ -300,8 +339,22 @@ static int luna_wdt_probe(struct platform_device *pdev)
 				     "a %lu Hz input clock cannot reach a 1 s window\n",
 				     wdt->rate);
 
-	/* The phase-1 timeout has its own interrupt line on this SoC ...
+	/* The phase-1 interrupt, where the board wires it ...
 	 * dev/MEASURED-luna_wdt.c.md sec 14. */
+	entry_intr = readl(wdt->base + LUNA_WDT_INTR);
+	wdt->irq = platform_get_irq_optional(pdev, 0);
+	if (wdt->irq > 0) {
+		writel(LUNA_WDT_INTR_PH1, wdt->base + LUNA_WDT_INTR);
+		ret = devm_request_irq(dev, wdt->irq, luna_wdt_ph1_irq, 0,
+				       "watchdog-phase1", wdt);
+		if (ret) {
+			dev_warn(dev, "phase-1 interrupt %d not taken (%d): no pretimeout record\n",
+				 wdt->irq, ret);
+			wdt->irq = 0;
+		}
+	} else if (wdt->irq != -ENXIO) {
+		dev_warn(dev, "phase-1 interrupt unusable (%d): no pretimeout record\n", wdt->irq);
+	}
 
 	wdt->wdd.info = &luna_wdt_info;
 	wdt->wdd.ops = &luna_wdt_ops;
@@ -343,11 +396,12 @@ static int luna_wdt_probe(struct platform_device *pdev)
 		return ret;
 
 	dev_info(dev,
-		 "Luna WDT at %pa on a %lu Hz clock: %u s timeout (max %u s), full-chip reset, %s at kernel entry, armed%s\n",
+		 "Luna WDT at %pa on a %lu Hz clock: %u s timeout (max %u s), full-chip reset, %s at kernel entry (INTR 0x%08x), armed%s, %s\n",
 		 &phys, wdt->rate, wdt->wdd.timeout, wdt->wdd.max_timeout,
 		 adopted ? "ALREADY RUNNING (reprogrammed to our window)"
-			 : "stopped",
-		 nowayout ? ", nowayout" : "");
+			 : "stopped", entry_intr,
+		 nowayout ? ", nowayout" : "",
+		 wdt->irq > 0 ? "phase-1 pretimeout -> crash record" : "no phase-1 interrupt wired");
 
 	return 0;
 }

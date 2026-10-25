@@ -206,6 +206,9 @@
 		compatible = "realtek,rtl9603cvd-wdt", "realtek,rtl960x-wdt";
 		reg = <0x18003260 0xc>;
 		clocks = <&lx_clk>;
+		/* Phase-1 timeout: input 39, live on the G24W (wdt_ph1_probe, 2026-10-25). */
+		interrupt-parent = <&intc>;
+		interrupts = <39>;
 		timeout-sec = <30>;
 	};
 

@@ -52,7 +52,7 @@
 
 #define DRV_NAME		"cortina-gpon"
 
-/* PON register window (from the DT reg entry / reference): phys 0x4_F5500000, 48 KiB. */
+/* PON register window (from the DT reg entry ): phys 0x4_F5500000, 48 KiB. */
 #define CG_PON_WINDOW_PHYS	0x4f5500000ULL
 #define CG_PON_WINDOW_SIZE	0xc000
 

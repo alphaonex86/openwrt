@@ -35,7 +35,7 @@
  *       three banks
  *     - clocks: OCP 1050 MHz, LX 200 MHz
  *
- *   CORROBORATED (tier 3, the chip's own 4.4.140 reference -- the same kernel
+ *   CORROBORATED (tier 3, the chip's own vendor firmware -- the same kernel
  *   version this board runs, which is what makes it tier 3 and not tier 4):
  *     - the interrupt aggregator's register map and routing values
  * ---------------------------------------------------------------------
@@ -224,7 +224,7 @@
 	 * never a compiled-in constant), and the DTB actually built for the
 	 * 9603CVD product carries the same 0x18012000/0x2000 window.  The
 	 * KSEG1 alias 0xB8012000 in the vendor header is dead code.
-	 * [tier 3, the chip's own 4.4.140 reference: the stock driver
+	 * [tier 3, the chip's own vendor firmware: its re8686 NIC driver
 	 *  takes the base from DT; the 9603CVD-configured tree's own DTB and
 	 *  arch/mips/boot/dts/realtek/rtl9607c_soc.dtsi agree on the window]
 	 *

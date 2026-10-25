@@ -229,7 +229,7 @@ enum cortina_ni_win {
 /*
  * Internal-GPHY fault latch + port reinit (stock aal_internal_phy_recovery /
  * aal_internal_phy_reinit; RTL9607F ko @0x180d0 adds a wrapper toggle over
- * the reference C version).  The quad-GPHY can wedge nondeterministically -
+ * the vendor's own).  The quad-GPHY can wedge nondeterministically -
  * typically across a link renegotiation: link reads up and every MAC/QM
  * register is normal, but the port never delivers a single ingress frame.
  * Stock polls the latch at 1 Hz on every port ("Incase any of any problem,
@@ -268,7 +268,7 @@ enum cortina_ni_win {
  * RTL9607C sibling's in-source NCTL tables are the rev-B path, not gen2.  Our
  * image is therefore LIVE-DUMPED from stock (per bank, uC held, via OCP
  * 0xa436=addr/read 0xa438=data) - facts read out of the shipped product, not
- * reference source.
+ * vendor firmware.
  *
  * All registers are internal-PHY OCP addresses, memory-mapped in the GPHY
  * window: OCP register A of bank b lives at b*0x40000 + A*4 (verified against
@@ -510,7 +510,7 @@ enum cortina_ni_win {
  * CPU_PUSH_PADDR pushes (cortina_ni_rx_populate) - they land nowhere, pa_req stuck 0.  But
  * we DO software-push (the cpu_eq=1 mechanism).  Setting cpu_eq=1 makes the EQM register
  * each pushed buffer -> pa_req>0 -> RMU0 admits.
- * ★★★ build67 (vendor reference RE): CPU pools ARE cpu_eq=1 (host-fed via CPU_PUSH_PADDR;
+ * ★★★ build67 (vendor binary RE): CPU pools ARE cpu_eq=1 (host-fed via CPU_PUSH_PADDR;
  * aal_l3qm.c:1568,1583).  The REAL bug was ROUTING: our CPU frame resolved to pdpid 0x08 =
  * NI PORT 0 (a PHYSICAL wire egress; NI/phys ports = dest 8-15) with deep_q=1, so it was
  * SWITCHED OUT A WIRE PORT (bm_rx==bm_tx, no drop) and NEVER crossed into L3QM.  CPU ports
@@ -525,7 +525,7 @@ enum cortina_ni_win {
  *     inactive counters stay 0 forever.  (EQ8 is the other stock model: cpu_eq=1
  *     but FBM-auto-refilled, refill_en=1 - needs the FBM block, not a CPU push.)
  *   - CFG2 buffer_size[2:0] LIVE decode: idx 128B=0,256=1,512=2,1024=3,2048=4,4096=5
- *     (live EQ14 c2=0xFF04 with a proven 2048B stride).  The sibling-reference "1=128B..
+ *     (live EQ14 c2=0xFF04 with a proven 2048B stride).  The sibling-chip "1=128B..
  *     5=2048B" table above was off by one on this chip: our old idx5 = 4096B stride.
  * => 0x0000ff04 = cpu_eq=0, refill_en=0, refill_ths=0xff (don't-care), size idx4=2048B.
  *    The old 0x0000ff0d was BOTH cpu_eq=1 host-fed AND a 4096-vs-2048 stride bug. */

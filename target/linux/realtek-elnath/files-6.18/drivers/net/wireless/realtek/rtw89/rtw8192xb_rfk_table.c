@@ -169,7 +169,7 @@ RTW89_DECLARE_RFK_TBL(rtw8192xb_dpk_kip_pwr_clk_off_defs);
 
 /* TSSI AFE/clock setup.  The 0x0304/0x0308/0x0318/0x0324 values are the
  * 8192XB's own (stock rtk_wifi6.ko _halrf_tssi_set_sys_8192xb disasm; 0x0308
- * byte is 0x1f in the shipped binary, newer than the 0x1c reference source).  The
+ * byte is 0x1f in the shipped binary, newer than the 0x1c vendor firmware).  The
  * 8852C values (0x1313/0x13/0x00410041/0x0041) this table was first derived
  * from misconfigure the TSSI ADC clocking on this chip, so the power detector
  * feeding the closed loop reads nonsense and the servo rails.

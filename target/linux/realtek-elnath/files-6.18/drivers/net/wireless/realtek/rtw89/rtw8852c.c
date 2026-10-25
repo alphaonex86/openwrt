@@ -401,10 +401,10 @@ static int rtw8852c_pwr_off_func(struct rtw89_dev *rtwdev)
 	 * switch the a-die crystal OFF, and set two 8852C SPS values.  The
 	 * vendor ships FOUR power-off variants per chip and installs one per
 	 * platform; an ONU is an AP platform.
-	 *   tier 3, the chip's own reference the stock driver:
+	 *   tier 3, the chip's own vendor firmware:
 	 *     mac_pwr_off_sdio / _usb / _nic_pcie_8852c each write
 	 *     B_AX_XTAL_OFF_A_DIE; mac_pwr_off_ap_pcie_8852c does NOT, and its
-	 *     B_AX_APFM_SWLPS write is COMMENTED OUT in the vendor reference.  Its
+	 *     B_AX_APFM_SWLPS write is COMMENTED OUT in the vendor binary.  Its
 	 *     tail is: clear B_AX_SYM_PADPDN_WL_RFC_1P3 -> xtal_si -> clear
 	 *     B_AX_SYM_PADPDN_WL_PTA_1P3 -> xtal_si -> set B_AX_APFM_OFFMAC,
 	 *     poll 0x04[9]==0 -> R_AX_WLLPS_CTRL &= ~B_AX_LPSOP_DSWR.  That is

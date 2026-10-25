@@ -17,7 +17,7 @@
  *
  * The MAC engine is identical on both; the SWITCH registers are not. Of 1361
  * name-matched switch registers, 853 keep their offset and 508 MOVE [tier 3,
- * each chip's own reference]. The trap that pays for the table: the RTL9607C's
+ * each chip's own vendor firmware]. The trap that pays for the table: the RTL9607C's
  * P_ABLTY at 0x200 is SDS_CFG on the RTL9603CVD, so a driver that "just worked
  * because the family is the same" would read a SerDes configuration word and
  * call it a link state.
@@ -232,7 +232,7 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
 #define   STP_FORWARDING	0x3
 
 /* THE PER-CHIP TABLE. Everything in it MOVED between the two parts, and every
- * field was read from that chip's OWN reference (tier 3) rather than inferred from
+ * field was read from that chip's OWN vendor firmware (tier 3) rather than inferred from
  * the sibling. A zero means "this chip has no such register" and the code must
  * SKIP the write -- offset 0 is the PHY indirect-access data register. */
 struct luna_eth_chip {
@@ -509,7 +509,7 @@ static const struct kernel_param_ops gphy_map_ops = {
 	.get = param_get_int,
 };
 module_param_cb(gphy_map, &gphy_map_ops, &gphy_map, 0644);
-MODULE_PARM_DESC(gphy_map, "internal-PHY OCP map: 0 = per the chip table, 1 = force GPHY page 0xA40 on every port, 2 = force the flat FE map (a bring-up experiment: the vendor reference and its own OCP map disagree for the FE ports)");
+MODULE_PARM_DESC(gphy_map, "internal-PHY OCP map: 0 = per the chip table, 1 = force GPHY page 0xA40 on every port, 2 = force the flat FE map (a bring-up experiment: the vendor firmware and its own OCP map disagree for the FE ports)");
 
 /* The UNI administrative lock, as a DESIRED state per copper ...
  * dev/MEASURED-luna_eth.c.md sec 19. */

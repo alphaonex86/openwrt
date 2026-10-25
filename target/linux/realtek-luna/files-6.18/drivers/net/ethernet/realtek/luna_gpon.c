@@ -4800,10 +4800,10 @@ void gpon_pbo_init(void)
 	}
 
 	/* No ABLTY_FORCE_MODE write here. The RE'd 0xc fits a one-word die where the
-	 * register is a port mask (9601B reference: `|= 1 << port`); on these dies it is
+	 * register is a port mask (9601B vendor firmware: `|= 1 << port`); on these dies it is
 	 * one register per port, so the write forced UNI port 0 to half duplex
 	 * under its autonegotiating PHY (field X111W late collisions 2026-10-25;
-	 * stock reads 0 there, and the reference forces only the CPU port). */
+	 * stock reads 0 there, and the vendor firmware forces only the CPU port). */
 	if (!usnic_strip) {
 		/* RTL9602C only: 0x0f4 is CFG_FE_POLL_WD_1 here and SSC_CTRL_1 on the
 		 * RTL9603CVD, which has no front-end poll/watchdog to translate to. */

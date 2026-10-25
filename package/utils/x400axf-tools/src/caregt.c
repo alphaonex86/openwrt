@@ -13,7 +13,7 @@
  * wrong -> capture the PROCESS not the snapshot").
  *
  * Physical map fact (tier-1, stock devmem cross-check): the CA8277C NE
- * register file is at phys 0x4f430_0000 (reference 0xf43xxxxx + 0x4_0000_0000);
+ * register file is at phys 0x4f430_0000 (vendor 0xf43xxxxx + 0x4_0000_0000);
  * AXI-REO at 0x4f432d000/0x4f432f000.  Pass FULL physical addresses.
  *
  * Modes:

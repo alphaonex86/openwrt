@@ -26,7 +26,7 @@
  * ★ THE TRANSLATION IS PURE, WHICH IS THE POINT.  Stock's own ME 171
  *   translators (omci_SetExtValnClassifyRule, omci_SetClassifyUsRule/Act,
  *   omci_SetClassifyDsRule/Act, omci_SetDsTagActByUsFilter,
- *   omci_SetUsRuleInvert2Ds in pf_rg.ko) make NO reference call at all — the vendor
+ *   omci_SetUsRuleInvert2Ds in pf_rg.ko) make NO vendor firmware call at all — the vendor
  *   had drawn this core/family boundary five years before naming it `_dm_`.
  *   So this file is x86-fuzzable model code, not driver code, and its host
  *   coverage is dev/rtl9607c-test/gpon_omci_vlan_test.c.

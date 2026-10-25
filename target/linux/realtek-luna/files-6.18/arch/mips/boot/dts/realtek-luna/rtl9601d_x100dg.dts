@@ -73,7 +73,7 @@
 	};
 };
 
-/* The GE jack is switch port 1: the vendor reference gives the RTL9601D sub-types
+/* The GE jack is switch port 1: the vendor firmware gives the RTL9601D sub-types
  * port 0 = none, port 1 = GE (its HGU/SFU port table), the X111W's GE port. */
 
 /* Stock's own ring: its boot prints RX[256,...]. 1024 buffers (~2.4 MB) do not

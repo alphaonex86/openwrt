@@ -19,7 +19,7 @@
  * ★★ THE PER-CHIP FOUR ARE NOT A MISTAKE, AND THEY ARE THE DANGEROUS KIND.
  * The switch LUT block MOVED between the two silicon revisions: the RTL9603CVD
  * inserted registers, so everything from LUT_UNKN_UC_DA_CTRL onward shifted.
- * Confirmed on 2026-08-28 from each chip's OWN register map in the vendor reference, which
+ * Confirmed on 2026-08-28 from each chip's OWN register map in the vendor firmware, which
  * agrees with what both drivers already had -- two independent tiers:
  *
  *     register              rtl9602c   rtl9603cvd
@@ -94,7 +94,7 @@
 #define RXD_RCDF		BIT(24)	/* RX: DMA error.  RCDF is the SILICON's own
 					 * name (the vendor NIC driver's rx_info
 					 * opts1 bitfield, `rcdf:1;//24`, same in
-					 * the 4.4 and 5.10 reference drops).  This one
+					 * the 4.4 and 5.10 vendor firmwares).  This one
 					 * bit carried TWO shell names, RXD_DMAERR
 					 * (luna_eth.c, invented -- in no vendor
 					 * source) and RXD_RCDF (rtl9602c_eth.c),
@@ -103,11 +103,11 @@
 #define TXD_LEN_MASK		0x1ffff	/* TX length */
 
 /* Ring geometry.  RX is STOCK's: the RTL9603CVD's running vendor driver prints
- * RX_RING_SIZE[0]=1024 and the reference's GMAC0_RX1_SIZE is 1024. With 64 the ring
+ * RX_RING_SIZE[0]=1024 and the vendor's GMAC0_RX1_SIZE is 1024. With 64 the ring
  * filled, the switch sent PAUSE (p3_tx_pause 42774) and G24W forwarded
  * CPU-path v6 at ~40 Mb/s with the CPU 99% idle (measured 2026-09-22). */
 #define RX_RING_SIZE		1024
-/* TX is the reference's GMAC0_TX1_SIZE: with 64 slots gpon0 (which drops rather than
+/* TX is the vendor's GMAC0_TX1_SIZE: with 64 slots gpon0 (which drops rather than
  * stops its queue on a full ring) discarded ~5% of a CPU-path v6 flow. */
 #define TX_RING_SIZE		2048
 #define RX_BUF_SIZE		2048
@@ -148,7 +148,7 @@
  * with a FLAT map answers at (N & 0x1f) << 1 instead.  WHICH of the two a given
  * port uses is per chip and is decided by that chip's own driver. */
 #define GPHY_MII_PAGE		0xA400
-/* MII register 0..15 on page 0xA40 (the reference's 0xa400 + reg * 2); `reg & 7`
+/* MII register 0..15 on page 0xA40 (the vendor's 0xa400 + reg * 2); `reg & 7`
  * aliased CTRL1000/STAT1000/ESTATUS onto BMSR/PHYSID/ADVERTISE. */
 static inline u32 luna_gphy_mii_ocp(unsigned int reg)
 {
@@ -221,7 +221,7 @@ static inline u32 luna_gphy_mii_ocp(unsigned int reg)
 
 
 /* Switch core: the VLAN block did NOT move between these two revisions. */
-/* ★ NAMES BOTH register maps AGREE ON, for the SWCORE registers
+/* ★ NAMES BOTH REGISTER MAPS AGREE ON, for the SWCORE registers
  * rtl9602c_datapath_tables_init writes (2026-09-04).  It spelled these as
  * bare hex; `bare_offset_chip_audit.py` resolves each address in the
  * rtl9602c AND rtl9603cvd register maps and only a SAME verdict is written here.
@@ -250,7 +250,7 @@ static inline u32 luna_gphy_mii_ocp(unsigned int reg)
  * word (p / 2) in bits [(p % 2) * 12 + 11 : (p % 2) * 12], NOT at its own word.
  *
  * Proven three ways from our OWN stock kernel (cross-compiler/stock_nor/k0_kernel),
- * not from the reference:
+ * not from the vendor firmware:
  *   descriptor @file 0xca15d0 : offset 0x1300c · element stride 0x000c = 12 BITS
  *                               · max port index 3
  *   _reg_addr_find @0x801b69dc: li 32 / div by stride / div port / sll 2 / addu
@@ -384,7 +384,7 @@ static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
  *                    port.  PER CHIP AND NOT GUESSABLE: the vendor's own NIC
  *                    RX hook switches on the chip id and picks 246 for the
  *                    RTL9602C but 229 for the RTL9607C and the RTL9603CVD
- *                    the stock driver
+ *                    (the vendor GPON module,
  *                    rtk_gponapp_omci_rx_wrapper -- tier 3).  Reading the
  *                    9602C's 246 on this die matches a reason nothing ever
  *                    carries, so the trap stays silent and the log reads as
@@ -413,7 +413,7 @@ struct luna_sw_map {
 	u8  n_copper;
 	/* ★ THE PER-PORT REGISTER INTERVAL, AND IT IS NOT THE FAMILY'S.  The
 	 * vendor states it as data -- macPpInfo.interval, 0x400 on the RTL9602C
-	 * and 0x100 on the RTL9603CVD and RTL9607C (reference register map chip.c).  It sat
+	 * and 0x100 on the RTL9603CVD and RTL9607C (their register maps).  It sat
 	 * in luna_gpon_regs.h only as a NUMBER named for one chip
 	 * (SW_MACPP_STRIDE_9602C), so a shared file could reach for it and did:
 	 * luna_gpon.c -- which BOTH Luna boards build -- wrote
@@ -869,7 +869,7 @@ static inline void luna_ipsel_cycle_gmac0(void)
  * rather than resolved: luna_eth.c calls it "switch-core enable" and
  * gpon-rtl960x.c calls the SAME bit at the SAME address "PONPBO IP enable".
  * Both set it.  Either one name is wrong, or the bit gates a block both need
- * and neither name says so.  OWED: settle it from the chip's own reference
+ * and neither name says so.  OWED: settle it from the chip's own vendor firmware
  * (tier 3) or a live read, and rename on the spot -- do NOT pick one by
  * majority, which is how two wrong names cancel and survive. */
 #define SOC_SW_ENABLE	((void __iomem *)0xb800063cul)

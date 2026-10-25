@@ -218,7 +218,7 @@ static bool addressed(const struct gpon_ploam *o, u8 onu_id, bool bcast_ok)
 		(bcast_ok && onu_id == GPON_PLOAM_ONU_ID_BROADCAST));
 }
 
-/* Disable_Serial_Number and the chip reference's 0x81 variant. Enable-all (0x0f)
+/* Disable_Serial_Number and the vendor firmware's 0x81 variant. Enable-all (0x0f)
  * names no serial number. */
 static bool sn_disables(const struct gpon_ploam *o, u8 type, const u8 *d)
 {
@@ -701,7 +701,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	case PLM_DS_RANGING_ADJ:
 		/* G.984.3 Annex D: O5 only, octet 3 bit 1 = decrease (bit 0, as
-		 * the chip reference reads it, too); a unicast one is acknowledged.  An
+		 * the vendor firmware reads it, too); a unicast one is acknowledged.  An
 		 * EqD below zero cannot be: it is reported, never written. */
 		if (o->state == GPON_O5_OPERATION && addressed(o, onu_id, true)) {
 			u32 delta = ((u32)d[1] << 24) | ((u32)d[2] << 16) |

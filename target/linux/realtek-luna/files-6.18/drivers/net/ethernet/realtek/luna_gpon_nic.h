@@ -94,7 +94,7 @@ void rtl9602c_eth_omci_selftest(void);
  * engine re-latches against the freshly-reset GMAC (stock order: GMAC reset -> NIC). */
 void gpon_pbo_init(void);
 
-/* Faithful port of the stock reference rtk_all_module_init() GPON datapath bring-up,
+/* Faithful port of the stock rtk_all_module_init() GPON datapath bring-up,
  * run on the quiescent switch in the eth reset path (after the GMAC reset + swcore
  * resync, before the GMAC is programmed/armed). Defined in luna_gpon.c. */
 void rtl9602c_datapath_tables_init(void);

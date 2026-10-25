@@ -49,7 +49,7 @@ typedef uint32_t u32;
 #define PLM_DS_POPUP			0x0c	/* O6 -> O4 (broadcast) or O5 (directed) */
 #define PLM_DS_SWIFT_POPUP		0x16	/* G.984.3 Annex D: O6 -> O5 */
 #define PLM_DS_RANGING_ADJ		0x17	/* G.984.3 Annex D: relative EqD, ACK if unicast */
-#define PLM_DS_DISABLE_SN_ZTE		0x81	/* chip reference: 0x11 disables, 0x0f/0x10 enable */
+#define PLM_DS_DISABLE_SN_ZTE		0x81	/* vendor firmware: 0x11 disables, 0x0f/0x10 enable */
 #define PLM_US_ENCRYPT_KEY		0x05	/* US Encryption_Key response */
 #define PLM_US_PASSWORD			0x02	/* US Password response (to Request_Password) */
 #define PLM_US_SERIAL_NUMBER		0x01

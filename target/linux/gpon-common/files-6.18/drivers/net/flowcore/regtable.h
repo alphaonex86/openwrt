@@ -110,7 +110,7 @@ struct reg {
 
 /**
  * REG_AT() / REG_ABSENT - the two INITIALISER forms. Brace forms, so
- * `.field = REG_AT(0x1204),` keeps the literal that a human, regtable_vs_sdk.py
+ * `.field = REG_AT(0x1204),` keeps the literal that a human, the host register-name check
  * and gpon_regtable_diff_test all read; only the WRAPPER is new.
  */
 #define REG_AT(off)	{ REG_ENC_OF(off) }

@@ -365,7 +365,7 @@
 #define PONIP_REG_SIZE		0x00010000u	/* covers up to IO_CMD_1_DS     */
 
 
-/* ★ NAMES THE TWO register maps AGREE ON, for the registers /proc/gpon reads
+/* ★ NAMES THE TWO REGISTER MAPS AGREE ON, for the registers /proc/gpon reads
  * (2026-09-04).  gpon_proc_show() spelled 76 bare offsets; these 34 are the
  * ones an ORACLE names -- `bare_offset_chip_audit.py` resolves each address
  * in the rtl9602c AND rtl9603cvd register maps, in the block its accessor implies,
@@ -596,7 +596,7 @@
 #define PI_PON_SID_GLB_TH	0x02454		/* [28:16] ON_TH [12:0] OFF_TH (global) */
 #define PI_PON_SID_RPV_TH	0x02458		/* per-SID reserved-page threshold, +sid*4 */
 /*
- * ★ CLOSED 2026-09-08, BY ARITHMETIC ON TWO register maps AND NO BOARD.  The open
+ * ★ CLOSED 2026-09-08, BY ARITHMETIC ON TWO REGISTER MAPS AND NO BOARD.  The open
  * question this block used to carry -- whether PON_SID_RPV_TH's "array offset
  * 32" means 32 BITS (4-byte stride) or 32 BYTES -- is settled by where each
  * chip's array ENDS, because on both dies the next declared register sits
@@ -659,8 +659,8 @@
  * port*0x400 (the chip's per-port register interval is 0x400 -- the old
  * 0x20-stride wrote unrelated registers and RX_SPC never landed)" -- and
  * luna_ponmac.c, MACPP_INTERVAL 0x100 on the RTL9603CVD/RTL9607C.  The vendor
- * reference states it as data: rtl9602c_macPpInfo = { 0x20000, 0x203FF, interval
- * 0x400 } the stock driver, 0x100 for the 9603CVD and 9607C.  So
+ * vendor firmware states it as data: rtl9602c_macPpInfo = { 0x20000, 0x203FF, interval
+ * 0x400 }, 0x100 for the 9603CVD and 9607C.  So
  * P_MISC[2] (PON) = 0x20804 and P_MISC[3] (CPU) = 0x20c04, which is what the
  * RTL9602C code has always written.  A LITERAL 0x20804 in a shared file would
  * be P_MISC[8] on the other two chips -- the reason a name matters here. */
@@ -779,7 +779,7 @@ static_assert(SW_P_MISC_PORT_9602C(2) == 0x20804u &&
  * CHIP IS ADDING ONE INITIALISER BELOW".
  *
  * VALUES ARE LITERALS ON PURPOSE, the same idiom as rtl9602c_sw_map in
- * luna_eth_regs.h: `regtable_vs_sdk.py` parses this initialiser structurally
+ * luna_eth_regs.h: the host register-name check parses this initialiser structurally
  * and confirms every address against the RTL9602C's OWN vendor register map
  * (rtk_rtl9602c_reg_list.c: GTC block 0x70xxxx, array-offset 32 BITS = 4-byte
  * stride, idx 0..127) -- a macro reference here would blind that oracle.  Each
@@ -945,7 +945,7 @@ static const struct gpon_chip luna_gpon_chip = {
 #define GPON_GEM_DS_RX_CNTR_STAT	0x4044	/* [31:0] ETH_PKT_RX */
 #define GPON_GEM_DS_FWD_CNTR_IND	0x404c	/* IDX[6:0]=flow, R_ACK[15] */
 #define GPON_GEM_DS_FWD_CNTR_STAT	0x4050	/* [31:0] ETH_PKT_FWD */
-/* ⚠ MISC has NO R_ACK -- bit 15 is reserved on BOTH register maps, the vendor DAL
+/* ⚠ MISC has NO R_ACK -- bit 15 is reserved on BOTH register maps, the vendor driver
  * reads it with no poll, and stock's own resting value shows it clear
  * (0x04064=0x6) while the three counters above latch theirs set.  Its IDX is
  * also the ONE counter field whose width differs between the chips: [3:0] on

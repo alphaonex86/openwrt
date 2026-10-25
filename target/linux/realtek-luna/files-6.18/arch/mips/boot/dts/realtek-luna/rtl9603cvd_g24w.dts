@@ -263,7 +263,7 @@
 	 *     boot log      physmap platform flash device: 04000000 at 14000000
 	 *     boot log      SPI-F: 5E4018/MMIO16-1/ModeC 1x16 MB      (the loader)
 	 *     boot log      Luna SPI NOR FLASH G3 driver-5E4018/MMIO16-1/ModeC
-	 *   ACCESS, tier 3 (this SoC's own reference: drivers/mtd/maps + the spi-nor
+	 *   ACCESS, tier 3 (this SoC's own vendor firmware: drivers/mtd/maps + the spi-nor
 	 *   "G3" driver): the vendor registers a physmap device whose resource
 	 *     ends at 0x17ffffff, and its READ path for any offset+len <= 16 MB
 	 *     is a plain memcpy from that window; the SPI-F PIO block at

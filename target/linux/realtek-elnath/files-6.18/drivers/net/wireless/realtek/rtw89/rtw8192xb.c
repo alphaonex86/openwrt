@@ -405,7 +405,7 @@ static void rtw8192xb_sps_default_voltages(struct rtw89_dev *rtwdev)
  * warm reset costs.  Guarded by dev/rtl9607c-test Step 27
  * (elnath_wifi2g_pwron_retry_test), mutation-proven.
  * ★ THE VENDOR'S BOUND IS NO LONGER OWED -- it is ESTABLISHED (tier 3, the
- *   chip's own reference): pwr_poll_u32() spins MAC_AX_PWR_POLL_CNT 20 times at
+ *   chip's own vendor firmware): pwr_poll_u32() spins MAC_AX_PWR_POLL_CNT 20 times at
  *   MAC_AX_PWR_POLL_MS 1 with a BUSY delay, i.e. ~19 ms, and NOTHING retries
  *   it.  Our 20 ms poll is already faithful to that.  So this ladder is
  *   ADDITIVE robustness, never a correction of a wrong bound -- and it does
@@ -450,7 +450,7 @@ static const unsigned int pwron_settle_ms[] = { 100, 200, 400, 800 };
  * What used to sit here was the vendor's `_patch_flr_lps` -- an AON GPIO10
  * pulse whose closing poll waits for B_AX_WLMAC_PWR_STE to leave LPS.  Two
  * separate reasons it could never have helped, both tier 2, i.e. THIS board's
- * own stock rtk_wifi6.ko, which outranks the reference revision it was ported from:
+ * own stock rtk_wifi6.ko, which outranks the vendor firmware revision it was ported from:
  *   - `chk_patch_flr_lps` is present as a symbol but has ZERO callers in the
  *     shipped module.  The control that makes that mean something: of the 62
  *     `chk_patch_*` symbols, most DO have 1-3 `bl` call sites, so the search
@@ -461,7 +461,7 @@ static const unsigned int pwron_settle_ms[] = { 100, 200, 400, 800 };
  *   - the state it polls for is already satisfied: B_AX_WLMAC_PWR_STE reads 0
  *     (MAC_OFF) on every recorded power-on of this board, so the poll returned
  *     immediately and the pulse was a no-op with side effects -- it armed
- *     R_AX_FWS0IMR's GPIOA interrupt and nothing ever disarmed it (the reference
+ *     R_AX_FWS0IMR's GPIOA interrupt and nothing ever disarmed it (the vendor firmware
  *     pairs that patch with a `clr_aon_int()` this port never had).
  *
  * WHAT THE CHIP IS ACTUALLY IN.  R_AX_IC_PWR_STATE's WHOLE-SYSTEM field reads
@@ -1085,7 +1085,7 @@ static int rtw8192xb_pwr_off_func(struct rtw89_dev *rtwdev)
 	 * a-die crystal OFF (rtw8852c.c).  The 8192XB's own vendor power-off does
 	 * NOT, in this board's configuration, and the difference is not cosmetic:
 	 *
-	 *   tier 3, the chip's own reference the stock driver: of the four
+	 *   tier 3, the chip's own vendor firmware: of the four
 	 *     power-off variants only sdio / usb / nic_pcie write
 	 *     B_AX_XTAL_OFF_A_DIE.  mac_pwr_off_ap_pcie_8192xb -- the one
 	 *     mac_priv_8192xb.c installs for PCIe on an AP platform, which is what

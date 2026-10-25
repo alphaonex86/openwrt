@@ -148,6 +148,12 @@
  * with a FLAT map answers at (N & 0x1f) << 1 instead.  WHICH of the two a given
  * port uses is per chip and is decided by that chip's own driver. */
 #define GPHY_MII_PAGE		0xA400
+/* MII register 0..15 on page 0xA40 (the reference's 0xa400 + reg * 2); `reg & 7`
+ * aliased CTRL1000/STAT1000/ESTATUS onto BMSR/PHYSID/ADVERTISE. */
+static inline u32 luna_gphy_mii_ocp(unsigned int reg)
+{
+	return GPHY_MII_PAGE | ((reg & 0xf) << 1);
+}
 /* ⚠ 0x198 / 0x1b8 / 0x1d8 / 0x1f8 ARE NOT NAMED HERE, and the attempt is worth
  * recording (2026-09-04).  The register map names three of them P_ABLTY,
  * BYPS_ABLTY_LOCK and MISCELLANEOUS_BONDING -- three unrelated registers -- but
@@ -157,7 +163,16 @@
  * naming ELEMENTS of an array, exactly as it does for the PISO block, and a
  * flat name for one element would be the same defect that made the G24W write
  * 0x2700c twice.  The compiler caught this one: SW_P_ABLTY was already taken. */
+/* One field layout for the three per-port ability words -- FORCE_P_ABLTY
+ * (forced values), P_ABLTY (what the MAC runs, read-only) and ABLTY_FORCE_MODE
+ * (which fields are forced) -- on the 9602C, 9603CVD and 9607C register maps. */
+#define ABLTY_SPEED		GENMASK(1, 0)	/* 0 = 10, 1 = 100, 2 = 1000	*/
+#define ABLTY_DUPLEX		BIT(2)	/* full duplex				*/
+#define ABLTY_FIB1G		BIT(3)
 #define ABLTY_LINK		BIT(4)	/* the LINK field of the ability trio	*/
+#define ABLTY_RX_FC		BIT(5)
+#define ABLTY_TX_FC		BIT(6)
+#define ABLTY_NWAY		BIT(7)
 #define SW_MAC_CPU_TAG_CTRL	0x23030	/* MAC_CPU_TAG_CTRL */
 #define SW_CHIP_INFO		0x10004	/* CHIP_INFO: low 16 bits = the GPHY variant */
 #define SW_METER_TB_CTRL	0x25000	/* METER_TB_CTRL: meter tick/token config */
@@ -482,7 +497,7 @@ struct luna_sw_map {
 
 static const struct luna_sw_map rtl9602c_sw_map = {
 	.force_ablty	= 0x00180,
-	.p_ablty	= 0,		/* this driver never reads it */
+	.p_ablty	= 0x00198,
 	.ablty_force	= 0x001B4,
 	.gphy_misc	= 0x00110,
 	.cfg_unhiol	= 0x23040,	/* CFG_UNHIOL on THIS chip -- see the field */

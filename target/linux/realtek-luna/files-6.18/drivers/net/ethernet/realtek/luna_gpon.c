@@ -4799,11 +4799,12 @@ void gpon_pbo_init(void)
 		}
 	}
 
-	/* GMAC0<->US-NIC internal link force, from the stock PON-MAC GPON mode-set.
-	 * Without it a CPU direct-TX US-OMCI frame never reaches the US-NIC ingress.
-	 * Stock releases the force once trained; we hold it up. */
+	/* No ABLTY_FORCE_MODE write here. The RE'd 0xc fits a one-word die where the
+	 * register is a port mask (9601B reference: `|= 1 << port`); on these dies it is
+	 * one register per port, so the write forced UNI port 0 to half duplex
+	 * under its autonegotiating PHY (field X111W late collisions 2026-10-25;
+	 * stock reads 0 there, and the reference forces only the CPU port). */
 	if (!usnic_strip) {
-		sw_field(ABLTY_FORCE_MODE, 4, 0, 0xc);	/* ABLTY_FORCE_MODE[4:0]=0xc — GPON internal-link force   */
 		/* RTL9602C only: 0x0f4 is CFG_FE_POLL_WD_1 here and SSC_CTRL_1 on the
 		 * RTL9603CVD, which has no front-end poll/watchdog to translate to. */
 		if (!is_9603cvd)

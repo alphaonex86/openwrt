@@ -541,7 +541,7 @@ static int gphy_wait(struct luna_eth *ep)
 static u32 gphy_ocp(struct luna_eth *ep, unsigned int p, unsigned int reg)
 {
 	if (gphy_map == 1 || (gphy_map == 0 && (ep->c->gphy_ports & BIT(p))))
-		return GPHY_MII_PAGE | ((reg & 7) << 1);	/* GPHY page 0xA40 */
+		return luna_gphy_mii_ocp(reg);		/* GPHY page 0xA40 */
 	return (reg & 0x1f) << 1;			/* FE PHY: flat map */
 }
 
@@ -610,12 +610,30 @@ static int gphy_write__locked(struct luna_eth *ep, unsigned int phyad,
 	return gphy_write_ocp__locked(ep, phyad, gphy_ocp(ep, phyad, reg), val);
 }
 
+static int luna_phy_read(struct net_device *ndev, unsigned int port,
+			 unsigned int reg, u16 *val)
+{
+	return gphy_read__locked(netdev_priv(ndev), port, reg, val);
+}
+
+static int luna_phy_write(struct net_device *ndev, unsigned int port,
+			  unsigned int reg, u16 val)
+{
+	return gphy_write__locked(netdev_priv(ndev), port, reg, val);
+}
+
+static const struct luna_phy_ops luna_phy_ops = {
+	.lock	= &luna_gphy_lock,
+	.read	= luna_phy_read,
+	.write	= luna_phy_write,
+};
+
 /* The OCP address THIS BOARD'S OWN ADMINISTRATIVE PATH uses, ...
  * dev/MEASURED-luna_eth.c.md sec 21. */
 static u32 gphy_ocp_miim(struct luna_eth *ep, unsigned int p, unsigned int reg)
 {
 	if (ep->c->gphy_ports & BIT(p))
-		return GPHY_MII_PAGE | ((reg & 7) << 1);
+		return luna_gphy_mii_ocp(reg);
 	return (reg & 0x1f) << 1;
 }
 
@@ -639,9 +657,9 @@ static void eth_phy_survey__locked(struct luna_eth *ep)
 		/* four reads of ONE port through BOTH maps, inside the caller's
 		 * single acquisition: a window taken per access would let
 		 * another user answer in the middle of them */
-		rc = gphy_read_ocp__locked(ep, p, GPHY_MII_PAGE | (0 << 1), &g_bmcr);
+		rc = gphy_read_ocp__locked(ep, p, luna_gphy_mii_ocp(MII_BMCR), &g_bmcr);
 		if (!rc)
-			rc = gphy_read_ocp__locked(ep, p, GPHY_MII_PAGE | (1 << 1), &g_bmsr);
+			rc = gphy_read_ocp__locked(ep, p, luna_gphy_mii_ocp(MII_BMSR), &g_bmsr);
 		if (!rc)
 			rc = gphy_read_ocp__locked(ep, p, 0 << 1, &f_bmcr);
 		if (!rc)
@@ -2076,6 +2094,7 @@ static int eth_open(struct net_device *ndev)
 		ret = eth_hw_start(ep);
 		if (ret)
 			return ret;
+		luna_mib_phy_reapply(ndev);
 	}
 	netif_start_queue(ndev);
 	netif_carrier_on(ndev);
@@ -2295,7 +2314,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &luna_eth_netdev_ops;
-	ret = luna_mib_attach(ndev, ep->sw, ep->c->sw_map);
+	ret = luna_mib_attach(ndev, ep->sw, ep->c->sw_map, &luna_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
 	netif_carrier_off(ndev);

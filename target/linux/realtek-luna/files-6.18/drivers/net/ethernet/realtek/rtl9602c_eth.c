@@ -472,7 +472,7 @@ static int rtl9602c_gphy_wait(struct rtl9602c_eth *ep)
 static int rtl9602c_gphy_read__locked(struct rtl9602c_eth *ep, unsigned int phyad,
 				      unsigned int reg, u16 *out)
 {
-	u32 adr = GPHY_IND_PHY(phyad) | GPHY_MII_PAGE | ((reg & 7) << 1);
+	u32 adr = GPHY_IND_PHY(phyad) | luna_gphy_mii_ocp(reg);
 
 	/* PREFLIGHT: a command issued while the previous transaction is still
 	 * BUSY makes the window answer for the wrong one. */
@@ -488,7 +488,7 @@ static int rtl9602c_gphy_read__locked(struct rtl9602c_eth *ep, unsigned int phya
 static int rtl9602c_gphy_write__locked(struct rtl9602c_eth *ep, unsigned int phyad,
 				       unsigned int reg, u16 val)
 {
-	u32 adr = GPHY_IND_PHY(phyad) | GPHY_MII_PAGE | ((reg & 7) << 1);
+	u32 adr = GPHY_IND_PHY(phyad) | luna_gphy_mii_ocp(reg);
 
 	/* PREFLIGHT BEFORE THE DATA REGISTER: the value would otherwise be
 	 * consumed by a transaction still in flight. */
@@ -498,6 +498,24 @@ static int rtl9602c_gphy_write__locked(struct rtl9602c_eth *ep, unsigned int phy
 	iowrite32(adr | GPHY_IND_WREN | GPHY_IND_EN, ep->sw + SW_GPHY_IND_CMD);
 	return rtl9602c_gphy_wait(ep);
 }
+
+static int rtl9602c_phy_read(struct net_device *ndev, unsigned int port,
+			     unsigned int reg, u16 *val)
+{
+	return rtl9602c_gphy_read__locked(netdev_priv(ndev), port, reg, val);
+}
+
+static int rtl9602c_phy_write(struct net_device *ndev, unsigned int port,
+			      unsigned int reg, u16 val)
+{
+	return rtl9602c_gphy_write__locked(netdev_priv(ndev), port, reg, val);
+}
+
+static const struct luna_phy_ops rtl9602c_phy_ops = {
+	.lock	= &rtl9602c_gphy_lock,
+	.read	= rtl9602c_phy_read,
+	.write	= rtl9602c_phy_write,
+};
 
 /* The boot loader's own command words, issued with the ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 26. */
@@ -2207,6 +2225,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		ret = rtl9602c_eth_hw_start(ep);
 		if (ret)
 			return ret;
+		luna_mib_phy_reapply(ndev);
 	}
 	netif_carrier_on(ndev);
 	netif_start_queue(ndev);
@@ -2811,7 +2830,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &rtl9602c_eth_netdev_ops;
-	ret = luna_mib_attach(ndev, ep->sw, ep->swm);
+	ret = luna_mib_attach(ndev, ep->sw, ep->swm, &rtl9602c_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
 	/* TC feature bit; nftables TC_SETUP_FT registration does not consult it. */

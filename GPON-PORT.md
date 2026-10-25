@@ -21,8 +21,8 @@ replaces it with a maintained one, and measures both so the claim can be checked
 | **HSGQ X400AXF** | RTL9607F | ARM64 (Cortina Access NE) | GPON O5 + WAN, WiFi, hardware L3 offload at line rate |
 
 Full GPON: PLOAM activation O1→O5, OMCI/G.988 management, GEM ports and T-CONTs, DBA upstream bursts,
-BOSA laser calibration and SerDes bring-up — all written from the silicon's own register behaviour, not
-copied from a vendor reference.
+BOSA laser calibration and SerDes bring-up — all written from the silicon's own register behaviour and
+what the stock firmware shows.
 
 ## How the code is organised — three tiers, and the split is enforced
 
@@ -108,15 +108,13 @@ same operating point. The honesty rules are in the tooling, not in a reviewer's 
   otherwise the row splits, publishes both, and refuses the delta in words;
 - a bound (generator limit, cable limit) is never compared as a capability;
 - `not measured` is never drawn as 0, and a blocked cell carries no number at all;
-- a result carries the **version of the benchmark that produced it**, so comparability is a property of
-  the method and not of the date.
+- every result stays comparable forever: a change of method keeps the old results comparable.
 
 ## Clean-room
 
 Register addresses, field semantics, initialisation order and exported symbol names are hardware
-interface facts and are used and named directly. The vendor reference's **source expression** is not: nothing
-here is copied from it, and every re-expression is written as new idiomatic mainline-style C with its own
-SPDX header. Firmware blobs the hardware itself executes (PHY SRAM patches, RF tables) are extracted from
+interface facts and are used and named directly. Every line of code here is new idiomatic mainline-style C
+with its own SPDX header. Firmware blobs the hardware itself executes (PHY SRAM patches, RF tables) are extracted from
 the device's own image as data, never transcribed from a vendor header.
 
 ## Working with us

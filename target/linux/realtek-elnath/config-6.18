@@ -741,6 +741,15 @@ CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y
 CONFIG_LOCKUP_DETECTOR=y
 CONFIG_SOFTLOCKUP_DETECTOR=y
 CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y
+#
+# A CPU stuck with interrupts off on an SMP part: the softlockup timer of that
+# CPU never fires and the other CPU keeps the watchdog fed. The buddy detector
+# has each CPU check that the next one still takes hrtimer interrupts and
+# panics when it does not (then CONFIG_PANIC_TIMEOUT reboots). Needs
+# CONFIG_KERNEL_HARDLOCKUP_DETECTOR=y in the buildroot .config as well.
+#
+CONFIG_HARDLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
 # CONFIG_CORTINA_DEBUG is not set
 # CONFIG_CORTINA_NI_REG_GUARD is not set
 

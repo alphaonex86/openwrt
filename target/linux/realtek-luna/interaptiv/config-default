@@ -51,6 +51,16 @@ CONFIG_NET_FLOW_LIMIT=y
 # CONFIG_MIPS_CPS_NS16550_BOOL is not set
 
 #
+# A CPU stuck with interrupts off on an SMP part: the softlockup timer of that
+# CPU never fires and the other CPU keeps the watchdog fed. The buddy detector
+# has each CPU check that the next one still takes hrtimer interrupts and
+# panics when it does not (then CONFIG_PANIC_TIMEOUT reboots). Needs
+# CONFIG_KERNEL_HARDLOCKUP_DETECTOR=y in the buildroot .config as well.
+#
+CONFIG_HARDLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
+
+#
 # 100 Hz, matching the proven-good 9607C bring-up.
 #
 # CONFIG_HZ_250 is not set

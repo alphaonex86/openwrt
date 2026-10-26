@@ -2868,10 +2868,77 @@ static void rtw8192xb_set_txpwr_sar_diff(struct rtw89_dev *rtwdev,
 	rtw89_phy_write32_mask(rtwdev, R_P1_TXPWRB, B_TXPWRB_MAX, sar_rf);
 }
 
+static char *txpwr_limit = "regdb";
+module_param(txpwr_limit, charp, 0644);
+MODULE_PARM_DESC(txpwr_limit,
+		 "TX power limit: regdb (the country maximum, default), table (the board's per-channel table) or off (power by rate only)");
+
+static struct {
+	const struct rtw89_rfe_parms *board;
+	struct rtw89_rfe_parms parms;
+	s8 lmt[RTW89_2G_BW_NUM][RTW89_NTX_NUM][RTW89_RS_LMT_NUM][RTW89_BF_NUM]
+	      [RTW89_REGD_NUM][RTW89_2G_CH_NUM];
+	s8 lmt_ru[RTW89_RU_NUM][RTW89_NTX_NUM][RTW89_REGD_NUM][RTW89_2G_CH_NUM];
+} rtw8192xb_limit;
+
+static s8 rtw8192xb_limit_cell(struct rtw89_dev *rtwdev, u8 ch_idx, u8 ntx, s8 board)
+{
+	struct ieee80211_supported_band *sband = rtwdev->hw->wiphy->bands[NL80211_BAND_2GHZ];
+	u8 factor = rtwdev->chip->txpwr_factor_rf;
+	int i, cap;
+
+	if (!strcmp(txpwr_limit, "table"))
+		return board;
+	if (!strcmp(txpwr_limit, "off"))
+		return S8_MAX;
+	for (i = 0; sband && i < sband->n_channels; i++) {
+		if (sband->channels[i].hw_value != ch_idx + 1 || sband->channels[i].max_reg_power <= 0)
+			continue;
+		/* regdb gives the whole radio; each extra chain halves the per-chain share */
+		cap = (sband->channels[i].max_reg_power << factor) - (ntx == RTW89_2TX ? 3 << factor : 0);
+		return clamp(cap, 1, S8_MAX);
+	}
+	return board;
+}
+
+static void rtw8192xb_apply_txpwr_limit(struct rtw89_dev *rtwdev)
+{
+	const struct rtw89_txpwr_rule_2ghz *board;
+	u8 bw, ntx, rs, bf, regd, ch, ru;
+
+	if (strcmp(txpwr_limit, "regdb") && strcmp(txpwr_limit, "table") && strcmp(txpwr_limit, "off"))
+		rtw89_warn(rtwdev, "txpwr_limit=%s is unknown, using regdb\n", txpwr_limit);
+	if (rtwdev->rfe_parms != &rtw8192xb_limit.parms) {
+		rtw8192xb_limit.board = rtwdev->rfe_parms;
+		rtw8192xb_limit.parms = *rtwdev->rfe_parms;
+		rtw8192xb_limit.parms.rule_2ghz.lmt = (const void *)&rtw8192xb_limit.lmt;
+		rtw8192xb_limit.parms.rule_2ghz.lmt_ru = (const void *)&rtw8192xb_limit.lmt_ru;
+		rtwdev->rfe_parms = &rtw8192xb_limit.parms;
+	}
+	board = &rtw8192xb_limit.board->rule_2ghz;
+
+	for (bw = 0; bw < RTW89_2G_BW_NUM; bw++)
+	for (ntx = 0; ntx < RTW89_NTX_NUM; ntx++)
+	for (rs = 0; rs < RTW89_RS_LMT_NUM; rs++)
+	for (bf = 0; bf < RTW89_BF_NUM; bf++)
+	for (regd = 0; regd < RTW89_REGD_NUM; regd++)
+	for (ch = 0; ch < RTW89_2G_CH_NUM; ch++)
+		rtw8192xb_limit.lmt[bw][ntx][rs][bf][regd][ch] =
+			rtw8192xb_limit_cell(rtwdev, ch, ntx, (*board->lmt)[bw][ntx][rs][bf][regd][ch]);
+
+	for (ru = 0; ru < RTW89_RU_NUM; ru++)
+	for (ntx = 0; ntx < RTW89_NTX_NUM; ntx++)
+	for (regd = 0; regd < RTW89_REGD_NUM; regd++)
+	for (ch = 0; ch < RTW89_2G_CH_NUM; ch++)
+		rtw8192xb_limit.lmt_ru[ru][ntx][regd][ch] =
+			rtw8192xb_limit_cell(rtwdev, ch, ntx, (*board->lmt_ru)[ru][ntx][regd][ch]);
+}
+
 static void rtw8192xb_set_txpwr(struct rtw89_dev *rtwdev,
 			       const struct rtw89_chan *chan,
 			       enum rtw89_phy_idx phy_idx)
 {
+	rtw8192xb_apply_txpwr_limit(rtwdev);
 	rtw89_phy_set_txpwr_byrate(rtwdev, chan, phy_idx);
 	rtw89_phy_set_txpwr_offset(rtwdev, chan, phy_idx);
 	rtw8192xb_set_tx_shape(rtwdev, chan, phy_idx);

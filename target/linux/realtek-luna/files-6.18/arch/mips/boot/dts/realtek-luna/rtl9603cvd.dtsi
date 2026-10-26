@@ -247,6 +247,25 @@
 	 * on THIS board, which is what corroborates the base here rather than
 	 * on the sibling.
 	 */
+	/* GPIO banks A-D and E-H. The pad enable word of bank 0 is 0x1b00003c on this
+	 * die, MEASURED on the G24W's stock in O5: it read 0x00008014, the same pins its
+	 * DIR word drives (2, 4, 15). Bank 1's word follows it at +4. */
+	gpio0: gpio@18003300 {
+		compatible = "realtek,rtl9603cvd-gpio", "realtek,luna-gpio";
+		reg = <0x18003300 0x1c>, <0x1b00003c 0x4>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <32>;
+	};
+
+	gpio1: gpio@1800331c {
+		compatible = "realtek,rtl9603cvd-gpio", "realtek,luna-gpio";
+		reg = <0x1800331c 0x1c>, <0x1b000040 0x4>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <32>;
+	};
+
 	nic: ethernet@18012000 {
 		compatible = "realtek,rtl9603cvd-nic";
 		reg = <0x18012000 0x2000>;
@@ -262,15 +281,12 @@
 	 * console DID measure, so the M2/M3 work starts from a fact instead
 	 * of a search:
 	 *
-	 *   gpio               - MEASURED bases: the vendor driver maps
-	 *       0x1b000038 (+0x0c, data/direction) and 0x18003308 (+0x54,
-	 *       per-bank interrupt/config) and sets up THREE banks. That is
-	 *       the same pair the RTL9607C description uses. What is still
-	 *       unknown is the part that matters for this board: NINE LED
-	 *       labels are DECLARED (PWR LOS PON GE FE3 FE2 FE1 NC Wifi)
-	 *       and not one GPIO number or polarity is known, and the
-	 *       vendor blinks them from a software kthread. A wrong gpio
-	 *       number drives an unknown pin on a live board.
+	 *   gpio LEDs          - banks A-D and E-H are above (gpio0, gpio1);
+	 *       a third bank exists and nothing here uses it. The G24W's
+	 *       stock tree names its power lamp bank 0 pin 15, active low;
+	 *       the other declared lamps (LOS PON GE FE3 FE2 FE1 NC Wifi)
+	 *       have no known pin, and stock blinks them from a software
+	 *       thread. A wrong number drives an unknown pin on a live board.
 	 *   switch interrupt   - aggregator input 8, wired to the GPON node
 	 *       below for the downstream PLOAM (stock: "apl_sw"); the NIC
 	 *       reads the per-port link state, not this interrupt. GMAC0

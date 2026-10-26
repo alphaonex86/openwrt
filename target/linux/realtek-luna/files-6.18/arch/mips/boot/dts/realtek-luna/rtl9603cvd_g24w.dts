@@ -88,9 +88,8 @@
 
 	/*
 	 * The laser driver's two enable pins are SoC GPIOs on this board, and
-	 * both must be driven LOW for the ONU to emit at all. Read by
-	 * luna_gpon.c (luna_laser_gpio_from_dt), which owns the pad because
-	 * it owns the laser.
+	 * both must be driven LOW for the ONU to emit at all. luna_gpon.c
+	 * drives them through the gpio0 bank, which enables their pads.
 	 *
 	 * MEASURED (tier 1, 2026-09-06, this unit on its STOCK firmware at O5,
 	 * stock_peek read-only): PABCD_DIR 0x18003308 = 0x00008014 (pins 2, 4,
@@ -101,9 +100,9 @@
 	 * /proc/config.gz live). Under OUR image both pins read as INPUTS
 	 * (DIR 0x8000), which is one reason the OLT never heard this board.
 	 *
-	 * Pin 15 is ALSO an output on stock and is NOT declared here: nothing
-	 * in this tree establishes what it drives, and a guessed name is worse
-	 * than an unnamed pin.
+	 * Pin 15 is ALSO an output on stock: its device tree names it the
+	 * power lamp, active low. Not declared here while CONFIG_LEDS_GPIO is
+	 * off; the lamp keeps the level the pad recipe leaves it at.
 	 */
 	/*
 	 * The UNI panel this board presents over OMCI, MEASURED from its own
@@ -149,8 +148,20 @@
 	};
 
 	pon-optics {
-		realtek,tx-disable-gpio = <2>;	/* driven 0 = laser may emit */
-		realtek,tx-power-gpio = <4>;	/* driven 0 = laser driver powered (active-low) */
+		tx-disable-gpios = <&gpio0 2 0>;	/* driven 0 = laser may emit */
+		tx-power-gpios = <&gpio0 4 1>;	/* driven 0 = laser driver powered (active-low) */
+	};
+
+	/* The reset button: GPIO 39, pressed = low (its stock device tree, bank 1 line 7). */
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <100>;
+
+		button-reset {
+			label = "reset";
+			linux,code = <0x198>;	/* KEY_RESTART */
+			gpios = <&gpio1 7 1>;	/* active low */
+		};
 	};
 
 	/*

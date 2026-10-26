@@ -741,6 +741,9 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 	case PLM_DS_NO_MESSAGE:
 	case PLM_DS_SN_MASK:
+	case PLM_DS_PEE:
+	case PLM_DS_POWER_LEVEL:
+	case PLM_DS_PST:
 		break;
 
 	default:

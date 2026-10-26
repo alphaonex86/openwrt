@@ -43,12 +43,24 @@
 		};
 	};
 
+	/* The reset button: GPIO 19, pressed = low (its stock kernel sets it as an input and reads it). */
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <100>;
+
+		button-reset {
+			label = "reset";
+			linux,code = <0x198>;	/* KEY_RESTART */
+			gpios = <&gpio0 19 1>;	/* active low */
+		};
+	};
+
 	/* Its BOSA is on I2C bus 1: stock loads europa_drv with I2C_PORT=1, and its
 	 * live registers show bus 1's config (slave 0x54) and indirect block in use. */
 	pon-optics {
 		realtek,i2c-bus = <1>;
-		realtek,tx-disable-gpio = <13>;	/* stock europa_drv TXDIS_PIN=13 */
-		realtek,tx-power-gpio = <0>;	/* stock europa_drv TXPWR_PIN=0 */
+		tx-disable-gpios = <&gpio0 13 0>;	/* stock europa_drv TXDIS_PIN=13 */
+		tx-power-gpios = <&gpio0 0 1>;	/* stock europa_drv TXPWR_PIN=0, low = powered */
 	};
 
 	/* The OMCI panel the OLT counts, from this unit's stock MIB (omci_panel.py

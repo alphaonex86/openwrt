@@ -44,6 +44,18 @@
 		};
 	};
 
+	/* The reset button: GPIO 38, pressed = low (its stock kernel's push-button read). */
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <100>;
+
+		button-reset {
+			label = "reset";
+			linux,code = <0x198>;	/* KEY_RESTART */
+			gpios = <&gpio1 6 1>;	/* active low */
+		};
+	};
+
 	/* The X111W's pad routing, which this board has run with so far:
 	 * IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
 	pon-optics {

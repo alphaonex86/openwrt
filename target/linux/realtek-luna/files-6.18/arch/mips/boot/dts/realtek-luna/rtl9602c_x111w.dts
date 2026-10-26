@@ -80,6 +80,18 @@
 		};
 	};
 
+	/* The reset button: GPIO 38, pressed = low (its stock kernel's push-button read). */
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <100>;
+
+		button-reset {
+			label = "reset";
+			linux,code = <0x198>;	/* KEY_RESTART */
+			gpios = <&gpio1 6 1>;	/* active low */
+		};
+	};
+
 	/* Board C's pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
 	pon-optics {
 		realtek,gpio-pads = <0x40202006 0x00000819 0x40002006 0xdbff1246

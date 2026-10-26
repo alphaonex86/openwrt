@@ -42,6 +42,9 @@ typedef uint32_t u32;
 #define PLM_DS_ASSIGN_ALLOC_ID		0x0a	/* Assign_Alloc-ID (ACK) */
 #define PLM_DS_REQUEST_PASSWORD		0x09	/* Request_Password (-> US Password 0x02) */
 #define PLM_DS_CONFIG_PORT		0x0e	/* Configure_Port-ID (ACK) */
+#define PLM_DS_PEE			0x0f	/* Physical_Equipment_Error: the stock takes no action */
+#define PLM_DS_POWER_LEVEL		0x10	/* Change_Power_Level: the stock takes no action */
+#define PLM_DS_PST			0x11	/* PST (protection K1/K2): the stock takes no action */
 #define PLM_DS_CFG_VPVC			0x07	/* Configure_VP/VC (ATM, unsupported; ACK) */
 #define PLM_DS_BER_INTERVAL		0x12	/* BER interval (ACK; arms BER reporting) */
 #define PLM_DS_SN_MASK			0x02	/* Serial_number_mask, deprecated since 2008 */

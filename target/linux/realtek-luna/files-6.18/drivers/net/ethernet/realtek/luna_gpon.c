@@ -42,6 +42,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/of.h>
+#include <linux/gpio/consumer.h>
 #include <linux/onu_crashlog.h>	/* every O5 loss kept in the unit's flash */
 #include <linux/time.h>		/* time64_to_tm: the O5 loss in UTC */
 #include <linux/of_address.h>	/* of_address_to_resource: the board's reserved PBO pools */
@@ -5130,6 +5131,53 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 		{0x06054, 0x06054},	/*   1  GPON_GEM_US_PTN_CTRL */
 		{0x06280, 0x06294},	/*   6  PCFG/GEM_BCNT */
 	};
+	/* The configuration blocks the RTL9602C/RTL9601D stock capture reads and
+	 * sw[] does not: ACL, CF, SVLAN, RLDP, DOS, METER, remark, LED, queues. */
+	static const u32 xsw9602[][2] = {
+		{0x10000, 0x1001c},	/*   8  MODEL_NAME_INFO/RSVD_CHIP_INFO */
+		{0x11050, 0x1108c},	/*  16  OUTPUT_DROP_CFG */
+		{0x11200, 0x1120c},	/*   4  RSVD_ALE_GLB */
+		{0x13010, 0x13080},	/*  29  RSVD_ALE_CVLAN */
+		{0x14000, 0x14020},	/*   9  SVLAN_EP_DMAC_CTRL/RSVD_ALE_SVLAN */
+		{0x15008, 0x151e8},	/* 121  ACL_TEMPLATE_CTRL/RNG_CHK_VID_RNG */
+		{0x1556c, 0x1559c},	/*  13  RNG_CHK_PKTLEN_RNG/RSVD_ALE_ACL */
+		{0x16030, 0x16448},	/* 263  CF_PATTERN0_TEMPLATE_CFG/RSVD_ALE_CF */
+		{0x17014, 0x17018},	/*   2  LUT_SYS_LRN_LIMITNO */
+		{0x17020, 0x170a4},	/*  34  LUT_SYS_LRN_OVER_CTRL/RSVD_ALE_L2 */
+		{0x18000, 0x18010},	/*   5  RGF_VER_ALE_MLTVLAN/RSVD_ALE_MLTVLAN */
+		{0x1a000, 0x1a008},	/*   3  RLDP_CTRL_1/RLDP_LP_STS_CTRL */
+		{0x1a01c, 0x1a044},	/*  11  RLDP_PORT_TX_EN/RSVD_ALE_RLDP */
+		{0x1e060, 0x1e06c},	/*   4  SERI_LED_CLK_PER/PON_LED_CFG */
+		{0x1e084, 0x1e098},	/*   6  LED_FLT_MPCP/RSVD_LED */
+		{0x1f000, 0x1f070},	/*  29  PHY_RG0X_CEN/RSVD_PHY_IP */
+		{0x20004, 0x20038},	/*  14  P_MISC/RSVD_PER_PORT_MAC */
+		{0x20100, 0x20138},	/*  15 */
+		{0x20200, 0x20238},	/*  15 */
+		{0x20300, 0x20338},	/*  15 */
+		{0x21000, 0x21048},	/*  19  WSDS_HSG_ANA_00/RSVD_HSG_SDSREG */
+		{0x21800, 0x2187c},	/*  32  HSG_SDS_REG0/HSG_SDS_REG31 */
+		{0x21a00, 0x21a7c},	/*  32  HSG_SDS_EXT_REG0/HSG_SDS_EXT_REG31 */
+		{0x21c00, 0x21c20},	/*   9  HSG_FIB_REG0/HSG_FIB_REG8 */
+		{0x21c34, 0x21c5c},	/*  11  HSG_FIB_REG13/HSG_FIB_REG23 */
+		{0x21c68, 0x21c68},	/*   1  HSG_FIB_REG26 */
+		{0x21c70, 0x21c7c},	/*   4  HSG_FIB_REG28/HSG_FIB_REG31 */
+		{0x21e00, 0x21e20},	/*   9  HSG_FIB_EXT_REG0/HSG_FIB_EXT_REG8 */
+		{0x21e34, 0x21e7c},	/*  19  HSG_FIB_EXT_REG13/HSG_FIB_EXT_REG31 */
+		{0x23120, 0x23128},	/*   3  FC_PON_GLB_LO_TH/FC_PON_P_LO_TH */
+		{0x23138, 0x23194},	/*  24  SPG_GLB_CTRL/RSVD_SWCORE */
+		{0x25088, 0x2509c},	/*   6  METER_PKT_RATE/RSVD_ALE_METER */
+		{0x26000, 0x26024},	/*  10  DOS_EN/RSVD_ALE_RMA_ATTACK */
+		{0x28000, 0x28000},	/*   1  HSB_CTRL */
+		{0x28140, 0x28144},	/*   2  HSB_PARSER */
+		{0x2a028, 0x2a058},	/*  13  SVLAN_SP2C/RMK_DOT1Q_RMK_EN_CTRL */
+		{0x2a068, 0x2a06c},	/*   2  RMK_P_DSCP_SEL/RMK_P_1P_SEL */
+		{0x2a0b0, 0x2a110},	/*  25  HSARAM_5_CFG/RSVD_ALE_HSA */
+		{0x2d000, 0x2d008},	/*   3  LOW_QUEUE_TH/HIGH_QUEUE_LSK */
+		{0x2d018, 0x2d020},	/*   3  FC_P_EGR_DROP_TH/FC_DBG_CTRL */
+		{0x2d02c, 0x2d034},	/*   3  ? */
+		{0x2d058, 0x2d0d4},	/*  32  RSVD_EGR_OUTQ */
+		{0x2d800, 0x2d88c},	/*  36  WFQ_CTRL/MOCIR_BPT */
+	};
 	const u32 (*xsw)[2] = NULL, (*xgt)[2] = NULL;
 	int nxsw = 0, nxgt = 0;
 	bool no_pcie;
@@ -5142,6 +5190,10 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 	/* The RTL9601D has no PCIe host block: a read of 0x18b00720 hangs its bus
 	 * until the watchdog resets it (measured on its stock, 2026-10-01). */
 	no_pcie = of_machine_is_compatible("realtek,rtl9601d");
+	if (swc == &gpon_swc_9602c) {
+		xsw = xsw9602;
+		nxsw = (int)ARRAY_SIZE(xsw9602);
+	}
 	if (swc == &gpon_swc_9603cvd) {
 		xsw = xsw9603;
 		nxsw = (int)ARRAY_SIZE(xsw9603);
@@ -9544,8 +9596,8 @@ static void __init rtl9602c_sc_ldo_init(void)
 
 /* The laser's enable pins are SoC GPIOs on some boards, and ...
  * dev/MEASURED-luna_gpon.c.md sec 255. */
-static int laser_tx_dis_gpio = -1;	/* from DT; -1 = this board has none */
-static int laser_tx_pwr_gpio = -1;
+static struct gpio_desc *laser_tx_dis;	/* from DT; NULL = this board has none */
+static struct gpio_desc *laser_tx_pwr;
 /* Board pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. A board
  * that declares none keeps its bootloader's pads (the X100DG's I2C bus 1, 2026-10-01). */
 static u32 board_gpio_pads[6];
@@ -9619,17 +9671,39 @@ static void gpon_optical_work_fn(struct work_struct *w)
 		schedule_delayed_work(&gpon_optical_work, msecs_to_jiffies(50));
 }
 
-static void __init luna_laser_gpio_from_dt(void)
+/* An absent property is a board without that pin; any other error is fatal. */
+static struct gpio_desc *__init luna_laser_gpio_get(struct device_node *np,
+						    const char *con_id, int *err)
+{
+	struct gpio_desc *d;
+
+	d = fwnode_gpiod_get_index(of_fwnode_handle(np), con_id, 0, GPIOD_ASIS, con_id);
+	if (!IS_ERR(d))
+		return d;
+	if (PTR_ERR(d) != -ENOENT) {
+		pr_err("luna-gpon: /pon-optics %s-gpios: %pe\n", con_id, d);
+		*err = PTR_ERR(d);
+	}
+	return NULL;
+}
+
+static void luna_laser_gpio_put(void)
+{
+	gpiod_put(laser_tx_dis);
+	gpiod_put(laser_tx_pwr);
+	laser_tx_dis = laser_tx_pwr = NULL;
+}
+
+static int __init luna_laser_gpio_from_dt(void)
 {
 	struct device_node *np = of_find_node_by_path("/pon-optics");
+	int err = 0;
 	u32 v;
 
 	if (!np)
-		return;
-	if (!of_property_read_u32(np, "realtek,tx-disable-gpio", &v))
-		laser_tx_dis_gpio = (int)v;
-	if (!of_property_read_u32(np, "realtek,tx-power-gpio", &v))
-		laser_tx_pwr_gpio = (int)v;
+		return 0;
+	laser_tx_dis = luna_laser_gpio_get(np, "tx-disable", &err);
+	laser_tx_pwr = luna_laser_gpio_get(np, "tx-power", &err);
 	board_gpio_pads_set = !of_property_read_u32_array(np, "realtek,gpio-pads",
 							   board_gpio_pads, 6);
 	optics_self_managed = of_property_read_bool(np, "realtek,optics-self-managed");
@@ -9640,42 +9714,28 @@ static void __init luna_laser_gpio_from_dt(void)
 			pr_err("luna-gpon: /pon-optics realtek,i2c-bus=%u: this die has buses 0 and 1 -- keeping 0\n", v);
 	}
 	of_node_put(np);
-	pr_info("luna-gpon: /pon-optics: tx-disable-gpio=%d tx-power-gpio=%d i2c-bus=%u gpio-pads=%s optics=%s\n",
-		laser_tx_dis_gpio, laser_tx_pwr_gpio, bosa_i2c_bus,
+	pr_info("luna-gpon: /pon-optics: tx-disable=%s tx-power=%s i2c-bus=%u gpio-pads=%s optics=%s\n",
+		laser_tx_dis ? "gpio" : "none", laser_tx_pwr ? "gpio" : "none", bosa_i2c_bus,
 		board_gpio_pads_set ? "declared" : "none (bootloader's kept)",
 		optics_self_managed ? "self-managed" : "host-calibrated");
+	if (err)
+		luna_laser_gpio_put();
+	return err;
 }
 
-/* Set level before enabling output to avoid a TX_DISABLE glitch. */
-static int luna_gpio_drive(int pin, bool high, const char *what)
+/* The PHYSICAL level, whatever the DT polarity says; the GPIO driver sets the
+ * level before the direction, so TX_DISABLE never glitches. Read back. */
+static int luna_gpio_drive(struct gpio_desc *pin, bool high, const char *what)
 {
-	void __iomem *gpio;
-	u32 dir_off, dat_off, bit, v;
-	int ret = 0;
+	int ret;
 
-	if (pin < 0)
+	if (!pin)
 		return 0; /* Boards without this GPIO keep their existing mechanism. */
-	if (pin >= 64 || !swc->io_gpio_en)
-		return -EINVAL;
-	gpio = ioremap(GPIO_PHYS_BASE, GPIO_REG_SIZE);
-	if (!gpio)
-		return -ENOMEM;
-	dir_off = pin < 32 ? GPIO_DIR_ABCD : GPIO_DIR_EFGH;
-	dat_off = pin < 32 ? GPIO_DATA_ABCD : GPIO_DATA_EFGH;
-	bit = 1u << (pin & 31);
-	v = ioread32(gpio + dat_off);
-	iowrite32(high ? v | bit : v & ~bit, gpio + dat_off);
-	v = ioread32(gpio + dir_off);
-	iowrite32(v | bit, gpio + dir_off);
-	sw_field(SOC_IO_GPIO_EN + 4 * (pin / 32), pin & 31, pin & 31, 1);
-	if (!!(ioread32(gpio + dat_off) & bit) != high ||
-	    !(ioread32(gpio + dir_off) & bit) ||
-	    !(sw_rd(SOC_IO_GPIO_EN + 4 * (pin / 32)) & bit))
+	ret = gpiod_direction_output_raw(pin, high);
+	if (!ret && (gpiod_get_raw_value(pin) != high || gpiod_get_direction(pin) != 0 /* output */))
 		ret = -EIO;
-	iounmap(gpio);
 	if (ret)
-		pr_err("luna-gpon: %s GPIO %d level %u failed: %d\n",
-		       what, pin, high, ret);
+		pr_err("luna-gpon: %s GPIO level %u failed: %d\n", what, high, ret);
 	return ret;
 }
 
@@ -9701,7 +9761,7 @@ static int luna_quiesce_locked(void)
 	gpon_field(GPON_GTC_US_PROC_MODE, 0, 0, 0);
 	gpon_wr(GPON_GTC_US_WRITE_PROTECT, GPON_US_WP_LOCK);
 	pi_field(PI_PONIP_CTL_US, 0, 0, 0);
-	return luna_gpio_drive(laser_tx_dis_gpio, true, "TX_DISABLE inhibit");
+	return luna_gpio_drive(laser_tx_dis, true, "TX_DISABLE inhibit");
 }
 
 static int luna_activate_locked(bool identity_changed)
@@ -9729,7 +9789,7 @@ static int luna_activate_locked(bool identity_changed)
 	ret = luna_quiesce_locked();
 	if (ret)
 		goto fail;
-	ret = luna_gpio_drive(laser_tx_pwr_gpio, false, "laser TX power");
+	ret = luna_gpio_drive(laser_tx_pwr, false, "laser TX power");
 	if (ret)
 		goto fail;
 	if (bosa_regs_live()) {
@@ -9745,7 +9805,7 @@ static int luna_activate_locked(bool identity_changed)
 	gpon_apply_identity_change();
 	/* US remains disabled while the checked physical inhibit is released. The
 	 * timer is stopped until the complete arming sequence has finished. */
-	ret = luna_gpio_drive(laser_tx_dis_gpio, false, "TX_DISABLE release");
+	ret = luna_gpio_drive(laser_tx_dis, false, "TX_DISABLE release");
 	if (ret)
 		goto fail;
 	WRITE_ONCE(luna_activation_ready, true);
@@ -9848,9 +9908,11 @@ static int __init rtl9602c_gpon_init(void)
 		ret = -EINVAL;
 		goto fail_maps;
 	}
-	luna_laser_gpio_from_dt();
+	ret = luna_laser_gpio_from_dt();
+	if (ret)
+		goto fail_maps;
 	luna_led_map_from_dt();
-	ret = luna_gpio_drive(laser_tx_dis_gpio, true, "TX_DISABLE inhibit");
+	ret = luna_gpio_drive(laser_tx_dis, true, "TX_DISABLE inhibit");
 	if (ret)
 		goto fail_maps;
 	pr_info("luna-gpon: SWCORE map = %s (io_mode_en=0x%05x i2c_en_bus0=%u oem_en=%u gpio_en=0x%05x fib_status=0x%05x sds_reg0=0x%05x)\n",
@@ -10070,7 +10132,7 @@ static int __init rtl9602c_gpon_init(void)
 			pr_info("luna-gpon: PON SerDes up (%s, analog ready)\n", via);
 		/* Stock powers the laser driver as the LAST step of its PON-MAC
 		 * mode set, i.e. right here, once the SerDes is up. */
-		ret = luna_gpio_drive(laser_tx_pwr_gpio, false, "laser TX power");
+		ret = luna_gpio_drive(laser_tx_pwr, false, "laser TX power");
 		if (ret)
 			goto fail_maps;
 
@@ -10342,6 +10404,7 @@ skip_bosa_init:
 	schedule_delayed_work(&gpon_optical_work, msecs_to_jiffies(50));
 	return 0;
 fail_maps:
+	luna_laser_gpio_put();
 	if (ponip_base) {
 		iounmap(ponip_base);
 		ponip_base = NULL;
@@ -10403,6 +10466,7 @@ static void __exit rtl9602c_gpon_exit(void)
 		iounmap(swcore_base);
 	if (gpon_base)
 		iounmap(gpon_base);
+	luna_laser_gpio_put();
 }
 
 module_init(rtl9602c_gpon_init);

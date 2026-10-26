@@ -99,7 +99,8 @@ CONFIG_DYNAMIC_DEBUG=y
 # G24W's flash base was unverified). The G24W reads its 16 MB SPI-NOR through
 # the same memory-mapped window the RTL9602C does (`mtd-rom` at 0x14000000;
 # the evidence is in rtl9603cvd_g24w.dts) -- it is how gpon-provision learns
-# this unit's own GPON_SN. READ-ONLY: no program/erase driver exists here.
+# this unit's own GPON_SN. Erase/program go through luna_nor's PIO path
+# (CONFIG_MTD_LUNA_NOR_WRITE in config-6.18), as on the RTL9602C.
 #
 # CONFIG_RTL9602C_ETH is not set
 CONFIG_LUNA_GPON=y

@@ -206,6 +206,8 @@ set wireless.$s.encryption='psk2'
 set wireless.$s.key='$key'
 set wireless.$s.macaddr='$mac_2g'
 set wireless.$s.multicast_to_unicast='1'
+set wireless.$s.ieee80211k='1'
+set wireless.$s.bss_transition='1'
 set wireless.$s.disabled='0'
 EOF2
 		;;
@@ -230,6 +232,8 @@ set wireless.$s.ssid='$ssid'
 set wireless.$s.encryption='psk2'
 set wireless.$s.key='$key'
 set wireless.$s.macaddr='$mac_5g'
+set wireless.$s.ieee80211k='1'
+set wireless.$s.bss_transition='1'
 set wireless.$s.disabled='0'
 EOF5
 		;;

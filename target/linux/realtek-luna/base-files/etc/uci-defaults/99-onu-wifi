@@ -65,6 +65,8 @@ for IF in default_radio0 default_radio1; do
 set wireless.$IF.ssid='$SSID'
 set wireless.$IF.encryption='psk2'
 set wireless.$IF.key='$PSK'
+set wireless.$IF.ieee80211k='1'
+set wireless.$IF.bss_transition='1'
 commit wireless
 EOF
 done

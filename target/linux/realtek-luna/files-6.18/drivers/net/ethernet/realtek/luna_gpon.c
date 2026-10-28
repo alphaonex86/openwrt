@@ -7550,10 +7550,10 @@ static void luna_omci_poll(void)
 	while (budget--) {
 		struct omci_accepted accepted;
 		struct luna_omci_frame frame;
-		u8 response[OMCI_LEN];
+		u8 response[OMCI_LEN], owed[OMCI_LEN];
 		unsigned long flags;
 		u64 rx_ns;
-		int n;
+		int n, m;
 
 		spin_lock_irqsave(&luna_omci_lock, flags);
 		if (!luna_omci.onu || !luna_omci.count) {
@@ -7566,6 +7566,7 @@ static void luna_omci_poll(void)
 		luna_omci.count--;
 		n = omci_onu_input_ex(luna_omci.onu, frame.msg, frame.len,
 				      response, &accepted);
+		m = omci_onu_owed_avc(luna_omci.onu, owed);
 #ifdef CONFIG_GPON_OLT_DIAG
 		/* The clock is read HERE and handed in: the core tier reads none,
 		 * which is what makes a capture replay deterministically. */
@@ -7589,6 +7590,14 @@ static void luna_omci_poll(void)
 		if (n > 0) {
 			luna_omci_send(response, n);
 			luna_omci_turnaround(rx_ns);
+		}
+		if (m && luna_omci_send(owed, m)) {
+			pr_warn_ratelimited("luna-gpon: owed AVC not sent (OMCI TX error), retried after the next answer\n");
+		} else if (m) {
+			spin_lock_irqsave(&luna_omci_lock, flags);
+			if (luna_omci.onu)
+				omci_onu_owed_avc_sent(luna_omci.onu);
+			spin_unlock_irqrestore(&luna_omci_lock, flags);
 		}
 #ifdef CONFIG_GPON_OMCI_DIAG
 		/* Preserve the shared request/response trace at its new owner. The

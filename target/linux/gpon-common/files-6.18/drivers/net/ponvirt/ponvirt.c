@@ -286,8 +286,13 @@ static void pv_ds(const u8 *d, unsigned int n, u32 now)
 		    pv->p.state != GPON_O5_OPERATION)
 			break;
 		pv->omci_rx++;
+		pv_put16(gem, pv->omcc_gem);
 		if (omci_onu_input(pv->onu, d + PV_GEM_HDR, OMCI_LEN, resp) == OMCI_LEN) {
-			pv_put16(gem, pv->omcc_gem);
+			pv_emit(PV_US_OMCI, gem, 2, resp, OMCI_LEN);
+			pv->omci_tx++;
+		}
+		if (omci_onu_owed_avc(pv->onu, resp) == OMCI_LEN) {
+			omci_onu_owed_avc_sent(pv->onu);
 			pv_emit(PV_US_OMCI, gem, 2, resp, OMCI_LEN);
 			pv->omci_tx++;
 		}

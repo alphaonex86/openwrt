@@ -67,6 +67,21 @@
 /* 32: ME 309's writable attributes end at octet 31 (stock mib_McastOperProf). */
 #define OMCI_STORE_BODY 32
 
+/* An attribute held by value outside the dense store: too long for it (ME 148/157 strings) or of an
+ * autonomous instance (ME 340, ZTE ME 65319). Only an attribute an OLT wrote takes a slot. */
+#ifndef OMCI_POOL_MAX
+#define OMCI_POOL_MAX 32
+#endif
+#define OMCI_POOL_SIZE 25
+
+struct omci_pool_attr {
+	u16	class_id;
+	u16	inst;
+	u8	attr;
+	bool	used;
+	u8	v[OMCI_POOL_SIZE];
+};
+
 struct omci_me_inst {
 	u16	class_id;
 	u16	inst;
@@ -276,6 +291,7 @@ struct omci_onu {
 	u16	store_n;		/* provisioned-ME count */
 	struct omci_mib_row	rows[OMCI_MIB_ROWS_MAX];
 	struct omci_me_inst	store[OMCI_STORE_MAX];
+	struct omci_pool_attr	pool[OMCI_POOL_MAX];
 	/* ME 171's row table.  It is NOT in the store above because one ME 171
 	 * instance carries many 16-octet rows and the dense body holds 26
 	 * octets total -- the subscriber VLAN simply does not fit the shape
@@ -302,6 +318,7 @@ struct omci_onu {
 					 * countable */
 	u32	avc_count;		/* autonomous AVC frames emitted */
 	bool	avc_veip_up_sent;
+	u16	avc_owed[3];		/* class, instance, mask of the AVC sent after this answer; class 0 = none */
 	/* First 16 G.988 alarm bits, MSB first; one reporting ME. */
 	u16	alarm_class;	/* the ME the conditions belong to (0 = none) */
 	u16	alarm_inst;
@@ -466,6 +483,9 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 #define OMCI_ME_VOIP_CONFIG	138
 #define OMCI_ME_VOIP_LINE_STATUS 141
 #define OMCI_ME_TR069_SERVER	340
+#define OMCI_ME_NET_ADDR	137
+#define OMCI_ME_AUTH_SECURITY	148
+#define OMCI_ME_LARGE_STRING	157
 #define OMCI_ME_ONU_G		256
 #define OMCI_ME_ONU2_G		257
 #define OMCI_ME_TCONT		262
@@ -728,7 +748,7 @@ u8 omci_me_attr_size(u16 class_id, u8 attr);
 /* a vendor-reserved (class, inst) this board does not upload?  Its stock
  * exposes only the vendor MEs it uploads, and answers any other with result 0
  * and every mask zero. */
-bool omci_vendor_absent(const struct omci_onu *o, u16 class_id, u16 inst);
+bool omci_vendor_absent(struct omci_onu *o, u16 class_id, u16 inst);
 
 /* is (class, inst) a MIB instance this ONU holds? */
 bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst);

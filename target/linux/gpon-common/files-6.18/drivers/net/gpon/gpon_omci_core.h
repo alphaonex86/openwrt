@@ -134,6 +134,12 @@ void omci_finalize(u8 *msg);
  * report.  Fills @out (48 bytes, trailer + MIC done); returns OMCI_LEN. */
 int omci_onu_emit_veip_up_avc(struct omci_onu *o, u8 *out);
 
+/* The AVC the model owes right after the answer just built (a far end's own ONU sends it then),
+ * carrying what a Get serves now; 0 when none.  Serialized by the caller, like the alarm:
+ * omci_onu_owed_avc_sent() only after a successful TX submission, else the next answer retries. */
+int omci_onu_owed_avc(struct omci_onu *o, u8 *out);
+void omci_onu_owed_avc_sent(struct omci_onu *o);
+
 /* ★★★ THE ALARM SURFACE (G.988 clause 11.2.2), in the core, ...
  * dev/MEASURED-gpon_omci_core.h.md sec 2. */
 void omci_onu_set_alarms(struct omci_onu *o, u16 class_id, u16 inst,

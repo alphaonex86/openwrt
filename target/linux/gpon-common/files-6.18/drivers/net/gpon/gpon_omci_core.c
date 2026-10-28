@@ -662,3 +662,21 @@ int omci_onu_emit_veip_up_avc(struct omci_onu *o, u8 *out)
 	o->avc_veip_up_sent = true;
 	return OMCI_LEN;
 }
+
+int omci_onu_owed_avc(struct omci_onu *o, u8 *out)
+{
+	u8 val[30] = { 0 };
+	u16 rmask, known;
+
+	if (!o->avc_owed[0])
+		return 0;
+	omci_me_fill(o, o->avc_owed[0], o->avc_owed[1], o->avc_owed[2], false, val,
+		     val + sizeof(val), &rmask, &known);
+	omci_emit_avc(o, o->avc_owed[0], o->avc_owed[1], rmask, val, sizeof(val), out);
+	return OMCI_LEN;
+}
+
+void omci_onu_owed_avc_sent(struct omci_onu *o)
+{
+	o->avc_owed[0] = 0;
+}

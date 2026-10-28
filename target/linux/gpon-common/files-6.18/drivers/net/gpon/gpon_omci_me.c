@@ -92,10 +92,30 @@ void omci_store_merge(struct omci_me_inst *e, const u8 *val, int vlen)
 		e->blen = (u8)vlen;
 }
 
+static struct omci_pool_attr *omci_pool_find(struct omci_onu *o, u16 class_id, u16 inst, u8 attr)
+{
+	struct omci_pool_attr *p;
+
+	for (p = o->pool; p < o->pool + OMCI_POOL_MAX; p++)
+		if (p->used && p->class_id == class_id && p->inst == inst && p->attr == attr)
+			return p;
+	return NULL;
+}
+
+static void omci_pool_drop(struct omci_onu *o, u16 class_id, u16 inst)
+{
+	struct omci_pool_attr *p;
+
+	for (p = o->pool; p < o->pool + OMCI_POOL_MAX; p++)
+		if (p->used && p->class_id == class_id && p->inst == inst)
+			p->used = false;
+}
+
 void omci_store_del(struct omci_onu *o, u16 class_id, u16 inst)
 {
 	struct omci_me_inst *e = omci_store_find(o, class_id, inst);
 
+	omci_pool_drop(o, class_id, inst);
 	if (e) {
 		e->used = false;
 		if (o->store_n)
@@ -172,6 +192,7 @@ enum omci_attr_src {
 	OMCI_SRC_TEXT,		/* v = enum omci_text */
 	OMCI_SRC_OLT_G,		/* v = offset into o->olt_g, OLT-writable */
 	OMCI_SRC_INST0,		/* one octet: v >> 8 on instance 0, else v & 0xff */
+	OMCI_SRC_POOL,		/* v = the default; o->pool once an OLT writes it */
 };
 
 /* Constant octet strings stock serves, zero-padded. */
@@ -288,6 +309,7 @@ struct omci_attr {
 #define A_ZERO(cls, n, sz)	AT(cls, n, sz, OMCI_SRC_ID,		\
 				   offsetof(struct omci_identity, zeros))
 #define A_SN(cls, n)		AT(cls, n, 8, OMCI_SRC_SN, 0)
+#define A_POOL(cls, n, sz, def) { (cls), (def), (n), (sz), OMCI_SRC_POOL, 3 }
 #define A_MDS(cls, n)		AT(cls, n, 1, OMCI_SRC_MDS, 0)
 #define A_D(cls, n, sz, dyn)	AT(cls, n, sz, OMCI_SRC_DYN, dyn)
 #define A_NO_ATTRS(cls)		AT(cls, 0, 0, OMCI_SRC_CONST, 0)
@@ -448,9 +470,34 @@ static const struct omci_attr omci_attrs[] = {
 	A_TXT(141, 7, 25, OMCI_TEXT_ZERO_DIGIT),	/* #7  Call 2 destination */
 	A_C(141, 8, 1, 0),			/* #8  Line state */
 	A_C(141, 9, 1, 0),			/* #9  Emergency call status */
-	A_CW(340, 1, 1, 1),			/* TR-069 server #1 Admin state */
-	A_CW(340, 2, 2, 0xffff),		/* #2  ACS address pointer */
-	A_CW(340, 3, 2, 0xffff),		/* #3  Associated tag */
+	A_POOL(340, 1, 1, 1),			/* TR-069 server #1 Admin state */
+	A_POOL(340, 2, 2, 0xffff),		/* #2  ACS address pointer -> ME 137 */
+	A_POOL(340, 3, 2, 0xffff),		/* #3  Associated tag */
+	/* ---- the ACS address chain ME 137 -> 148 + 157, widths as the F670L's own OMCI holds
+	 * them; a baseline Create cannot carry 148's 101 octets, so every OLT Sets them ---- */
+	A_ST(137, 1, 2, 0, 7),			/* #1  Security pointer -> ME 148 */
+	A_ST(137, 2, 2, 2, 7),			/* #2  Address pointer -> ME 157 */
+	A_POOL(148, 1, 1, 0),			/* #1  Validation scheme */
+	A_POOL(148, 2, 25, 0),			/* #2  Username 1 */
+	A_POOL(148, 3, 25, 0),			/* #3  Password */
+	A_POOL(148, 4, 25, 0),			/* #4  Realm */
+	A_POOL(148, 5, 25, 0),			/* #5  Username 2 */
+	A_POOL(157, 1, 1, 0),			/* #1  Number of parts */
+	A_POOL(157, 2, 25, 0),
+	A_POOL(157, 3, 25, 0),
+	A_POOL(157, 4, 25, 0),
+	A_POOL(157, 5, 25, 0),
+	A_POOL(157, 6, 25, 0),
+	A_POOL(157, 7, 25, 0),
+	A_POOL(157, 8, 25, 0),
+	A_POOL(157, 9, 25, 0),
+	A_POOL(157, 10, 25, 0),
+	A_POOL(157, 11, 25, 0),
+	A_POOL(157, 12, 25, 0),
+	A_POOL(157, 13, 25, 0),
+	A_POOL(157, 14, 25, 0),
+	A_POOL(157, 15, 25, 0),
+	A_POOL(157, 16, 25, 0),
 
 	/* ---- ME 134 IP host config data, one per declared instance.  The
 	 * current-address group (#9..#13) reads 0: stock mirrors the live WAN
@@ -917,6 +964,29 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(65294, 4, 4, 0),			/* #4  Interval */
 	A_CW(65294, 5, 1, 0),
 	A_CW(65294, 6, 1, 0),
+	/* ---- ME 65305, 65319, 65321: widths and access read off the F670L's own OMCI
+	 * (V1.1.20P3N4D, OMCI-simulate/zte_stock.py: a pattern Set, then Get) ---- */
+	A_ST(65305, 1, 1, 0, 7),
+	A_ST(65305, 2, 1, 1, 7),
+	A_ST(65305, 3, 1, 2, 7),
+	A_ST(65305, 4, 1, 3, 7),
+	A_ST(65305, 5, 2, 4, 7),
+	A_ST(65305, 6, 4, 6, 3),		/* #6  IPv4 address */
+	A_ST(65305, 7, 4, 10, 3),		/* #7  IPv4 address */
+	/* 65319 #0 is autonomous and never uploaded */
+	A_POOL(65319, 1, 16, 0),
+	A_C(65319, 2, 1, 1),
+	A_ZERO(65319, 3, 25),
+	A_POOL(65319, 4, 1, 0),
+	A_ZERO(65319, 5, 25),
+	A_C(65319, 6, 2, 4),
+	A_ST(65321, 1, 1, 0, 7),
+	A_ST(65321, 2, 2, 1, 7),
+	A_ST(65321, 3, 2, 3, 7),
+	A_ST(65321, 4, 2, 5, 7),
+	A_ST(65321, 5, 2, 7, 7),
+	A_ST(65321, 6, 2, 9, 3),
+	A_C(65321, 7, 2, 0),			/* #7  always 0: its width (<= 14) never shows */
 #endif
 	/* ---- ME 65352 ONU support (mib_hsg_onu_support) ---- */
 	A_ZERO(65352, 1, 16),
@@ -1218,10 +1288,40 @@ bool omci_me_mutable(u16 class_id)
 	case OMCI_ME_MCAST_OPER_PROF:
 	case OMCI_ME_ETH_EXT_PM:
 	case OMCI_ME_GEM_CTP_PM:
+	case OMCI_ME_TR069_SERVER:
+	case OMCI_ME_NET_ADDR:
+	case OMCI_ME_AUTH_SECURITY:
+	case OMCI_ME_LARGE_STRING:
+#ifdef CONFIG_OLT_ZTE
+	case 65305:
+	case 65319:
+	case 65321:
+#endif
 		return true;
 	default:
 		return false;
 	}
+}
+
+/* @a's slot for @inst, taken and set to the default when new; NULL when the pool is full. */
+static struct omci_pool_attr *omci_pool_slot(struct omci_onu *o, const struct omci_attr *a, u16 inst)
+{
+	struct omci_pool_attr *p = omci_pool_find(o, a->class_id, inst, a->attr);
+	unsigned int i;
+
+	for (i = 0; !p && i < OMCI_POOL_MAX; i++)
+		if (!o->pool[i].used)
+			p = &o->pool[i];
+	if (!p || p->used)
+		return p;
+	memset(p, 0, sizeof(*p));
+	p->used = true;
+	p->class_id = a->class_id;
+	p->inst = inst;
+	p->attr = a->attr;
+	for (i = 0; a->size <= 4 && i < a->size; i++)
+		p->v[i] = (u8)(a->v >> (8 * (a->size - 1 - i)));
+	return p;
 }
 
 static void omci_anig_alarms_refresh(struct omci_onu *o)
@@ -1274,6 +1374,7 @@ static const struct omci_farend_profile {
 	u8 omcc_version;	/* ONU2-G #2 when the identity leaves it to the far end */
 	u16 me[2][2];		/* class, instance this far end provisions on every ONU */
 	bool alloc_by_omci;	/* the data Alloc-ID comes by ME 262 alone, never Assign_Alloc-ID */
+	u16 vendor_avc[2];	/* class, mask its own ONU AVCs on instance 0 once ME 131 names this OLT */
 } omci_farends[OMCI_FAREND_N] = {
 	[OMCI_FAREND_GENERIC] = { "generic", { 0 }, 0x80 },
 #ifdef CONFIG_OLT_ZTE
@@ -1281,9 +1382,10 @@ static const struct omci_farend_profile {
 	 * ZTE F670L, whose own binaries announce OMCC 0xa2 (V1.1.20P3N4D/P3N6B). */
 	/* Entel's ZTE (2026-10-21) assigns only Alloc-ID = ONU-ID by PLOAM and the data
 	 * Alloc-ID by ME 262; it grants it at once and deactivates an ONU that never
-	 * bursts there, every ~40 s. */
+	 * bursts there, every ~40 s.  The F670L AVCs 65319 #6 right after ME 131 names ZTEG. */
 	[OMCI_FAREND_ZTE] = { "zte", { 'Z', 'T', 'E', 'G' }, 0xa2,
-		{ { OMCI_ME_VOIP_CONFIG, 0 }, { OMCI_ME_TR069_SERVER, OMCI_VEIP_INST } }, true },
+		{ { OMCI_ME_VOIP_CONFIG, 0 }, { OMCI_ME_TR069_SERVER, OMCI_VEIP_INST } }, true,
+		{ 65319, OMCI_ATTR_BIT(6) } },
 #endif
 };
 
@@ -1453,6 +1555,7 @@ void omci_me_reset_values(struct omci_onu *o)
 	 * subscriber VLAN to an OLT that has just told us to forget
 	 * everything. */
 	gpon_vlan_model_reset(&o->vlan);
+	memset(o->pool, 0, sizeof(o->pool));
 	o->tcont_alloc_written = 0;
 	/* G.988's unassigned 0x00ff on every T-CONT, as stock's omci_app creates
 	 * them and the field X111W uploads them */
@@ -1567,11 +1670,21 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		return;			/* validated equal to what we serve */
 	if (a->src == OMCI_SRC_STORE)
 		memcpy(e->body + a->v, v, a->size);
+	else if (a->src == OMCI_SRC_POOL)
+		memcpy(omci_pool_slot(o, a, inst)->v, v, a->size);
 	else if (a->src == OMCI_SRC_OLT_G) {
 		memcpy(o->olt_g + a->v, v, a->size);
 		if (a->v == 0 && a->size >= sizeof(o->olt_vendor_seen)) {
+			const struct omci_farend_profile *f;
+
 			memcpy(o->olt_vendor_seen, v, sizeof(o->olt_vendor_seen));
 			omci_farend_refresh(o);
+			f = &omci_farends[o->farend];
+			if (f->vendor_avc[0] && !memcmp(v, f->vendor, 4)) {
+				o->avc_owed[0] = f->vendor_avc[0];
+				o->avc_owed[1] = 0;
+				o->avc_owed[2] = f->vendor_avc[1];
+			}
 		}
 	}
 	else if (a->src == OMCI_SRC_ANIG_THRESHOLD)
@@ -1663,7 +1776,8 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	for (a = first, pos = 0; a && a->class_id == class_id; a++) {
 		if (!a->attr || !(mask & OMCI_ATTR_BIT(a->attr)))
 			continue;
-		if (!omci_set_value_realisable(o, pptp_slot, a, values + pos)) {
+		if (!omci_set_value_realisable(o, pptp_slot, a, values + pos) ||
+		    (a->src == OMCI_SRC_POOL && !omci_pool_slot(o, a, inst))) {	/* the pool is full */
 			*failed = mask;
 			return OMCI_RC_ATTR_FAILED;
 		}
@@ -1721,11 +1835,14 @@ static bool omci_row_listed(const struct omci_onu *o, u16 class_id, u16 inst)
 	return false;
 }
 
-bool omci_vendor_absent(const struct omci_onu *o, u16 class_id, u16 inst)
+bool omci_vendor_absent(struct omci_onu *o, u16 class_id, u16 inst)
 {
-	/* CTC LoID authentication: served by Get, never uploaded, as stock's */
+	/* Served by Get and never uploaded, as stock's: CTC LoID authentication,
+	 * ZTE's 65319 #0, and a described vendor ME the OLT created. */
 	return omci_vendor_class(class_id) && class_id != OMCI_ME_CTC_LOID_AUTH &&
-	       !omci_row_listed(o, class_id, inst);
+	       !(IS_ENABLED(CONFIG_OLT_ZTE) && class_id == 65319 && !inst) &&
+	       !omci_row_listed(o, class_id, inst) &&
+	       !(omci_me_find(class_id) && omci_store_find(o, class_id, inst));
 }
 
 /* The bytes of one attribute.  Integers are big-endian, right-aligned in
@@ -1819,6 +1936,16 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 		break;
 	case OMCI_SRC_OLT_G:
 		return o->olt_g + a->v;
+	case OMCI_SRC_POOL: {
+		const struct omci_pool_attr *p = omci_pool_find(o, a->class_id, inst, a->attr);
+
+		if (p)
+			return p->v;
+		if (a->size > 4)
+			return o->id.zeros;
+		val = a->v;
+		break;
+	}
 	case OMCI_SRC_STORE: {
 		struct omci_me_inst *e = omci_store_find(o,
 						      a->class_id, inst);

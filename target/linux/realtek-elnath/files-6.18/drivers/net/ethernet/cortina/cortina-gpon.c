@@ -2687,17 +2687,31 @@ static void cg_selftest_answer(struct cortina_gpon *cg)
 		dev_warn_ratelimited(cg->dev, "ANI-G Test Result not sent (OMCI TX error)\n");
 }
 
+/* The AVC the model owes after an answer; a failed TX stays owed for the next one. */
+static void cg_owed_avc_send(struct cortina_gpon *cg, const u8 *owed)
+{
+	if (cg_omci_tx(cg, owed)) {
+		dev_warn_ratelimited(cg->dev, "owed AVC not sent (OMCI TX error), retried after the next answer\n");
+		return;
+	}
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci_active)
+		omci_onu_owed_avc_sent(cg->omci);
+	spin_unlock_bh(&cg->omci_lock);
+}
+
 static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
 {
 	struct omci_accepted accepted = { .kind = OMCI_ACCEPT_NONE };
 	struct omci_data_binding binding;
-	u8 resp[OMCI_LEN];
+	u8 resp[OMCI_LEN], owed[OMCI_LEN];
 	bool uni_pending = false;
-	int n = 0;
+	int n = 0, m = 0;
 
 	spin_lock_bh(&cg->omci_lock);
 	if (cg->omci_active) {
 		n = omci_onu_input_ex(cg->omci, pdu, OMCI_LEN, resp, &accepted);
+		m = omci_onu_owed_avc(cg->omci, owed);
 		if (accepted.kind != OMCI_ACCEPT_NONE)
 			omci_data_binding_snapshot(cg->omci, cg->omcc_gem,
 						   CG_MCAST_GEM_ID, &binding);
@@ -2713,6 +2727,8 @@ static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
 		cg_sched(cg, &cg->veip_avc_work, 31 * HZ);
 	if (n == OMCI_LEN)
 		cg_omci_tx(cg, resp);
+	if (m)
+		cg_owed_avc_send(cg, owed);
 	cg_selftest_answer(cg);
 	if (unlikely(cg_omci_trace))
 		cg_omci_trace_one(cg, pdu, OMCI_LEN, resp, n);

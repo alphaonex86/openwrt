@@ -45,6 +45,7 @@ define Package/gpon-provision/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/gpon-capture $(1)/usr/sbin/gpon-capture
 	$(INSTALL_BIN) ./files/gpon-omci-view $(1)/usr/sbin/gpon-omci-view
 	$(INSTALL_BIN) ./files/gpon-wan-discover $(1)/usr/sbin/gpon-wan-discover
+	$(INSTALL_BIN) ./files/gpon-acs $(1)/usr/sbin/gpon-acs
 	$(INSTALL_BIN) ./files/gpon-bundle $(1)/usr/sbin/gpon-bundle
 	$(INSTALL_BIN) ./files/gpon-vlan-check $(1)/usr/sbin/gpon-vlan-check
 	$(INSTALL_DIR) $(1)/etc/init.d

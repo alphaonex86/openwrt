@@ -1430,6 +1430,68 @@ int omci_farend_fmt(const struct omci_onu *o, char *out, size_t sz)
 	return pos + scnprintf(out + pos, sz - pos, "\nomci_olt_vendor: -\n");
 }
 
+/* @n octets of attribute @attr as a Get serves them; false when absent. */
+static bool omci_attr_read(struct omci_onu *o, u16 cls, u16 inst, u8 attr, u8 *v, unsigned int n)
+{
+	u16 rmask, known;
+
+	memset(v, 0, n);
+	return omci_me_fill(o, cls, inst, OMCI_ATTR_BIT(attr), false, v, v + n, &rmask, &known) ==
+	       OMCI_RC_OK && rmask;
+}
+
+/* A shell reads these lines: a value with a byte outside 0x20..0x7e is refused, never printed. */
+static int omci_acs_line(char *out, size_t sz, const char *name, const u8 *s)
+{
+	const u8 *c;
+
+	for (c = s; *c; c++)
+		if (*c < 0x20 || *c > 0x7e)
+			return scnprintf(out, sz, "acs_refused: %s byte 0x%02x at %u\n", name, *c,
+					 (unsigned int)(c - s));
+	return scnprintf(out, sz, "acs_%s: %s\n", name, s);
+}
+
+/* The ACS the OLT provisioned (G.988 ME 340 -> 137 -> 148 + 157) for the CWMP client.  It holds
+ * the password: only a root-only file may show it. */
+int omci_acs_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	u8 s[OMCI_POOL_SIZE * 15 + 1];
+	u16 acs, sec, addr;
+	unsigned int i, parts;
+	int pos;
+
+	omci_attr_read(o, OMCI_ME_TR069_SERVER, OMCI_VEIP_INST, 1, s, 1);
+	pos = scnprintf(out, sz, "acs_admin: %u\n", s[0]);
+	if (!omci_attr_read(o, OMCI_ME_TR069_SERVER, OMCI_VEIP_INST, 2, s, 2))
+		return pos;
+	acs = (u16)(s[0] << 8 | s[1]);
+	if (!omci_store_find(o, OMCI_ME_NET_ADDR, acs) ||
+	    !omci_attr_read(o, OMCI_ME_NET_ADDR, acs, 1, s, 2))
+		return pos;
+	sec = (u16)(s[0] << 8 | s[1]);
+	omci_attr_read(o, OMCI_ME_NET_ADDR, acs, 2, s, 2);
+	addr = (u16)(s[0] << 8 | s[1]);
+	if (omci_store_find(o, OMCI_ME_LARGE_STRING, addr) &&
+	    omci_attr_read(o, OMCI_ME_LARGE_STRING, addr, 1, s, 1)) {
+		parts = min_t(unsigned int, s[0], 15);
+		for (i = 0; i < parts; i++)
+			omci_attr_read(o, OMCI_ME_LARGE_STRING, addr, 2 + i, s + i * OMCI_POOL_SIZE,
+				       OMCI_POOL_SIZE);
+		s[parts * OMCI_POOL_SIZE] = 0;
+		pos += omci_acs_line(out + pos, sz - pos, "url", s);
+	}
+	if (!omci_store_find(o, OMCI_ME_AUTH_SECURITY, sec))
+		return pos;
+	omci_attr_read(o, OMCI_ME_AUTH_SECURITY, sec, 2, s, OMCI_POOL_SIZE);
+	omci_attr_read(o, OMCI_ME_AUTH_SECURITY, sec, 5, s + OMCI_POOL_SIZE, OMCI_POOL_SIZE);
+	s[2 * OMCI_POOL_SIZE] = 0;
+	pos += omci_acs_line(out + pos, sz - pos, "username", s);
+	omci_attr_read(o, OMCI_ME_AUTH_SECURITY, sec, 3, s, OMCI_POOL_SIZE);
+	s[OMCI_POOL_SIZE] = 0;
+	return pos + omci_acs_line(out + pos, sz - pos, "password", s);
+}
+
 static bool omci_farend_known(const u8 *val, unsigned int len)
 {
 	unsigned int f;

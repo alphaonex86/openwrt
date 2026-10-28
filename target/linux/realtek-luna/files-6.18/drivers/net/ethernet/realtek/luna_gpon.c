@@ -7778,6 +7778,23 @@ static int gpon_vlan_proc_show(struct seq_file *s, void *v)
 	return 0;
 }
 
+static int gpon_acs_proc_show(struct seq_file *s, void *v)
+{
+	static DEFINE_MUTEX(show_lock);
+	static char out[512];
+	unsigned long flags;
+
+	mutex_lock(&show_lock);
+	out[0] = 0;
+	spin_lock_irqsave(&luna_omci_lock, flags);
+	if (luna_omci.onu)
+		omci_acs_fmt(luna_omci.onu, out, sizeof(out));
+	spin_unlock_irqrestore(&luna_omci_lock, flags);
+	seq_puts(s, out);
+	mutex_unlock(&show_lock);
+	return 0;
+}
+
 static int luna_timing_show(struct seq_file *s, void *v)
 {
 	struct {
@@ -10257,6 +10274,7 @@ skip_bosa_init:
 
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
 	proc_create_single("gpon_vlan", 0444, NULL, gpon_vlan_proc_show);
+	proc_create_single("gpon_acs", 0400, NULL, gpon_acs_proc_show);
 	proc_create_single("gpon_log", 0444, NULL, luna_log_show);
 	proc_create_single("gpon_timing", 0444, NULL, luna_timing_show);
 	luna_mon_register();
@@ -10456,6 +10474,7 @@ static void __exit rtl9602c_gpon_exit(void)
 	proc_remove(luna_health_proc);
 	luna_health_proc = NULL;
 	remove_proc_entry("gpon_vlan", NULL);
+	remove_proc_entry("gpon_acs", NULL);
 	remove_proc_entry("gpon", NULL);
 	remove_proc_entry("gpon_log", NULL);
 	remove_proc_entry("gpon_timing", NULL);

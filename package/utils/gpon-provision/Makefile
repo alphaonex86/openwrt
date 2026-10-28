@@ -35,11 +35,14 @@ endef
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-o $(PKG_BUILD_DIR)/rtk_factory $(PKG_BUILD_DIR)/rtk_factory.c -lz
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-o $(PKG_BUILD_DIR)/gpon-capture $(PKG_BUILD_DIR)/gpon_capture.c
 endef
 
 define Package/gpon-provision/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/rtk_factory $(1)/usr/sbin/rtk_factory
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/gpon-capture $(1)/usr/sbin/gpon-capture
 	$(INSTALL_BIN) ./files/gpon-omci-view $(1)/usr/sbin/gpon-omci-view
 	$(INSTALL_BIN) ./files/gpon-wan-discover $(1)/usr/sbin/gpon-wan-discover
 	$(INSTALL_BIN) ./files/gpon-bundle $(1)/usr/sbin/gpon-bundle
@@ -48,6 +51,7 @@ define Package/gpon-provision/install
 	$(INSTALL_BIN) ./files/gpon_provision.init $(1)/etc/init.d/gpon_provision
 	$(INSTALL_BIN) ./files/gpon_wan_auto.init $(1)/etc/init.d/gpon_wan_auto
 	$(INSTALL_BIN) ./files/gpon_vlan_watch.init $(1)/etc/init.d/gpon_vlan_watch
+	$(INSTALL_BIN) ./files/gpon_capture.init $(1)/etc/init.d/gpon_capture
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/gpon.config $(1)/etc/config/gpon
 endef

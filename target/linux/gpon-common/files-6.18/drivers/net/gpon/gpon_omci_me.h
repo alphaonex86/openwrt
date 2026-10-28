@@ -485,6 +485,7 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * which both our shells hardcode to
 					 * GPON_MCAST_GEM_PORT today */
 #define OMCI_ME_VEIP		329
+#define OMCI_ME_HSGQ_WAN_ACL	251	/* HSGQ vendor ME: WAN management ACL */
 #define OMCI_ME_CTC_LOID_AUTH	65530	/* 0xFFFA — CTC extension the OLT audits */
 
 /* ★★ THE MIB-DATA-SYNC POISON SEED IS PROTOCOL POLICY, AND IT ...
@@ -719,6 +720,9 @@ u8 omci_me_table_next(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 /* does the model carry this class at all (descriptor row or vendor range)? */
 bool omci_class_modelled(u16 class_id);
 bool omci_class_described(u16 class_id);
+/* a class the model holds with no instance until the OLT creates one: a Get
+ * of another is 0x05, as its stock answers */
+bool omci_absent_until_created(u16 class_id);
 u8 omci_me_attr_size(u16 class_id, u8 attr);
 
 /* a vendor-reserved (class, inst) this board does not upload?  Its stock

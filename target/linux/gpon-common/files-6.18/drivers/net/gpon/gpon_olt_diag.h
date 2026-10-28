@@ -73,6 +73,7 @@ struct gpon_olt_capture {
 	struct gpon_olt_capture *ledger;
 	struct gpon_olt_capture *unknown;
 	bool (*described)(u16 class_id);	/* the ME model; NULL counts every class as modelled */
+	bool (*absent_by_model)(u16 class_id);	/* 0x05 to it is the modelled answer; NULL: none */
 };
 
 /* A static capture with its storage: GPON_OLT_CAPTURE(x, n, .ledger = &y); */

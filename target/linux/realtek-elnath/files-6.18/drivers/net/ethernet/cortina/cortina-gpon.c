@@ -2402,7 +2402,8 @@ static void cg_veip_avc_work(struct work_struct *work)
 GPON_OLT_CAPTURE(cg_olt_prov, GPON_OLT_LEDGER_RECORDS);
 GPON_OLT_CAPTURE(cg_olt_unknown, GPON_OLT_UNKNOWN_RECORDS);
 GPON_OLT_CAPTURE(cg_olt_cap, GPON_OLT_RECORDS, .ledger = &cg_olt_prov,
-			.unknown = &cg_olt_unknown, .described = omci_class_described);
+			.unknown = &cg_olt_unknown, .described = omci_class_described,
+			.absent_by_model = omci_absent_until_created);
 
 /* The PON-MAC numbers its states from 0 (0 = O1), the core enum from 1.  A
  * value the MAC does not name maps to COULD NOT ASK, never to a state. */

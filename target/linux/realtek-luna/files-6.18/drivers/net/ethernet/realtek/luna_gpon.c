@@ -7470,7 +7470,8 @@ static void luna_data_alloc_changed(void *sh, u16 alloc, bool assigned)
 GPON_OLT_CAPTURE(luna_olt_prov, GPON_OLT_LEDGER_RECORDS);
 GPON_OLT_CAPTURE(luna_olt_unknown, GPON_OLT_UNKNOWN_RECORDS);
 GPON_OLT_CAPTURE(luna_olt_cap, GPON_OLT_RECORDS, .ledger = &luna_olt_prov,
-			.unknown = &luna_olt_unknown, .described = omci_class_described);
+			.unknown = &luna_olt_unknown, .described = omci_class_described,
+			.absent_by_model = omci_absent_until_created);
 
 static int olt_capture_show(struct seq_file *s, struct gpon_olt_capture *c,
 			    spinlock_t *lock)

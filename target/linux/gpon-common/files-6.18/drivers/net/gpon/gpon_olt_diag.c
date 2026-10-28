@@ -140,17 +140,20 @@ void gpon_olt_ledger_note(struct gpon_olt_capture *l, const struct gpon_olt_rec 
 }
 
 /* Not identified: no answer to a request that asked for one, an answer with a
- * non-zero result, or a class this ONU holds no model of (answered by policy). */
+ * non-zero result (but 0x05 to a class modelled absent until created), or a class
+ * this ONU holds no model of (answered by policy). */
 static bool olt_unidentified(const struct gpon_olt_capture *c, const struct gpon_olt_rec *req,
 			     const struct gpon_olt_rec *resp)
 {
 	u8 mt = req->pdu[2] & 0x1f;
+	u16 class_id = (u16)(req->pdu[4] << 8 | req->pdu[5]);
 
 	if (!resp)
 		return req->pdu[2] & 0x40;
-	if (resp->len > 8 && resp->pdu[8] && (mt < OMCI_MT_GET_ALL_ALARMS || mt > OMCI_MT_MIB_UPLOAD_NX))
+	if (resp->len > 8 && resp->pdu[8] && (mt < OMCI_MT_GET_ALL_ALARMS || mt > OMCI_MT_MIB_UPLOAD_NX) &&
+	    !(resp->pdu[8] == OMCI_RC_UNKNOWN_INST && c->absent_by_model && c->absent_by_model(class_id)))
 		return true;
-	return c->described && !c->described((u16)(req->pdu[4] << 8 | req->pdu[5]));
+	return c->described && !c->described(class_id);
 }
 
 void gpon_olt_ploam_unknown_note(struct gpon_olt_capture *u, const struct gpon_olt_rec *ds)

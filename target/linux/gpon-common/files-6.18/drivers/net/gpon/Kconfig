@@ -85,6 +85,18 @@ config OLT_ZTE
 	  vmlinux on the X100DG (MIPS); 4096 B on the X400AXF (aarch64),
 	  exactly one page, so there the alignment quantum is what shows.
 
+config OLT_HSGQ
+	bool "Serve HSGQ OLTs"
+	depends on GPON_CORE
+	default y
+	help
+	  What only an HSGQ OLT needs of the ONU: its vendor ME 251 (WAN
+	  management ACL: telnet, HTTP, HTTPS, ICMP and their ports), held as
+	  the HSGQ stock ONUs hold it -- the class is known, no instance exists
+	  until the OLT creates one, so a Get of instance 0 is answered 0x05.
+	  Nothing it carries opens a WAN service. Off, ME 251 is an unknown
+	  vendor class again.
+
 config GPON_FLOW_OFFLOAD
 	bool
 	depends on GPON_CORE

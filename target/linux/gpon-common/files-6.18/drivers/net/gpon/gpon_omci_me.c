@@ -852,6 +852,16 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(247, 15, 2, 0),
 	A_C(247, 16, 1, 0),			/* #16 Reset default */
 #endif
+#ifdef CONFIG_OLT_HSGQ
+	/* ---- ME 251 WAN management ACL (mib_wanacl): no instance until created ---- */
+	A_CW(251, 1, 1, 0),			/* #1  Telnet */
+	A_CW(251, 2, 2, 0),			/* #2  Telnet port */
+	A_CW(251, 3, 1, 0),			/* #3  HTTP */
+	A_CW(251, 4, 2, 0),			/* #4  HTTP port */
+	A_CW(251, 5, 1, 0),			/* #5  HTTPS */
+	A_CW(251, 6, 2, 0),			/* #6  HTTPS port */
+	A_CW(251, 7, 1, 0),			/* #7  ICMP */
+#endif
 	/* ---- ME 252 WLAN profile (mib_WlanCfgProfile) ---- */
 	A_C(252, 1, 1, 0),			/* #1  WLAN type */
 	A_C(252, 2, 1, 1),			/* #2  2.4 GHz admin */
@@ -1166,7 +1176,7 @@ bool omci_get_checks_inst(u16 class_id)
 	       class_id == OMCI_ME_LCT_UNI || class_id == OMCI_ME_POWER_SHED ||
 	       class_id == OMCI_ME_VOIP_CONFIG ||
 	       class_id == OMCI_ME_VOIP_LINE_STATUS ||
-	       class_id == OMCI_ME_TR069_SERVER;
+	       class_id == OMCI_ME_TR069_SERVER || omci_absent_until_created(class_id);
 }
 
 /* Only these classes have a verified mutable layout in this model. Other
@@ -1675,6 +1685,11 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 bool omci_class_described(u16 class_id)
 {
 	return omci_me_find(class_id) != NULL;
+}
+
+bool omci_absent_until_created(u16 class_id)
+{
+	return IS_ENABLED(CONFIG_OLT_HSGQ) && class_id == OMCI_ME_HSGQ_WAN_ACL;
 }
 
 /* The wire size of one attribute the model describes, 0 when it does not: the
@@ -2946,7 +2961,7 @@ bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst)
 {
 	u16 i;
 
-	if (omci_vendor_class(class_id))
+	if (omci_vendor_class(class_id) && !omci_absent_until_created(class_id))
 		return true;
 	if (omci_store_find(o, class_id, inst))
 		return true;

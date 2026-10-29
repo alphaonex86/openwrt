@@ -6,8 +6,10 @@
 . /usr/share/libubox/jshn.sh
 
 health() { sed -n "s/^$1: *//p" /proc/gpon_health 2>/dev/null | head -1; }
-first_int() { sed -n "s/.*$1\(-\{0,1\}[0-9][0-9]*\).*/\1/p" /proc/gpon 2>/dev/null | head -1; }
-cdbm_to_dbm() { [ -n "$1" ] && awk -v c="$1" 'BEGIN { printf "%.1f", c / 100.0 }' || echo "n/a"; }
+# /proc/gpon samples the optics live (~1 s on the RTL8290B): status reads it ONCE, into $G
+gpon_sed() { printf '%s\n' "$G" | sed -n "$1" | head -1; }
+first_int() { gpon_sed "s/.*$1\(-\{0,1\}[0-9][0-9]*\).*/\1/p"; }
+cdbm_to_dbm() { [ -n "$1" ] && [ "$1" -gt -100000 ] && awk -v c="$1" 'BEGIN { printf "%.1f", c / 100.0 }' || echo "n/a"; }
 
 state_name() {
 	case "$1" in
@@ -24,10 +26,10 @@ los_now() {
 	local los
 	los=$(health los)
 	case "$los" in 0|1) echo "$los"; return ;; esac
-	los=$(sed -n 's/.*optic_los=\([01]\).*/\1/p' /proc/gpon 2>/dev/null | head -1)
+	los=$(gpon_sed 's/.*optic_los=\([01]\).*/\1/p')
 	[ -n "$los" ] && { echo "$los"; return; }
-	grep -q '^alarm .*(LOS/LOF!)' /proc/gpon 2>/dev/null && { echo 1; return; }
-	grep -q '^alarm .*(no alarm' /proc/gpon 2>/dev/null && echo 0
+	printf '%s\n' "$G" | grep -q '^alarm .*(LOS/LOF!)' && { echo 1; return; }
+	printf '%s\n' "$G" | grep -q '^alarm .*(no alarm' && echo 0
 }
 
 case "$1" in
@@ -37,6 +39,7 @@ list)
 call)
 	case "$2" in
 	status)
+		G=$(cat /proc/gpon 2>/dev/null)
 		st=$(health onu_state)
 		los=$(los_now)
 		json_init
@@ -53,13 +56,14 @@ call)
 		else
 			json_add_string optic_rx_dbm "$(cdbm_to_dbm "$(first_int 'optic_rx_cdbm: *')")"
 			json_add_string optic_tx_dbm "$(cdbm_to_dbm "$(first_int 'tx_cdbm=')")"
+			printf '%s\n' "$G" | grep -q ' rx<=' && json_add_boolean optic_rx_floor 1
 		fi
-		json_add_string farend "$(sed -n 's/^omci_farend: //p' /proc/gpon 2>/dev/null)"
-		json_add_string farends "$(sed -n 's/^omci_farends: //p' /proc/gpon 2>/dev/null)"
-		json_add_string olt_vendor "$(sed -n 's/^omci_olt_vendor: //p' /proc/gpon 2>/dev/null)"
+		json_add_string farend "$(gpon_sed 's/^omci_farend: //p')"
+		json_add_string farends "$(gpon_sed 's/^omci_farends: //p')"
+		json_add_string olt_vendor "$(gpon_sed 's/^omci_olt_vendor: //p')"
 		ol=$(health o5_lost)
 		[ -n "$ol" ] && json_add_int o5_lost "$ol" &&
-			json_add_string o5_last "$(sed -n 's/^o5_lost: *[0-9]* //p' /proc/gpon 2>/dev/null)"
+			json_add_string o5_last "$(gpon_sed 's/^o5_lost: *[0-9]* //p')"
 		json_dump
 		;;
 	detail)

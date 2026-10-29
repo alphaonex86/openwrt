@@ -260,6 +260,35 @@ laser_from_unit() {
 	log "laser from this unit: $(echo $out)"
 }
 
+# RTL8290B: THIS unit's DDM coefficients over the driver's compiled ones. Readings only:
+# a missing or unusable calibration is said and never stops GPON.
+optical_from_unit() {
+	local part="$1" out key val vals=
+	case "$2" in RTL8290B|'') ;; *) return 0 ;; esac
+	[ -w "$LASER_PARAM_DIR/optic_rx_vthr" ] || return 0
+	out=$("$RTK" -p "$part" optical_cal 2>/dev/null) || {
+		log "no RTL8290B optical calibration on '$part'; optical readings use the compiled board's"
+		return 0
+	}
+	[ "$(echo "$out" | sed -n 's/^rx_a=//p')" = 0 ] || {
+		log "optical calibration rx_a is not 0, a polynomial the driver does not compute; readings use the compiled board's"
+		return 0
+	}
+	for key in rssi_v0:optic_rx_vthr rx_b:optic_rx_b rx_c:optic_rx_c tx_a:optic_tx_slope tx_b:optic_tx_offset \
+		   temp_off:optic_temp_off; do
+		val=$(echo "$out" | sed -n "s/^${key%%:*}=//p")
+		case "$val" in
+		''|-|*[!0-9-]*) log "optical calibration has no integer ${key%%:*}; readings use the compiled board's"; return 0 ;;
+		esac
+		vals="$vals ${key#*:}=$val"
+	done
+	for key in $vals; do
+		echo "${key#*=}" > "$LASER_PARAM_DIR/${key%%=*}" ||
+			log "the driver refused ${key}: optical readings mix this unit's and the compiled calibration"
+	done
+	log "optical calibration from this unit:$vals"
+}
+
 # GN25L95: the host calibrates the part from this unit's rtkbosa file. A failed
 # stage must not leave older bytes available to request_firmware.
 stage_gn_cal() {
@@ -351,6 +380,7 @@ try_identity() {
 	*) stage_gn_cal "$part" || return 1 ;;
 	esac
 	laser_from_unit "$part" "$backend" || return 1
+	optical_from_unit "$part" "$backend"
 	set_password "$part"
 	set_omci_identity "$part"
 

@@ -13,6 +13,7 @@ s32 bosa_code_to_cdbm(u32 code);
 /* "Could not measure" sentinel for the RX optical chain. ...
  * dev/MEASURED-luna_gpon_logic.h.md sec 2. */
 #define BOSA_RX_CODE_NA		0u
+#define BOSA_RX_CODE_FLOOR	11u	/* the chain's clamp: at or below 1.1 uW, a bound */
 
 /* Per-board optical calibration. Stock loads this from rtl8290b.data into its
  * europa_param struct; the shell owns the instance (compiled defaults are that

@@ -70,7 +70,7 @@ u32 bosa_rx_code_calc(u32 rssi, u32 tap_lo, u32 tap_hi,
 	q  = (u32)div64_u64(irssi, s1);
 	code = (((u64)cal->rx_poly_b * q) >> 13) * s1 + ((1000u * (u32)cal->rx_poly_c) >> 12);
 	code = div64_u64(code, 100);
-	return code < 11 ? 11 : (u32)code;
+	return code < BOSA_RX_CODE_FLOOR ? BOSA_RX_CODE_FLOOR : (u32)code;
 }
 
 /* Module temperature in deci-degC from 14 raw (0x302, 0x303) register pairs:

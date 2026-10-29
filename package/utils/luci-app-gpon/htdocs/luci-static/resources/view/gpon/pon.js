@@ -139,7 +139,7 @@ function summary(st, wan) {
 		(st.onu_state_name && st.onu_state_name != 'unknown' ? ' – ' + st.onu_state_name : '');
 	return table([
 		[ _('ONU state'), E('span', { 'class': st.online ? 'label success' : 'label warning' }, [ state ]) ],
-		[ _('RX power'), (st.optic_rx_dbm || 'n/a') + ' dBm' ],
+		[ _('RX power'), (st.optic_rx_floor ? '≤ ' : '') + (st.optic_rx_dbm || 'n/a') + ' dBm' ],
 		[ _('TX power'), (st.optic_tx_dbm || 'n/a') + ' dBm' ],
 		[ _('Signal'), st.los === true ? _('LOS (no fiber light)') : st.los === false ? _('OK') : _('unknown') ],
 		[ _('OLT mode'), (st.farend || '—') + (uci.get('gpon', 'identity', 'farend') ? ' (' + _('forced') + ')' : ' (' + _('detected') + ')') ],

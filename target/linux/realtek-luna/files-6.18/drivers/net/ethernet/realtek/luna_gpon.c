@@ -2533,6 +2533,33 @@ static struct bosa_optical_cal bosa_cal = {
 	.tx_slope = 2022, .tx_offset = 0,
 };
 
+/* The provisioning hands THIS unit's coefficients (rtk_factory optical_cal) over
+ * the compiled ones above; a zero threshold, RX slope or TX slope is no calibration. */
+static int optic_cal_set(const char *val, const struct kernel_param *kp)
+{
+	bool signed_ok = kp->arg == &bosa_cal.rx_poly_c || kp->arg == &bosa_cal.tx_offset;
+	int v;
+
+	if (kstrtoint(val, 0, &v) || (!signed_ok && v <= 0))
+		return -EINVAL;
+	mutex_lock(&bosa_lock);
+	*(s32 *)kp->arg = v;
+	mutex_unlock(&bosa_lock);
+	return 0;
+}
+
+static const struct kernel_param_ops optic_cal_ops = {
+	.set = optic_cal_set,
+	.get = param_get_int,
+};
+module_param_cb(optic_rx_vthr, &optic_cal_ops, &bosa_cal.rx_vthr, 0644);
+module_param_cb(optic_rx_b, &optic_cal_ops, &bosa_cal.rx_poly_b, 0644);
+module_param_cb(optic_rx_c, &optic_cal_ops, &bosa_cal.rx_poly_c, 0644);
+module_param_cb(optic_tx_slope, &optic_cal_ops, &bosa_cal.tx_slope, 0644);
+module_param_cb(optic_tx_offset, &optic_cal_ops, &bosa_cal.tx_offset, 0644);
+module_param_named(optic_temp_off, bosa_cal.temp_off, short, 0644);
+MODULE_PARM_DESC(optic_rx_vthr, "this unit's RSSI dark threshold, uV (rtl8290b.data rssi_v0)");
+
 
 /* 24-bit big-endian read of three consecutive BOSA analog-page registers. */
 static u32 bosa_read24(u16 reg_hi)
@@ -5537,8 +5564,9 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 		if (rx_cdbm == BOSA_RX_CDBM_NA)
 			strscpy(rx_s, "n/a", sizeof(rx_s));
 		else
-			scnprintf(rx_s, sizeof(rx_s), "%d.%02ddBm", rx_cdbm / 100,
-				  (rx_cdbm < 0 ? -rx_cdbm : rx_cdbm) % 100);
+			scnprintf(rx_s, sizeof(rx_s), "%s%d.%02ddBm",
+				  rx_cdbm == bosa_code_to_cdbm(BOSA_RX_CODE_FLOOR) ? "<=" : "",
+				  rx_cdbm / 100, (rx_cdbm < 0 ? -rx_cdbm : rx_cdbm) % 100);
 		if (SDS_FIB_STATUS)
 			scnprintf(sdet_s, sizeof(sdet_s), "%d",
 				  !!(sw_rd(SDS_FIB_STATUS) & SDS_FIB_SDS_SDET));

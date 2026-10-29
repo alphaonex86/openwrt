@@ -1,6 +1,6 @@
 --- a/Makefile
 +++ b/Makefile
-@@ -871,7 +871,17 @@
+@@ -871,7 +871,15 @@
  KBUILD_CFLAGS	+= -fno-delete-null-pointer-checks
 
 +# RTL9602C (Lexra RLX, 4KC-scheduled) MDU erratum: a load scheduled into the
@@ -12,10 +12,7 @@
 +KBUILD_CFLAGS	+= -fno-schedule-insns2
 +
  ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
--KBUILD_CFLAGS += -O2
-+# realtek-luna: the NAND kernel partition (k0 = 3 MB) is size-constrained and the
-+# OpenWrt config-merge always resolves this choice to PERFORMANCE, so force -Os.
-+KBUILD_CFLAGS += -Os
+ KBUILD_CFLAGS += -O2
  KBUILD_RUSTFLAGS += -Copt-level=2
  else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
  KBUILD_CFLAGS += -Os

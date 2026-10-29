@@ -2032,6 +2032,9 @@ MODULE_PARM_DESC(poke, "DEV: <g|G|p|P> <hexoff> [hexval] live GTC/PON-IP reg rea
 /* RTL8290B BOSA state captured at probe for /proc display (-1 ...
  * dev/MEASURED-luna_gpon.c.md sec 69. */
 static bool bosa_not_8290b;		/* set by bosa_probe() on a positive mismatch */
+/* from DT: the optical module runs its own laser driver and APC, so arming
+ * needs no host calibration (neither RTL8290B nor GN25L95) */
+static bool optics_self_managed;
 static int bosa_id_num __ro_after_init = -1;
 static int bosa_id_vid __ro_after_init = -1;
 static int bosa_w41 __ro_after_init = -1;
@@ -2043,6 +2046,12 @@ static int bosa_status2 __ro_after_init = -1;
 static bool bosa_regs_live(void)
 {
 	return bosa_id_num == 0x8290 && !bosa_not_8290b;
+}
+
+/* Does the module answer the standard SFF-8472 A2h monitor instead (V2801RGW)? */
+static bool bosa_reads_a2h(void)
+{
+	return bosa_gn_identified || bosa_not_8290b || optics_self_managed;
 }
 
 /* Read one 8-bit register from an I2C slave via the SoC ...
@@ -2763,7 +2772,7 @@ static void luna_selftest_read(struct gpon_optic_reading *v)
 	u32 bias;
 
 	memset(v, 0, sizeof(*v));
-	if (bosa_gn_identified || bosa_not_8290b) {
+	if (bosa_reads_a2h()) {
 		if (bosa_a2h_read(&d) == GPON_DDM_OK)
 			gpon_optic_from_a2h(v, &d);
 		return;
@@ -2809,7 +2818,7 @@ static bool gpon_optical_cache_poll(void)
 
 	luna_optic_read_now();
 	/* a module's zero power word is no measurement: both levels stay (G24W) */
-	if ((bosa_gn_identified || bosa_not_8290b) && (v->have & both) != both)
+	if (bosa_reads_a2h() && (v->have & both) != both)
 		return false;
 	if (v->have & GPON_OPTIC_RX)
 		anig_rx_level = gpon_ddm_cdbm_to_anig(v->rx_cdbm);
@@ -9662,10 +9671,6 @@ static struct gpio_desc *laser_tx_pwr;
  * that declares none keeps its bootloader's pads (the X100DG's I2C bus 1, 2026-10-01). */
 static u32 board_gpio_pads[6];
 static bool board_gpio_pads_set;
-/* from DT: the optical module runs its own laser driver and APC, so arming
- * needs no host calibration (neither RTL8290B nor GN25L95) */
-static bool optics_self_managed;
-
 /* Cached operational state only: reading the full dump consumes PM counters. */
 static int luna_health_show(struct seq_file *s, void *v)
 {
@@ -9720,7 +9725,7 @@ static void gpon_optical_work_fn(struct work_struct *w)
 				}
 			}
 		}
-		if (optical_poll && (bosa_regs_live() || bosa_cal_ready) &&
+		if (optical_poll && (bosa_regs_live() || bosa_cal_ready || optics_self_managed) &&
 		    time_after_eq(jiffies, optical_next)) {
 			if (gpon_optical_cache_poll())
 				rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);

@@ -499,6 +499,7 @@ struct gpon_swc_map {
 	u32 fib_reg16;		/* FIB_REG16   [10] FRC_SD [2] SEL_RX_SD       */
 	u32 fib_ext_reg21;	/* FIB_EXT_REG21 [13] analog-ready             */
 	u32 wsds_dig_18;	/* WSDS_DIG_18 [15:12] optic-LOS force + BEN_OE */
+	u32 sds_gpon42;		/* SDS_ANA_GPON_REG42; 0 = the chip has none   */
 	/* The indirect I2C master, whose whole block sits +4 on the ...
 	 * dev/MEASURED-luna_gpon.c.md sec 19. */
 	u32 i2c_ind_wd;		/* I2C_IND_WD  [31:0] write data               */
@@ -597,7 +598,7 @@ static const struct gpon_swc_map gpon_swc_9602c = {
 	.io_gpio_en = 0x00048,
 	.sds_fib_status = 0x001e4,
 	.sds_reg0 = 0x22800, .fib_reg16 = 0x22c40, .fib_ext_reg21 = 0x22e54,
-	.wsds_dig_18 = 0x22090,
+	.wsds_dig_18 = 0x22090, .sds_gpon42 = 0x22728,
 	.i2c_ind_wd = 0x000b0, .i2c_ind_adr = 0x000b8,
 	.i2c_ind_cmd = 0x000c0, .i2c_ind_rd = 0x000c8,
 	.sds_win = 0x22000, .sds_cfg = 0x001d0,
@@ -726,7 +727,7 @@ static const struct gpon_swc_map gpon_swc_9607c = {
 	 * the one the GPON RX uses. ddm_probe_9607c() scans all three. */
 	.sds_fib_status = 0x0028c,
 	.sds_reg0 = 0x40800, .fib_reg16 = 0x40c40, .fib_ext_reg21 = 0x40e54,
-	.wsds_dig_18 = 0x40090,
+	.wsds_dig_18 = 0x40090, .sds_gpon42 = 0x40728,
 	.i2c_ind_wd = 0x000b4, .i2c_ind_adr = 0x000bc,
 	.i2c_ind_cmd = 0x000c4, .i2c_ind_rd = 0x000cc,
 	.sds_win = 0x40000, .sds_cfg = 0x00270,
@@ -1079,7 +1080,7 @@ enum {
 #undef  SDS_ANA_COM_REG27
 #define SDS_ANA_COM_REG27      SDS(0x225ec)
 #undef  SDS_ANA_GPON_REG42
-#define SDS_ANA_GPON_REG42     SDS(0x22728)
+#define SDS_ANA_GPON_REG42     (swc->sds_gpon42)
 #undef  SDS_ANA_GPON_REG46
 #define SDS_ANA_GPON_REG46     SDS(0x22738)
 #undef  SDS_ANA_MISC_REG00
@@ -6045,9 +6046,13 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 	 */
 	seq_printf(s, "sds: dig00=0x%08x dig1d=0x%08x  (golden 0xf30 / 0x1c000)\n",
 		   sw_rd(WSDS_DIG_00), sw_rd(WSDS_DIG_1D));
-	seq_printf(s, "sds: com03=0x%08x com26=0x%08x gpon42=0x%08x dig18=0x%08x@0x%05x\n",
-		   sw_rd(SDS_ANA_COM_REG03), sw_rd(SDS_ANA_COM_REG26),
-		   sw_rd(SDS_ANA_GPON_REG42), sw_rd(WSDS_DIG_18), swc->wsds_dig_18);
+	seq_printf(s, "sds: com03=0x%08x com26=0x%08x ",
+		   sw_rd(SDS_ANA_COM_REG03), sw_rd(SDS_ANA_COM_REG26));
+	if (SDS_ANA_GPON_REG42)
+		seq_printf(s, "gpon42=0x%08x", sw_rd(SDS_ANA_GPON_REG42));
+	else
+		seq_puts(s, "gpon42=n/a");
+	seq_printf(s, " dig18=0x%08x@0x%05x\n", sw_rd(WSDS_DIG_18), swc->wsds_dig_18);
 	/* ★ THE ONE LINE THAT SAYS WHETHER optic_los IS SAMPLED OR ...
 	 * dev/MEASURED-luna_gpon.c.md sec 308. */
 	{

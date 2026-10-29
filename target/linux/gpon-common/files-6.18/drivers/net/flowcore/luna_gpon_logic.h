@@ -7,7 +7,6 @@
 #include <linux/types.h>
 
 u8 bosa_slave_for(u16 reg);
-s32 ddm_word_to_level(int raw);
 s32 bosa_code_to_cdbm(u32 code);
 
 /* "Could not measure" sentinel for the RX optical chain. ...

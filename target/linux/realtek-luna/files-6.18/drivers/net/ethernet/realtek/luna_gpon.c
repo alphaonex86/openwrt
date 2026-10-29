@@ -1410,11 +1410,11 @@ MODULE_PARM_DESC(serdes_txpll_relock, "1=re-lock the TX CMU PLL (toggle CMU enab
 static bool unranged_reseat = true;
 module_param(unranged_reseat, bool, 0644);
 MODULE_PARM_DESC(unranged_reseat, "pulse the US-TX SerDes interface reset-B every ~200 ticks while un-ranged (default 1 = as shipped; 0 = the O4-wall A/B)");
-/* optical_poll: periodic ANI-G DDM optical read. DEFAULT OFF ...
+/* optical_poll: the ANI-G levels from the live chain, every 60 s and on O5 entry (2026-10-29) ...
  * dev/MEASURED-luna_gpon.c.md sec 278. */
-static bool optical_poll;
+static bool optical_poll = true;
 module_param(optical_poll, bool, 0644);
-MODULE_PARM_DESC(optical_poll, "1=periodic ANI-G DDM optical poll; 0=off default (the live /proc read + LuCI refresh already show current dBm without periodic BOSA I2C, which historically churned the OLT)");
+MODULE_PARM_DESC(optical_poll, "1=ANI-G optical levels from the live chain every 60 s and on O5 entry (default); 0=the boot constants stay");
 /* bosa_i2c_restore_pad: optional cleanup — return bus-0's SoC ...
  * dev/MEASURED-luna_gpon.c.md sec 48. */
 static bool bosa_i2c_restore_pad;
@@ -2307,37 +2307,7 @@ static void bosa_a2h_show(struct seq_file *s)
 	seq_putc(s, '\n');
 }
 
-/* Sample the calibrated DDM optical words and refresh the ANI-G level cache.
- * Called from process work at a slow cadence (never from the GET path);
- * a "not available" word keeps the previous cached value. */
-static bool gpon_optical_cache_poll(void)
-{
-	s32 rx, tx;
-
-	/* A module that is not an RTL8290B has no RTL8290B DDM words: 0x166/0x168
-	 * are bytes of its identity EEPROM. The G24W's GN25L95 reported -30.00 dBm
-	 * RX to the OLT while its own A2h monitor read -8.87 (2026-09-30). Ask it the
-	 * standard way, through the decode the Cortina shell uses too. */
-	if (bosa_gn_identified || bosa_not_8290b) {
-		struct gpon_ddm_a2h d;
-
-		/* a zero power word is no measurement: keep the previous level */
-		if (bosa_a2h_read(&d) != GPON_DDM_OK || !d.rx_pwr || !d.tx_pwr)
-			return false;
-		anig_rx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.rx_pwr));
-		anig_tx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.tx_pwr));
-		return true;
-	}
-	rx = ddm_word_to_level(bosa_read16_median(0x168));	/* RX */
-	tx = ddm_word_to_level(bosa_read16_median(0x166));	/* TX */
-	if (rx == INT_MIN || tx == INT_MIN)
-		return false;
-	anig_rx_level = (s16)rx;
-	anig_tx_level = (s16)tx;
-	return true;
-}
-
-/* One process worker owns the 50 ms RTL servo and separate 3 s DDM. */
+/* One process worker owns the 50 ms RTL servo and the separate 60 s DDM. */
 static struct delayed_work gpon_optical_work;
 static void gpon_optical_work_fn(struct work_struct *w);
 
@@ -2781,6 +2751,36 @@ static s32 bosa_tx_power_cdbm(void)
 	/* word(0.1uW) = (avg*slope*10)>>8 + (offset*10>>5); slope=2022, offset=0 here. */
 	word = bosa_tx_word_calc(sum, n, bosa_cal.tx_slope, bosa_cal.tx_offset);
 	return bosa_code_to_cdbm(word);
+}
+
+/* Measure RX/TX and refresh the ANI-G level cache, from process work at a slow
+ * cadence (never from the GET path); a level not measured keeps the previous one. */
+static bool gpon_optical_cache_poll(void)
+{
+	s32 rx, tx;
+
+	/* A module that is not an RTL8290B has no RTL8290B DDM words: 0x166/0x168
+	 * are bytes of its identity EEPROM. The G24W's GN25L95 reported -30.00 dBm
+	 * RX to the OLT while its own A2h monitor read -8.87 (2026-09-30). Ask it the
+	 * standard way, through the decode the Cortina shell uses too. */
+	if (bosa_gn_identified || bosa_not_8290b) {
+		struct gpon_ddm_a2h d;
+
+		/* a zero power word is no measurement: keep the previous level */
+		if (bosa_a2h_read(&d) != GPON_DDM_OK || !d.rx_pwr || !d.tx_pwr)
+			return false;
+		anig_rx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.rx_pwr));
+		anig_tx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.tx_pwr));
+		return true;
+	}
+	/* the RTL8290B's own DDM words 0x166/0x168 are not live: its chain is */
+	rx = bosa_rx_power_cdbm();
+	tx = bosa_tx_power_cdbm();
+	if (rx != BOSA_RX_CDBM_NA)
+		anig_rx_level = gpon_ddm_cdbm_to_anig(rx);
+	if (tx != INT_MIN)
+		anig_tx_level = gpon_ddm_cdbm_to_anig(tx);
+	return rx != BOSA_RX_CDBM_NA || tx != INT_MIN;
 }
 
 /* One ANI-G self-test reading (the OLT's `show ont-optical`), in the units the
@@ -9682,7 +9682,14 @@ static int luna_health_show(struct seq_file *s, void *v)
 static void gpon_optical_work_fn(struct work_struct *w)
 {
 	static unsigned long optical_next;
+	static u32 o5_seen;
+	u32 o5 = READ_ONCE(gpon_o5_entry_tick);
 
+	if (o5 != o5_seen) {
+		o5_seen = o5;
+		if (o5)	/* the OLT reads ANI-G once in service: measure now */
+			optical_next = jiffies;
+	}
 	mutex_lock(&bosa_lock);
 	if (luna_driver_ready && !luna_stopping) {
 		if (bosa_regs_live() && !laser_off && !skip_bosa) {
@@ -9712,7 +9719,7 @@ static void gpon_optical_work_fn(struct work_struct *w)
 		    time_after_eq(jiffies, optical_next)) {
 			if (gpon_optical_cache_poll())
 				rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);
-			optical_next = jiffies + msecs_to_jiffies(3000);
+			optical_next = jiffies + msecs_to_jiffies(60000);
 		}
 		if (luna_selftest_owed()) {
 			struct gpon_optic_reading v;

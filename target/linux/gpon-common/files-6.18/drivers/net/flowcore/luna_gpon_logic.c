@@ -18,19 +18,6 @@ u8 bosa_slave_for(u16 reg)
 	}
 }
 
-/* Raw SFF-8472 DDM power word (0.1 uW/LSB) -> the ANI-G level encoding.
- * INT_MIN when the word reads "not available" (0x0000/0xffff), so the caller
- * keeps its cache. */
-s32 ddm_word_to_level(int raw)
-{
-	s32 level;
-
-	if (raw <= 0 || raw >= 0xffff)
-		return INT_MIN;
-	level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm((u32)raw));
-	return level;
-}
-
 /* Linear power code (0.1 uW) -> centi-dBm. A dark or "n/a" read floors at
  * -40.00 dBm rather than returning a sentinel: this family's reporting policy. */
 s32 bosa_code_to_cdbm(u32 code)

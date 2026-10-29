@@ -209,6 +209,11 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 		if (class_id == OMCI_ME_ONU_DATA && len >= 11 &&
 		    (mask & 0x8000))
 			o->mds = msg[10];
+		/* ZTE writes the LoID auth status as a notice and leaves it out
+		 * of its own count: a +1 here makes it re-provision (Entel). */
+		if (IS_ENABLED(CONFIG_OLT_ZTE) &&
+		    class_id == OMCI_ME_CTC_LOID_AUTH)
+			return OMCI_RC_OK;
 		break;
 	}
 

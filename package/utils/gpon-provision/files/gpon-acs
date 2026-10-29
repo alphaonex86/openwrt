@@ -1,26 +1,32 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 # The ACS the OLT provisioned over OMCI (G.988 ME 340 -> 137 -> 148 + 157) handed to onu-cwmp, as the
-# ISP's own ONU applies it. Usage: gpon-acs [acs-file]; exit 1 when the cwmp config could not be written.
+# ISP's own ONU applies it, on the interface holding the OLT's management address (ME 134), else the one
+# the cwmp config names. Usage: gpon-acs [acs-file]; exit 1 when the cwmp config could not be written.
 src=${1:-/proc/gpon_acs}
 [ -r "$src" ] || exit 0
 get() { sed -n "s/^acs_$1: //p" "$src"; }
+once() { [ "$2" = "$(cat "/tmp/gpon-acs.$1" 2> /dev/null)" ] || { logger -t gpon-acs "$2"; echo "$2" > "/tmp/gpon-acs.$1"; }; }
 refused=$(get refused)
-if [ -n "$refused" ] && [ "$refused" != "$(cat /tmp/gpon-acs.refused 2> /dev/null)" ]; then
-	logger -t gpon-acs "a value the OLT provisioned was refused: $refused"
-	echo "$refused" > /tmp/gpon-acs.refused
-fi
+[ -n "$refused" ] && once refused "a value the OLT provisioned was refused: $refused"
 url=$(get url)
 [ "$(get admin)" = 0 ] && [ -n "$url" ] || exit 0
 [ -x /etc/init.d/onu-cwmp ] || exit 0
+set -- $(gpon-wan-discover --mgmt)
+iface=$(uci -q show network | tr -d "'" | awk -F= -v ip="${2%/*}" '$1 ~ /^network\.[^.]+\.ipaddr$/ {
+	n = split($2, a, " "); for (i = 1; i <= n; i++) { sub(/\/.*/, "", a[i]); if (a[i] == ip) { split($1, k, "."); print k[2]; exit } } }')
+[ -n "$iface" ] || iface=$(uci -q get cwmp.acs.interface)
+uci -q get "network.$iface" > /dev/null || { once iface "the OLT's ACS $url waits: no interface holds the OLT's management address${2:+ $2} (ME 134) nor is named by the cwmp config"; exit 0; }
 user=$(get username)
 pass=$(get password)
 [ "$(uci -q get cwmp.acs.enabled)" = 1 ] && [ "$(uci -q get cwmp.acs.url)" = "$url" ] &&
-	[ "$(uci -q get cwmp.acs.username)" = "$user" ] && [ "$(uci -q get cwmp.acs.password)" = "$pass" ] && exit 0
+	[ "$(uci -q get cwmp.acs.username)" = "$user" ] && [ "$(uci -q get cwmp.acs.password)" = "$pass" ] &&
+	[ "$(uci -q get cwmp.acs.interface)" = "$iface" ] && exit 0
 if ! uci -q set cwmp.acs.url="$url" || ! uci -q set cwmp.acs.username="$user" ||
-	! uci -q set cwmp.acs.password="$pass" || ! uci -q set cwmp.acs.enabled=1 || ! uci -q commit cwmp; then
+	! uci -q set cwmp.acs.password="$pass" || ! uci -q set cwmp.acs.interface="$iface" ||
+	! uci -q set cwmp.acs.enabled=1 || ! uci -q commit cwmp; then
 	logger -t gpon-acs "the OLT's ACS $url could not be written to the cwmp config"
 	exit 1
 fi
-logger -t gpon-acs "ACS from the OLT over OMCI: $url"
+logger -t gpon-acs "ACS from the OLT over OMCI: $url on $iface"
 /etc/init.d/onu-cwmp restart

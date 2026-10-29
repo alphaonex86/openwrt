@@ -18,7 +18,7 @@ start_service() {
 	config_get agent acs user_agent onu-cwmp
 	[ -s /etc/cwmp/model.tsv ] || { logger -t onu-cwmp "no data model in /etc/cwmp/model.tsv"; return 0; }
 	. /lib/functions/network.sh
-	network_get_device dev "$iface" || return 0
+	network_get_device dev "$iface" || { logger -t onu-cwmp "interface $iface is not up: started when it is"; return 0; }
 	# the management DNS the PPP link gave, kept out of the system resolver (peerdns 0)
 	dns=$(ifstatus "$iface" | jsonfilter -e '@["dns-server"][0]' -e '@.inactive["dns-server"][0]' | head -1)
 	procd_open_instance

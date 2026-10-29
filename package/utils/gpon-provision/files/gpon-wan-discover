@@ -5,6 +5,7 @@
 #                                                   adds VLAN devices and an nft table, removed on exit
 #        gpon-wan-discover --apply-routed <ipv4>    the ISP routes <ipv4> to us: add it to the WAN, LAN leaves from it
 #        gpon-wan-discover --apply-dhcp <vid>       the WAN becomes DHCP on <vid> (0 = untagged)
+#        gpon-wan-discover --mgmt        the OLT's management address over OMCI: "vid ip/prefix gateway"
 #        gpon-wan-discover --auto        at boot: a WAN with no default route that nobody set by hand gets the one
 #                                        unambiguous answer (gpon.wan_auto.enabled=0 turns it off); /tmp/gpon/wan-auto.txt
 base=$(uci -q get network.wan.device); base=${base%%.*}; base=${base:-gpon0}
@@ -98,6 +99,7 @@ case "${1:-}" in
 --apply-routed) apply_routed "$2"; exit $?;;
 --apply-dhcp) apply_dhcp "$2"; exit $?;;
 --auto) auto; exit $?;;
+--mgmt) omci_mgmt; exit $?;;
 esac
 
 secs=60

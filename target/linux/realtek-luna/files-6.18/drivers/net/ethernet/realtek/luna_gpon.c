@@ -2754,36 +2754,6 @@ static s32 bosa_tx_power_cdbm(void)
 	return bosa_code_to_cdbm(word);
 }
 
-/* Measure RX/TX and refresh the ANI-G level cache, from process work at a slow
- * cadence (never from the GET path); a level not measured keeps the previous one. */
-static bool gpon_optical_cache_poll(void)
-{
-	s32 rx, tx;
-
-	/* A module that is not an RTL8290B has no RTL8290B DDM words: 0x166/0x168
-	 * are bytes of its identity EEPROM. The G24W's GN25L95 reported -30.00 dBm
-	 * RX to the OLT while its own A2h monitor read -8.87 (2026-09-30). Ask it the
-	 * standard way, through the decode the Cortina shell uses too. */
-	if (bosa_gn_identified || bosa_not_8290b) {
-		struct gpon_ddm_a2h d;
-
-		/* a zero power word is no measurement: keep the previous level */
-		if (bosa_a2h_read(&d) != GPON_DDM_OK || !d.rx_pwr || !d.tx_pwr)
-			return false;
-		anig_rx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.rx_pwr));
-		anig_tx_level = gpon_ddm_cdbm_to_anig(gpon_ddm_uw10_to_cdbm(d.tx_pwr));
-		return true;
-	}
-	/* the RTL8290B's own DDM words 0x166/0x168 are not live: its chain is */
-	rx = bosa_rx_power_cdbm();
-	tx = bosa_tx_power_cdbm();
-	if (rx != BOSA_RX_CDBM_NA)
-		anig_rx_level = gpon_ddm_cdbm_to_anig(rx);
-	if (tx != INT_MIN)
-		anig_tx_level = gpon_ddm_cdbm_to_anig(tx);
-	return rx != BOSA_RX_CDBM_NA || tx != INT_MIN;
-}
-
 /* One ANI-G self-test reading (the OLT's `show ont-optical`), in the units the
  * OMCI core takes. What this module cannot produce stays out of @v->have. */
 static void luna_selftest_read(struct gpon_optic_reading *v)
@@ -2816,6 +2786,36 @@ static void luna_selftest_read(struct gpon_optic_reading *v)
 		v->bias_2ua = bias / 2;
 		v->have |= GPON_OPTIC_BIAS;
 	}
+}
+
+/* The last optic reading and its jiffies (0 = none): the ANI-G self-test answers
+ * from it at once, as a stock ONU answers from its monitor (Entel ZTE 2026-10-29:
+ * ours took 0.8-1.9 s reading live). */
+static struct gpon_optic_reading luna_optic_last;
+static unsigned long luna_optic_last_at;
+
+static void luna_optic_read_now(void)
+{
+	luna_selftest_read(&luna_optic_last);
+	luna_optic_last_at = jiffies ?: 1;
+}
+
+/* Measure the module and refresh the ANI-G level cache, from process work at a
+ * slow cadence (never from the GET path); a level not measured keeps the previous one. */
+static bool gpon_optical_cache_poll(void)
+{
+	const struct gpon_optic_reading *v = &luna_optic_last;
+	const u8 both = GPON_OPTIC_RX | GPON_OPTIC_TX;
+
+	luna_optic_read_now();
+	/* a module's zero power word is no measurement: both levels stay (G24W) */
+	if ((bosa_gn_identified || bosa_not_8290b) && (v->have & both) != both)
+		return false;
+	if (v->have & GPON_OPTIC_RX)
+		anig_rx_level = gpon_ddm_cdbm_to_anig(v->rx_cdbm);
+	if (v->have & GPON_OPTIC_TX)
+		anig_tx_level = gpon_ddm_cdbm_to_anig(v->tx_cdbm);
+	return v->have & both;
 }
 
 /* Power up the RTL8290B optical receiver so its signal-detect ...
@@ -9727,10 +9727,10 @@ static void gpon_optical_work_fn(struct work_struct *w)
 			optical_next = jiffies + msecs_to_jiffies(60000);
 		}
 		if (luna_selftest_owed()) {
-			struct gpon_optic_reading v;
-
-			luna_selftest_read(&v);
-			luna_selftest_hand_over(&v);
+			if (!luna_optic_last_at ||
+			    time_after(jiffies, luna_optic_last_at + msecs_to_jiffies(60000)))
+				luna_optic_read_now();
+			luna_selftest_hand_over(&luna_optic_last);
 		}
 	}
 	mutex_unlock(&bosa_lock);

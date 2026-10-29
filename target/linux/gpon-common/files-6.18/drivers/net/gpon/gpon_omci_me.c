@@ -770,7 +770,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_D(263, 10, 2, OMCI_DYN_ANIG_RX),	/* #10 RX optical level */
 	{ 263, 0, 11, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
 	{ 263, 1, 12, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
-	A_HIDE(263, 13, 2, OMCI_SRC_CONST, 0x0000, 0),	/* #13 ONU response time */
+	A_HIDE(263, 13, 2, OMCI_SRC_CONST, 35000, 0),	/* #13 ONU response time: G.984.3 35 us, in ns */
 	A_D(263, 14, 2, OMCI_DYN_ANIG_TX),	/* #14 TX optical level */
 	{ 263, 2, 15, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },
 	{ 263, 3, 16, 1, OMCI_SRC_ANIG_THRESHOLD, 3 },

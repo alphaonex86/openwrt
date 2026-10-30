@@ -26,10 +26,11 @@ int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key,
 		flow_rule_match_control(rule, &m);
 		addr_type = m.key->addr_type;
 	}
-	if (addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS) {
+	if (addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS &&
+	    addr_type != FLOW_DISSECTOR_KEY_IPV6_ADDRS) {
 		if (why)
 			*why = GPON_FLOW_REF_NOT_IPV4;
-		return -EOPNOTSUPP;	/* IPv4 NAPT only, as before */
+		return -EOPNOTSUPP;
 	}
 
 	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
@@ -56,6 +57,17 @@ int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key,
 		key->ip_sa = be32_to_cpu(m.key->src);
 		key->ip_da = be32_to_cpu(m.key->dst);
 	}
+	if (addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS &&
+	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV6_ADDRS)) {
+		struct flow_match_ipv6_addrs m;
+		int i;
+
+		flow_rule_match_ipv6_addrs(rule, &m);
+		for (i = 0; i < 4; i++) {
+			key->ip6_sa[i] = be32_to_cpu(m.key->src.s6_addr32[i]);
+			key->ip6_da[i] = be32_to_cpu(m.key->dst.s6_addr32[i]);
+		}
+	}
 
 	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
 		if (why)
@@ -69,6 +81,6 @@ int gpon_flow_key_from_tc(struct flow_rule *rule, struct gpon_flow_key *key,
 		key->l4_dport = be16_to_cpu(m.key->dst);
 	}
 
-	key->ip_ver = 0;		/* IPv4 */
+	key->ip_ver = addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS ? 6 : 0;
 	return 0;
 }

@@ -220,6 +220,14 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 
 	act->dmac_valid = got_dmac_lo && got_dmac_hi;
 
+	if (act->routed) {
+		if (!*odev_out || act->nat_valid || act->port_valid) {
+			if (why)
+				*why = GPON_FLOW_REF_INCOMPLETE;
+			return -EOPNOTSUPP;
+		}
+		return 0;
+	}
 	/*
 	 * Keep to the proven shape: a full inline NAT rewrite plus a redirect.
 	 * Anything less cannot be expressed as one entry.
@@ -334,6 +342,11 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 		GPON_FLOW_NOTE(fo, why);
 		return err;
 	}
+	if (key.ip_ver == 6 && !fo->ops->ipv6) {
+		GPON_FLOW_NOTE(fo, GPON_FLOW_REF_NOT_IPV4);
+		return -EOPNOTSUPP;
+	}
+	act.routed = key.ip_ver == 6;
 
 	/* ★ The block-cb device is NOT the flow's ingress -- every ...
 	 * dev/MEASURED-gpon_flow_offload.c.md sec 8. */

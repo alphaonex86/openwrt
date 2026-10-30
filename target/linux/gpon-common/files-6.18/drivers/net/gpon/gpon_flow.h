@@ -18,7 +18,9 @@ struct gpon_flow_key {
 	u16 l4_sport;
 	u16 l4_dport;
 	u8  ip_protocol;	/* IPPROTO_TCP or IPPROTO_UDP		*/
-	u8  ip_ver;		/* 0 = IPv4.  IPv6 is not decoded yet	*/
+	u8  ip_ver;		/* 0 = IPv4, 6 = IPv6 (ip6_* below)	*/
+	u32 ip6_sa[4];		/* IPv6 words, each host order		*/
+	u32 ip6_da[4];
 };
 
 /* Decode one TC flow rule into a key. -> 0, or -EOPNOTSUPP. ★ ...

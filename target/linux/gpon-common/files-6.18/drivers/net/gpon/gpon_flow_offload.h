@@ -27,6 +27,7 @@ struct gpon_flow_act {
 	 * ops->wan_vlan: the VID the US leg pushes, or the DS leg's pop.	*/
 	u16 vlan_vid;		/* US: 1..4094, 0 = no tag pushed		*/
 	u8  vlan_pop;		/* DS: 1 = the rule pops one tag		*/
+	u8  routed;		/* IPv6: forwarded, no address rewritten	*/
 };
 
 /* The devices the rule names, and which leg this is. The core ...
@@ -72,6 +73,9 @@ struct gpon_flow_ops {
 	 * a US push / DS pop as DATA (act->vlan_*) and install() decides.
 	 * false = refused and attributed through note_vlan_action, as before. */
 	bool wan_vlan;
+
+	/* The engine forwards routed IPv6 flows; false = refused as not-ipv4. */
+	bool ipv6;
 
 	/* Bytes of per-entry family state, appended to the core's ...
 	 * dev/MEASURED-gpon_flow_offload.h.md sec 6. */

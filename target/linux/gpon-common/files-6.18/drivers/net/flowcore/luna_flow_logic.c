@@ -27,10 +27,33 @@ u32 luna_flow_entry_count(const struct luna_flow_hash_config *cfg)
 	return 1u << (cfg->storage ? 12 + cfg->storage : cfg->sram_bits);
 }
 
-static bool ipv4_tcp_udp(const struct gpon_flow_key *key)
+static bool ip_tcp_udp(const struct gpon_flow_key *key)
 {
-	return key && !key->ip_ver &&
+	return key && (!key->ip_ver || key->ip_ver == 6) &&
 	       (key->ip_protocol == 6 || key->ip_protocol == 17);
+}
+
+/* The entry has 32-bit address fields: an IPv6 address is carried folded,
+ * the destination keeping its multicast (ff00::/8) bit on top. */
+static u32 fold6(const u32 a[4])
+{
+	return a[0] ^ a[1] ^ a[2] ^ a[3];
+}
+
+static u32 flow_src(const struct gpon_flow_key *key)
+{
+	return key->ip_ver ? fold6(key->ip6_sa) : key->ip_sa;
+}
+
+static u32 flow_dst(const struct gpon_flow_key *key)
+{
+	u32 x;
+
+	if (!key->ip_ver)
+		return key->ip_da;
+	x = fold6(key->ip6_da);
+	x = (x >> 31) ^ (x & 0x7fffffff);
+	return x | ((key->ip6_da[0] >> 24 == 0xff) ? 1u << 31 : 0);
 }
 
 int luna_flow_netif_encode(const struct luna_flow_netif *e,
@@ -70,10 +93,10 @@ int luna_flow_hash(const struct luna_flow_hash_config *cfg,
 
 	if (!count || !first || !second || first == second || extra > 0xffffff)
 		return -EINVAL;
-	if (!ipv4_tcp_udp(key))
+	if (!ip_tcp_udp(key))
 		return -EOPNOTSUPP;
-	addr[0] = preprocess(key->ip_sa, cfg->prehash[2], 20);
-	addr[1] = preprocess(key->ip_da, cfg->prehash[3], 20);
+	addr[0] = preprocess(flow_src(key), cfg->prehash[2], 20);
+	addr[1] = preprocess(flow_dst(key), cfg->prehash[3], 20);
 	sum = preprocess(key->l4_sport, cfg->prehash[0], 16) +
 	      preprocess(key->l4_dport, cfg->prehash[1], 16);
 	for (i = 0; i < 2; i++)
@@ -129,15 +152,16 @@ int luna_flow_path5_encode(const struct gpon_flow_key *key,
 	    a->ingress_priority >= 8 || a->ctag.priority >= 8 ||
 	    a->stag.priority >= 8 || a->ctag.vid >= 4096 || a->stag.vid >= 4096)
 		return -EINVAL;
-	if (!ipv4_tcp_udp(key))
+	if (!ip_tcp_udp(key) || (key->ip_ver && a->nat != LUNA_FLOW_ROUTE))
 		return -EOPNOTSUPP;
 	w[0] = 1 | (2u << 2) | ((u32)a->ingress_if << 4) |
-	       ((u32)a->set_stream << 8) | ((u32)a->ingress_ctag << 17) |
+	       ((u32)a->set_stream << 8) | ((u32)!!key->ip_ver << 16) |
+	       ((u32)a->ingress_ctag << 17) |
 	       ((u32)a->ingress_stag << 18) | ((u32)a->ingress_pppoe << 19) |
 	       ((u32)a->egress_if << 20) | ((u32)a->tos << 24);
-	w[1] = key->ip_sa;
+	w[1] = flow_src(key);
 	/* DNAT matches the interface gateway IP; word 2 carries the replacement. */
-	w[2] = a->nat == LUNA_FLOW_DNAT ? a->translated_dst : key->ip_da;
+	w[2] = a->nat == LUNA_FLOW_DNAT ? a->translated_dst : flow_dst(key);
 	w[3] = key->l4_sport | ((u32)key->l4_dport << 16);
 	w[4] = a->dmac_index | ((u32)a->stag.tagged << 8) |
 	       ((u32)a->ctag.tagged << 12) |

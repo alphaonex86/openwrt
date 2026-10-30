@@ -142,7 +142,7 @@ static int luna_flow_provision(struct luna_eth *ep, const struct gpon_edge *edge
 {
 	struct luna_flow_engine *e = ep->flow;
 	struct luna_flow_netif n = {
-		.valid = true, .check_mtu = true, .deny_ipv6 = true,
+		.valid = true, .check_mtu = true,
 	};
 	u32 words[2][LUNA_FLOW_NETIF_WORDS];
 	unsigned int i;
@@ -206,10 +206,17 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 
 	if (!ep->wan_ndev || ep->closing || !netif_carrier_ok(ep->ndev) ||
 	    !netif_carrier_ok(ep->wan_ndev) || !act->dmac_valid || !ctx->idev ||
-	    !ctx->odev || ds != !!act->nat_is_da ||
+	    !ctx->odev || (!act->routed && ds != !!act->nat_is_da) ||
 	    (ds ? !luna_flow_lan(sh, ctx->odev) : ctx->odev != ep->wan_ndev))
 		return -EOPNOTSUPP;
-	if (!ds) {
+	if (act->routed) {
+		/* IPv6 rides the WAN an IPv4 flow provisioned: same tag, same session. */
+		if (!e->provisioned)
+			return -EAGAIN;
+		if (!ds && (act->vlan_vid != e->edge.wan_vlan ||
+			    act->pppoe_sid != e->edge.wan_pppoe_sid))
+			return -EOPNOTSUPP;
+	} else if (!ds) {
 		ret = gpon_edge_read_via(ep->ndev, ep->wan_ndev, key->ip_da,
 					 ctx->odev, act->gw_dmac, &edge, &why);
 		if (ret)
@@ -243,7 +250,7 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 	a.ingress_if = ds ? 1 : 0;
 	a.egress_if = ds ? 0 : 1;
 	a.dmac_index = p->mac.index;
-	a.nat = ds ? LUNA_FLOW_DNAT : LUNA_FLOW_SNAT;
+	a.nat = act->routed ? LUNA_FLOW_ROUTE : ds ? LUNA_FLOW_DNAT : LUNA_FLOW_SNAT;
 	a.translated_dst = act->nat_addr;
 	a.translated_port = act->nat_port;
 	a.ingress_pppoe = ds && e->edge.wan_pppoe_sid;
@@ -286,6 +293,7 @@ static int luna_flow_stats(void *sh, u32 index, void *priv, unsigned long *lastu
 static const struct gpon_flow_ops luna_flow_ops = {
 	.is_lan_side = luna_flow_lan,
 	.wan_vlan = true,	/* the path5 entry carries the tag per flow */
+	.ipv6 = true,		/* path5 word 0 bit 16, folded addresses */
 	.install = luna_flow_install,
 	.remove = luna_flow_remove,
 	.abort_install = luna_flow_remove,

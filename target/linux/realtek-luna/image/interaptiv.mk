@@ -23,6 +23,13 @@ define Device/unknown_unknown
   DEVICE_DTS := rtl9607c_unknown
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9607c
+  SUPPORTED_DEVICES := unknown,rtl9607c-unknown
+  DEVICE_PACKAGES := uboot-envtools
+  # U-Boot boots bank 1 from the UBI volume ubi_k1 (83 LEBs of 126976 bytes): the
+  # initramfs uImage is the whole firmware, so it is also the sysupgrade payload.
+  IMAGES := sysupgrade.bin
+  IMAGE/sysupgrade.bin := append-image-stage initramfs-kernel.bin | \
+	check-size 10292k | append-metadata
 endef
 TARGET_DEVICES += unknown_unknown
 

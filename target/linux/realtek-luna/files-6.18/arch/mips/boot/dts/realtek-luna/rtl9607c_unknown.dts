@@ -47,7 +47,8 @@
 
 /* 256 MiB Micron MT29F2G01ABAGD, the vendor BCH6 layout (on-die ECC off). U-Boot's map:
  * UBI 0x140000-0xfb00000 holds both banks (ubi_k0/r0 native, ubi_k1/r1 ours).
- * Every partition is read-only until a RAM boot proves this kernel reads the vendor's UBI. */
+ * Writable: the U-Boot environment (bank variables) and UBI (bank 1); U-Boot, static_conf and
+ * the tail stay read-only. Fork 5dbe2493e2 is the all-read-only image for a first read proof. */
 &snand {
 	status = "okay";
 
@@ -74,13 +75,11 @@
 			partition@c0000 {
 				label = "env";
 				reg = <0xc0000 0x20000>;
-				read-only;
 			};
 
 			partition@e0000 {
 				label = "env2";
 				reg = <0xe0000 0x20000>;
-				read-only;
 			};
 
 			partition@100000 {
@@ -92,7 +91,6 @@
 			partition@140000 {
 				label = "ubi";
 				reg = <0x140000 0xf9c0000>;
-				read-only;
 			};
 
 			partition@fb00000 {

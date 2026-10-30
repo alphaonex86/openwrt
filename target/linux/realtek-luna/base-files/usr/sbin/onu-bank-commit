@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# A UBI-bank ONU booted on trial from ubi_k1 (U-Boot root=31:9, sw_commit=0) becomes U-Boot's default
+# (sw_commit=1) once SSH listens and the LAN is up. Without that it reboots, and U-Boot falls back to
+# bank 0: a bank is never made the default without a way in.
+TAG=onu-bank-commit
+DEADLINE=300
+
+grep -qsx ubi_k1 /sys/class/ubi/ubi0_*/name || exit 0
+grep -qw 'root=31:9' /proc/cmdline || exit 0
+commit=$(fw_printenv -n sw_commit 2>/dev/null) || {
+	logger -t $TAG "cannot read the U-Boot environment: bank 1 left on trial"
+	exit 1
+}
+[ "$commit" = 1 ] && exit 0
+
+reachable() {
+	grep -qs '^ *[0-9]*: [0-9A-F]*:0016 [0-9A-F]*:0000 0A ' /proc/net/tcp /proc/net/tcp6 &&
+		[ "$(ifstatus lan 2>/dev/null | jsonfilter -e '@.up')" = true ]
+}
+
+elapsed=0
+while [ $elapsed -lt $DEADLINE ]; do
+	if reachable; then
+		if fw_setenv sw_commit 1 && [ "$(fw_printenv -n sw_commit)" = 1 ]; then
+			logger -t $TAG "SSH and LAN up after ${elapsed}s: bank 1 committed (sw_commit=1)"
+			exit 0
+		fi
+		logger -t $TAG "sw_commit=1 does not read back: bank 1 left on trial"
+		exit 1
+	fi
+	sleep 5
+	elapsed=$((elapsed + 5))
+done
+logger -t $TAG "no SSH or LAN after ${DEADLINE}s: rebooting into bank 0"
+sync
+reboot

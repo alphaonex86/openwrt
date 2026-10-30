@@ -81,7 +81,7 @@
 		downstream-queue-ports = /bits/ 16 <0x0101 0x0601>;
 		/* Stock's CTC ONU capability, OnuType 1 = HGU (omcicli mib get 65529,
 		 * 2026-10-06): without it the HSGQ OLT keeps the type it last saw. */
-		extra-me-instances = /bits/ 16 <65529 0>;
+		extra-me-instances = /bits/ 16 <83 0  133 0  340 0x0601  65294 0  65363 0  65529 0>;
 	};
 };
 

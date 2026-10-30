@@ -89,7 +89,7 @@
 		 * core serves 2 undeclared); without it the HSGQ OLT keeps the ISP
 		 * ONU type it last saw. */
 		ctc-onu-capability = /bits/ 8 <0 1 1 1>;
-		extra-me-instances = /bits/ 16 <65529 0>;
+		extra-me-instances = /bits/ 16 <133 0  138 0  247 0  340 0x0601  65529 0>;
 	};
 };
 

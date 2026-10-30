@@ -71,10 +71,10 @@ static u8 omci_get_fill(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	if (class_id == OMCI_ME_ONU_DATA && inst)
 		return OMCI_RC_UNKNOWN_INST;
 	if (omci_vendor_absent(o, class_id, inst)) {
-		/* stock's answer to a vendor ME it does not expose: result 0,
-		 * every mask zero (field X111W, production OLT, 2026-10-02) */
+		/* stock's answer to a vendor ME it does not expose: result 0, every
+		 * mask zero (Luna stacks), or 0x05 where the board declares it (X400AXF) */
 		memset(resp + 9, 0, 31);
-		return OMCI_RC_OK;
+		return o->cap.vendor_absent_rc5 ? OMCI_RC_UNKNOWN_INST : OMCI_RC_OK;
 	}
 	rc = omci_me_fill(o, class_id, inst, mask, true, resp + 11, resp + 36,
 			  &rmask, &known);

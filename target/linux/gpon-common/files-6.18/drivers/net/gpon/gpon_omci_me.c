@@ -205,6 +205,7 @@ enum omci_text {
 	OMCI_TEXT_HW_CAP,	/* ME 65427 #2 capability declaration */
 	OMCI_TEXT_P2Q_CAP,	/* ME 350 #14 */
 	OMCI_TEXT_CTC_OP,	/* ME 65529 #1 operation ID */
+	OMCI_TEXT_CUC_OP,	/* ME 65457 #1 operator ID */
 };
 
 static const u8 omci_text[][26] = {
@@ -214,6 +215,7 @@ static const u8 omci_text[][26] = {
 	[OMCI_TEXT_HW_CAP]	= "RSQQQSQSQSSSSQQS",
 	[OMCI_TEXT_P2Q_CAP]	= "\x01\x08",
 	[OMCI_TEXT_CTC_OP]	= "CTC",
+	[OMCI_TEXT_CUC_OP]	= "CUC",
 };
 
 /* Where an OMCI_SRC_TBL write goes. */
@@ -672,9 +674,12 @@ static const struct omci_attr omci_attrs[] = {
 	A_CNT(341, 6, 8, 19),		/* #6  TxPayloadBytes */
 	A_CNT(341, 7, 4, 27),		/* #7  EncryptKeyErrors */
 #ifdef CONFIG_OLT_HSGQ
-	/* ---- ME 65457; origin: Get by the HSGQ G008, which no stock plugin models; the stock
-	 * X111W answers rc=0 with an empty mask (capture 2026-10-02), and so does this. ---- */
-	A_NO_ATTRS(65457),
+	/* ---- ME 65457 CUC ONU capability (inst 0); origin: Get by the HSGQ G008.  Stock's
+	 * values wherever it uploads it (X400AXF, G24W 2026-10-30); unlisted, the Get is empty. ---- */
+	A_TXT(65457, 1, 4, OMCI_TEXT_CUC_OP),	/* #1  Operator ID */
+	A_C(65457, 2, 1, 3),			/* #2  CUC spec version */
+	A_C(65457, 3, 1, 1),			/* #3  ONU type: 1 = HGU */
+	A_C(65457, 4, 1, 2),			/* #4  TX power supply control */
 #endif
 
 	/* ME 78 VLAN tagging operation configuration data ...
@@ -2901,6 +2906,8 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	a = prop(ctx, "extra-me-instances", &alen);
 	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
 		      "extra-me-instances");
+	prop(ctx, "vendor-me-absent-unknown-instance", &alen);
+	o->cap.vendor_absent_rc5 = alen >= 0;
 #undef OMCI_DECLARED
 	return first;
 }

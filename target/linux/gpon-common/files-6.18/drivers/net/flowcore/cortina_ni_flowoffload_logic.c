@@ -105,6 +105,22 @@ void cn_l3e_build_hdri(const struct cn_l3e_key *k, int profile,
 	memcpy(words, h, CN_L3E_HDRI_BYTES);
 }
 
+/* An IPv6 key: sa/da are the address words in network order (word 0 = the
+ * top 32 bits); the engine holds them least-significant word first. */
+void cn_l3e_key_set_ip6(struct cn_l3e_key *k, const u32 sa[4],
+			const u32 da[4])
+{
+	k->ip_sa_0 = sa[3];
+	k->ip_sa_1 = sa[2];
+	k->ip_sa_2 = sa[1];
+	k->ip_sa_3 = sa[0];
+	k->ip_da_0 = da[3];
+	k->ip_da_1 = da[2];
+	k->ip_da_2 = da[1];
+	k->ip_da_3 = da[0];
+	k->ip_ver = 1;
+}
+
 /* cn_fib_field() - read one field out of a raw 32-byte FIB ...
  * dev/MEASURED-cortina_ni_flowoffload_logic.c.md sec 3. */
 u64 cn_fib_field(const void *fib, u32 bit, u32 width)

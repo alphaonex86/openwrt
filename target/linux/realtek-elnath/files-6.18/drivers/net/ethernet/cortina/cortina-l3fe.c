@@ -238,8 +238,8 @@ int cortina_l3fe_engine_init(void __iomem *ne, const struct cn_l3e_tables *t)
  * Word i covers entry bits [32i+31 : 32i].
  */
 #define L3FE_MASK5_W0		0x000003ffu
-#define L3FE_MASK5_W1		0x827ff000u
-#define L3FE_MASK5_W2		0xff3fd100u
+#define L3FE_MASK5_W1		0x027ff000u
+#define L3FE_MASK5_W2		0xff3fd402u
 #define L3FE_MASK5_W3		0xffffffffu
 
 /* ★ INVARIANT D (build-time): the 5-tuple mask MUST select ...
@@ -259,7 +259,9 @@ static const u32 l3fe_mask_lo[9][4] = {
 	{ 0xffffffff, 0x027fffff, 0xff7ff000, 0xffffffff },
 	{ 0x000003ff, 0x0221f000, 0x15001402, 0xc0f03fe1 },
 	/* ★ mask 8: 5-TUPLE-ONLY NAPT mask, from the aal-77c ...
-	 * dev/MEASURED-cortina-l3fe.c.md sec 16. */
+	 * dev/MEASURED-cortina-l3fe.c.md sec 16.
+	 * ip_da/ip_sa keep-length 0x080 as stock mask 0: the whole IPv6
+	 * address, and still the whole /32 of an IPv4 one. */
 	{ L3FE_MASK5_W0, L3FE_MASK5_W1, L3FE_MASK5_W2, L3FE_MASK5_W3 },
 };
 static const u32 l3fe_mask_hi[9][4] = {

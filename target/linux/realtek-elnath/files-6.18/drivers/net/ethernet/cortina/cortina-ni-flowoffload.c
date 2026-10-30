@@ -1997,11 +1997,14 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 	/* ★ THE 5-TUPLE AND THE ACTION COME DECIDED ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 79. */
 	key.ip_protocol = k->ip_protocol;
-	key.ip_sa_0     = k->ip_sa;
-	key.ip_da_0     = k->ip_da;
+	if (k->ip_ver == 6)
+		cn_l3e_key_set_ip6(&key, k->ip6_sa, k->ip6_da);
+	else {
+		key.ip_sa_0 = k->ip_sa;
+		key.ip_da_0 = k->ip_da;
+	}
 	key.l4_sport    = k->l4_sport;
 	key.l4_dport    = k->l4_dport;
-	key.ip_ver      = k->ip_ver;
 	key.ip_vld      = 1;
 
 	act.ip_addr_vld = a->nat_valid;
@@ -2388,6 +2391,7 @@ static const struct gpon_flow_ops cn_flow_ops = {
 	.stats			= cn_flow_stats_op,
 	.note_vlan_action	= cn_flow_note_vlan_action,
 	.wan_vlan		= true,
+	.ipv6			= true,
 	.priv_size		= sizeof(struct cn_flow_priv),
 };
 

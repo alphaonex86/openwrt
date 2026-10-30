@@ -68,6 +68,22 @@ config MTD_LUNA_NOR_WRITE
 	  identity in them) stay readable and nothing can be written, which is what a
 	  bench unit booted from RAM over a vendor bank needs.
 
+config LUNA_SPI_NAND
+	bool "SPI-NAND flash on the Realtek Luna (RTL9607C) controller"
+	depends on REALTEK_LUNA && MTD
+	select SPI
+	select SPI_MASTER
+	select SPI_MEM
+	select SPI_REALTEK_SNAND
+	select REGMAP_MMIO
+	select MTD_NAND_ECC_REALTEK
+	select MTD_SPI_NAND
+	select MTD_UBI
+	help
+	  The Luna SPI-NAND controller and BCH engine are the RTL93xx ones: this
+	  builds that stack and UBI into a NAND board's kernel only (a NOR board
+	  stays without it).
+
 config MTD_ONU_CRASHLOG
 	bool "ONU crash records on a reserved MTD partition"
 	depends on MTD

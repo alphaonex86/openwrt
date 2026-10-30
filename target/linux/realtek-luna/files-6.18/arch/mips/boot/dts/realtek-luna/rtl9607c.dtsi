@@ -234,6 +234,25 @@
 		};
 	};
 
+	/* The SPI-NAND controller and its BCH engine are the RTL93xx blocks (same
+	 * registers): mainline drivers, NAND DMA done on GIC external 35. */
+	snand: spi@1801a400 {
+		compatible = "realtek,rtl9301-snand";
+		reg = <0x1801a400 0x44>;
+		interrupt-parent = <&gic>;
+		interrupts = <0 35 4>;
+		clocks = <&lx_clk>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+
+	nand_ecc: ecc@1801a600 {
+		compatible = "realtek,rtl9301-ecc";
+		reg = <0x1801a600 0x54>;
+		status = "disabled";
+	};
+
 	/* Doorbell/mailbox to the auxiliary processor, backed by ipc_shm. */
 	soft_ipc@18141180 {
 		compatible = "rtk,soft_ipc";

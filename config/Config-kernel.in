@@ -938,6 +938,14 @@ config KERNEL_MTD_LUNA_NOR_WRITE
 	  stays readable (the unit's identity) and nothing can write it
 	  (build-openwrt.py variant "ram").
 
+config KERNEL_LUNA_SPI_NAND
+	bool "Luna SPI-NAND flash and UBI"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  A NAND board's layer turns it on (RTL9607C UNKNOWN); NOR boards keep a
+	  kernel without the SPI-NAND, ECC and UBI code.
+
 config KERNEL_LUNA_DEBUG
 	bool "Luna bring-up markers and driver diagnostics"
 	depends on TARGET_realtek_luna

@@ -44,3 +44,66 @@
 	/delete-node/ usb@1;
 	/delete-node/ usb@2;
 };
+
+/* 256 MiB Micron MT29F2G01ABAGD, the vendor BCH6 layout (on-die ECC off). U-Boot's map:
+ * UBI 0x140000-0xfb00000 holds both banks (ubi_k0/r0 native, ubi_k1/r1 ours).
+ * Every partition is read-only until a RAM boot proves this kernel reads the vendor's UBI. */
+&snand {
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		nand-ecc-engine = <&nand_ecc>;
+		nand-ecc-strength = <6>;
+		nand-ecc-step-size = <512>;
+		nand-ecc-algo = "bch";
+		nand-ecc-placement = "oob";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "boot";
+				reg = <0x0 0xc0000>;
+				read-only;
+			};
+
+			partition@c0000 {
+				label = "env";
+				reg = <0xc0000 0x20000>;
+				read-only;
+			};
+
+			partition@e0000 {
+				label = "env2";
+				reg = <0xe0000 0x20000>;
+				read-only;
+			};
+
+			partition@100000 {
+				label = "static_conf";
+				reg = <0x100000 0x40000>;
+				read-only;
+			};
+
+			partition@140000 {
+				label = "ubi";
+				reg = <0x140000 0xf9c0000>;
+				read-only;
+			};
+
+			partition@fb00000 {
+				label = "reserved";
+				reg = <0xfb00000 0x500000>;
+				read-only;
+			};
+		};
+	};
+};
+
+&nand_ecc {
+	status = "okay";
+};

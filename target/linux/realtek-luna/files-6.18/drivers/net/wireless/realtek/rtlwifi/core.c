@@ -13,14 +13,12 @@
 #include <linux/export.h>
 #include <net/cfg80211.h>
 
-/* DIAGNOSTIC ARM (2026-09-28): TX A-MPDU has been refused since 2026-07-06 because the
- * aggregated-BD path "wedged the HW" -- measured before the BD segment layout (REG_RX_RXBD_NUM
- * bit 15, 16-byte segments) agreed with the descriptors. Without aggregation every 60 B frame
- * pays a whole PPDU, which is the small-frame downlink loss both Luna APs show against stock.
- * 1 = the mainline path (rtl_tx_agg_start); 0 = the refusal (default, the shipping behaviour). */
-static int tx_ampdu;
+/* TX A-MPDU as stock does: without it every 60 B frame pays a whole PPDU (the Luna
+ * downlink deficit). The 2026-07 "wedge" predates the BD segment layout fix; X111W
+ * 2026-10-01 doubled its 1400 B downlink with it. 0 = the old refusal, kept as a lever. */
+static int tx_ampdu = 1;
 module_param(tx_ampdu, int, 0444);
-MODULE_PARM_DESC(tx_ampdu, "DIAGNOSTIC: accept TX A-MPDU sessions (default 0 = refuse)");
+MODULE_PARM_DESC(tx_ampdu, "accept TX A-MPDU sessions (default 1; 0 = refuse)");
 
 u8 channel5g[CHANNEL_MAX_NUMBER_5G] = {
 	36, 38, 40, 42, 44, 46, 48,		/* Band 1 */
@@ -1454,17 +1452,6 @@ static int rtl_op_ampdu_action(struct ieee80211_hw *hw,
 	case IEEE80211_AMPDU_TX_START:
 		if (tx_ampdu)
 			return rtl_tx_agg_start(hw, vif, sta, tid, &params->ssn);
-		/* Refuse AP TX aggregation. On this new-trx-flow RTL8192FE the
-		 * aggregated-frame BD/segment TX path wedges the HW: a fresh BE
-		 * (data) stream sends its first few MPDUs NON-aggregated (which
-		 * complete fine), then the Block-Ack session turns operational,
-		 * frames switch to AMPDU, and the HW stops completing descriptors
-		 * (hw_idx freezes -> no DOK -> ring fills -> stop-queue latch). The
-		 * mgmt/EAPOL frames never open a BA session, which is exactly why
-		 * they always transmitted while data died after a few frames,
-		 * independent of rate/crypto. Declining the BA keeps all data on the
-		 * proven non-aggregated path so it flows continuously. Costs peak
-		 * throughput only; re-enable once the aggregated-BD path is fixed. */
 		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_TRACE,
 			"IEEE80211_AMPDU_TX_START refused (agg-BD path wedges HW)\n");
 		return -EOPNOTSUPP;

@@ -2482,7 +2482,7 @@ static const struct rtl92fe_board_cal rtl92fe_g24w_cal = {
 	.thermalmeter = 34,		/* MIB text "34", INT_T => base 10 */
 	.crystalcap = 21,		/* MIB text "21", INT_T => base 10 */
 	.pa_type = 0,
-	.rfe_type = 7,		/* Preserve existing profile pending own-stock RFE evidence. */
+	.rfe_type = 3,		/* Own stock mib_rf 2026-10-29: rfe_type 3, pa_type 0. */
 	.reg_domain = 14,		/* MIB text "14", INT_T => base 10 */
 };
 

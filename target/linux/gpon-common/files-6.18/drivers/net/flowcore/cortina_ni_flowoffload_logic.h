@@ -144,6 +144,7 @@ void cn_l3e_build_hdri(const struct cn_l3e_key *k, int profile,
 
 /* independent bit-numbered FIB readback (the anti-SID2QID instrument) */
 u64 cn_fib_field(const void *fib, u32 bit, u32 width);
+u64 cn_te_pm_bytes(const u32 *d, unsigned int n);
 void cn_l3e_key_set_ip6(struct cn_l3e_key *k, const u32 sa[4],
 			const u32 da[4]);
 

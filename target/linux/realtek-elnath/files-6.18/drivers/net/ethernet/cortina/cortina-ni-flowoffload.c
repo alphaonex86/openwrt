@@ -95,6 +95,22 @@
 #define CN_L3E_LAN_MASK_ID		8	/* routed flow, either direction */
 #define CN_L3E_BRIDGE_MASK_ID		1	/* L2 (MAC) key, non-routed */
 
+/* The L3 TE per-policer MIB (TE_PM), indexed by an action's pol_id. Stock runs
+ * it enabled and free-running; every flow policer group resets to type 0, no
+ * policing, so a flow given a pol_id is counted and never metered. */
+#define CN_TE_PM_CTRL			0x9900
+#define  CN_TE_PM_DISABLE		BIT(7)
+#define  CN_TE_PM_READ_CLEAR		BIT(5)
+#define CN_TE_PM_CNT_ACCESS		0x993c
+#define CN_TE_PM_CNT_DATA(n)		(0x9960 - 4 * (n))	/* DATA0 highest */
+#define CN_TE_PM_WORDS			9
+#define CN_TE_PM_PKT_WORD		0	/* total packets, measured */
+#define CN_TE_PM_BYTE_FIELD		0	/* total bytes, measured */
+#define CN_TE_POL_FLOW_GRP_CTRL(g)	(0x9118 + 4 * (g))	/* 32 policers each */
+#define  CN_TE_POL_GRP_NO_POLICING	0x500	/* type 0, ipg 20: the reset value */
+#define CN_FLOW_MIB_FIRST		32	/* pol_id 0..31 stay the meter band */
+#define CN_FLOW_MIBS			(256 - CN_FLOW_MIB_FIRST)
+
 /*
  * Action FIB, "normal" mode = action groups 18 + 20 (a_mask 0x140000),
  * 224 bits packed, fetched as one 256-bit FIB entry.
@@ -213,6 +229,7 @@ struct cn_l3e {
 					 * that carry the WAN VLAN edit live
 					 * here (CA_NI_WIN_DMA, 0x4_f7001000) */
 	spinlock_t	reg_lock;	/* serializes indirect GO cycles */
+	DECLARE_BITMAP(mib_used, CN_FLOW_MIBS);	/* TE_PM counters owned */
 	/* DMA-AFT allocation state, guarded by aft_lock.  Tiny by construction:
 	 * 64 fib entries and 64 map entries, and this board has ONE WAN VLAN. */
 	spinlock_t	aft_lock;
@@ -544,6 +561,9 @@ struct cn_flow_priv {
 						 * installed under (0 = real action) */
 	struct cn_aft_ref	aft;		/* the hardware WAN VLAN edit this
 						 * flow uses, if any */
+	u16			mib;		/* TE_PM pol_id + 1, 0 = none */
+	u32			mib_packets;	/* counter at the last read */
+	u64			mib_bytes;
 };
 
 static bool cn_flow_table_ready;
@@ -1963,6 +1983,72 @@ static bool cn_flow_rule_tag(bool ds_leg, u16 vid, u16 rule_sid,
 	return true;
 }
 
+static int cn_flow_mib_read(struct cn_l3e *l3e, u32 pol, u64 *bytes,
+			    u32 *packets)
+{
+	u32 d[CN_TE_PM_WORDS];
+	unsigned long flags;
+	int i, ret;
+
+	spin_lock_irqsave(&l3e->reg_lock, flags);
+	ret = l3fe_access_go(l3e->ne_base, CN_TE_PM_CNT_ACCESS,
+			     pol | CN_L3E_GO, CN_L3E_GO);
+	for (i = 0; !ret && i < CN_TE_PM_WORDS; i++)
+		d[i] = readl(l3e->ne_base + CN_TE_PM_CNT_DATA(i));
+	spin_unlock_irqrestore(&l3e->reg_lock, flags);
+	if (ret)
+		return ret;
+	*packets = d[CN_TE_PM_PKT_WORD];
+	*bytes = cn_te_pm_bytes(d, CN_TE_PM_BYTE_FIELD);
+	return 0;
+}
+
+/* Give a flow a free TE_PM counter, its baseline read now. None free or a
+ * stuck read = the flow is installed without one. */
+static void cn_flow_mib_assign(struct cn_l3e *l3e, struct cn_flow_priv *entry,
+			       struct cn_l3e_act *act)
+{
+	u32 n = find_first_zero_bit(l3e->mib_used, CN_FLOW_MIBS);
+
+	if (n >= CN_FLOW_MIBS ||
+	    cn_flow_mib_read(l3e, CN_FLOW_MIB_FIRST + n, &entry->mib_bytes,
+			     &entry->mib_packets))
+		return;
+	__set_bit(n, l3e->mib_used);
+	entry->mib = n + 1;
+	act->pol_vld = 1;
+	act->pol_en = 1;
+	act->pol_id = CN_FLOW_MIB_FIRST + n;
+}
+
+static void cn_flow_mib_release(struct cn_l3e *l3e, struct cn_flow_priv *entry)
+{
+	if (entry->mib)
+		__clear_bit(entry->mib - 1, l3e->mib_used);
+	entry->mib = 0;
+}
+
+static int cn_flow_counters(void *sh, u32 idx, void *priv, u64 *bytes,
+			    u64 *packets)
+{
+	struct cn_flow_priv *entry = priv;
+	u32 pkts;
+	u64 b;
+	int err;
+
+	if (!entry->mib)
+		return -ENODATA;
+	err = cn_flow_mib_read(cn_l3e, CN_FLOW_MIB_FIRST + entry->mib - 1,
+			       &b, &pkts);
+	if (err)
+		return err;
+	*bytes = (b - entry->mib_bytes) & GENMASK_ULL(35, 0);
+	*packets = (u32)(pkts - entry->mib_packets);
+	entry->mib_bytes = b;
+	entry->mib_packets = pkts;
+	return 0;
+}
+
 /* The ENGINE half of a TC flow install. The LIFECYCLE half -- ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 78. */
 static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
@@ -2241,6 +2327,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 		       (ds_leg && READ_ONCE(cn_l3e->data_pppoe_session));
 	entry->probe = ds_leg ? hw_ds_probe : 0;
 
+	cn_flow_mib_assign(cn_l3e, entry, &act);
 	err = cn_l3e_flow_add(cn_l3e, &key, &act, profile, CN_L3E_WAN_MASK_ID,
 			      &entry->hash_idx, &entry->crc16);
 	if (err) {
@@ -2324,6 +2411,7 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 	*idx_out = entry->hash_idx;
 	return 0;
 free:
+	cn_flow_mib_release(cn_l3e, entry);
 	/* Reached only from the install steps above.  The core owns the entry
 	 * memory and the cookie table, so there is nothing to free here -- the
 	 * hardware undo that used to live at the rhashtable-failure label moved
@@ -2336,10 +2424,16 @@ free:
 static int cn_flow_remove(void *sh, u32 idx, void *priv)
 {
 	struct cn_flow_priv *entry = priv;
+	int err;
 
 	cn_l3e->entry_by_idx[idx] = NULL;
 	cn_l3e->bucket_occ[idx / CN_L3E_AGE_SLOTS]--;
-	cn_l3e_flow_del(cn_l3e, idx, entry->crc16);
+	err = cn_l3e_flow_del(cn_l3e, idx, entry->crc16);
+	if (err)
+		pr_warn_ratelimited("cortina-l3fe: idx=%u teardown incomplete (%d); its counter stays reserved\n",
+				    idx, err);
+	else
+		cn_flow_mib_release(cn_l3e, entry);
 	cn_aft_release(cn_l3e, &entry->aft);
 	if (entry->ds)
 		atomic_dec(&cn_ds_installed);
@@ -2389,6 +2483,7 @@ static const struct gpon_flow_ops cn_flow_ops = {
 	.install		= cn_flow_install,
 	.remove			= cn_flow_remove,
 	.stats			= cn_flow_stats_op,
+	.counters		= cn_flow_counters,
 	.note_vlan_action	= cn_flow_note_vlan_action,
 	.wan_vlan		= true,
 	.ipv6			= true,
@@ -2558,6 +2653,23 @@ static int cn_l3e_verify_profile_invariants(struct cn_l3e *l3e)
 	return 0;
 }
 
+/* The per-flow counters as stock runs them: TE_PM enabled, free-running, and
+ * every flow policer group passing traffic unmetered. */
+static void cn_te_pm_enable(struct cn_l3e *l3e)
+{
+	u32 v = readl(l3e->ne_base + CN_TE_PM_CTRL);
+	int g;
+
+	for (g = 0; g < 8; g++)
+		writel(CN_TE_POL_GRP_NO_POLICING,
+		       l3e->ne_base + CN_TE_POL_FLOW_GRP_CTRL(g));
+	writel(v & ~(CN_TE_PM_DISABLE | CN_TE_PM_READ_CLEAR),
+	       l3e->ne_base + CN_TE_PM_CTRL);
+	v = readl(l3e->ne_base + CN_TE_PM_CTRL);
+	if (v & (CN_TE_PM_DISABLE | CN_TE_PM_READ_CLEAR))
+		dev_warn(l3e->dev, "l3fe: TE_PM_CTRL reads %#x after enable - per-flow counters will misread\n", v);
+}
+
 static int cn_l3e_init(struct cn_l3e *l3e)
 {
 	struct cn_l3e_tables t = {
@@ -2592,6 +2704,7 @@ static int cn_l3e_init(struct cn_l3e *l3e)
 
 	/* stock profile/tuple/mask classify config so the engine ...
 	 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 145. */
+	cn_te_pm_enable(l3e);
 	ret = cortina_l3fe_classify_setup(l3e->ne_base);
 	if (ret) {
 		dev_warn(l3e->dev,

@@ -105,6 +105,16 @@ void cn_l3e_build_hdri(const struct cn_l3e_key *k, int profile,
 	memcpy(words, h, CN_L3E_HDRI_BYTES);
 }
 
+/* Byte counter @n (0..3) of a TE_PM entry d[DATA0..DATA8]: four packet
+ * words, then four 36-bit byte counters packed across DATA4..DATA8. */
+u64 cn_te_pm_bytes(const u32 *d, unsigned int n)
+{
+	unsigned int lo = 4 * n;
+
+	return ((u64)(d[5 + n] & GENMASK(4 * n + 3, 0)) << (32 - lo)) |
+	       (d[4 + n] >> lo);
+}
+
 /* An IPv6 key: sa/da are the address words in network order (word 0 = the
  * top 32 bits); the engine holds them least-significant word first. */
 void cn_l3e_key_set_ip6(struct cn_l3e_key *k, const u32 sa[4],

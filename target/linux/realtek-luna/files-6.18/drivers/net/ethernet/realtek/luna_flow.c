@@ -229,17 +229,40 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 	    (ds ? !luna_flow_lan(sh, ctx->odev) : ctx->odev != ep->wan_ndev))
 		return -EOPNOTSUPP;
 	if (act->routed) {
-		/* IPv6 rides the WAN an IPv4 flow provisioned: same tag, same session. */
-		if (!e->provisioned)
-			return -EAGAIN;
+		/* IPv6 rides the WAN's own tag and session; a v6 flow first after
+		 * boot provisions that WAN from its route. */
+		if (!e->provisioned) {
+			if (ds)
+				return -EAGAIN;
+			ret = gpon_edge_read_v6(ep->ndev, ep->wan_ndev, key->ip6_sa, key->ip6_da,
+						ctx->odev, &edge, &why);
+			if (ret) {
+				net_info_ratelimited("luna-flow: v6 WAN edge not read: %s (%d)\n",
+						     why, ret);
+				return ret;
+			}
+			edge.wan_pppoe_sid = act->pppoe_sid;
+			if (gpon_flow_wan_vid(act, edge.wan_vlan, &edge.wan_vlan) ||
+			    edge.lan_vlan)
+				return -EOPNOTSUPP;
+			ret = luna_flow_initialize(ep);
+			if (ret)
+				return ret;
+			ret = luna_flow_provision(ep, &edge);
+			if (ret)
+				return ret;
+		}
 		if (!ds && (act->vlan_vid != e->edge.wan_vlan ||
 			    act->pppoe_sid != e->edge.wan_pppoe_sid))
 			return -EOPNOTSUPP;
 	} else if (!ds) {
 		ret = gpon_edge_read_via(ep->ndev, ep->wan_ndev, key->ip_da,
 					 ctx->odev, act->gw_dmac, &edge, &why);
-		if (ret)
+		if (ret) {
+			net_info_ratelimited("luna-flow: WAN edge not read: %s (%d)\n",
+					     why, ret);
 			return ret;
+		}
 		edge.wan_pppoe_sid = act->pppoe_sid;
 		/* PPPoE over gpon0.<vid> routes through ppp, which has no VID. */
 		if (gpon_flow_wan_vid(act, edge.wan_vlan, &edge.wan_vlan) ||

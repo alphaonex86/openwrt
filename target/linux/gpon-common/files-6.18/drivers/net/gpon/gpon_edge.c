@@ -13,6 +13,7 @@
 #include <net/arp.h>
 #include <net/neighbour.h>
 #include <net/route.h>
+#include <net/ip6_route.h>
 
 #include "gpon_edge.h"
 
@@ -85,11 +86,29 @@ static bool gpon_edge_gw_mac(struct net_device *dev, __be32 gw, u8 *mac)
  *        action carries it, so a caller that has it may supply it rather than
  *        asking a neighbour table that will never answer.
  */
+/* The LAN half of an edge: an ordinary router enslaves the LAN port to a
+ * bridge and the address lives on that master upper. */
+static int gpon_edge_lan(struct net_device *lan, struct gpon_edge *e,
+			 const char **why)
+{
+	struct net_device *lan_l3 = gpon_edge_l3_dev(lan);
+
+	if (!gpon_edge_ipv4(lan_l3, &e->lan_ip, &e->lan_prefix)) {
+		*why = "the LAN interface carries no IPv4 address yet";
+		return -EAGAIN;
+	}
+	e->lan_net = e->lan_ip & (e->lan_prefix == 32
+				  ? ~0u : ~0u << (32 - e->lan_prefix));
+	e->lan_vlan = gpon_edge_vlan(lan_l3);
+	ether_addr_copy(e->lan_mac, lan_l3->dev_addr);
+	return 0;
+}
+
 int gpon_edge_read_via(struct net_device *lan, struct net_device *wan,
 		       u32 peer, struct net_device *odev, const u8 *dmac,
 		       struct gpon_edge *e, const char **why)
 {
-	struct net_device *lan_l3, *wan_l3;
+	struct net_device *wan_l3;
 	struct flowi4 fl4 = { .daddr = htonl(peer) };
 	struct rtable *rt;
 	__be32 next_hop;
@@ -156,23 +175,67 @@ int gpon_edge_read_via(struct net_device *lan, struct net_device *wan,
 		}
 	}
 
-	/* The LAN side IS reached through the master upper: an ordinary router
-	 * enslaves the LAN port to a bridge and the address lives there. */
-	lan_l3 = gpon_edge_l3_dev(lan);
-	if (!gpon_edge_ipv4(lan_l3, &e->lan_ip, &e->lan_prefix)) {
-		*why = "the LAN interface carries no IPv4 address yet";
-		goto out_put;
-	}
-	e->lan_net = e->lan_ip & (e->lan_prefix == 32
-				  ? ~0u : ~0u << (32 - e->lan_prefix));
-	e->lan_vlan = gpon_edge_vlan(lan_l3);
-	ether_addr_copy(e->lan_mac, lan_l3->dev_addr);
-	ret = 0;
+	ret = gpon_edge_lan(lan, e, why);
 out_put:
 	ip_rt_put(rt);
 out:
 	rcu_read_unlock();
 	return ret;
+}
+
+/* The WAN interface an IPv6 flow @sa -> @da leaves by, from its own route:
+ * the tag, the egress MAC and the IPv4 address the interface table carries.
+ * The source matters: OpenWrt's default routes are "from" the delegated
+ * prefix. No next hop: a routed flow takes it from its own rewrite. */
+int gpon_edge_read_v6(struct net_device *lan, struct net_device *wan,
+		      const u32 sa[4], const u32 da[4], struct net_device *odev,
+		      struct gpon_edge *e, const char **why)
+{
+#if IS_REACHABLE(CONFIG_IPV6)
+	struct flowi6 fl6 = {};
+	struct net_device *wan_l3;
+	struct dst_entry *dst;
+	int i, ret = -EAGAIN;
+
+	*why = "";
+	if (!lan || !wan) {
+		*why = "the driver has no LAN/WAN netdev pair";
+		return -ENODEV;
+	}
+	memset(e, 0, sizeof(*e));
+	for (i = 0; i < 4; i++) {
+		fl6.saddr.s6_addr32[i] = htonl(sa[i]);
+		fl6.daddr.s6_addr32[i] = htonl(da[i]);
+	}
+	rcu_read_lock();
+	dst = ip6_route_output(dev_net(wan), NULL, &fl6);
+	if (dst->error) {
+		*why = "no IPv6 route to the flow's destination";
+		ret = dst->error;
+		goto out;
+	}
+	wan_l3 = dst->dev;
+	if (!gpon_edge_rides(wan_l3, wan) && odev != wan) {
+		*why = "the WAN route leaves through a device this engine does not drive";
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+	if (!gpon_edge_ipv4(wan_l3, &e->wan_ip, NULL)) {
+		*why = "the WAN interface carries no IPv4 address yet";
+		goto out;
+	}
+	e->wan_vlan = gpon_edge_vlan(wan_l3);
+	ether_addr_copy(e->wan_mac, gpon_edge_rides(wan_l3, wan)
+				    ? wan_l3->dev_addr : wan->dev_addr);
+	ret = gpon_edge_lan(lan, e, why);
+out:
+	dst_release(dst);
+	rcu_read_unlock();
+	return ret;
+#else
+	*why = "this kernel has no IPv6";
+	return -EOPNOTSUPP;
+#endif
 }
 
 /* The original spelling, for every caller that has neither: it asks exactly what

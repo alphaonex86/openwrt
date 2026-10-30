@@ -67,6 +67,9 @@ bool gpon_edge_same(const struct gpon_edge *a, const struct gpon_edge *b);
  * interfaces, reached for a destination that resolves to a different next hop.
  * That is what an ON-LINK peer looks like, and it is a different question from
  * gpon_edge_same(): the interface tables can stay, the next hop cannot. */
+int gpon_edge_read_v6(struct net_device *lan, struct net_device *wan,
+		      const u32 sa[4], const u32 da[4], struct net_device *odev,
+		      struct gpon_edge *e, const char **why);
 bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b);
 
 #endif /* GPON_EDGE_H */

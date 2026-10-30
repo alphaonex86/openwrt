@@ -439,6 +439,7 @@ int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 {
 	struct gpon_flow_entry *entry;
 	unsigned long lastused = 0;
+	u64 bytes = 0, packets = 0;
 	int err;
 
 	if (!fo || !fo->table_ready)
@@ -457,8 +458,15 @@ int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 	err = fo->ops->stats(fo->sh, entry->idx, entry_priv(entry), &lastused);
 	if (err)
 		return err;
+	if (fo->ops->counters) {
+		err = fo->ops->counters(fo->sh, entry->idx, entry_priv(entry),
+					&bytes, &packets);
+		if (err && err != -ENODATA)
+			return err;
+	}
 
-	f->stats.lastused = lastused;
+	flow_stats_update(&f->stats, bytes, packets, 0, lastused,
+			  FLOW_ACTION_HW_STATS_DELAYED);
 	return 0;
 }
 

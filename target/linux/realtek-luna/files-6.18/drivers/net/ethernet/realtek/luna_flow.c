@@ -18,6 +18,9 @@ struct luna_flow_priv {
 	struct luna_flow_slot slot;
 	struct luna_flow_mac_ref mac;
 	unsigned long last_hit;
+	u8 mib;			/* 1 + flow MIB counter, 0 = none */
+	u32 mib_packets;	/* the counter at the previous read */
+	u64 mib_bytes;
 };
 
 struct luna_flow_engine {
@@ -28,6 +31,7 @@ struct luna_flow_engine {
 	struct gpon_edge edge;
 	bool initialized, provisioned;
 	unsigned long hits_at;	/* jiffies of the last hit-bit sweep */
+	u32 mibs_used;
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
 	struct proc_dir_entry *proc;
 	u32 offered, hits;
@@ -46,6 +50,21 @@ static u32 luna_flow_rd(struct luna_eth *ep, u32 offset)
 static void luna_flow_wr(struct luna_eth *ep, u32 offset, u32 value)
 {
 	writel(value, ep->flow->sram.sw + offset);
+}
+
+/* The OUT (forwarded) half of one flow MIB counter: packets in word 3, octets
+ * low/high in words 4/5; the high word is re-read across a low-word carry. */
+static void luna_flow_mib_read(struct luna_eth *ep, unsigned int n,
+			       u64 *bytes, u32 *packets)
+{
+	u32 base = ep->c->flow->mib_base + 24 * n, hi, lo;
+
+	do {
+		hi = luna_flow_rd(ep, base + 20);
+		lo = luna_flow_rd(ep, base + 16);
+	} while (hi != luna_flow_rd(ep, base + 20));
+	*bytes = (u64)hi << 32 | lo;
+	*packets = luna_flow_rd(ep, base + 12);
 }
 
 static struct luna_eth *luna_flow_eth(struct net_device *dev)
@@ -256,6 +275,13 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 	a.ingress_pppoe = ds && e->edge.wan_pppoe_sid;
 	a.set_stream = !ds;
 	a.stream_id = ds ? 0 : GPON_DATA_FLOW;
+	if (ep->c->flow->mib_base && ~e->mibs_used) {
+		a.count = true;
+		a.counter = ffz(e->mibs_used);
+		e->mibs_used |= BIT(a.counter);
+		p->mib = a.counter + 1;
+		luna_flow_mib_read(ep, a.counter, &p->mib_bytes, &p->mib_packets);
+	}
 	luna_flow_hits(ep);
 	ret = luna_flow_sram_add(&e->sram, &p->slot, key,
 				(key->ip_protocol == IPPROTO_TCP) << 23, &a);
@@ -275,7 +301,28 @@ static int luna_flow_remove(void *sh, u32 index, void *priv)
 	ret = luna_flow_sram_del(&ep->flow->sram, &p->slot);
 	if (ret)
 		return ret;
+	if (p->mib) {
+		ep->flow->mibs_used &= ~BIT(p->mib - 1);
+		p->mib = 0;
+	}
 	return luna_flow_mac_put(&ep->flow->macs, &p->mac);
+}
+
+static int luna_flow_counters(void *sh, u32 index, void *priv, u64 *bytes,
+			      u64 *packets)
+{
+	struct luna_flow_priv *p = priv;
+	u64 b;
+	u32 n;
+
+	if (!p->mib || !p->slot.owned || p->slot.index != index)
+		return -ENODATA;
+	luna_flow_mib_read(sh, p->mib - 1, &b, &n);
+	*bytes = b - p->mib_bytes;
+	*packets = n - p->mib_packets;
+	p->mib_bytes = b;
+	p->mib_packets = n;
+	return 0;
 }
 
 static int luna_flow_stats(void *sh, u32 index, void *priv, unsigned long *lastused)
@@ -298,6 +345,7 @@ static const struct gpon_flow_ops luna_flow_ops = {
 	.remove = luna_flow_remove,
 	.abort_install = luna_flow_remove,
 	.stats = luna_flow_stats,
+	.counters = luna_flow_counters,
 	.priv_size = sizeof(struct luna_flow_priv),
 };
 

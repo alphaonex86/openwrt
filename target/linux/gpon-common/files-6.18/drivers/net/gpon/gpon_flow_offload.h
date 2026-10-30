@@ -63,6 +63,9 @@ struct gpon_flow_ops {
 	/* Fill `*lastused` (jiffies).  A family with no per-flow counters
 	 * reports LIVENESS only, which is what TC actually asks for. */
 	int (*stats)(void *sh, u32 idx, void *priv, unsigned long *lastused);
+	/* Optional: bytes and packets forwarded since the previous call (TC
+	 * accumulates deltas); -ENODATA = this entry has no counter. */
+	int (*counters)(void *sh, u32 idx, void *priv, u64 *bytes, u64 *packets);
 
 	/* Optional: a VLAN push/pop the core does not carry is refused, but a
 	 * family that keeps a refusal ledger wants to ATTRIBUTE it rather than

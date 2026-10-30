@@ -8,6 +8,7 @@ struct gpon_flow_key;
 
 #define LUNA_FLOW_WORDS 8
 #define LUNA_FLOW_NETIF_WORDS 5
+#define LUNA_FLOW_MIBS 32
 
 enum luna_flow_storage {
 	LUNA_FLOW_SRAM,
@@ -43,6 +44,8 @@ struct luna_flow_path5 {
 	u8 tos, ingress_priority, stream_id;
 	bool ingress_ctag, ingress_stag, ingress_pppoe;
 	bool check_tos, set_stream, locked;
+	bool count;		/* count in flow MIB @counter */
+	u8 counter;
 };
 
 enum luna_flow_pppoe {

@@ -150,7 +150,8 @@ int luna_flow_path5_encode(const struct gpon_flow_key *key,
 	if (!a || !w || a->nat < LUNA_FLOW_ROUTE || a->nat > LUNA_FLOW_DNAT ||
 	    a->ingress_if >= 16 || a->egress_if >= 16 || a->stream_id >= 128 ||
 	    a->ingress_priority >= 8 || a->ctag.priority >= 8 ||
-	    a->stag.priority >= 8 || a->ctag.vid >= 4096 || a->stag.vid >= 4096)
+	    a->stag.priority >= 8 || a->ctag.vid >= 4096 || a->stag.vid >= 4096 ||
+	    a->counter >= LUNA_FLOW_MIBS)
 		return -EINVAL;
 	if (!ip_tcp_udp(key) || (key->ip_ver && a->nat != LUNA_FLOW_ROUTE))
 		return -EOPNOTSUPP;
@@ -176,6 +177,6 @@ int luna_flow_path5_encode(const struct gpon_flow_key *key,
 	       ((u32)(key->ip_protocol == 6) << 26) |
 	       ((u32)a->check_tos << 27) | ((u32)a->locked << 28) |
 	       ((u32)a->ingress_priority << 29);
-	w[7] = 0;
+	w[7] = a->count | ((u32)a->counter << 1);
 	return 0;
 }

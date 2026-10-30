@@ -83,7 +83,9 @@
 		 * `earlycon` and `ignore_loglevel` STAY: readability was never the
 		 * cost, duplication was, and the boot that ranged had both.
 		 */
-		bootargs = "console=ttyS0,115200 earlycon ignore_loglevel";
+		/* No TX A-MPDU here (2026-10-29): with it a TXDMA error stalls a data
+		 * queue and the radio restarts under load; this host's open TXDMA bug. */
+		bootargs = "console=ttyS0,115200 earlycon ignore_loglevel rtlwifi.tx_ampdu=0";
 	};
 
 	/*

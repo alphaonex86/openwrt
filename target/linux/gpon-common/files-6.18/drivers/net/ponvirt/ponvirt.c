@@ -50,6 +50,9 @@ struct ponvirt {
 	struct omci_vlan_service svc;
 	bool svc_up;
 	u8 uni_port[8], uni_port_n;
+	struct omci_meter meter;
+	u32 us_pir, us_burst, us_tokens;	/* ME 280 upstream, bytes/s and bytes */
+	unsigned long us_stamp;
 	u64 omci_rx, omci_tx, gem_rx, gem_tx, gem_drop;
 };
 
@@ -173,6 +176,37 @@ static const struct gpon_ploam_ops pv_ops = {
 
 /* ---- the WAN data path ---------------------------------------------------------------- */
 
+static int pv_meter_set(void *sh, u16 gem, enum omci_meter_dir dir, const struct gpon_gem_td *td)
+{
+	(void)sh;
+	if (dir != OMCI_METER_US)
+		return td ? -EOPNOTSUPP : 0;
+	if (gem != pv->svc.gem_port)
+		return td ? -ENOENT : 0;
+	pv->us_pir = td ? td->pir : 0;
+	pv->us_burst = max_t(u32, td && td->pbs ? td->pbs : pv->us_pir / 50, ETH_FRAME_LEN + VLAN_HLEN);
+	return 0;
+}
+
+static const struct omci_meter_ops pv_meter_ops = { .rate_set = pv_meter_set };
+
+/* The upstream PIR as a token bucket refilled by elapsed time: @len taken, or the frame dropped. */
+static bool pv_meter_admit(unsigned int len)
+{
+	unsigned long now = jiffies;
+	u64 fill;
+
+	if (!pv->us_pir)
+		return true;
+	fill = div_u64((u64)pv->us_pir * jiffies_to_usecs(now - pv->us_stamp), USEC_PER_SEC);
+	pv->us_stamp = now;
+	pv->us_tokens = min_t(u64, pv->us_tokens + fill, pv->us_burst);
+	if (pv->us_tokens < len)
+		return false;
+	pv->us_tokens -= len;
+	return true;
+}
+
 /* The WAN service the OLT provisioned, re-read every tick: carrier follows it. */
 static void pv_service(void)
 {
@@ -187,6 +221,7 @@ static void pv_service(void)
 		pr_info("ponvirt: WAN service VLAN %u on GEM %u alloc %u\n", s.vid, s.gem_port,
 			s.alloc_id);
 	}
+	omci_meters_apply(&pv->meter, &s, up ? 1 : 0);
 	if (up != pv->svc_up) {
 		pv->svc_up = up;
 		if (up)
@@ -229,7 +264,7 @@ static netdev_tx_t pv_wan_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (skb_linearize(skb) || skb->len < ETH_HLEN)
 		goto drop;
 	spin_lock_bh(&pv->lock);
-	if (!pv->svc_up) {
+	if (!pv->svc_up || !pv_meter_admit(skb->len)) {
 		spin_unlock_bh(&pv->lock);
 		goto drop;
 	}
@@ -339,10 +374,11 @@ static int pv_show(struct seq_file *m, void *v)
 {
 	spin_lock_bh(&pv->lock);
 	seq_printf(m, "state O%d onu_id %u omcc %s gem %u service %s vid %u gem %u alloc %u "
-		   "omci rx %llu tx %llu gem rx %llu tx %llu drop %llu\n",
+		   "omci rx %llu tx %llu gem rx %llu tx %llu drop %llu meter %u/%u/%u pir %u\n",
 		   pv->p.state, pv->p.onu_id, pv->omcc ? "up" : "down", pv->omcc_gem,
 		   pv->svc_up ? "up" : "down", pv->svc.vid, pv->svc.gem_port, pv->svc.alloc_id,
-		   pv->omci_rx, pv->omci_tx, pv->gem_rx, pv->gem_tx, pv->gem_drop);
+		   pv->omci_rx, pv->omci_tx, pv->gem_rx, pv->gem_tx, pv->gem_drop,
+		   pv->meter.applied, pv->meter.owed, pv->meter.failed, pv->us_pir);
 	spin_unlock_bh(&pv->lock);
 	return 0;
 }
@@ -424,6 +460,11 @@ static int __init ponvirt_init(void)
 		return rc;
 	}
 	omci_onu_init(pv->onu, pv->sn, get_random_u8());
+	rc = omci_meter_init(&pv->meter, &pv_meter_ops, pv);
+	if (rc) {
+		pr_err("ponvirt: the OMCI core refused the meter table (%d)\n", rc);
+		return rc;
+	}
 	omci_onu_set_wan_mac(pv->onu, pv->wan->dev_addr);
 	pv_declare_panel();
 	missing = gpon_ploam_init(&pv->p, &pv_ops, &pv->cfg, pv, pv->sn);

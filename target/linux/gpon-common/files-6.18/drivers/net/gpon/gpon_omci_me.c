@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* TIER: CORE (prefix gpon_) — protocol only. NEVER touches ...
  * dev/MEASURED-gpon_omci_me.c.md sec 1. */
+#include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 
@@ -201,11 +202,6 @@ enum omci_text {
 	OMCI_TEXT_ZERO_DIGIT,	/* a version or address nobody set: "0" */
 	/* the vendor MEs' own defaults, as stock's plugins and upload hold them */
 	OMCI_TEXT_TWO,		/* ME 65363 #2 configuration version */
-	OMCI_TEXT_WEP_KEY,	/* ME 65386 #6..#9: a WEP key nobody set */
-	OMCI_TEXT_EXT_ONU_G7,	/* ME 65408 #7  (mib_ExtendedOnuG) */
-	OMCI_TEXT_EXT_ONU_G9,	/* ME 65408 #9  region */
-	OMCI_TEXT_EXT_ONU_G10,	/* ME 65408 #10 a masked password */
-	OMCI_TEXT_EXT_ONU_G12,	/* ME 65408 #12 */
 	OMCI_TEXT_HW_CAP,	/* ME 65427 #2 capability declaration */
 	OMCI_TEXT_P2Q_CAP,	/* ME 350 #14 */
 	OMCI_TEXT_CTC_OP,	/* ME 65529 #1 operation ID */
@@ -215,11 +211,6 @@ static const u8 omci_text[][26] = {
 	[OMCI_TEXT_SPACES]	= "                    ",
 	[OMCI_TEXT_ZERO_DIGIT]	= "0",
 	[OMCI_TEXT_TWO]		= "2",
-	[OMCI_TEXT_WEP_KEY]	= "0000000000",
-	[OMCI_TEXT_EXT_ONU_G7]	= "12D7",
-	[OMCI_TEXT_EXT_ONU_G9]	= "CHINA",
-	[OMCI_TEXT_EXT_ONU_G10]	= "****************",
-	[OMCI_TEXT_EXT_ONU_G12]	= "EeAa",
 	[OMCI_TEXT_HW_CAP]	= "RSQQQSQSQSSSSQQS",
 	[OMCI_TEXT_P2Q_CAP]	= "\x01\x08",
 	[OMCI_TEXT_CTC_OP]	= "CTC",
@@ -680,9 +671,11 @@ static const struct omci_attr omci_attrs[] = {
 	A_CNT(341, 5, 8, 11),		/* #5  RxPayloadBytes */
 	A_CNT(341, 6, 8, 19),		/* #6  TxPayloadBytes */
 	A_CNT(341, 7, 4, 27),		/* #7  EncryptKeyErrors */
-	/* ---- ME 65457: a vendor class no stock plugin models; the stock X111W answers its Get
-	 * rc=0 with an empty mask (production capture 2026-10-02), and so does this. ---- */
+#ifdef CONFIG_OLT_HSGQ
+	/* ---- ME 65457; origin: Get by the HSGQ G008, which no stock plugin models; the stock
+	 * X111W answers rc=0 with an empty mask (capture 2026-10-02), and so does this. ---- */
 	A_NO_ATTRS(65457),
+#endif
 
 	/* ME 78 VLAN tagging operation configuration data ...
 	 * dev/MEASURED-gpon_omci_me.c.md sec 15. */
@@ -874,14 +867,14 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
 	A_C(329, 5,  2, 0x0000),		/* #5  IANA assigned port */
 
-	/* ==== VENDOR MEs a board declares (extra-me-instances), as the field
-	 * X111W's stock uploads them (production OLT, 2026-10-02).  Widths are
+	/* ==== VENDOR MEs a board declares (extra-me-instances): each one OLT's, under its
+	 * CONFIG_OLT_<X> with its origin, never one nobody can place (olt_vendor_me_guard.py).  Widths are
 	 * its own plugins' (OMCI-simulate/me_attr_table.py on M225-260618; ME
 	 * 65294 from the G24W and X100DG stocks, whose X111W plugin has no
 	 * table to decode); values are the plugins' defaults.  The subscriber's
 	 * WiFi names and keys are NOT served here: zeros. ==== */
 #ifdef CONFIG_OLT_ZTE
-	/* ---- ME 247 extended ONU-G (mib_ExtendedOnuGZTE) ---- */
+	/* ---- ME 247 extended ONU-G (mib_ExtendedOnuGZTE); origin: Get by the Entel and AXS ZTE OLTs ---- */
 	A_C(247, 1, 2, 0),
 	A_C(247, 2, 2, 0),
 	A_IDN(247, 3, 14, equipment_id),	/* #3  Version: the model name */
@@ -900,7 +893,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(247, 16, 1, 0),			/* #16 Reset default */
 #endif
 #ifdef CONFIG_OLT_HSGQ
-	/* ---- ME 251 WAN management ACL (mib_wanacl): no instance until created ---- */
+	/* ---- ME 251 WAN management ACL (mib_wanacl); origin: Get by the HSGQ G008 ---- */
 	A_CW(251, 1, 1, 0),			/* #1  Telnet */
 	A_CW(251, 2, 2, 0),			/* #2  Telnet port */
 	A_CW(251, 3, 1, 0),			/* #3  HTTP */
@@ -909,23 +902,8 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(251, 6, 2, 0),			/* #6  HTTPS port */
 	A_CW(251, 7, 1, 0),			/* #7  ICMP */
 #endif
-	/* ---- ME 252 WLAN profile (mib_WlanCfgProfile) ---- */
-	A_C(252, 1, 1, 0),			/* #1  WLAN type */
-	A_C(252, 2, 1, 1),			/* #2  2.4 GHz admin */
-	A_C(252, 3, 1, 6),			/* #3  2.4 GHz encryption */
-	A_ZERO(252, 4, 24),			/* #4  2.4 GHz SSID: not served */
-	A_ZERO(252, 5, 24),			/* #5  2.4 GHz key: never served */
-	A_C(252, 6, 1, 0),			/* #6  5 GHz admin */
-	A_C(252, 7, 1, 0),			/* #7  5 GHz encryption */
-	A_TXT(252, 8, 24, OMCI_TEXT_ZERO_DIGIT),	/* #8  5 GHz SSID */
-	A_TXT(252, 9, 24, OMCI_TEXT_ZERO_DIGIT),	/* #9  5 GHz key */
-	A_C(252, 10, 1, 0),			/* #10 Commit */
-	/* ---- ME 253 loop detection, per Ethernet UNI (mib_LoopDetect) ---- */
-	A_CW(253, 1, 1, 0),			/* #1  Admin state */
-	A_CW(253, 2, 1, 0),			/* #2  ARC */
-	A_CW(253, 3, 1, 0),			/* #3  ARC interval */
-	A_CW(253, 4, 1, 0),			/* #4  Loop detection config */
-	/* ---- ME 350 (mib_Me350) ---- */
+#ifdef CONFIG_OLT_HUAWEI
+	/* ---- ME 350 (mib_Me350, HW_EXTEND_ONT_ABILITY); origin: Huawei by name ---- */
 	A_C(350, 1, 1, 0),			/* #1  Flow mapping mode */
 	A_C(350, 2, 1, 2),			/* #2  Traffic management */
 	A_C(350, 3, 1, 1),			/* #3  Flow CAR */
@@ -942,29 +920,16 @@ static const struct omci_attr omci_attrs[] = {
 	A_TXT(350, 14, 4, OMCI_TEXT_P2Q_CAP),	/* #14 P2Q capability */
 	A_ZERO(350, 15, 6),			/* #15 P2Q map */
 	A_TXT(350, 16, 4, OMCI_TEXT_SPACES),	/* #16 four spaces */
-	/* ---- ME 373 (mib_Me373) ---- */
-	A_C(373, 1, 1, 1),
-	A_C(373, 2, 1, 1),
-	A_C(373, 3, 1, 0),
-	A_C(373, 4, 1, 0),
-	A_C(373, 5, 1, 1),
-	A_C(373, 6, 1, 1),
-	A_C(373, 7, 1, 1),
-	A_C(373, 8, 1, 1),
-	A_C(373, 9, 2, 0xff80),
-	A_C(373, 10, 2, 0x8000),
-	A_C(373, 11, 2, 0xe000),
-	A_C(373, 12, 2, 0xc000),
-	A_C(373, 13, 1, 1),
+#endif
 #ifdef CONFIG_OLT_ZTE
-	/* ---- ME 65294 SNTP (mib_MeZteSntp) ---- */
+	/* ---- ME 65294 SNTP (mib_MeZteSntp); origin: ZTE by name ---- */
 	A_CW(65294, 1, 2, 0),			/* #1  Time zone */
 	A_CW(65294, 2, 4, 0),			/* #2  Master server */
 	A_CW(65294, 3, 4, 0),			/* #3  Slave server */
 	A_CW(65294, 4, 4, 0),			/* #4  Interval */
 	A_CW(65294, 5, 1, 0),
 	A_CW(65294, 6, 1, 0),
-	/* ---- ME 65305, 65319, 65321: widths and access read off the F670L's own OMCI
+	/* ---- ME 65305, 65319, 65321; origin: used by the AXS ZTE OLT; widths and access read off the F670L's own OMCI
 	 * (V1.1.20P3N4D, OMCI-simulate/zte_stock.py: a pattern Set, then Get) ---- */
 	A_ST(65305, 1, 1, 0, 7),
 	A_ST(65305, 2, 1, 1, 7),
@@ -988,9 +953,12 @@ static const struct omci_attr omci_attrs[] = {
 	A_ST(65321, 6, 2, 9, 3),
 	A_C(65321, 7, 2, 0),			/* #7  always 0: its width (<= 14) never shows */
 #endif
-	/* ---- ME 65352 ONU support (mib_hsg_onu_support) ---- */
+#ifdef CONFIG_OLT_HSGQ
+	/* ---- ME 65352 ONU support (mib_hsg_onu_support); origin: Get by the HSGQ G008 ---- */
 	A_ZERO(65352, 1, 16),
-	/* ---- ME 65363 ONU (mib_FHOnu) ---- */
+#endif
+#ifdef CONFIG_OLT_FIBERHOME
+	/* ---- ME 65363 ONU (mib_FHOnu); origin: FiberHome by name ---- */
 	A_C(65363, 1, 1, 0x5e),			/* #1  OMCI flag */
 	A_TXT(65363, 2, 12, OMCI_TEXT_TWO),	/* #2  Configuration version */
 	A_C(65363, 3, 2, 0),			/* #3  OLT number */
@@ -1005,76 +973,31 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(65363, 12, 4, 0),			/* #12 Special ability */
 	A_ZERO(65363, 13, 24),			/* #13 Version info: stock's own build */
 	A_C(65363, 14, 2, 0),			/* #14 Telnet */
-	/* ---- ME 65385 WLAN common, per SSID (mib_WlanCommonCfg) ---- */
-	A_C(65385, 1, 1, 4),			/* #1  Mode */
-	A_C(65385, 2, 1, 0),			/* #2  Channel */
-	A_ZERO(65385, 3, 24),			/* #3  SSID: not served */
-	A_C(65385, 4, 1, 1),			/* #4  Bandwidth */
-	A_C(65385, 5, 1, 0),			/* #5  Rate */
-	A_C(65385, 6, 2, 1),			/* #6  Guard interval */
-	A_C(65385, 7, 2, 100),			/* #7  Beacon interval */
-	A_C(65385, 8, 2, 1),			/* #8  DTIM interval */
-	A_C(65385, 9, 1, 0),			/* #9  AP isolation */
-	A_C(65385, 10, 1, 0),			/* #10 Hidden SSID */
-	A_C(65385, 11, 1, 1),			/* #11 SSID enable */
-	A_INST0(65385, 12, 1, 0),		/* #12 Enable: the first SSID */
-	/* ---- ME 65386 WLAN security, per SSID (mib_WlanSecurityCfg) ---- */
-	A_INST0(65386, 1, 4, 0),		/* #1  Security mode */
-	A_ZERO(65386, 2, 24),			/* #2  Shared key: never served */
-	A_C(65386, 3, 1, 2),			/* #3  WEP authentication */
-	A_C(65386, 4, 1, 0),			/* #4  WEP key bits */
-	A_C(65386, 5, 1, 0),			/* #5  Key index */
-	A_TXT(65386, 6, 26, OMCI_TEXT_WEP_KEY),	/* #6..#9 WEP keys */
-	A_TXT(65386, 7, 26, OMCI_TEXT_WEP_KEY),
-	A_TXT(65386, 8, 26, OMCI_TEXT_WEP_KEY),
-	A_TXT(65386, 9, 26, OMCI_TEXT_WEP_KEY),
-	A_INST0(65386, 10, 2, 1),		/* #10 WPA encryption */
-	/* ---- ME 65408 extended ONU-G (mib_ExtendedOnuG) ---- */
-	A_C(65408, 1, 1, 0),			/* #1  Reset default */
-	A_C(65408, 2, 1, 1),
-	A_C(65408, 3, 1, 0x3d),
-	A_C(65408, 4, 1, 3),
-	A_C(65408, 5, 2, 0x3800),
-	A_C(65408, 6, 4, 0),
-	A_TXT(65408, 7, 16, OMCI_TEXT_EXT_ONU_G7),
-	A_C(65408, 8, 1, 0),
-	A_TXT(65408, 9, 24, OMCI_TEXT_EXT_ONU_G9),
-	A_TXT(65408, 10, 16, OMCI_TEXT_EXT_ONU_G10),
-	A_C(65408, 11, 1, 0),
-	A_TXT(65408, 12, 25, OMCI_TEXT_EXT_ONU_G12),
-	A_C(65408, 13, 1, 0),
-	A_C(65408, 14, 1, 0),
-	A_C(65408, 15, 4, 0x13),
-	A_C(65408, 16, 4, 0),
-	/* ---- ME 65417 MAC per PPTP (mib_mac_pptp) ---- */
-	A_C(65417, 1, 1, 0),
-	A_ZERO(65417, 2, 25),
-	A_ZERO(65417, 3, 25),
-	A_ZERO(65417, 4, 25),
-	A_ZERO(65417, 5, 25),
-	A_ZERO(65417, 6, 25),
-	A_ZERO(65417, 7, 25),
-	A_C(65417, 8, 1, 0),
-	/* ---- ME 65427 proprietary capability (mib_HwProprietaryCapabilityDeclare) */
+#endif
+#ifdef CONFIG_OLT_HUAWEI
+	/* ---- ME 65427 capability (mib_HwProprietaryCapabilityDeclare); origin: Huawei by name ---- */
 	A_C(65427, 1, 2, 0xffff),
 	A_TXT(65427, 2, 16, OMCI_TEXT_HW_CAP),
 	A_C(65427, 3, 1, 0x90),
 	A_C(65427, 4, 1, 0x6f),
 
-	/* ---- ME 65529 CTC ONU capability (inst 0, mib_OnuCapability): the
-	 * HSGQ OLT takes the ISP ONU type from #3 before it counts VEIPs ---- */
+#endif
+#ifdef CONFIG_OLT_CTC
+	/* ---- ME 65529 CTC ONU capability (inst 0, mib_OnuCapability); origin: Get by the HSGQ
+	 * G008, which takes the ISP ONU type from #3 before it counts VEIPs ---- */
 	A_TXT(65529, 1, 4, OMCI_TEXT_CTC_OP),	/* #1  Operation ID */
 	A_D(65529, 2, 1, OMCI_DYN_CTC),		/* #2  CTC spec version */
 	A_D(65529, 3, 1, OMCI_DYN_CTC),		/* #3  ONU type: 1 = HGU */
 	A_D(65529, 4, 1, OMCI_DYN_CTC),		/* #4  TX power supply control */
 	A_HIDE(65529, 5, 1, OMCI_SRC_DYN, OMCI_DYN_CTC, 1),	/* #5  customized type, Get only */
 
-	/* ---- ME 65530 CTC LoID authentication (inst 0) ---- */
+	/* ---- ME 65530 CTC LoID authentication (inst 0); origin: Set by the Entel and AXS ZTE OLTs ---- */
 	A_ID(65530, 1, operator_id),		/* #1  Operation ID */
 	A_ID(65530, 2, loid),			/* #2  LoID */
 	A_ID(65530, 3, loid_passwd),		/* #3  Password (MUST be
 						 * servable, proven) */
 	A_C(65530, 4,  1, 0x01),		/* #4  Auth status = success */
+#endif
 
 	{ 0, 0, 0, 0, 0, 0 },			/* terminator (class 0 is not a
 						 * G.988 class ID) */
@@ -3272,6 +3195,56 @@ static bool omci_ctp_alloc(const struct omci_onu *o, const struct omci_me_inst *
 	return true;
 }
 
+/* The ME 280 the 2-octet pointer at @off of this ME 268 names -> false on 0 or a dangling pointer. */
+static bool omci_ctp_td(const struct omci_onu *o, const struct omci_me_inst *ctp, unsigned int off,
+			struct gpon_gem_td *td)
+{
+	const struct omci_me_inst *e;
+	u16 ptr;
+
+	if (ctp->blen < off + 2)
+		return false;
+	ptr = (u16)ctp->body[off] << 8 | ctp->body[off + 1];
+	e = ptr ? omci_store_get(o, OMCI_ME_GEM_TRAFFIC_DESC, ptr) : NULL;
+	return e && gpon_gem_td_decode(e->body, e->blen, td);
+}
+
+int omci_meter_init(struct omci_meter *m, const struct omci_meter_ops *ops, void *sh)
+{
+	if (!m || !ops || !ops->rate_set)
+		return -EINVAL;
+	memset(m, 0, sizeof(*m));
+	m->ops = ops;
+	m->sh = sh;
+	return 0;
+}
+
+void omci_meters_apply(struct omci_meter *m, const struct omci_vlan_service *svc, unsigned int n)
+{
+	unsigned int i, d;
+	int rc;
+
+	if (!m || !m->ops)
+		return;
+	m->applied = m->owed = m->failed = 0;
+	for (i = 0; i < n; i++) {
+		const struct gpon_gem_td *td[2] = {
+			svc[i].td_us_set ? &svc[i].td_us : NULL,
+			svc[i].td_ds_set ? &svc[i].td_ds : NULL,
+		};
+
+		for (d = OMCI_METER_US; d <= OMCI_METER_DS; d++) {
+			rc = m->ops->rate_set(m->sh, svc[i].gem_port, d, td[d]);
+			if (!rc)
+				m->applied++;
+			else if (rc == -EOPNOTSUPP)
+				m->owed++;
+			else
+				m->failed++;
+		}
+	}
+}
+
 unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
 				struct omci_vlan_service *svc, unsigned int max)
 {
@@ -3281,7 +3254,8 @@ unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcas
 	for (i = 0; o && i < OMCI_STORE_MAX; i++) {
 		const struct omci_me_inst *f = &o->store[i], *e;
 		u16 ctp, port_id, alloc = 0;
-		bool alloc_known;
+		struct gpon_gem_td td_us = { 0 }, td_ds = { 0 };
+		bool alloc_known, td_us_set, td_ds_set;
 
 		if (!omci_is_vlan_filter(f) || !omci_filter_ctp(o, f, &ctp))
 			continue;
@@ -3289,11 +3263,17 @@ unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcas
 		if (!e || omci_dgem_classify(e->body, e->blen, omcc_gem, mcast_gem, &port_id) != OMCI_DGEM_YES)
 			continue;
 		alloc_known = omci_ctp_alloc(o, e, &alloc);
+		td_us_set = omci_ctp_td(o, e, 7, &td_us);	/* ME 268 #5 */
+		td_ds_set = omci_ctp_td(o, e, 13, &td_ds);	/* ME 268 #9 */
 		for (k = 0; k < f->body[25] && k < 12 && n < max; k++, n++) {
 			svc[n].vid = omci_filter_vid(f, k);
 			svc[n].gem_port = port_id;
 			svc[n].alloc_id = alloc;
 			svc[n].alloc_known = alloc_known;
+			svc[n].td_us_set = td_us_set;
+			svc[n].td_ds_set = td_ds_set;
+			svc[n].td_us = td_us;
+			svc[n].td_ds = td_ds;
 		}
 	}
 	return n;

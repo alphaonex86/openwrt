@@ -70,6 +70,7 @@ config OLT_ZTE
 	bool "Serve ZTE OLTs"
 	depends on GPON_CORE
 	default y
+	select OLT_CTC
 	help
 	  What only a ZTE OLT needs of the ONU: the "zte" far-end profile
 	  (OMCC 0xa2, ME 138 and ME 340 on the VEIP), ZTE's vendor MEs 247
@@ -89,13 +90,41 @@ config OLT_HSGQ
 	bool "Serve HSGQ OLTs"
 	depends on GPON_CORE
 	default y
+	select OLT_CTC
 	help
 	  What only an HSGQ OLT needs of the ONU: its vendor ME 251 (WAN
 	  management ACL: telnet, HTTP, HTTPS, ICMP and their ports), held as
 	  the HSGQ stock ONUs hold it -- the class is known, no instance exists
 	  until the OLT creates one, so a Get of instance 0 is answered 0x05.
-	  Nothing it carries opens a WAN service. Off, ME 251 is an unknown
-	  vendor class again.
+	  Nothing it carries opens a WAN service. Also ME 65352 (ONU support),
+	  which the HSGQ G008 Gets. Off, both are unknown vendor classes again.
+
+config OLT_CTC
+	bool "Serve CTC-extension OLTs"
+	depends on GPON_CORE
+	default y
+	help
+	  The China Telecom OMCI extension several OLT vendors speak: ME 65529
+	  (ONU capability, Get by the HSGQ G008) and ME 65530 (LoID
+	  authentication, Set by the Entel and AXS ZTE OLTs). Selected by every
+	  OLT_<VENDOR> whose OLT was seen using it.
+
+config OLT_HUAWEI
+	bool "Serve Huawei OLTs"
+	depends on GPON_CORE
+	default y
+	help
+	  Huawei's vendor MEs 350 (extended ONT ability) and 65427 (proprietary
+	  capability), placed by their stock plugin names; no Huawei OLT has
+	  been captured yet.
+
+config OLT_FIBERHOME
+	bool "Serve FiberHome OLTs"
+	depends on GPON_CORE
+	default y
+	help
+	  FiberHome's vendor ME 65363 (ONU), placed by its stock plugin name;
+	  no FiberHome OLT has been captured yet.
 
 config GPON_FLOW_OFFLOAD
 	bool

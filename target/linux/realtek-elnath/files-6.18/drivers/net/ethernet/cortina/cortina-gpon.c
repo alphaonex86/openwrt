@@ -512,6 +512,7 @@ struct cortina_gpon {
 	/* Stage C: the G.988 OMCI responder + US OMCI TX */
 	struct omci_onu *omci;		/* responder context (kzalloc'd at probe) */
 	spinlock_t omci_lock;		/* common model readers vs ordered worker */
+	struct omci_meter meter;
 	struct omci_identity omci_id;	/* provisioned via /proc/gpon "id", under omci_lock */
 	bool omci_id_set;
 	bool omci_active;		/* transport permits requests */
@@ -1826,6 +1827,8 @@ static void cg_omci_arm_locked(struct cortina_gpon *cg, bool reinit_if_armed)
 		if (cg->omci_id_set)
 			cg->omci->id = cg->omci_id;
 		cg_omci_declare_uni_panel(cg->omci, cg->dev);
+		if (cg->wan_ndev)
+			omci_onu_set_wan_mac(cg->omci, cg->wan_ndev->dev_addr);
 	}
 	cg->omci_initialized = true;
 }
@@ -2326,17 +2329,31 @@ static void cg_optic_sample(struct cortina_gpon *cg, struct seq_file *m)
 	}
 }
 
+/* No Cortina queue shaper is mapped yet: an ME 280 the OLT sets is counted owed. */
+static int cg_meter_set(void *sh, u16 gem, enum omci_meter_dir dir, const struct gpon_gem_td *td)
+{
+	(void)sh; (void)gem; (void)dir;
+	return td ? -EOPNOTSUPP : 0;
+}
+
+static const struct omci_meter_ops cg_meter_ops = { .rate_set = cg_meter_set };
+
 /* O5 supervisor holds sn_lock; failed TX remains pending for its next tick. */
 static void cg_optic_poll(struct cortina_gpon *cg)
 {
+	struct omci_vlan_service svc[8];
+	unsigned int nsvc = 0;
 	u8 frame[OMCI_LEN];
 	int n = 0;
 
 	cg_optic_sample(cg, NULL);
 	spin_lock_bh(&cg->omci_lock);
-	if (cg->omci_active && cg->omcc_up)
+	if (cg->omci_active && cg->omcc_up) {
 		n = omci_onu_alarm_prepare(cg->omci, frame);
+		nsvc = omci_vlan_services(cg->omci, cg->omcc_gem, CG_MCAST_GEM_ID, svc, ARRAY_SIZE(svc));
+	}
 	spin_unlock_bh(&cg->omci_lock);
+	omci_meters_apply(&cg->meter, svc, nsvc);
 	if (n && !cg_omci_tx(cg, frame)) {
 		spin_lock_bh(&cg->omci_lock);
 		omci_onu_alarm_sent(cg->omci, frame);
@@ -3060,12 +3077,30 @@ static netdev_tx_t cg_wan_xmit(struct sk_buff *skb, struct net_device *ndev)
 	return cortina_ni_pon_data_tx(skb, ndev);
 }
 
+/* ME 134 reports the WAN MAC: the core follows every change of it. */
+static void cg_omci_wan_mac(struct cortina_gpon *cg, const u8 *mac)
+{
+	spin_lock_bh(&cg->omci_lock);
+	if (cg->omci_initialized)
+		omci_onu_set_wan_mac(cg->omci, mac);
+	spin_unlock_bh(&cg->omci_lock);
+}
+
+static int cg_wan_set_mac(struct net_device *ndev, void *addr)
+{
+	int rc = eth_mac_addr(ndev, addr);
+
+	if (!rc && cg_singleton)
+		cg_omci_wan_mac(cg_singleton, ndev->dev_addr);
+	return rc;
+}
+
 static const struct net_device_ops cg_wan_ops = {
 	.ndo_open		= cg_wan_open,
 	.ndo_stop		= cg_wan_stop,
 	.ndo_start_xmit		= cg_wan_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_set_mac_address	= cg_wan_set_mac,
 	/* nf_flow_table HW offload: an nft flowtable with `flags offload` BINDs a
 	 * flow block on EVERY hooked device, gpon0 included, so the WAN netdev must
 	 * expose the same setup_tc entry as eth0.  Without it the flowtable offload
@@ -3112,6 +3147,7 @@ static void cg_wan_create(struct cortina_gpon *cg)
 		return;
 	}
 	cg->wan_ndev = ndev;
+	cg_omci_wan_mac(cg, ndev->dev_addr);
 	if (IS_REACHABLE(CONFIG_CORTINA_NI))
 		cortina_ni_pon_wan_ndev_set(ndev);
 	dev_info(cg->dev, "WAN netdev gpon0 registered (%pM from %s)\n", mac,
@@ -3213,6 +3249,8 @@ static int cg_proc_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "gpon-mac @ phys 0x%llx + 0x%x\n",
 		   (unsigned long long)CG_PON_WINDOW_PHYS, CG_GPON_MAC_OFF);
+	seq_printf(m, "meter: applied=%u owed=%u failed=%u\n",
+		   cg->meter.applied, cg->meter.owed, cg->meter.failed);
 	seq_puts(m, OMCI_ID_FIELDS_LINE "\n");
 	seq_printf(m, "vendor-id      = 0x%08x (\"%s\")\n",
 		   cg_mac_rd(cg, CG_REG_VENDOR), vendor);
@@ -3419,7 +3457,7 @@ static int cg_uni_test_set(struct cortina_gpon *cg, const char *arg)
 {
 	u32 rx0, drop0, mic0;
 	unsigned int inst, admin;
-	u8 msg[OMCI_LEN], admin_val;
+	u8 msg[OMCI_LEN];
 	int slot = -1, port;
 	u16 tci;
 
@@ -3445,9 +3483,7 @@ static int cg_uni_test_set(struct cortina_gpon *cg, const char *arg)
 	/* ME 11 attribute 5, administrative state: a UNIQUE tid per injection,
 	 * AR=0 and AK=0 so no response is owed.  The octets and the stamper are
 	 * the core's, so the MIC gate below sees a real MIC. */
-	admin_val = (u8)admin;
-	omci_set_build(msg, tci, OMCI_ME_PPTP_ETH_UNI, (u16)inst, OMCI_ATTR_BIT(5),
-		       &admin_val, 1);
+	omci_uni_admin_set_build(msg, tci, (u16)inst, (u8)admin);
 
 	/* ★ THE REQUEST IS ANNOUNCED BEFORE IT IS SUBMITTED: the bottom half can
 	 *   consume it and complete on another CPU before a line printed after the
@@ -3619,6 +3655,8 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 	cg->omci = devm_kzalloc(dev, sizeof(*cg->omci), GFP_KERNEL);
 	if (!cg->omci)
 		dev_warn(dev, "no OMCI responder ctx - DS OMCI will not be answered\n");
+	if (omci_meter_init(&cg->meter, &cg_meter_ops, cg))
+		dev_err(dev, "the OMCI core refused the meter table, ME 280 is not applied\n");
 
 	/* Map the whole 48 KiB PON window (40-bit AXI address ...
 	 * dev/MEASURED-cortina-gpon.c.md sec 118. */

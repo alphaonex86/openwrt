@@ -26,6 +26,7 @@ enum { LOCAL_PLAN = 1, LOCAL_GRAPH, LOCAL_ACS_DONE, LOCAL_ONLINE };
 #define OLT_STRING	1
 #define OLT_AUTH	1
 #define OLT_ADDRESS	1
+#define OLT_TD		1
 
 /* G.988 MEs the OLT creates for the TR-069 push that the ONU model lacks. */
 #define ME_NET_ADDRESS	137
@@ -591,12 +592,17 @@ static void plan_service(struct gpon_olt_omci *o)
 		uni_port(o, ++port, OMCI_ME_VEIP, o->veip, 11, 10, false);
 	o->ani_port = ++port;
 	put_num(create(o, OMCI_ME_GAL_ETH_PROF, OLT_GAL, 0), 1, p->gem_payload);
+	if (p->us_pir) {
+		s = create(o, OMCI_ME_GEM_TRAFFIC_DESC, OLT_TD, 0);
+		put_num(s, 1, 0);
+		put_num(s, 2, p->us_pir);
+	}
 	s = create(o, OMCI_ME_GEM_CTP, OLT_CTP, 0);
 	put_num(s, 1, p->gem_port);
 	put_num(s, 2, o->tcont);
 	put_num(s, 3, GPON_GEM_BIDIR);
 	put_num(s, 4, o->pq_us);
-	put_num(s, 5, 0);
+	put_num(s, 5, p->us_pir ? OLT_TD : 0);
 	put_num(s, 7, 0);
 	s = create(o, OMCI_ME_GEM_IW_TP, OLT_IWTP, 0);
 	put_num(s, 1, OLT_CTP);

@@ -151,15 +151,11 @@
 		/* Further MEs stock's MIB upload reports, <class instance> (field
 		 * X111W, production OLT, 2026-10-02): PPTP LCT UNI, ONU power
 		 * shedding, VoIP config data, VoIP line status of the POTS port,
-		 * TR-069 server of the VEIP; then the vendor MEs: extended ONU-G,
-		 * WLAN profile, loop detection per Ethernet UNI, 350, 373, SNTP,
-		 * ONU support, FiberHome ONU, WLAN common and security per SSID,
-		 * extended ONU-G, MAC per PPTP, capability declaration. */
+		 * TR-069 server of the VEIP; then the vendor MEs an OLT is known to
+		 * use: ZTE extended ONU-G, Huawei 350, ZTE SNTP, HSGQ ONU support,
+		 * FiberHome ONU, Huawei capability declaration. */
 		extra-me-instances = /bits/ 16 <83 0  133 0  138 0  141 0x0201  340 0x0601
-			247 0  252 0  253 0x0101  253 0x0102  350 0  373 0  65294 0
-			65352 0  65363 0  65385 0  65385 1  65385 2  65385 3
-			65386 0  65386 1  65386 2  65386 3  65408 0
-			65417 0  65417 1  65417 2  65427 0xff80>;
+			247 0  350 0  65294 0  65352 0  65363 0  65427 0xff80>;
 	};
 };
 

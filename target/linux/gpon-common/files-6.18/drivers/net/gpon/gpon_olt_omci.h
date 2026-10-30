@@ -85,6 +85,7 @@ struct gpon_olt_profile {
 	u16 vlan;			/* 0: transparent, no VLAN filter */
 	u8 pbit;
 	u16 gem_payload;
+	u32 us_pir;			/* bytes/s on an ME 280 named by ME 268 #5; 0: none */
 	char loid[25];
 	char loid_password[13];
 	bool check_loid;

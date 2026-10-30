@@ -419,7 +419,6 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 
 /* ME class IDs presented in the MIB upload (G.988 + the HSGQ ...
  * dev/MEASURED-gpon_omci_me.h.md sec 24. */
-#define OMCI_ME_ONU_DATA	2
 #define OMCI_ME_CARDHOLDER	5
 #define OMCI_ME_CIRCUIT_PACK	6
 #define OMCI_ME_SW_IMAGE	7
@@ -505,7 +504,6 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * path.  It NAMES the multicast GEM,
 					 * which both our shells hardcode to
 					 * GPON_MCAST_GEM_PORT today */
-#define OMCI_ME_VEIP		329
 #define OMCI_ME_HSGQ_WAN_ACL	251	/* HSGQ vendor ME: WAN management ACL */
 #define OMCI_ME_CTC_LOID_AUTH	65530	/* 0xFFFA — CTC extension the OLT audits */
 
@@ -668,6 +666,12 @@ void omci_onu_declare_panel(struct omci_onu *o, omci_prop_fn prop, void *ctx,
 
 /* The WAN netdev's MAC, which ME 134 reports; the shell keeps it current. */
 void omci_onu_set_wan_mac(struct omci_onu *o, const u8 mac[6]);
+
+/* The local ME 11 #5 (administrative state) Set a shell's uni_test injects at its own responder. */
+static inline void omci_uni_admin_set_build(u8 *out, u16 tci, u16 inst, u8 admin)
+{
+	omci_set_build(out, tci, OMCI_ME_PPTP_ETH_UNI, inst, OMCI_ATTR_BIT(5), &admin, 1);
+}
 
 /* The inventory slot holding @inst, or NULL when this board has no such
  * instance.  Answers on the FULL u16. */
@@ -842,12 +846,32 @@ struct omci_vlan_service {
 	u16 gem_port;
 	u16 alloc_id;
 	bool alloc_known;
+	bool td_us_set, td_ds_set;	/* ME 268 #5 / #9 name an existing ME 280 */
+	struct gpon_gem_td td_us, td_ds;
 };
 
 /* Every (VID, data GEM) pair ME 84 -> ME 47 -> ME 266 -> ME 268 resolves to, at most @max, in store
  * order. Caller holds the store's serialization. -> the count written. */
 unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcast_gem,
 				struct omci_vlan_service *svc, unsigned int max);
+
+enum omci_meter_dir { OMCI_METER_US, OMCI_METER_DS };
+
+/* The family's meter on one GEM and direction; @td NULL lifts it. -EOPNOTSUPP = this silicon has none. */
+struct omci_meter_ops {
+	int (*rate_set)(void *sh, u16 gem_port, enum omci_meter_dir dir, const struct gpon_gem_td *td);
+};
+
+struct omci_meter {
+	const struct omci_meter_ops *ops;
+	void *sh;
+	u16 applied, owed, failed;	/* the last pass */
+};
+
+/* Every family shell calls both: init refuses an incomplete table, apply hands every service's ME 280
+ * (or none) to the family on each pass, outside the store's lock. */
+int omci_meter_init(struct omci_meter *m, const struct omci_meter_ops *ops, void *sh);
+void omci_meters_apply(struct omci_meter *m, const struct omci_vlan_service *svc, unsigned int n);
 
 /* Walk the provisioned store and return the WAN data GEM Port-ID, if the OLT
  * has created one.  -> false when it has not, which is the NORMAL state before

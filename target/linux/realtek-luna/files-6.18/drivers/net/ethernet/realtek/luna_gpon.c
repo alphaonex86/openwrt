@@ -401,6 +401,7 @@ MODULE_PARM_DESC(onu_password, "G.984.3 PLOAM Password: up to 10 printable chara
 static bool alloc_cam_park = true;
 static u16 luna_idle_alloc[LUNA_IDLE_TCONT_N];	/* the alloc each idle T-CONT holds, 0 = free */
 static u16 luna_svc_gem[LUNA_IDLE_TCONT_N];	/* the service GEM a pool T-CONT carries, 0 = idle GEM only */
+static struct omci_meter luna_meter;		/* ME 280 on the upstream queues */
 static u32 luna_svc_vid_flow[LUNA_SVC_VIDS];	/* vid << 8 | flow, 0 = free; read lockless by the WAN TX */
 static u16 luna_data_tcont_alloc;		/* the alloc GPON_DATA_TCONT holds, 0 = none */
 module_param(alloc_cam_park, bool, 0644);
@@ -5961,6 +5962,8 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 			   pi_packed_get(PI_PON_WFQ_WEIGHT, GPON_OMCC_PHYS_QID, 10),
 			   pi_rd(PI_DRN_CMD),
 			   pi_rd(PI_PON_SCH_CTRL), (pi_rd(PI_PON_SCH_CTRL) >> 18) & 1UL);
+		seq_printf(s, "meter: applied=%u owed=%u failed=%u\n",
+			   luna_meter.applied, luna_meter.owed, luna_meter.failed);
 		/* SID page-occupancy probe, an OLT-INDEPENDENT verify of the ...
 		 * dev/MEASURED-luna_gpon.c.md sec 188. */
 		{
@@ -6898,7 +6901,7 @@ static void luna_uni_test_show(void)
 
 static int luna_uni_test_set(const char *val, const struct kernel_param *kp)
 {
-	u8 msg[OMCI_LEN], admin_val;
+	u8 msg[OMCI_LEN];
 	unsigned int inst, admin;
 	unsigned long flags;
 	bool declared = false;
@@ -6929,9 +6932,7 @@ static int luna_uni_test_set(const char *val, const struct kernel_param *kp)
 
 	/* ME 11 attribute 5, administrative state: a UNIQUE tid per injection,
 	 * AR=0 and AK=0 so no response is owed.  The octets are the core's. */
-	admin_val = (u8)admin;
-	omci_set_build(msg, tci, OMCI_ME_PPTP_ETH_UNI, (u16)inst, OMCI_ATTR_BIT(5),
-		       &admin_val, 1);
+	omci_uni_admin_set_build(msg, tci, (u16)inst, (u8)admin);
 
 	/* ★ THE REQUEST IS ANNOUNCED BEFORE IT IS SUBMITTED.  The FSM timer can
 	 *   consume it and the apply can complete on another CPU before a line
@@ -7397,6 +7398,43 @@ static void luna_services_sync(const struct omci_vlan_service *svc, unsigned int
 	}
 	luna_svc_publish(svc, n);
 }
+
+#define LUNA_QID_RATE_MAX	0x3ffffu	/* 8 kbit/s granules; the unmetered PIR every queue resets to */
+
+/* bytes/s -> a queue rate word: 8 kbit/s granules, stored n - 1 below the 1 and max sentinels. */
+static u32 luna_qid_rate(u32 bytes_per_s, u32 none)
+{
+	u32 n;
+
+	if (!bytes_per_s)
+		return none;
+	n = min_t(u32, bytes_per_s / 1000 + !!(bytes_per_s % 1000), LUNA_QID_RATE_MAX);
+	return n == 1 || n == LUNA_QID_RATE_MAX ? n : n - 1;
+}
+
+/* ME 280 on the upstream queue that carries @gem; the downstream has no per-GEM meter here. */
+static int luna_meter_set(void *sh, u16 gem, enum omci_meter_dir dir, const struct gpon_gem_td *td)
+{
+	unsigned int i;
+	int qid = -ENOENT;
+
+	(void)sh;
+	if (dir != OMCI_METER_US)
+		return td ? -EOPNOTSUPP : 0;
+	if (gem == gpon_data_gem_port && luna_data.armed.installed)
+		qid = luna_data.armed.rides_omcc ? -EBUSY : luna_data_qid;
+	for (i = 0; qid == -ENOENT && i < LUNA_IDLE_TCONT_N; i++)
+		if (luna_svc_gem[i] == gem)
+			qid = luna_svc_qid(i);
+	if (qid < 0)
+		return td ? qid : 0;
+	pi_field(PI_PON_QID_CIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0, luna_qid_rate(td ? td->cir : 0, 0));
+	pi_field(PI_PON_QID_PIR_RATE + qid * PI_QID_RATE_STRIDE, 17, 0,
+		 luna_qid_rate(td ? td->pir : 0, LUNA_QID_RATE_MAX));
+	return 0;
+}
+
+static const struct omci_meter_ops luna_meter_ops = { .rate_set = luna_meter_set };
 
 u8 luna_gpon_svc_flow(int vid)
 {
@@ -8265,6 +8303,7 @@ out:
 	if (want.omcc_up) {
 		luna_idle_tconts_sync();
 		luna_services_sync(svc, nsvc);
+		omci_meters_apply(&luna_meter, svc, nsvc);
 	}
 }
 
@@ -10317,6 +10356,8 @@ skip_bosa_init:
 		bosa_apc_calibrate();		/* legacy non-B flow (A/B fallback) */
 	mutex_unlock(&bosa_lock);
 
+	if (omci_meter_init(&luna_meter, &luna_meter_ops, NULL))
+		pr_err("luna-gpon: the OMCI core refused the meter table, ME 280 is not applied\n");
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
 	proc_create_single("gpon_vlan", 0444, NULL, gpon_vlan_proc_show);
 	proc_create_single("gpon_acs", 0400, NULL, gpon_acs_proc_show);

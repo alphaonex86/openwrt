@@ -26,6 +26,7 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
+#include <linux/onu_rx_control.h>
 
 #include "cortina-gpon-serdes.h"
 #include "cortina-gpon-bosa.h"
@@ -3126,7 +3127,7 @@ static void cg_wan_create(struct cortina_gpon *cg)
 	 * registers hold a GPON serial, not a station address. */
 	src = gpon_hwaddr_resolve(NULL, have_dt ? dt : NULL, NULL, mac);
 
-	ndev = alloc_etherdev(0);
+	ndev = alloc_etherdev_mqs(0, 1, ONU_RX_QUEUES);
 	if (!ndev)
 		return;
 	strscpy(ndev->name, "gpon0", sizeof(ndev->name));

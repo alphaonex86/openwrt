@@ -18,6 +18,7 @@
 #include <linux/phy.h>
 #include <linux/seq_file.h>
 #include <linux/skbuff.h>
+#include <linux/onu_rx_control.h>
 #include <net/arp.h>
 #include <net/net_namespace.h>
 
@@ -1294,7 +1295,7 @@ int cortina_ni_tx_probe(struct cortina_ni *ni)
 	if (ret)
 		return dev_err_probe(ni->dev, ret, "no 32-bit DMA\n");
 
-	ndev = devm_alloc_etherdev(ni->dev, sizeof(struct cortina_ni *));
+	ndev = devm_alloc_etherdev_mqs(ni->dev, sizeof(struct cortina_ni *), 1, ONU_RX_QUEUES);
 	if (!ndev)
 		return -ENOMEM;
 	SET_NETDEV_DEV(ndev, ni->dev);

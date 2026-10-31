@@ -26,6 +26,8 @@
 #include <linux/unaligned.h>
 #include <net/net_namespace.h>
 
+#include <linux/onu_rx_control.h>
+
 #include "cortina-access.h"	/* the ONE indirect transaction */
 #include "cortina-ni.h"
 
@@ -556,6 +558,16 @@ static noinline void cortina_ni_rx_stack_tap(struct cortina_ni *ni,
 			       DUMP_PREFIX_OFFSET, 16, 4, w, sizeof(w), false);
 }
 
+/* Into the stack; link control rides the RX queue without an RPS map (onu_rx_control.h). */
+static inline void cortina_ni_rx_deliver(struct napi_struct *napi, struct sk_buff *skb,
+					 struct net_device *dev)
+{
+	skb_record_rx_queue(skb, onu_rx_is_control(skb->data, skb->len) ?
+			    ONU_RX_QUEUE_CONTROL : ONU_RX_QUEUE_DATA);
+	skb->protocol = eth_type_trans(skb, dev);
+	napi_gro_receive(napi, skb);
+}
+
 /* multi-buffer receive: the SOP..EOP descriptor chain Where a ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 23. */
 static inline struct net_device *cortina_ni_rx_wan_dest(u32 hdra_lo, bool *is_l3)
@@ -799,16 +811,14 @@ static noinline u32 cortina_ni_rx_chain_seg(struct cortina_ni *ni,
 				rx->wan_frames++;
 			wan->stats.rx_packets++;
 			wan->stats.rx_bytes += flen;
-			skb->protocol = eth_type_trans(skb, wan);
-			napi_gro_receive(&rx->napi, skb);
+			cortina_ni_rx_deliver(&rx->napi, skb, wan);
 			return rpa;
 		}
 		rx->frames++;
 		rx->bytes += flen;
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += flen;
-		skb->protocol = eth_type_trans(skb, ndev);
-		napi_gro_receive(&rx->napi, skb);
+		cortina_ni_rx_deliver(&rx->napi, skb, ndev);
 	}
 	return rpa;
 
@@ -1055,8 +1065,7 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 				return rpa;
 			}
 			skb_put_data(skb, buf + off, len);
-			skb->protocol = eth_type_trans(skb, wan);
-			napi_gro_receive(&rx->napi, skb);
+			cortina_ni_rx_deliver(&rx->napi, skb, wan);
 			wan->stats.rx_packets++;
 			wan->stats.rx_bytes += len;
 			return rpa;
@@ -1083,8 +1092,7 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	if (unlikely(rx_frag_tap > 0))
 		cortina_ni_rx_frag_tap(ndev, buf, off, len, desc, pa, dlen,
 				       hdra_lo, skb->data);
-	skb->protocol = eth_type_trans(skb, ndev);
-	napi_gro_receive(&rx->napi, skb);
+	cortina_ni_rx_deliver(&rx->napi, skb, ndev);
 
 	rx->frames++;
 	rx->bytes += len;

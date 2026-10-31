@@ -174,45 +174,24 @@
 		interrupts = <0 52 4>;
 	};
 
-	gpio: gpio@1b000038 {
-		#address-cells = <1>;
-		#size-cells = <0>;
-		compatible = "rtk,gpio";
-		/* Data/direction window + the per-bank interrupt/config window. */
-		reg = <0x1b000038 0x0c>, <0x18003308 0x54>;
+	/* Two 32-line banks: line n of bank b is bit n of its DIR (+0x08) and DATA
+	 * (+0x0c) words at 0x18003300 + 0x1c * b, reaching its pad once bit n of
+	 * IO_GPIO_EN (swcore 0x38 + 4 * b) is set. The UNKNOWN unit's native kernel
+	 * drives and reads its pins exactly so (PCIe reset 40 = bank 1 bit 8 below). */
+	gpio0: gpio@18003300 {
+		compatible = "realtek,rtl9607c-gpio", "realtek,luna-gpio";
+		reg = <0x18003300 0x1c>, <0x1b000038 0x4>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <32>;
+	};
 
-		bank@0 {
-			gpio-controller;
-			interrupt-controller;
-			reg = <0>;
-			ngpios = <32>;
-			#gpio-cells = <2>;
-			#interrupt-cells = <2>;
-			interrupt-parent = <&gic>;
-			interrupts = <0 21 4>;
-		};
-
-		gpio1: bank@1 {
-			gpio-controller;
-			interrupt-controller;
-			reg = <1>;
-			ngpios = <32>;
-			#gpio-cells = <2>;
-			#interrupt-cells = <2>;
-			interrupt-parent = <&gic>;
-			interrupts = <0 22 4>;
-		};
-
-		bank@2 {
-			gpio-controller;
-			interrupt-controller;
-			reg = <2>;
-			ngpios = <32>;
-			#gpio-cells = <2>;
-			#interrupt-cells = <2>;
-			interrupt-parent = <&gic>;
-			interrupts = <0 18 4>;
-		};
+	gpio1: gpio@1800331c {
+		compatible = "realtek,rtl9607c-gpio", "realtek,luna-gpio";
+		reg = <0x1800331c 0x1c>, <0x1b00003c 0x4>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <32>;
 	};
 
 	/* GPIO lines used to reset the PCIe endpoints / Ethernet PHY at probe. */

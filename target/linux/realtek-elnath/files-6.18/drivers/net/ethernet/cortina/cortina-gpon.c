@@ -2750,6 +2750,7 @@ static void cg_omci_process(struct cortina_gpon *cg, const u8 *pdu)
 	if (cg->omci_active) {
 		n = omci_onu_input_ex(cg->omci, pdu, OMCI_LEN, resp, &accepted);
 		m = omci_onu_owed_avc(cg->omci, owed);
+		WRITE_ONCE(cortina_mcast_ds_control, omci_mcast_ds_tag_control(cg->omci));
 		if (accepted.kind != OMCI_ACCEPT_NONE)
 			omci_data_binding_snapshot(cg->omci, cg->omcc_gem,
 						   CG_MCAST_GEM_ID, &binding);

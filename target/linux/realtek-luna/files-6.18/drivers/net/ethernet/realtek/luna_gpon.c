@@ -7649,6 +7649,7 @@ static void luna_omci_poll(void)
 		n = omci_onu_input_ex(luna_omci.onu, frame.msg, frame.len,
 				      response, &accepted);
 		m = omci_onu_owed_avc(luna_omci.onu, owed);
+		WRITE_ONCE(luna_mcast_ds_control, omci_mcast_ds_tag_control(luna_omci.onu));
 #ifdef CONFIG_GPON_OLT_DIAG
 		/* The clock is read HERE and handed in: the core tier reads none,
 		 * which is what makes a capture replay deterministically. */
@@ -7840,6 +7841,8 @@ static void luna_omci_turnaround(u64 rx_ns)
  * read by the suite's gpon_timing benchmark. */
 struct gpon_vlan_census luna_vlan_census;
 EXPORT_SYMBOL(luna_vlan_census);
+u8 luna_mcast_ds_control;
+EXPORT_SYMBOL(luna_mcast_ds_control);
 
 static int gpon_vlan_proc_show(struct seq_file *s, void *v)
 {

@@ -1002,6 +1002,10 @@ static const struct omci_attr omci_attrs[] = {
 	A_ID(65530, 3, loid_passwd),		/* #3  Password (MUST be
 						 * servable, proven) */
 	A_C(65530, 4,  1, 0x01),		/* #4  Auth status = success */
+
+	/* ---- ME 65531 CTC extended multicast operations profile (inst 0); origin: Set by the HSGQ
+	 * G008, its per-ONT mcast_downstream (2026-10-31).  #16 is ME 309's #16 ---- */
+	A_POOL(65531, 16, 3, 0),		/* #16 Downstream IGMP and multicast TCI */
 #endif
 
 	{ 0, 0, 0, 0, 0, 0 },			/* terminator (class 0 is not a
@@ -3284,6 +3288,37 @@ unsigned int omci_vlan_services(const struct omci_onu *o, u16 omcc_gem, u16 mcas
 		}
 	}
 	return n;
+}
+
+bool omci_ctc_mop_ds_tci_set(struct omci_onu *o, u16 inst, const u8 *v)
+{
+	const struct omci_attr *a;
+	struct omci_pool_attr *p;
+
+	for (a = omci_me_find(OMCI_ME_CTC_EXT_MOP); a && a->class_id == OMCI_ME_CTC_EXT_MOP; a++) {
+		if (a->attr != 16)
+			continue;
+		p = omci_pool_slot(o, a, inst);
+		if (p)
+			memcpy(p->v, v, a->size);
+		return p;
+	}
+	return false;
+}
+
+u8 omci_mcast_ds_tag_control(struct omci_onu *o)
+{
+	const struct omci_pool_attr *p = IS_ENABLED(CONFIG_OLT_CTC) ?
+					 omci_pool_find(o, OMCI_ME_CTC_EXT_MOP, 0, 16) : NULL;
+	u16 i;
+
+	for (i = 0; i < OMCI_STORE_MAX; i++) {
+		const struct omci_me_inst *e = &o->store[i];
+
+		if (e->used && e->class_id == OMCI_ME_MCAST_OPER_PROF && e->blen > 28 && e->body[28])
+			return e->body[28];
+	}
+	return p ? p->v[0] : 0;
 }
 
 void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids)

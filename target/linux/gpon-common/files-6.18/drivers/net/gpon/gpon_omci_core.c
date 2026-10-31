@@ -201,6 +201,11 @@ static u8 omci_config_apply(struct omci_onu *o, u8 mt, u16 class_id, u16 inst,
 			omci_put_be16(resp + 11, failed);
 			if (rc != OMCI_RC_OK)
 				return rc;
+		} else if (IS_ENABLED(CONFIG_OLT_CTC) && class_id == OMCI_ME_CTC_EXT_MOP &&
+			   mask == OMCI_ATTR_BIT(16)) {
+			/* the HSGQ G008's per-ONT multicast untag; any other 65531 Set stays ACKed unmodelled */
+			if (!omci_ctc_mop_ds_tci_set(o, inst, msg + 10))
+				return OMCI_RC_ATTR_FAILED;
 		} else if (e && mask) {
 			omci_store_merge(e, msg + 10, (int)(len - 10));
 		}

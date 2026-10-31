@@ -1462,8 +1462,10 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, int budget, bool napi_ctx)
 			/* The switch CPU port prepends a 2-byte offset word ahead of ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 74. */
 			skb_pull(skb, RX_CPU_PREFIX);
-			if (rdev == ep->wan_ndev)
+			if (rdev == ep->wan_ndev) {
 				luna_vlan_note(GPON_VLAN_RX, skb);
+				luna_mcast_untag(skb, rdev);
+			}
 			if (!netif_running(rdev)) {
 				rdev->stats.rx_dropped++;
 				dev_kfree_skb_any(skb);

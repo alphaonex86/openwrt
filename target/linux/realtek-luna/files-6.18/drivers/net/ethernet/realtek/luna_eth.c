@@ -1835,8 +1835,10 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 				rdev->stats.rx_dropped++;
 				dev_kfree_skb_any(skb);
 			} else {
-				if (rdev == ep->wan_ndev)
+				if (rdev == ep->wan_ndev) {
 					luna_vlan_note(GPON_VLAN_RX, skb);
+					luna_mcast_untag(skb, rdev);
+				}
 				/* NAPI poll context: use the receive path, not netif_rx. */
 				skb->protocol = eth_type_trans(skb, rdev);
 				rdev->stats.rx_packets++;

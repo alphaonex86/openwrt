@@ -1337,6 +1337,17 @@ static inline unsigned int gpon_vlan_put_list(char *out, unsigned int at, unsign
 	return n ? at : gpon_vlan_put(out, at, sz, " none");
 }
 
+/* Downstream multicast tag control 1 strips the outer tag (G.988 9.3.27 #16): the outer C-tag's VID of an
+ * IPv4/IPv6 multicast frame to strip, else -1.  PURE. */
+static inline int gpon_mcast_ds_strip_vid(const u8 *f, unsigned int len, u8 control)
+{
+	if (control != 1 || len < 18 || f[12] != 0x81 || f[13] != 0x00)
+		return -1;
+	if (!(f[0] == 0x01 && f[1] == 0x00 && f[2] == 0x5e) && !(f[0] == 0x33 && f[1] == 0x33))
+		return -1;
+	return ((f[14] << 8) | f[15]) & 0xfff;
+}
+
 /* /proc/gpon_vlan: what the OLT provisioned, what crossed the wire, and what crossed it unprovisioned.
  * An OLT that provisions no VLAN (a transparent one) makes nothing unexpected. -> chars written */
 static inline unsigned int gpon_vlan_census_render(const struct gpon_vlan_census *c, const u64 *prov,

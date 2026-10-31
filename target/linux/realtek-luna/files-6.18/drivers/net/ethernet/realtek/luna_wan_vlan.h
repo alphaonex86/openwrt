@@ -8,11 +8,30 @@
 #include "luna_gpon_nic.h"
 
 extern struct gpon_vlan_census luna_vlan_census;
+/* The OLT's downstream multicast tag control (ME 309/65531 #16), refreshed per OMCI message. */
+extern u8 luna_mcast_ds_control;
 
 static inline void luna_vlan_note(unsigned int dir, const struct sk_buff *skb)
 {
 	gpon_vlan_census_note(&luna_vlan_census, dir, skb_vlan_tag_present(skb) ? skb_vlan_tag_get_id(skb) :
 			      gpon_vlan_frame_vid(skb->data, skb_headlen(skb)));
+}
+
+/* Cut a multicast outer tag the OLT says to strip (ME 309/65531 #16) that no VLAN netdev of @wan claims. */
+static inline void luna_mcast_untag(struct sk_buff *skb, struct net_device *wan)
+{
+	int vid = gpon_mcast_ds_strip_vid(skb->data, skb_headlen(skb), READ_ONCE(luna_mcast_ds_control));
+	bool claimed;
+
+	if (vid < 0)
+		return;
+	rcu_read_lock();
+	claimed = __vlan_find_dev_deep_rcu(wan, htons(ETH_P_8021Q), vid);
+	rcu_read_unlock();
+	if (claimed)
+		return;
+	memmove(skb->data + VLAN_HLEN, skb->data, 2 * ETH_ALEN);
+	skb_pull(skb, VLAN_HLEN);
 }
 
 /* The US flow of a WAN frame: its VID's service flow, else the WAN's control or data flow. */

@@ -365,6 +365,8 @@ int cortina_ni_pon_tx(const u8 *pdu, unsigned int len);
 void cortina_ni_pon_wan_ndev_set(struct net_device *ndev);
 /* Every WAN frame's VID, both directions; cortina-gpon renders /proc/gpon_vlan. */
 extern struct gpon_vlan_census cortina_vlan_census;
+/* The OLT's downstream multicast tag control (ME 309/65531 #16), refreshed by cortina-gpon per OMCI message. */
+extern u8 cortina_mcast_ds_control;
 
 /* Print BOTH directions' CPU-forward counters (US ... -- dev/MEASURED-cortina-ni.h.md sec 14. */
 struct seq_file;

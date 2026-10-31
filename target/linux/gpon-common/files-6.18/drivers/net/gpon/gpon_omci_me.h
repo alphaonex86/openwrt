@@ -507,6 +507,7 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * GPON_MCAST_GEM_PORT today */
 #define OMCI_ME_HSGQ_WAN_ACL	251	/* HSGQ vendor ME: WAN management ACL */
 #define OMCI_ME_CTC_LOID_AUTH	65530	/* 0xFFFA — CTC extension the OLT audits */
+#define OMCI_ME_CTC_EXT_MOP	65531	/* 0xFFFB — CTC extended multicast operations profile */
 
 /* ★★ THE MIB-DATA-SYNC POISON SEED IS PROTOCOL POLICY, AND IT ...
  * dev/MEASURED-gpon_omci_me.h.md sec 9. */
@@ -835,6 +836,10 @@ struct omci_data_binding {
 /* Every VID the OLT provisioned over OMCI -- ME 84 filter lists, ME 171 filters and treatments -- into a
  * GPON_VLAN_WORDS bitmap the caller zeroed. */
 void omci_vlan_provisioned(const struct omci_onu *o, u64 *vids);
+/* The downstream multicast tag control the OLT set (ME 309 #16, CTC ME 65531 #16), 0 (transparent) when none. */
+u8 omci_mcast_ds_tag_control(struct omci_onu *o);
+/* CTC ME 65531 #16 from an OLT Set of that attribute alone; false when the pool is full. */
+bool omci_ctc_mop_ds_tci_set(struct omci_onu *o, u16 inst, const u8 *v);
 
 void omci_data_binding_snapshot(const struct omci_onu *o, u16 omcc_gem,
 				u16 mcast_gem, struct omci_data_binding *binding);

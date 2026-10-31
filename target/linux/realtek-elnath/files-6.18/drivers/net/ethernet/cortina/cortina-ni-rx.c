@@ -11,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/etherdevice.h>
+#include <linux/if_vlan.h>	/* __vlan_find_dev_deep_rcu(): a VID a VLAN netdev claims */
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -304,6 +305,22 @@ EXPORT_SYMBOL_GPL(cortina_ni_pon_rx_hook_set);
  * dev/MEASURED-cortina-ni-rx.c.md sec 20. */
 static struct net_device *cortina_ni_pon_wan_ndev;
 struct gpon_vlan_census cortina_vlan_census;
+u8 cortina_mcast_ds_control;
+EXPORT_SYMBOL_GPL(cortina_mcast_ds_control);
+
+/* The tag bytes to cut from a WAN frame: a multicast outer tag the OLT says to strip and no VLAN netdev claims. */
+static unsigned int cortina_ni_rx_mcast_cut(const u8 *f, unsigned int len, struct net_device *wan)
+{
+	int vid = gpon_mcast_ds_strip_vid(f, len, READ_ONCE(cortina_mcast_ds_control));
+	bool claimed;
+
+	if (vid < 0)
+		return 0;
+	rcu_read_lock();
+	claimed = __vlan_find_dev_deep_rcu(wan, htons(ETH_P_8021Q), vid);
+	rcu_read_unlock();
+	return claimed ? 0 : VLAN_HLEN;
+}
 EXPORT_SYMBOL_GPL(cortina_vlan_census);
 
 void cortina_ni_pon_wan_ndev_set(struct net_device *ndev)
@@ -1053,18 +1070,26 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 								&is_l3wan);
 
 		if (wan) {
+			unsigned int cut;
+
 			if (is_l3wan)
 				rx->wan_l3_frames++;
 			else
 				rx->wan_frames++;
 			gpon_vlan_census_note(&cortina_vlan_census, GPON_VLAN_RX, gpon_vlan_frame_vid(buf + off, len));
-			skb = napi_alloc_skb(&rx->napi, len);
+			cut = cortina_ni_rx_mcast_cut(buf + off, len, wan);
+			skb = napi_alloc_skb(&rx->napi, len - cut);
 			if (unlikely(!skb)) {
 				rx->drop_nobuf++;
 				wan->stats.rx_dropped++;
 				return rpa;
 			}
-			skb_put_data(skb, buf + off, len);
+			if (cut) {
+				skb_put_data(skb, buf + off, 2 * ETH_ALEN);
+				skb_put_data(skb, buf + off + 2 * ETH_ALEN + cut, len - 2 * ETH_ALEN - cut);
+			} else {
+				skb_put_data(skb, buf + off, len);
+			}
 			cortina_ni_rx_deliver(&rx->napi, skb, wan);
 			wan->stats.rx_packets++;
 			wan->stats.rx_bytes += len;

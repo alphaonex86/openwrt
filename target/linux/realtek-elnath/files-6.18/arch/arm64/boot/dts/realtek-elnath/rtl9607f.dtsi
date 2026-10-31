@@ -179,6 +179,22 @@
 		status = "okay";
 	};
 
+	/* The SoC temperature sensor; a board sets its calibration `deviation` (millidegrees). */
+	soc_thermal: thermal-sensor@f4320294 {
+		compatible = "cortina,thermal-sensor";
+		reg = <0x00 0xf4320294 0x00 0x10>;
+		#thermal-sensor-cells = <0>;
+	};
+
+	/* The zone stock names cpu-thermal, polled as stock does; stock declares no trip either. */
+	thermal-zones {
+		cpu-thermal {
+			polling-delay-passive = <500>;
+			polling-delay = <3000>;
+			thermal-sensors = <&soc_thermal>;
+		};
+	};
+
 
 	/*
 	 * Cortina NI (network engine) — the RTL9607F Ethernet packet engine.

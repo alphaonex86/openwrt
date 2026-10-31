@@ -269,6 +269,10 @@
 	};
 };
 
+&soc_thermal {
+	deviation = <2000>;	/* the stock tree's value */
+};
+
 /* The 5 GHz PA supply, "usb_vbus" in the stock tree: held high as stock does, not left to the bootloader. */
 &gpio4 {
 	pa-5g-hog {

@@ -379,6 +379,7 @@ static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
  * @bc_flood:         broadcast flood, one bit per port
  * @unkn_mc_flood:    unknown-multicast flood, one bit per port
  * @unkn_uc_flood:    unknown-unicast flood, one bit per port
+ * @bc_behave:        per-port broadcast action, 2 bits per port (0 = not established)
  * @omci_cpu_reason:  the CPU-tag RX `reason` code (rx opts2[28:21]) the switch
  *                    stamps on a DOWNSTREAM OMCI frame it traps to the CPU
  *                    port.  PER CHIP AND NOT GUESSABLE: the vendor's own NIC
@@ -461,6 +462,7 @@ struct luna_sw_map {
 	u32 bc_flood;
 	u32 unkn_mc_flood;
 	u32 unkn_uc_flood;
+	u32 bc_behave;
 	/* ★ THE STATISTICS BLOCK.  STAT_PORT_TX_MIB is family-invariant (0x32000
 	 * on all three dies) and lives as a #define above; the RX base MOVES and
 	 * the port count differs, so both are data.  See the table in the RX-MIB
@@ -549,6 +551,7 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.bc_flood	= 0x1C028,
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
+	.bc_behave	= 0x1C034,	/* LUT_BC_BEHAVE, the same offset on both dies [tier 3, its register map] */
 	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9603CVD,	/* [tier 3, its register map] */
 	.n_mib_ports	= 7,		/* register map port index 0..6 */
 	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */
@@ -595,6 +598,7 @@ static const struct luna_sw_map rtl9607c_sw_map = {
 	.bc_flood	= 0x1C028,
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
+	.bc_behave	= 0x1C034,	/* LUT_BC_BEHAVE, the same offset on both dies [tier 3, its register map] */
 	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9607C,	/* [tier 3, its register map] */
 	.n_mib_ports	= 12,		/* register map port index 0..11 */
 	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */

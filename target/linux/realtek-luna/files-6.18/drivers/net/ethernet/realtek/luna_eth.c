@@ -1284,6 +1284,32 @@ static int eth_alloc_rings(struct luna_eth *ep)
 }
 
 /* ---- switch open-L2 bring-up (ordered; see file header) ------------------- */
+#define LUT_MISS_TRAP	2	/* LUT_UNKN_UC_DA / UNKN_*_MC action: trap to the CPU */
+#define LUT_BC_TRAP	1	/* LUT_BC_BEHAVE action: trap to the CPU */
+
+static void sw_port_act(struct luna_eth *ep, u32 base, unsigned int port, u32 act)
+{
+	u32 reg = sw_packed_off(base, port, SW_DA_ACT_BITS);
+
+	sw_wr(ep, reg, sw_packed_ins(sw_rd(ep, reg), port, SW_DA_ACT_BITS, act));
+}
+
+/* The PON is a routed WAN, never a bridge leg: a frame from it that misses the lookup (unknown
+ * unicast -- the switch never learns gpon0's own MAC --, unknown multicast, broadcast) goes to
+ * the CPU alone instead of flooding the LAN. Per ingress port, so the flow engine's LAN<->PON
+ * NAT is untouched, which port isolation would block (G24W 2026-10-31). */
+static void eth_pon_miss_to_cpu(struct luna_eth *ep)
+{
+	const struct luna_sw_map *m = ep->c->sw_map;
+
+	sw_port_act(ep, m->lut_unkn_uc_da, m->pon_port, LUT_MISS_TRAP);
+	sw_port_act(ep, m->unkn_l2_mc, m->pon_port, LUT_MISS_TRAP);
+	sw_port_act(ep, m->unkn_ip4_mc, m->pon_port, LUT_MISS_TRAP);
+	sw_port_act(ep, m->unkn_ip6_mc, m->pon_port, LUT_MISS_TRAP);
+	if (m->bc_behave)
+		sw_port_act(ep, m->bc_behave, m->pon_port, LUT_BC_TRAP);
+}
+
 static int eth_switch_init(struct luna_eth *ep)
 {
 	unsigned int p;
@@ -1352,13 +1378,14 @@ static int eth_switch_init(struct luna_eth *ep)
 	/* The PON port is not a flood destination (2026-08-27): ...
 	 * dev/MEASURED-luna_eth.c.md sec 36. */
 	{
-		u32 flood = ep->c->sw_map->port_mask;
+		u32 flood = ep->c->sw_map->port_mask, keep = ~flood;
 
 		if (ep->c->force_pon_ablty)
 			flood &= ~BIT(ep->c->sw_map->pon_port);
-		sw_or(ep, ep->c->sw_map->bc_flood, flood);
-		sw_or(ep, ep->c->sw_map->unkn_mc_flood, flood);
-		sw_or(ep, ep->c->sw_map->unkn_uc_flood, flood);
+		/* the port field written whole: the reset value already holds the PON bit, an OR kept it */
+		sw_wr(ep, ep->c->sw_map->bc_flood, (sw_rd(ep, ep->c->sw_map->bc_flood) & keep) | flood);
+		sw_wr(ep, ep->c->sw_map->unkn_mc_flood, (sw_rd(ep, ep->c->sw_map->unkn_mc_flood) & keep) | flood);
+		sw_wr(ep, ep->c->sw_map->unkn_uc_flood, (sw_rd(ep, ep->c->sw_map->unkn_uc_flood) & keep) | flood);
 		ep->lan_flood_mask = flood & ~BIT(ep->c->sw_map->cpu_port);
 	}
 	/* 0 is the RESET value and is written only because it is: forcing every
@@ -1373,6 +1400,7 @@ static int eth_switch_init(struct luna_eth *ep)
 	sw_wr(ep, ep->c->sw_map->unkn_l2_mc,  sw_rd(ep, ep->c->sw_map->unkn_l2_mc)  & ~DA_ACT_PORTS);
 	sw_wr(ep, ep->c->sw_map->unkn_ip4_mc, sw_rd(ep, ep->c->sw_map->unkn_ip4_mc) & ~DA_ACT_PORTS);
 	sw_wr(ep, ep->c->sw_map->unkn_ip6_mc, sw_rd(ep, ep->c->sw_map->unkn_ip6_mc) & ~DA_ACT_PORTS);
+	eth_pon_miss_to_cpu(ep);
 
 	/* 4a3. VLAN must not gate CPU<->LAN egress. The boot loader can leave VLAN
 	 *      filtering ON with the CPU port outside the member set, which silently

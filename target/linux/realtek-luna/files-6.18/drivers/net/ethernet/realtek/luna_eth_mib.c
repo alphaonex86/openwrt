@@ -117,9 +117,14 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 	       (luna_mib_has_rx(s) ? ARRAY_SIZE(luna_mib_rx) : 0);
 }
 
+/* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map. */
+#define LUNA_MIB_ROLES	2
+
 static int luna_mib_count(const struct luna_mib_state *s)
 {
-	return luna_mib_ports(s) * luna_mib_per_port(s);
+	unsigned int n = luna_mib_ports(s);
+
+	return n ? LUNA_MIB_ROLES + n * luna_mib_per_port(s) : 0;
 }
 
 /* One 32-bit or 64-bit counter out of a per-port window. The ...
@@ -153,9 +158,11 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 	const struct luna_mib_state *s = &luna_mib;
 	unsigned int port, i, n = luna_mib_ports(s);
 
-	if (sset != ETH_SS_STATS)
+	if (sset != ETH_SS_STATS || !n)
 		return;
 
+	ethtool_puts(&data, "pon_port");
+	ethtool_puts(&data, "cpu_port");
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)
@@ -173,6 +180,10 @@ static void luna_mib_get_stats(struct net_device *ndev,
 	struct luna_mib_state *s = &luna_mib;
 	unsigned int port, i, n = luna_mib_ports(s);
 
+	if (!n)
+		return;
+	*data++ = s->map->pon_port;
+	*data++ = s->map->cpu_port;
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)

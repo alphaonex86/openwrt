@@ -239,6 +239,16 @@
 		#clock-cells = <0>;
 	};
 
+	/* The memcpy DMA engine: its two channels, global control, interrupt routing, AXI master. */
+	dma-controller@90301200 {
+		compatible = "cortina,adma";
+		reg = <0x00 0x90301200 0x00 0x80>,
+		      <0x00 0x90301000 0x00 0x60>,
+		      <0x00 0x90301600 0x00 0x40>,
+		      <0x00 0x903011a0 0x00 0x10>;
+		interrupts = <0x00 0x1f 0x04>, <0x00 0x20 0x04>;	/* GIC SPI 31, 32 */
+	};
+
 	/* The true random number generator, /dev/hwrng; stock describes it and binds no driver. */
 	trng@90600200 {
 		compatible = "cortina,trng";

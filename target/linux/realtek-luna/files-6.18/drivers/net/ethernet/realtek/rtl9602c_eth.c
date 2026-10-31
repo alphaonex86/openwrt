@@ -649,6 +649,19 @@ static int rtl9602c_vlan_write(struct rtl9602c_eth *ep, u16 vid, u32 mbr, u32 un
 			     rtl9602c_sw_tbl_pause);
 }
 
+/* The WAN is VLAN-transparent: every VID reaches the CPU from the PON, tagged, since an OLT never
+ * names its multicast VLAN to the ONU. The VLANs written after this one take their own entries. */
+static int rtl9602c_wan_vids_admit(struct rtl9602c_eth *ep)
+{
+	u32 mbr = BIT(ep->swm->pon_port) | BIT(ep->swm->cpu_port);
+	u16 vid;
+
+	for (vid = 1; vid < 4095; vid++)
+		if (rtl9602c_vlan_write(ep, vid, mbr, 0, 0x1) < 0)
+			return vid;
+	return 0;
+}
+
 static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 {
 	if (!ep->sw)
@@ -694,6 +707,11 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 
 		u32 lan_ext = 0x7, pon = BIT(ep->swm->pon_port) | BIT(ep->swm->cpu_port);
 
+		rc = rtl9602c_wan_vids_admit(ep);
+		if (rc)
+			netdev_warn(ep->ndev,
+				    "swcore VLAN table BUSY at VID %d: a WAN VLAN from that one on is dropped before the CPU\n",
+				    rc);
 		/* As stock's 4005: every port and the CPU's extension ports, all untagged */
 		rc = rtl9602c_vlan_write(ep, SW_DEFAULT_VID, 0xf, 0xf, lan_ext);
 		if (rc < 0)
@@ -1147,26 +1165,6 @@ static int rtl9602c_eth_wan_stop(struct net_device *ndev)
 	return 0;
 }
 
-/* With the VLAN filter on, a tagged WAN needs its VID in the table: PON and CPU, tagged. */
-static int rtl9602c_wan_vid(struct rtl9602c_eth *ep, u16 vid, bool add)
-{
-	u32 mbr = BIT(ep->swm->pon_port) | BIT(ep->swm->cpu_port);
-
-	if (!ep->sw || !pon_vid || !vid || vid == SW_DEFAULT_VID || vid == pon_vid)
-		return 0;
-	return rtl9602c_vlan_write(ep, vid, add ? mbr : 0, 0, add ? 0x1 : 0) < 0 ? -EBUSY : 0;
-}
-
-static int rtl9602c_wan_vid_add(struct net_device *ndev, __be16 proto, u16 vid)
-{
-	return rtl9602c_wan_vid(*(struct rtl9602c_eth **)netdev_priv(ndev), vid, true);
-}
-
-static int rtl9602c_wan_vid_kill(struct net_device *ndev, __be16 proto, u16 vid)
-{
-	return rtl9602c_wan_vid(*(struct rtl9602c_eth **)netdev_priv(ndev), vid, false);
-}
-
 static const struct net_device_ops rtl9602c_eth_wan_ops = {
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	.ndo_setup_tc		= rtl9602c_l34_setup_tc,
@@ -1176,8 +1174,6 @@ static const struct net_device_ops rtl9602c_eth_wan_ops = {
 	.ndo_start_xmit		= rtl9602c_eth_wan_xmit,
 	.ndo_set_mac_address	= rtl9602c_eth_wan_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_vlan_rx_add_vid	= rtl9602c_wan_vid_add,
-	.ndo_vlan_rx_kill_vid	= rtl9602c_wan_vid_kill,
 };
 
 static int rtl9602c_eth_omci_xmit(struct rtl9602c_eth *ep, const u8 *omci,
@@ -2881,7 +2877,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			wan->netdev_ops = &rtl9602c_eth_wan_ops;
 			/* Keep the LAN and WAN feature declarations consistent. */
 			wan->hw_features |= NETIF_F_HW_TC;
-			wan->features |= NETIF_F_HW_TC | NETIF_F_HW_VLAN_CTAG_FILTER;
+			wan->features |= NETIF_F_HW_TC;
 			/* Initial WAN MAC = board MAC + offset; re-derived at open + on eth0 MAC
 			 * changes once rtk_factory provisions the real board MAC onto eth0. */
 			rtl9602c_wan_mac(wmac, ndev->dev_addr);

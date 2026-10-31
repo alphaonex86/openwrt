@@ -4,6 +4,7 @@
 #ifndef _LUNA_PONMAC_H
 #define _LUNA_PONMAC_H
 
+#include <linux/errno.h>
 #include <linux/types.h>
 
 /* The chips this library actually serves. It is the LUNA MIPS ...
@@ -18,6 +19,22 @@ enum luna_chip {
 #define LUNA_REV_A		0x1
 #define LUNA_REV_B		0x2
 #define LUNA_REV_C		0x3
+
+/* MODEL_NAME_INFO (swcore 0x10000): RTL_ID [31:16], MODEL_CHAR_1ST [15:11]
+ * ('C' = 3), a variant bit [4], RTL_VID [3:0]. The stock probe reads the
+ * RTL9607C revision as RTL_VID + 2 (+ 1 with bit 4 set), capped at C; the
+ * UNKNOWN board's 0x96071800 is rev B. -ENODEV when the word names another die. */
+#define LUNA_MODEL_NAME_INFO	0x1B010000u
+
+static inline int luna_rtl9607c_rev(u32 model_name_info)
+{
+	u32 rev;
+
+	if ((model_name_info >> 16) != 0x9607 || ((model_name_info >> 11) & 0x1f) != 3)
+		return -ENODEV;
+	rev = (model_name_info & 0xf) + ((model_name_info & 0x10) ? 1 : 2);
+	return rev > LUNA_REV_C ? LUNA_REV_C : (int)rev;
+}
 
 /* Subtype (9602C family): pick GponModeV3 (9601C) vs V2 on rev>A. */
 #define LUNA_SUBTYPE_NONE		0x00

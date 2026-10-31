@@ -420,9 +420,11 @@ static bool i2c_proxy;
 module_param(i2c_proxy, bool, 0644);
 
 /* Set once at init from the DT compatible: the RTL9607C shares the family
- * PON-MAC/GTC/PLOAM core but uses the c7 rev-C SerDes path, needs the rev>A
- * PON-IP power bit, and has NO external BOSA (internal SerDes front-end). */
+ * PON-MAC/GTC/PLOAM core but uses the c7 SerDes path of its own revision (read
+ * from MODEL_NAME_INFO, never assumed), needs the rev>A PON-IP power bit, and has
+ * NO external BOSA (internal SerDes front-end). */
 static bool is_9607c;
+static int rtl9607c_rev = LUNA_REV_C;
 /* The THIRD chip. Stock treats the RTL9603CVD as its own silicon -- its own DAL,
  * its own register table, PON SerDes at SWCORE +0x040000 -- and this tree already
  * carries its table; see the note at the assignment. */
@@ -10041,13 +10043,22 @@ static int __init rtl9602c_gpon_init(void)
 	}
 
 	if (is_9607c) {
+		u32 model = r960_phys_rd(LUNA_MODEL_NAME_INFO);
+		int rev = luna_rtl9607c_rev(model);
+
+		if (rev < 0)
+			pr_err("luna-gpon: MODEL_NAME_INFO 0x%08x names no RTL9607C: SerDes table for rev C\n",
+			       model);
+		else
+			rtl9607c_rev = rev;
 		skip_bosa = true;
 		/* Enable the switch-internal SMI master so the PHY-10 proxy can reach
 		 * the I2C-indirect hole (0xB0-0xD8) for the optical-module DDM read. */
 		iowrite32(ioread32(swcore_base + SW_IO_MODE_EN_9607C) | SW_MDX_M_EN,
 			  swcore_base + SW_IO_MODE_EN_9607C);
 		(void)ioread32(swcore_base + SW_IO_MODE_EN_9607C);
-		pr_info("luna-gpon: RTL9607C detected — rev-C SerDes, internal front-end (skip BOSA), SMI proxy on\n");
+		pr_info("luna-gpon: RTL9607C rev %c (MODEL_NAME_INFO 0x%08x), internal front-end (skip BOSA), SMI proxy on\n",
+			'A' + rtl9607c_rev - LUNA_REV_A, model);
 	}
 
 	/* Power up the PON packet-datapath IP domain (see SOC_IP_ENABLE_PHYS). */
@@ -10193,11 +10204,11 @@ static int __init rtl9602c_gpon_init(void)
 				bosa_settle_ms);
 		}
 		if (family_lib) {
-			/* Clean-room family lib. RTL9607C = c7 rev-C ModeV3 SerDes; RTL9602C
-			 * = rev-A. Same ops for both (same SWCORE base; the lib never touches
-			 * the 9607C I2C-indirect decode hole). */
+			/* Clean-room family lib. RTL9607C = c7 SerDes of the measured rev;
+			 * RTL9602C = rev-A. Same ops for both (same SWCORE base; the lib never
+			 * touches the 9607C I2C-indirect decode hole). */
 			if (is_9607c)
-				sret = luna_ponmac_mode_set(LUNA_CHIP_9607C, LUNA_REV_C,
+				sret = luna_ponmac_mode_set(LUNA_CHIP_9607C, rtl9607c_rev,
 							       LUNA_SUBTYPE_NONE,
 							       &rtl9602c_r960_ops);
 			else if (is_9603cvd)

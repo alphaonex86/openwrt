@@ -53,6 +53,7 @@
 #include <linux/types.h>
 #include <linux/bits.h>
 #include "luna_gmac_logic.h"	/* struct luna_rx_layout: the per-die RX field map */
+#include "luna_ctl_acl.h"	/* struct luna_ctl_acl: the control-ethertype ACL */
 
 /* ───────────────────────── family-invariant facts ───────────────────────── */
 /* MAC block, offsets from the MAC base. */
@@ -380,6 +381,9 @@ static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
  * @unkn_mc_flood:    unknown-multicast flood, one bit per port
  * @unkn_uc_flood:    unknown-unicast flood, one bit per port
  * @bc_behave:        per-port broadcast action, 2 bits per port (0 = not established)
+ * @l2_cfg:           L2_CFG, [2:0] = priority of a lookup-miss trap; non-zero arms the
+ *                    control RX ring (0 = not proven on this die: one ring)
+ * @ctl_acl:          the ingress ACL that stamps that priority on control ethertypes (NULL = none)
  * @omci_cpu_reason:  the CPU-tag RX `reason` code (rx opts2[28:21]) the switch
  *                    stamps on a DOWNSTREAM OMCI frame it traps to the CPU
  *                    port.  PER CHIP AND NOT GUESSABLE: the vendor's own NIC
@@ -397,6 +401,13 @@ static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
  * "+8 from the 9602C" table is a table that silently follows the wrong chip the
  * day a third revision moves only half the block.
  */
+/* The ingress ACL [tier 3, its register map and table list] */
+static const struct luna_ctl_acl rtl9603cvd_ctl_acl = {
+	.tmpl = 0x15008, .en = 0x15048, .permit = 0x1504C, .act_ctrl = 0x15050, .pri_sel = 0x1C23C,
+	.data_base = 128, .rule_tbl = 2, .act_tbl = 3, .rules = 64, .ports = 0x3f,
+	.pri_shift = 16, .acl_weight_shift = 9, .addr_shift = 12,
+};
+
 struct luna_sw_map {
 	/* ★ PORT NUMBERS ARE PER-CHIP AND WERE HALF-TABULATED.  luna_eth.c
 	 * already carried pon_port/cpu_port per chip while rtl9602c_eth.c
@@ -463,6 +474,8 @@ struct luna_sw_map {
 	u32 unkn_mc_flood;
 	u32 unkn_uc_flood;
 	u32 bc_behave;
+	u32 l2_cfg;
+	const struct luna_ctl_acl *ctl_acl;
 	/* ★ THE STATISTICS BLOCK.  STAT_PORT_TX_MIB is family-invariant (0x32000
 	 * on all three dies) and lives as a #define above; the RX base MOVES and
 	 * the port count differs, so both are data.  See the table in the RX-MIB
@@ -552,6 +565,8 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.unkn_mc_flood	= 0x1C02C,
 	.unkn_uc_flood	= 0x1C030,
 	.bc_behave	= 0x1C034,	/* LUT_BC_BEHAVE, the same offset on both dies [tier 3, its register map] */
+	.l2_cfg		= 0x17154,	/* L2_CFG [tier 3, its register map] */
+	.ctl_acl	= &rtl9603cvd_ctl_acl,
 	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9603CVD,	/* [tier 3, its register map] */
 	.n_mib_ports	= 7,		/* register map port index 0..6 */
 	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */

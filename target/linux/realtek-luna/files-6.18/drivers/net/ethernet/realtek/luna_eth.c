@@ -199,6 +199,10 @@ MODULE_PARM_DESC(lan_flood_direct, "send CPU-originated multicast/broadcast to a
 #define R_TxFDP0	0x1300	/* TX ring0 fetch-descriptor pointer		*/
 #define R_TxCDO0	0x1304	/* TX ring0 current-descriptor offset (u16)	*/
 #define R_RRING_ROUTE	0x1370	/* RX class -> ring routing			*/
+#define R_RxFDP2	0x1390	/* RX ring 2: descriptor base			*/
+#define R_RxCDO2	0x1394	/* RX ring 2: CDO[31:16] | size-1 [11:0]	*/
+#define R_RxDesNum2	0x1398	/* RX ring 2: size-1 [11:0]			*/
+#define R_RxDesWrap2	0x139C	/* RX ring 2: pause on [27:16] / off [11:0]	*/
 #define R_RxFDP0	0x13F0	/* RX ring0 fetch-descriptor pointer		*/
 #define R_RxCDO0	0x13F4	/* RX ring0: RxCDO[31:16] | RxRingSize[15:8]	*/
 				/* 32-BIT register: the store must not be 16-bit. MSR(0x58) ...
@@ -209,6 +213,13 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
 
 #define IO_CMD_ENABLE	0xc059f130
 #define IO_CMD1_ENABLE	0x32000001
+#define IO_CMD1_RX_RINGS(n)	(GENMASK((n) - 1, 0) << 16)
+/* The control RX ring: the switch stamps a lookup-miss trap (a WAN broadcast) and a control
+ * ethertype (luna_ctl_acl.h) CTL_RX_PRIO, the GMAC routes that priority to hardware ring 2, NAPI
+ * drains it first, so a flood that fills the data ring cannot take the link's control with it. */
+#define CTL_RING_SIZE	64
+#define CTL_RX_PRIO	7
+#define CTL_RX_ROUTE	0x21111111	/* one nibble per priority: 7 -> ring 2, the rest ring 1 */
 /* Stock RCR (G24W stock live read 2026-10-24; the vendor driver writes it whatever the
  * promiscuity): AcceptAllPhys|AcceptMyPhys|AcceptMulticast|AcceptBroadcast.  The switch
  * already filtered; DS OMCI reaches the GMAC with its TCI where a DA sits, so without
@@ -403,6 +414,14 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 
 /* MII BMCR/BMSR bits. The MII register bits are ... -- dev/MEASURED-luna_eth.c.md sec 13. */
 
+struct luna_rxq {
+	struct rx_desc		*ring;
+	dma_addr_t		ring_dma;
+	struct sk_buff		*skb[RX_RING_SIZE];
+	dma_addr_t		buf_dma[RX_RING_SIZE];
+	unsigned int		head, size;
+};
+
 struct luna_eth {
 	const struct luna_eth_chip *c;	/* THE per-chip table -- never an #ifdef */
 	struct net_device	*ndev;
@@ -420,11 +439,8 @@ struct luna_eth {
 
 	/* Plain streaming DMA: the kernel manages the L2 so dma_map/unmap flush +
 	 * invalidate it -- no bounce buffers needed. */
-	struct rx_desc		*rx_ring;
-	dma_addr_t		rx_ring_dma;
-	struct sk_buff		*rx_skb[RX_RING_SIZE];
-	dma_addr_t		rx_buf_dma[RX_RING_SIZE];
-	unsigned int		rx_head;
+	struct luna_rxq		rxq[2];		/* [0] data, [1] control */
+	unsigned int		n_rxq;
 
 	struct tx_desc		*tx_ring;
 	dma_addr_t		tx_ring_dma;
@@ -1218,23 +1234,30 @@ static void eth_set_hwaddr(struct luna_eth *ep, const u8 *mac)
 /* Allocate a fresh RX skb, stream-map it, and arm the descriptor on it. */
 /* The body is the FAMILY's (luna_eth_regs.h); the wrapper keeps the old name
  * and signature so every call site is untouched. */
-static int eth_refill(struct luna_eth *ep, unsigned int idx)
+static int eth_refill(struct luna_eth *ep, struct luna_rxq *q, unsigned int idx)
 {
-	return luna_rx_refill(ep->ndev, ep->dev, ep->rx_ring, ep->rx_skb,
-				 ep->rx_buf_dma, idx, RX_RING_SIZE, RX_BUF_SIZE);
+	return luna_rx_refill(ep->ndev, ep->dev, q->ring, q->skb,
+				 q->buf_dma, idx, q->size, RX_BUF_SIZE);
 }
 
 static void eth_free_rings(struct luna_eth *ep)
 {
+	struct luna_rxq *q;
 	unsigned int i;
 
-	for (i = 0; i < RX_RING_SIZE; i++) {
-		if (ep->rx_skb[i]) {
-			dma_unmap_single(ep->dev, ep->rx_buf_dma[i], RX_BUF_SIZE,
-					 DMA_FROM_DEVICE);
-			dev_kfree_skb_any(ep->rx_skb[i]);
-			ep->rx_skb[i] = NULL;
+	for (q = ep->rxq; q < ep->rxq + ARRAY_SIZE(ep->rxq); q++) {
+		for (i = 0; i < q->size; i++) {
+			if (q->skb[i]) {
+				dma_unmap_single(ep->dev, q->buf_dma[i], RX_BUF_SIZE,
+						 DMA_FROM_DEVICE);
+				dev_kfree_skb_any(q->skb[i]);
+				q->skb[i] = NULL;
+			}
 		}
+		if (q->ring)
+			dma_free_coherent(ep->dev, q->size * sizeof(struct rx_desc),
+					  q->ring, q->ring_dma);
+		q->ring = NULL;
 	}
 	for (i = 0; i < TX_RING_SIZE; i++) {
 		if (ep->tx_skb[i]) {		/* zero-copy frames still in flight */
@@ -1246,30 +1269,37 @@ static void eth_free_rings(struct luna_eth *ep)
 		kfree(ep->tx_buf[i]);
 		ep->tx_buf[i] = NULL;
 	}
-	if (ep->rx_ring)
-		dma_free_coherent(ep->dev, RX_RING_SIZE * sizeof(struct rx_desc),
-				  ep->rx_ring, ep->rx_ring_dma);
 	if (ep->tx_ring)
 		dma_free_coherent(ep->dev, TX_RING_SIZE * sizeof(struct tx_desc),
 				  ep->tx_ring, ep->tx_ring_dma);
-	ep->rx_ring = NULL;
 	ep->tx_ring = NULL;
 }
 
 static int eth_alloc_rings(struct luna_eth *ep)
 {
+	struct luna_rxq *q;
 	unsigned int i;
 
-	ep->rx_ring = dma_alloc_coherent(ep->dev,
-			RX_RING_SIZE * sizeof(struct rx_desc),
-			&ep->rx_ring_dma, GFP_KERNEL);
+	ep->n_rxq = ep->c->sw_map->l2_cfg ? 2 : 1;
+	ep->rxq[0].size = RX_RING_SIZE;
+	ep->rxq[1].size = CTL_RING_SIZE;
+	for (q = ep->rxq; q < ep->rxq + ep->n_rxq; q++) {
+		q->head = 0;
+		q->ring = dma_alloc_coherent(ep->dev, q->size * sizeof(struct rx_desc),
+					     &q->ring_dma, GFP_KERNEL);
+		if (!q->ring)
+			return -ENOMEM;
+		for (i = 0; i < q->size; i++)
+			if (eth_refill(ep, q, i))
+				return -ENOMEM;
+	}
 	ep->tx_ring = dma_alloc_coherent(ep->dev,
 			TX_RING_SIZE * sizeof(struct tx_desc),
 			&ep->tx_ring_dma, GFP_KERNEL);
-	if (!ep->rx_ring || !ep->tx_ring)
+	if (!ep->tx_ring)
 		return -ENOMEM;
 
-	ep->rx_head = ep->tx_head = ep->tx_dirty = 0;
+	ep->tx_head = ep->tx_dirty = 0;
 	for (i = 0; i < TX_RING_SIZE; i++) {
 		ep->tx_buf[i] = kmalloc(RX_BUF_SIZE, GFP_KERNEL);
 		if (!ep->tx_buf[i])
@@ -1277,9 +1307,6 @@ static int eth_alloc_rings(struct luna_eth *ep)
 		ep->tx_ring[i].opts1 = (i == TX_RING_SIZE - 1) ? D_EOR : 0;
 		ep->tx_skb[i] = NULL;
 	}
-	for (i = 0; i < RX_RING_SIZE; i++)
-		if (eth_refill(ep, i))
-			return -ENOMEM;
 	return 0;
 }
 
@@ -1401,6 +1428,15 @@ static int eth_switch_init(struct luna_eth *ep)
 	sw_wr(ep, ep->c->sw_map->unkn_ip4_mc, sw_rd(ep, ep->c->sw_map->unkn_ip4_mc) & ~DA_ACT_PORTS);
 	sw_wr(ep, ep->c->sw_map->unkn_ip6_mc, sw_rd(ep, ep->c->sw_map->unkn_ip6_mc) & ~DA_ACT_PORTS);
 	eth_pon_miss_to_cpu(ep);
+	if (ep->c->sw_map->l2_cfg)
+		sw_wr(ep, ep->c->sw_map->l2_cfg,
+		      (sw_rd(ep, ep->c->sw_map->l2_cfg) & ~GENMASK(2, 0)) | CTL_RX_PRIO);
+	if (ep->c->sw_map->ctl_acl) {
+		int rc = luna_ctl_acl_install(ep->sw, ep->c->sw_map->ctl_acl, CTL_RX_PRIO);
+
+		if (rc)
+			dev_err(ep->dev, "control ACL not installed (%d): ARP shares the data ring under a flood\n", rc);
+	}
 
 	/* 4a3. VLAN must not gate CPU<->LAN egress. The boot loader can leave VLAN
 	 *      filtering ON with the CPU port outside the member set, which silently
@@ -1523,19 +1559,24 @@ static void eth_hw_program(struct luna_eth *ep)
 	/* ring pointers (writable only while the engine is stopped). */
 	ep_wr(ep, R_TxFDP0, ep->tx_ring_dma | DMA_BUS_WINDOW);
 	iowrite16(0, ep->base + R_TxCDO0);
-	ep_wr(ep, R_RxFDP0, ep->rx_ring_dma | DMA_BUS_WINDOW);
+	ep_wr(ep, R_RxFDP0, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
 	/* Was this file's own spelling of the family packing -- the THIRD copy. */
 	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
 	/* 32-BIT, like the vendor and like rtl9602c_eth.c -- NOT ...
 	 * dev/MEASURED-luna_eth.c.md sec 39. */
 	ep_wr(ep, R_RxCDO0, luna_gmac_rxcdo_pack(RX_RING_SIZE));
-	/* route every RX class to ring 0. */
+	if (ep->n_rxq > 1) {
+		ep_wr(ep, R_RxFDP2, ep->rxq[1].ring_dma | DMA_BUS_WINDOW);
+		ep_wr(ep, R_RxCDO2, CTL_RING_SIZE - 1);
+		ep_wr(ep, R_RxDesNum2, CTL_RING_SIZE - 1);
+		ep_wr(ep, R_RxDesWrap2, (TH_ON_VAL << 16) | TH_OFF_VAL);
+	}
 	{
 		unsigned int k;
 
 		for (k = 0; k < 7; k++)
-			ep_wr(ep, R_RRING_ROUTE + k * 4, 0);
+			ep_wr(ep, R_RRING_ROUTE + k * 4, ep->n_rxq > 1 ? CTL_RX_ROUTE : 0);
 	}
 
 	/* MSR(0x58) top byte -- see the msr_top param note.  0xf0 is stock's
@@ -1547,7 +1588,7 @@ static void eth_hw_program(struct luna_eth *ep)
 	ep_wr(ep, R_MAR4, 0xffffffff);
 
 	/* enable edge: IO_CMD1 first, then IO_CMD (latches the fetch engine). */
-	ep_wr(ep, R_IO_CMD1, IO_CMD1_ENABLE);
+	ep_wr(ep, R_IO_CMD1, IO_CMD1_ENABLE | (ep->n_rxq > 1 ? IO_CMD1_RX_RINGS(2) : 0));
 	ep_wr(ep, R_IO_CMD, IO_CMD_ENABLE);
 
 	iowrite16(0xffff, ep->base + R_ISR);
@@ -1646,14 +1687,14 @@ static void luna_eth_omci_input(struct luna_eth *ep, const u8 *msg,
 		ep->dbg_omci_unhandled++;
 }
 
-static int eth_rx(struct luna_eth *ep, int budget)
+static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 {
 	struct net_device *ndev = ep->ndev;
 	int done = 0;
 
 	while (done < budget) {
-		unsigned int i = ep->rx_head;
-		u32 opts1 = ep->rx_ring[i].opts1;
+		unsigned int i = q->head;
+		u32 opts1 = q->ring[i].opts1;
 		struct sk_buff *skb, *fresh;
 		dma_addr_t fresh_dma;
 		u32 len;
@@ -1666,15 +1707,15 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		fresh = luna_rx_alloc(ndev, ep->dev, RX_BUF_SIZE, &fresh_dma);
 		if (!fresh) {
 			ndev->stats.rx_dropped++;
-			luna_rx_rearm(ep->rx_ring, i, RX_RING_SIZE, RX_BUF_SIZE);
-			ep->rx_head = (i + 1) % RX_RING_SIZE;
+			luna_rx_rearm(q->ring, i, q->size, RX_BUF_SIZE);
+			q->head = (i + 1) % q->size;
 			done++;
 			continue;
 		}
 
 		len = opts1 & RXD_LEN_MASK;
-		skb = ep->rx_skb[i];
-		dma_unmap_single(ep->dev, ep->rx_buf_dma[i], RX_BUF_SIZE,
+		skb = q->skb[i];
+		dma_unmap_single(ep->dev, q->buf_dma[i], RX_BUF_SIZE,
 				 DMA_FROM_DEVICE);
 
 		if (rx_dump > 0 && ep->rx_dumped < rx_dump && len) {
@@ -1683,23 +1724,23 @@ static int eth_rx(struct luna_eth *ep, int budget)
 			 * dev/MEASURED-luna_eth.c.md sec 43. */
 			dev_info(ep->dev,
 				 "rx0 desc: opts1=%08x opts2=%08x opts3=%08x len=%u (src_port=%u reason=%u)\n",
-				 opts1, ep->rx_ring[i].opts2, ep->rx_ring[i].opts3,
-				 len, luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, ep->rx_ring[i].opts3),
-				 (ep->rx_ring[i].opts2 >> 21) & 0xff);
+				 opts1, q->ring[i].opts2, q->ring[i].opts3,
+				 len, luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, q->ring[i].opts3),
+				 (q->ring[i].opts2 >> 21) & 0xff);
 			print_hex_dump(KERN_INFO, "rx0: ", DUMP_PREFIX_OFFSET,
 				       16, 1, skb->data, min_t(u32, len, 32), false);
 		}
 
 		/* One line per DISTINCT cpu-tag reason, ever.  See the field. */
 		{
-			unsigned int rsn = (ep->rx_ring[i].opts2 >> 21) & 0xff;
+			unsigned int rsn = (q->ring[i].opts2 >> 21) & 0xff;
 
 			if (!(ep->rx_reason_seen[rsn >> 5] & BIT(rsn & 31))) {
 				ep->rx_reason_seen[rsn >> 5] |= BIT(rsn & 31);
 				netdev_info(ndev,
 					    "rx cpu-tag reason %u seen (opts2=%08x opts3=%08x len=%u); this chip traps DS OMCI as %u\n",
-					    rsn, ep->rx_ring[i].opts2,
-					    ep->rx_ring[i].opts3, len,
+					    rsn, q->ring[i].opts2,
+					    q->ring[i].opts3, len,
 					    ep->c->sw_map->omci_cpu_reason);
 			}
 		}
@@ -1708,13 +1749,13 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		 * what tells a WAN that counts nothing apart from an OLT that is
 		 * sending nothing. */
 		{
-			unsigned int sp = luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, ep->rx_ring[i].opts3);
+			unsigned int sp = luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, q->ring[i].opts3);
 
 			if (!(ep->rx_src_port_seen & BIT(sp))) {
 				ep->rx_src_port_seen |= BIT(sp);
 				netdev_info(ndev,
 					    "rx ingress port %u seen (opts3=%08x len=%u); this chip's fibre port is %u, CPU port %u\n",
-					    sp, ep->rx_ring[i].opts3, len,
+					    sp, q->ring[i].opts3, len,
 					    ep->c->sw_map->pon_port,
 					    ep->c->sw_map->cpu_port);
 			}
@@ -1723,15 +1764,15 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		/* ... and one per distinct PON stream id, fibre-ingress only: the
 		 * field is extspa on a frame that came from anywhere else. */
 		if (luna_gmac_rx_is_wan(ep->c->sw_map->rx_layout,
-					ep->rx_ring[i].opts3,
+					q->ring[i].opts3,
 					ep->c->sw_map->pon_port)) {
-			unsigned int sid = luna_gmac_rx_pon_sid(ep->rx_ring[i].opts3);
+			unsigned int sid = luna_gmac_rx_pon_sid(q->ring[i].opts3);
 
 			if (!(ep->rx_pon_sid_seen[sid >> 5] & BIT(sid & 31))) {
 				ep->rx_pon_sid_seen[sid >> 5] |= BIT(sid & 31);
 				netdev_info(ndev,
 					    "rx PON stream %u seen (opts3=%08x len=%u); OMCC is %u, WAN data is %u, multicast is %u\n",
-					    sid, ep->rx_ring[i].opts3, len,
+					    sid, q->ring[i].opts3, len,
 					    ep->omci_sid, GPON_DATA_FLOW,
 					    GPON_MCAST_FLOW);
 			}
@@ -1742,8 +1783,8 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		 * bytes 12-13 of a G.988 header and the bridge would drop it silently. */
 		if (luna_gmac_rx_is_ds_omci(ep->c->sw_map->rx_layout,
 					    ep->omci_trap_on,
-					    ep->rx_ring[i].opts2,
-					    ep->rx_ring[i].opts3, len,
+					    q->ring[i].opts2,
+					    q->ring[i].opts3, len,
 					    ep->c->sw_map->omci_cpu_reason,
 					    (unsigned int)rx_prefix,
 					    RX_BUF_SIZE)) {
@@ -1780,7 +1821,7 @@ static int eth_rx(struct luna_eth *ep, int budget)
 
 			if (ep->wan_ndev &&
 			    luna_gmac_rx_is_wan(ep->c->sw_map->rx_layout,
-						ep->rx_ring[i].opts3,
+						q->ring[i].opts3,
 						ep->c->sw_map->pon_port))
 				rdev = ep->wan_ndev;
 
@@ -1805,9 +1846,9 @@ static int eth_rx(struct luna_eth *ep, int budget)
 		}
 
 		/* re-arm with the skb secured above */
-		luna_rx_arm(ep->rx_ring, ep->rx_skb, ep->rx_buf_dma, i,
-			    RX_RING_SIZE, RX_BUF_SIZE, fresh, fresh_dma);
-		ep->rx_head = (i + 1) % RX_RING_SIZE;
+		luna_rx_arm(q->ring, q->skb, q->buf_dma, i,
+			    q->size, RX_BUF_SIZE, fresh, fresh_dma);
+		q->head = (i + 1) % q->size;
 		done++;
 	}
 	return done;
@@ -1845,7 +1886,9 @@ static int eth_napi_poll(struct napi_struct *napi, int budget)
 	unsigned long flags;
 	int work;
 
-	work = eth_rx(ep, budget);
+	/* control first, but at most half the budget: a trapped flood cannot starve the data */
+	work = ep->n_rxq > 1 ? eth_rx(ep, &ep->rxq[1], budget / 2) : 0;
+	work += eth_rx(ep, &ep->rxq[0], budget - work);
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	eth_tx_reclaim(ep);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
@@ -1856,7 +1899,8 @@ static int eth_napi_poll(struct napi_struct *napi, int budget)
 		ep_wr(ep, R_ISR1, ep_rd(ep, R_ISR1));
 		iowrite16(IMR_RX_BITS, ep->base + R_IMR);
 		ep_wr(ep, R_IMR0, IMR0_TX_BITS);
-		if (luna_rx_ready(ep->rx_ring, ep->rx_head))	/* its bit went to the ack */
+		if (luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||	/* its bit went to the ack */
+		    (ep->n_rxq > 1 && luna_rx_ready(ep->rxq[1].ring, ep->rxq[1].head)))
 			napi_schedule(napi);
 	}
 	return work;
@@ -2183,6 +2227,7 @@ static int luna_eth_wan_open(struct net_device *ndev)
 		eth_hw_addr_set(ndev, wmac);
 	}
 	luna_omci_set_wan_mac(ndev->dev_addr);
+	luna_flow_wan_pin(ep, ndev->dev_addr);
 	netif_carrier_on(ndev);
 	netif_start_queue(ndev);
 	netdev_info(ndev, "WAN up: identity %pM (eth0 %pM + %u), US stream %u, fibre port %u\n",
@@ -2193,10 +2238,14 @@ static int luna_eth_wan_open(struct net_device *ndev)
 
 static int luna_eth_wan_set_mac(struct net_device *ndev, void *addr)
 {
+	struct luna_eth *ep = *(struct luna_eth **)netdev_priv(ndev);
 	int rc = eth_mac_addr(ndev, addr);
 
-	if (!rc)
+	if (!rc) {
 		luna_omci_set_wan_mac(ndev->dev_addr);	/* the OLT reads the WAN MAC through OMCI too */
+		if (netif_running(ndev))
+			luna_flow_wan_pin(ep, ndev->dev_addr);
+	}
 	return rc;
 }
 
@@ -2207,6 +2256,7 @@ static int luna_eth_wan_stop(struct net_device *ndev)
 	netif_stop_queue(ndev);
 	netif_carrier_off(ndev);
 	luna_flow_stop(ep);
+	luna_flow_wan_pin(ep, NULL);
 	return 0;
 }
 

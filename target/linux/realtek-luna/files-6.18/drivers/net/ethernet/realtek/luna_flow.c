@@ -27,6 +27,7 @@ struct luna_flow_engine {
 	struct luna_flow_sram sram;
 	struct luna_flow_mac_table macs;
 	struct luna_flow_local_mac local[2];
+	struct luna_flow_local_mac wan_pin;
 	struct gpon_flow_offload *fo;
 	struct gpon_edge edge;
 	bool initialized, provisioned;
@@ -404,6 +405,24 @@ static int luna_flow_setup_tc(struct net_device *dev, enum tc_setup_type type,
 				     luna_flow_block_cb, NULL);
 }
 
+/* gpon0's own MAC pinned to the CPU port while gpon0 is up, flows or none: a WAN frame to it is
+ * a lookup hit at data priority, never the lookup-miss trap that carries CTL_RX_PRIO. NULL unpins. */
+static void luna_flow_wan_pin(struct luna_eth *ep, const u8 *mac)
+{
+	int ret;
+
+	if (!ep->flow)
+		return;
+	mutex_lock(&luna_flow_mutex);
+	ret = luna_flow_local_put(&ep->flow->macs, &ep->flow->wan_pin);
+	if (!ret && mac)
+		ret = luna_flow_local_get(&ep->flow->macs, &ep->flow->wan_pin, mac,
+					  ep->c->sw_map->cpu_port);
+	mutex_unlock(&luna_flow_mutex);
+	if (ret)
+		netdev_err(ep->ndev, "WAN MAC lookup pin failed: %d\n", ret);
+}
+
 static void luna_flow_stop(struct luna_eth *ep)
 {
 	int ret;
@@ -497,6 +516,9 @@ static void luna_flow_release(void *data)
 		if (ret)
 			netdev_err(ep->ndev, "local MAC restore failed: %d\n", ret);
 	}
+	ret = luna_flow_local_put(&ep->flow->macs, &ep->flow->wan_pin);
+	if (ret)
+		netdev_err(ep->ndev, "WAN MAC pin restore failed: %d\n", ret);
 	gpon_flow_offload_free(ep->flow->fo);
 	kfree(ep->flow);
 	ep->flow = NULL;
@@ -542,4 +564,5 @@ static int luna_flow_probe(struct luna_eth *ep)
 #else
 static int luna_flow_probe(struct luna_eth *ep) { return 0; }
 static void luna_flow_stop(struct luna_eth *ep) { }
+static void luna_flow_wan_pin(struct luna_eth *ep, const u8 *mac) { }
 #endif

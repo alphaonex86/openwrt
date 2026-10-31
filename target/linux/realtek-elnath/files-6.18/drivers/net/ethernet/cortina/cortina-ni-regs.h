@@ -908,6 +908,23 @@ enum cortina_ni_win {
 #define CA_NI_L2TM_DQSCH_VOQ_THRSH_ACCESS	0x2e70	/* DQSCH_VOQ_THRSH_PROFILE_MEM_ACCESS */
 #define CA_NI_L2TM_DQSCH_VOQ_THRSH_DATA		0x2e74
 #define CA_NI_L2TM_CB_ABR_CTRL		0x2eec	/* stock 0x88000200 */
+
+/* L3 TE congestion buffer (stock reg.txt TE_TE_GLB_CTRL / TE_CB_VOQ_THRSH_*); tables indirect, DATA first. */
+#define CA_NI_L3TE_GLB_CTRL		0x9004
+#define  CA_NI_L3TE_GLB_TAILDROP_EN	BIT(2)
+#define CA_NI_L3TE_CB_VOQ_PROF_ACCESS	0x95f8
+#define CA_NI_L3TE_CB_VOQ_PROF_DATA2	0x95fc
+#define  CA_NI_L3TE_CB_PROF_D2_PRVT_HI	GENMASK(5, 0)	/* prvt[13:8] */
+#define CA_NI_L3TE_CB_VOQ_PROF_DATA1	0x9600
+#define  CA_NI_L3TE_CB_PROF_D1_PRVT_LO	GENMASK(31, 24)	/* prvt[7:0] */
+#define  CA_NI_L3TE_CB_PROF_D1_GRP	GENMASK(23, 0)	/* group hth + group lth[13:4] */
+#define CA_NI_L3TE_CB_VOQ_PROF_DATA0	0x9604
+#define  CA_NI_L3TE_CB_PROF_D0_GRP	GENMASK(31, 28)	/* group lth[3:0] */
+#define  CA_NI_L3TE_CB_PROF_D0_HTH	GENMASK(27, 14)
+#define  CA_NI_L3TE_CB_PROF_D0_LTH	GENMASK(13, 0)
+#define CA_NI_L3TE_CB_VOQ_SEL_ACCESS	0x9608	/* idx = port * 8 + voq */
+#define CA_NI_L3TE_CB_VOQ_SEL_DATA	0x960c
+#define CA_NI_L3TE_CB_THRSH_OFF		0x3fff
 #define  CA_NI_L2TM_CB_ABR_CTRL_STOCK	0x88000200u	/* bit31 = ABR deep-q arbiter enable (FINAL) */
 #define  CA_NI_L2TM_DEEPQ_PROFILE_PERMISSIVE 0x7fff7fffu /* permissive VOQ profile threshold */
 /* ★★ build38: the DQSCH OUTPUT static config (0x2f00/04/08) - the deep-queue-dequeue
@@ -1837,6 +1854,7 @@ enum cortina_ni_win {
  * it and cannot admit (0x6900=0).  8 per-voq rings laid out contiguously in the
  * reserved DDR region; ring[voq*128 + slot].  NAPI drains all 8. */
 #define CA_NI_RX_VOQ_COUNT		8
+#define CA_NI_RX_VOQ_CONTROL		(CA_NI_RX_VOQ_COUNT - 1)	/* CLS control trap rows, drained first */
 /* 0x4000 = CPU port 0's rings + CPU port 1's rings, both memremapped and poisoned. */
 #define CA_NI_RX_RING_TOTAL_BYTES	(2 * CA_NI_RX_VOQ_COUNT * CA_NI_RX_RING_BYTES) /* 0x4000 */
 #define CA_NI_RX_RING_SLOTS_PER_VOQ	CA_NI_RX_EPP_PER_VOQ	/* __le64 slots per voq */

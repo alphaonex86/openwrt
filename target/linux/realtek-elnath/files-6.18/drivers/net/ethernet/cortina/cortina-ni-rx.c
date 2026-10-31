@@ -1272,10 +1272,8 @@ static int cortina_ni_rx_poll(struct napi_struct *napi, int budget)
 
 	rx->polls++;
 
-	/* ★ Drain ALL 8 CPU-port VOQs: the deep_q frame may land on any voq (by
-	 * cos/priority), and stock arms every voq's CPU-EPP FIFO.  Round-robin
-	 * within the shared NAPI budget. */
-	for (voq = 0; voq < CA_NI_RX_VOQ_COUNT && work < budget; voq++)
+	/* Drain all 8 CPU-port voqs, highest first: the CLS trap rows put control frames on the top one. */
+	for (voq = CA_NI_RX_VOQ_COUNT; voq-- && work < budget;)
 		work += cortina_ni_rx_poll_voq(ni, voq, budget - work);
 
 	if (work < budget && napi_complete_done(napi, work)) {
@@ -2591,18 +2589,61 @@ static const struct { u16 idx; u32 w[CA_NI_L3FE_CLS_KEY_WORDS]; } cls_key_golden
 /* stock FIB rows, struct word0..word6 (verbatim; word0=DATA0=0x33cc low .. word6=DATA6).
  * FIB idx = (key_row<<2)|slot: profile0 rows 0/1/2 -> 0,1,4,8; profile1 rows 64/65/66 ->
  * 256,257,260,264 (KEY64 slots0/1, KEY65 slot0, KEY66 slot0 = the LAN bcast catch-all). */
+/* FIB word 4: cos_sel 18:17 (1 = this row's cos), cos 21:19.  KEY row 1 traps unicast IP (data), row 2 is the
+ * catch-all (ARP, PPPoE discovery, IP broadcast/DHCP): its FIB rows put those on the top CPU voq. */
+#define CA_NI_CLS_FIB_W4_COS_SEL	GENMASK(18, 17)
+#define CA_NI_CLS_FIB_W4_COS		GENMASK(21, 19)
+#define CA_NI_CLS_FIB_W4_COS_CONTROL	(FIELD_PREP_CONST(CA_NI_CLS_FIB_W4_COS_SEL, 1) | \
+					 FIELD_PREP_CONST(CA_NI_CLS_FIB_W4_COS, CA_NI_RX_VOQ_CONTROL))
+
 static const struct { u16 idx; u32 w[CA_NI_L3FE_CLS_FIB_WORDS]; } cls_fib_golden[] = {
 	/* profile 0 (WAN) */
 	{ 0,   { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000A00 } },
 	{ 1,   { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000A00 } },
 	{ 4,   { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000200 } },
-	{ 8,   { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000600 } },
+	{ 8,   { 0, 0, 0, 0, 0x1C000000 | CA_NI_CLS_FIB_W4_COS_CONTROL, 0x01000004, 0x00000600 } },
 	/* profile 1 (LAN) */
 	{ 256, { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000A00 } },
 	{ 257, { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000A00 } },
 	{ 260, { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000200 } },
-	{ 264, { 0, 0, 0, 0, 0x1C000000, 0x01000004, 0x00000600 } },
+	{ 264, { 0, 0, 0, 0, 0x1C000000 | CA_NI_CLS_FIB_W4_COS_CONTROL, 0x01000004, 0x00000600 } },
 };
+
+/* L3TE congestion buffer of the CPU port: the data voqs tail-drop before they empty the shared CPU pool (EQ5 + EQ6,
+ * 1024 buffers), the control voq keeps private buffers, so a WAN flood cannot starve ARP/DHCP/PPPoE discovery
+ * (measured: ARP answered 10-16/35 -> 35/35 under a 750 kpps flood). */
+#define CA_NI_L3TE_PROF_DATA		3
+#define CA_NI_L3TE_PROF_CONTROL		4
+#define CA_NI_L3TE_DATA_LTH		640
+#define CA_NI_L3TE_DATA_HTH		768
+#define CA_NI_L3TE_DATA_PRVT		3
+#define CA_NI_L3TE_CONTROL_PRVT		100
+
+static void cortina_ni_rx_l3te_voq_profile(struct cortina_ni *ni, unsigned int prof, u32 lth, u32 hth, u32 prvt)
+{
+	writel(FIELD_PREP(CA_NI_L3TE_CB_PROF_D2_PRVT_HI, prvt >> 8), ni_base(ni) + CA_NI_L3TE_CB_VOQ_PROF_DATA2);
+	writel(FIELD_PREP(CA_NI_L3TE_CB_PROF_D1_PRVT_LO, prvt & 0xff) | CA_NI_L3TE_CB_PROF_D1_GRP,
+	       ni_base(ni) + CA_NI_L3TE_CB_VOQ_PROF_DATA1);
+	writel(CA_NI_L3TE_CB_PROF_D0_GRP | FIELD_PREP(CA_NI_L3TE_CB_PROF_D0_HTH, hth) |
+	       FIELD_PREP(CA_NI_L3TE_CB_PROF_D0_LTH, lth), ni_base(ni) + CA_NI_L3TE_CB_VOQ_PROF_DATA0);
+	cortina_ni_rx_ind_store(ni, CA_NI_L3TE_CB_VOQ_PROF_ACCESS, prof);
+}
+
+static void cortina_ni_rx_l3te_cb_init(struct cortina_ni *ni)
+{
+	unsigned int voq;
+
+	cortina_ni_rx_l3te_voq_profile(ni, CA_NI_L3TE_PROF_DATA, CA_NI_L3TE_DATA_LTH, CA_NI_L3TE_DATA_HTH,
+				       CA_NI_L3TE_DATA_PRVT);
+	cortina_ni_rx_l3te_voq_profile(ni, CA_NI_L3TE_PROF_CONTROL, CA_NI_L3TE_CB_THRSH_OFF,
+				       CA_NI_L3TE_CB_THRSH_OFF, CA_NI_L3TE_CONTROL_PRVT);
+	for (voq = 0; voq < CA_NI_RX_VOQ_COUNT; voq++) {
+		writel(voq == CA_NI_RX_VOQ_CONTROL ? CA_NI_L3TE_PROF_CONTROL : CA_NI_L3TE_PROF_DATA,
+		       ni_base(ni) + CA_NI_L3TE_CB_VOQ_SEL_DATA);
+		cortina_ni_rx_ind_store(ni, CA_NI_L3TE_CB_VOQ_SEL_ACCESS, CA_NI_RX_CPU_PORT * CA_NI_RX_VOQ_COUNT + voq);
+	}
+	writel(readl(ni_base(ni) + CA_NI_L3TE_GLB_CTRL) | CA_NI_L3TE_GLB_TAILDROP_EN, ni_base(ni) + CA_NI_L3TE_GLB_CTRL);
+}
 
 static void cortina_ni_rx_l3fe_glb_init(struct cortina_ni *ni)
 {
@@ -2820,6 +2861,7 @@ static int cortina_ni_rx_steer_init(struct cortina_ni *ni)
 	/* ★★★ build71: the L3-CLS special-packet trap - broadcast ...
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 178. */
 	cortina_ni_rx_cls_init(ni);
+	cortina_ni_rx_l3te_cb_init(ni);
 
 	/* full FE path: byp OFF, pass OAM, drop unknown opcodes (stock policy).
 	 * ★ Apply to EVERY GPHY LAN port, not just CA_NI_RX_PORT, so whichever port

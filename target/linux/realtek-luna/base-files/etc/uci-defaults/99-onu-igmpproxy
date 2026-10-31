@@ -1,0 +1,8 @@
+#!/bin/sh
+# IPTV sources sit beyond the WAN subnet: the upstream accepts a group from any source.
+for s in $(uci -q show igmpproxy | sed -n "s/^igmpproxy\.\([^.]*\)\.direction='upstream'$/\1/p"); do
+	uci -q delete igmpproxy."$s".altnet
+	uci add_list igmpproxy."$s".altnet='0.0.0.0/0'
+done
+uci -q commit igmpproxy
+exit 0

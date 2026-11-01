@@ -281,6 +281,8 @@ struct gpon_gtc_regs {
 	struct reg	gem_us_port_map;/* array base; 32-bit words, stride 4 */
 	u32	gem_us_port_stride;	/* the stride itself, in BYTES        */
 	struct reg	gem_ds_mc_cfg;	/* broadcast / non-multicast / FCS    */
+	struct reg	gem_ds_mc_ind;	/* DS multicast MAC filter op: OP_MODE[9:8] OP_IDX[7:0] */
+	u32	gem_ds_mc_idx_mask;	/* its depth as a mask (0xff = 256 entries)  */
 	struct reg	ds_traffic_cfg;	/* per-flow DS traffic config array   */
 	u32	ds_traffic_stride;
 	/* The two indirect GTC CAMs (gpon_gtc_cam_write() below).  Each is an

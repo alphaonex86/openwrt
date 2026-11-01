@@ -54,6 +54,7 @@
 #include "gpon_lat.h"		/* gpon_lat_add(): the OMCI turnaround record */
 #include <linux/etherdevice.h>
 #include "luna_gpon_nic.h"
+#include "luna_gpon_cam.h"
 #include "luna_wan_vlan.h"
 #include "luna_eth_regs.h"	/* SOC_SW_ENABLE + the family register map */
 #include "luna_ponmac.h"		/* clean-room family PON-MAC/SerDes bring-up lib */
@@ -5308,17 +5309,23 @@ static int swdump_proc_show(struct seq_file *s, void *v)
 /* Serialize complete indirect transactions, including readback. A timed-out
  * CAM retains its own pending state after the lock is released. */
 static DEFINE_SPINLOCK(gpon_ind_lock);
-static bool gpon_cam_pending[2];
+static bool gpon_cam_pending[LUNA_CAMS];
 
-static int luna_cam_xact(bool alloc, u32 mode, u32 index, u16 *value, bool *hit)
+static int luna_cam_xact(enum luna_cam cam, u32 mode, u32 index, u16 *value, bool *hit)
 {
 	const struct gpon_gtc_regs *r = &luna_gpon_chip.gtc;
-	struct reg ind = alloc ? r->ds_alloc_ind : r->ds_port_ind;
-	struct reg wr = alloc ? r->ds_alloc_wr : r->ds_port_wr;
-	struct reg rd = alloc ? r->ds_alloc_rd : r->ds_port_rd;
-	u32 mask = alloc ? r->ds_alloc_idx_mask : r->ds_port_idx_mask;
+	struct reg ind = r->ds_port_ind, wr = r->ds_port_wr, rd = r->ds_port_rd;
+	u32 mask = r->ds_port_idx_mask;
 	unsigned long flags;
 	int rc;
+
+	if (cam == LUNA_CAM_ALLOC) {
+		ind = r->ds_alloc_ind, wr = r->ds_alloc_wr, rd = r->ds_alloc_rd;
+		mask = r->ds_alloc_idx_mask;
+	} else if (cam == LUNA_CAM_MC_FILTER) {
+		ind = r->gem_ds_mc_ind, wr = reg_none(), rd = reg_none();
+		mask = r->gem_ds_mc_idx_mask;
+	}
 
 	if (index > mask || (mode == GPON_GTC_CAM_OP_READ && (!value || !hit)))
 		return -EINVAL;
@@ -5328,13 +5335,13 @@ static int luna_cam_xact(bool alloc, u32 mode, u32 index, u16 *value, bool *hit)
 		if (rc)
 			return rc;
 	}
-	if (alloc)
+	if (cam == LUNA_CAM_ALLOC)
 		index = luna_tcont_cam_index(index);
 	spin_lock_irqsave(&gpon_ind_lock, flags);
 	rc = gpon_gtc_cam_xact_pending(&gpon_io, ind, mode, mask, index, wr,
 				       mode == GPON_GTC_CAM_OP_WRITE && value ? *value : 0,
 				       gpon_cam_delay_us,
-				       &gpon_cam_pending[alloc]);
+				       &gpon_cam_pending[cam]);
 	if (rc >= 0 && mode == GPON_GTC_CAM_OP_READ) {
 		*hit = !!(hwio_rd(&gpon_io, reg_at(ind)) & GPON_GTC_CAM_OP_HIT);
 		*value = hwio_rd(&gpon_io, reg_at(rd)) & GPON_GTC_CAM_VAL_MASK;
@@ -5345,12 +5352,12 @@ static int luna_cam_xact(bool alloc, u32 mode, u32 index, u16 *value, bool *hit)
 
 static int luna_port_cam_write(u32 flow, u16 gem)
 {
-	return luna_cam_xact(false, GPON_GTC_CAM_OP_WRITE, flow, &gem, NULL);
+	return luna_cam_xact(LUNA_CAM_PORT, GPON_GTC_CAM_OP_WRITE, flow, &gem, NULL);
 }
 
 static int luna_alloc_cam_write(u32 tcont, u16 alloc)
 {
-	return luna_cam_xact(true, GPON_GTC_CAM_OP_WRITE, tcont, &alloc, NULL);
+	return luna_cam_xact(LUNA_CAM_ALLOC, GPON_GTC_CAM_OP_WRITE, tcont, &alloc, NULL);
 }
 
 /* Per-flow downstream GEM Ethernet RX packet count ... -- dev/MEASURED-luna_gpon.c.md sec 169. */
@@ -5387,7 +5394,7 @@ static int gpon_ds_cam_read(u8 flow)
 {
 	u16 gem;
 	bool hit;
-	int rc = luna_cam_xact(false, GPON_GTC_CAM_OP_READ, flow, &gem, &hit);
+	int rc = luna_cam_xact(LUNA_CAM_PORT, GPON_GTC_CAM_OP_READ, flow, &gem, &hit);
 
 	if (rc < 0)
 		return rc;
@@ -5398,7 +5405,7 @@ static int gpon_ds_cam_read(u8 flow)
  * dev/MEASURED-luna_gpon.c.md sec 171. */
 static int gpon_ds_cam_clean(unsigned int f)
 {
-	int rc = luna_cam_xact(false, GPON_GTC_CAM_OP_CLEAN, f, NULL, NULL);
+	int rc = luna_cam_xact(LUNA_CAM_PORT, GPON_GTC_CAM_OP_CLEAN, f, NULL, NULL);
 
 	if (!rc)
 		gpon_field(GPON_GTC_DS_TRAFFIC_CFG + f * DS_TRAFFIC_CFG_STRIDE, 4, 0, 0);
@@ -5414,6 +5421,25 @@ static int gpon_ds_cam_clear_all(void)
 
 		if (rc)
 			return rc;
+	}
+	return 0;
+}
+
+/* GEM_DS_MC_CFG runs the DS multicast MAC filter in EXCLUDE mode, and the reset leaves its
+ * SRAM as random VALID entries: a group one matches is dropped before the switch, on some
+ * boots only (X111W 2026-11-01). Nothing here writes an entry, so all are cleared once. */
+static int gpon_ds_mc_filter_clear(void)
+{
+	u32 idx;
+	int rc;
+
+	for (idx = 0; idx <= luna_gpon_chip.gtc.gem_ds_mc_idx_mask; idx++) {
+		rc = luna_cam_xact(LUNA_CAM_MC_FILTER, GPON_GTC_CAM_OP_CLEAN, idx, NULL, NULL);
+		if (rc < 0) {
+			pr_err("luna-gpon: DS multicast filter entry %u not cleared (%d): a group it matches is dropped\n",
+			       idx, rc);
+			return rc;
+		}
 	}
 	return 0;
 }
@@ -5462,7 +5488,7 @@ static int gpon_alloc_cam_read(u8 tcont)
 {
 	u16 alloc;
 	bool hit;
-	int rc = luna_cam_xact(true, GPON_GTC_CAM_OP_READ, tcont, &alloc, &hit);
+	int rc = luna_cam_xact(LUNA_CAM_ALLOC, GPON_GTC_CAM_OP_READ, tcont, &alloc, &hit);
 
 	if (rc < 0)
 		return rc;
@@ -5498,7 +5524,7 @@ static int gpon_alloc_cam_clear_others(u8 keep)
 					  rb & 0xfff,
 					  "no-hit-outside-kept-tcont", dmp, sizeof(dmp));
 		}
-		rc = luna_cam_xact(true, GPON_GTC_CAM_OP_CLEAN, t, NULL, NULL);
+		rc = luna_cam_xact(LUNA_CAM_ALLOC, GPON_GTC_CAM_OP_CLEAN, t, NULL, NULL);
 		if (rc)
 			return rc;
 	}
@@ -7319,7 +7345,7 @@ static void luna_svc_teardown(unsigned int i)
 			WRITE_ONCE(luna_svc_vid_flow[k], 0);
 	pi_packed_set(PI_PON_SIDVALID, flow, 1, 0);
 	gpon_gtc_us_gem_stamp(&gpon_io, &luna_gpon_chip.gtc, flow, 0);
-	if (luna_cam_xact(false, GPON_GTC_CAM_OP_CLEAN, flow, NULL, NULL))
+	if (luna_cam_xact(LUNA_CAM_PORT, GPON_GTC_CAM_OP_CLEAN, flow, NULL, NULL))
 		pr_warn("luna-gpon: service flow %u: DS GEM %u CAM clean failed\n", flow, luna_svc_gem[i]);
 	else
 		gpon_field(GPON_GTC_DS_TRAFFIC_CFG + flow * DS_TRAFFIC_CFG_STRIDE, 4, 0, 0);
@@ -7455,7 +7481,7 @@ EXPORT_SYMBOL(luna_gpon_svc_flow);
 static void luna_idle_slot_free(unsigned int i)
 {
 	luna_svc_teardown(i);
-	if (luna_cam_xact(true, GPON_GTC_CAM_OP_CLEAN, LUNA_IDLE_TCONT_FIRST + i, NULL, NULL))
+	if (luna_cam_xact(LUNA_CAM_ALLOC, GPON_GTC_CAM_OP_CLEAN, LUNA_IDLE_TCONT_FIRST + i, NULL, NULL))
 		return;
 	pi_packed_set(PI_PON_TCONT_EN, LUNA_IDLE_TCONT_FIRST + i, 1, 0);
 	luna_idle_alloc[i] = 0;
@@ -8171,7 +8197,7 @@ static int luna_data_retire(void)
 		luna_data.queue_dirty = false;
 	}
 	if (luna_data.gem_dirty) {
-		rc = luna_cam_xact(false, GPON_GTC_CAM_OP_CLEAN, GPON_DATA_FLOW, NULL, NULL);
+		rc = luna_cam_xact(LUNA_CAM_PORT, GPON_GTC_CAM_OP_CLEAN, GPON_DATA_FLOW, NULL, NULL);
 		if (rc)
 			return rc;
 		/* Own stock clears these five traffic bits after CAM completion. */
@@ -8183,7 +8209,7 @@ static int luna_data_retire(void)
 	if (luna_data.alloc_dirty) {
 		if (luna_data.armed.rides_omcc)
 			return -EINVAL;
-		rc = luna_cam_xact(true, GPON_GTC_CAM_OP_CLEAN, GPON_DATA_TCONT, NULL, NULL);
+		rc = luna_cam_xact(LUNA_CAM_ALLOC, GPON_GTC_CAM_OP_CLEAN, GPON_DATA_TCONT, NULL, NULL);
 		if (rc)
 			return rc;
 		luna_data.alloc_dirty = false;
@@ -10351,6 +10377,7 @@ skip_bosa_init:
 	luna_ds_cam_scrubbed = !gpon_ds_cam_clear_all();
 	if (!luna_ds_cam_scrubbed)
 		pr_warn("luna-gpon: DS GEM-port CAM not cleared after the reset: the first Configure_Port-ID clears it\n");
+	gpon_ds_mc_filter_clear();
 
 	/* Optical loss-of-signal monitoring, inverted polarity. The downstream framer
 	 * gates on OPTIC_LOS_SIG; until the input is enabled with the correct

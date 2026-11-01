@@ -771,6 +771,7 @@ static_assert(SW_P_MISC_PORT_9602C(2) == 0x20804u &&
 #define GPON_GTC_DS_ETH_PTI	0x1208		/* DS PTI config, Ethernet flows; stock O5 = 0x11 */
 #define GPON_GTC_DS_OMCI_PTI	0x1204		/* [6:4] PTI_MASK [2:0] END_PTI */
 #define   DS_OMCI_PTI_VAL	((1u << 4) | 1u)	/* mask=1 ptn=1 -> 0x11 */
+#define GPON_GEM_DS_MC_IND	0x4084		/* DS multicast MAC filter op: [15] REQ [14] COMPL [13] HIT [9:8] MODE [7:0] IDX */
 #define GPON_GEM_DS_MC_CFG	0x4080		/* [6] BROADCAST_PASS [4] NON_MULTICAST_PASS [3] FCS_CHK_EN */
 #define   GEM_DS_MC_CFG_VAL	0x59u		/* stock O5 operating value (read live from an online stock ONU): BROADCAST_PASS(6)|NON_MULTICAST_PASS(4)|FCS_CHK_EN(3)|bit0. The earlier 0x18 (no broadcast/bit0) was a wrong "avoid US stall" guess — stock runs 0x59 stably online with OMCI flowing. */
 
@@ -808,6 +809,8 @@ static const struct gpon_chip luna_gpon_chip = {
 		.gem_us_port_map	= REG_AT(0x6400),	/* = GPON_GEM_US_PORT_MAP; register map 0x706400 */
 		.gem_us_port_stride	= 4,		/* = GEM_US_PORT_MAP_STRIDE (luna_gpon.c); register map array-offset 32 bits */
 		.gem_ds_mc_cfg		= REG_AT(0x4080),	/* = GPON_GEM_DS_MC_CFG; register map 0x704080 */
+		.gem_ds_mc_ind		= REG_AT(0x4084),	/* = GPON_GEM_DS_MC_IND; register map 0x704084 */
+		.gem_ds_mc_idx_mask	= 0xff,		/* 256 entries -- MC_ITEM_OP_IDX[7:0] */
 		.ds_traffic_cfg		= REG_AT(0x1400),	/* = GPON_GTC_DS_TRAFFIC_CFG; register map 0x701400 */
 		.ds_traffic_stride	= 4,		/* = DS_TRAFFIC_CFG_STRIDE; register map array-offset 32 bits */
 		/* The two indirect CAMs (gpon_gtc_cam_write, 2026-09-03).

@@ -2,6 +2,7 @@
 # IPTV for the wired LAN ports only (igmpproxy.@igmpproxy[0].wired_only=1): the bridge drops the
 # IGMP/MLD reports WiFi stations send, so no WiFi port joins a group and nothing keeps a group on
 # the CPU for WiFi; an ONU whose switch routes multicast then carries every stream alone.
+# nft wildcards are trailing only ("phy*"): a * inside a name is a literal character.
 START=99
 USE_PROCD=1
 TABLE=onu_mcast_wired
@@ -23,8 +24,8 @@ start_service() {
 table bridge $TABLE {
 	chain prerouting {
 		type filter hook prerouting priority -200; policy accept;
-		iifname "phy*-ap*" ip protocol igmp drop
-		iifname "phy*-ap*" icmpv6 type { mld-listener-report, mld-listener-done, mld2-listener-report } drop
+		iifname "phy*" ip protocol igmp drop
+		iifname "phy*" icmpv6 type { mld-listener-report, mld-listener-done, mld2-listener-report } drop
 	}
 }
 NFT

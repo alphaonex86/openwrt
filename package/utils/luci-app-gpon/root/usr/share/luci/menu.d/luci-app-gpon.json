@@ -7,7 +7,9 @@
 			"path": "gpon/pon"
 		},
 		"depends": {
-			"acl": [ "luci-app-gpon" ]
+			"acl": [
+				"luci-app-gpon"
+			]
 		}
 	},
 	"admin/status/crash": {
@@ -18,7 +20,22 @@
 			"path": "gpon/crash"
 		},
 		"depends": {
-			"acl": [ "luci-app-gpon" ]
+			"acl": [
+				"luci-app-gpon"
+			]
+		}
+	},
+	"admin/network/multicast": {
+		"title": "Multicast",
+		"order": 31,
+		"action": {
+			"type": "view",
+			"path": "gpon/multicast"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-gpon"
+			]
 		}
 	}
 }

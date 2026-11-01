@@ -33,8 +33,8 @@ endef
 
 define Package/luci-app-gpon/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/gpon
-	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/gpon/pon.js \
-		$(1)/www/luci-static/resources/view/gpon/pon.js
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/gpon/*.js \
+		$(1)/www/luci-static/resources/view/gpon/
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/status/include
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/status/include/35_gpon.js \
 		$(1)/www/luci-static/resources/view/status/include/35_gpon.js

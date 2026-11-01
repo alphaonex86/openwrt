@@ -16,6 +16,7 @@
 #include <linux/if_bridge.h>
 #include <linux/mroute.h>
 #include <linux/mroute_base.h>
+#include <net/arp.h>
 #include <net/fib_notifier.h>
 #include <net/route.h>
 #include <net/switchdev.h>
@@ -83,7 +84,7 @@ static int rtl9602c_ipmc_fib_event(struct notifier_block *nb, unsigned long even
 		return NOTIFY_DONE;
 	}
 	spin_unlock_bh(&m->lock);
-	schedule_work(&m->sync);
+	mod_delayed_work(system_wq, &m->sync, 0);
 	return NOTIFY_DONE;
 }
 
@@ -95,7 +96,7 @@ static int rtl9602c_ipmc_mdb_event(struct notifier_block *nb, unsigned long even
 
 	if ((event == SWITCHDEV_PORT_OBJ_ADD || event == SWITCHDEV_PORT_OBJ_DEL) &&
 	    info->obj->id == SWITCHDEV_OBJ_ID_PORT_MDB)
-		schedule_work(&m->sync);
+		mod_delayed_work(system_wq, &m->sync, 0);
 	return NOTIFY_DONE;
 }
 
@@ -113,6 +114,27 @@ static bool ipmc_src_via_wan(struct rtl9602c_eth *ep, u32 src)
 	wan = dev == ep->wan_ndev || (is_vlan_dev(dev) && vlan_dev_real_dev(dev) == ep->wan_ndev);
 	ip_rt_put(rt);
 	return wan;
+}
+
+/* Nothing else ARPs for an on-link source (an IPTV server in the WAN subnet): ask, so
+ * the retry finds the next hop the interface tables need. */
+static void ipmc_kick_next_hop(struct rtl9602c_eth *ep, u32 src)
+{
+	struct flowi4 fl4 = { .daddr = htonl(src) };
+	struct neighbour *n;
+	struct rtable *rt;
+	__be32 nh;
+
+	rt = ip_route_output_key(dev_net(ep->ndev), &fl4);
+	if (IS_ERR(rt))
+		return;
+	nh = rt_nexthop(rt, fl4.daddr);
+	n = __neigh_lookup(&arp_tbl, &nh, rt->dst.dev, 1);
+	if (!IS_ERR_OR_NULL(n)) {
+		neigh_event_send(n, NULL);
+		neigh_release(n);
+	}
+	ip_rt_put(rt);
 }
 
 /* -> the (S,G) count copied to m->snap, with every VIF classified and the groups a
@@ -332,9 +354,10 @@ static void ipmc_apply(struct rtl9602c_eth *ep, struct rtl9602c_ipmc *m, unsigne
 
 static void rtl9602c_ipmc_sync(struct work_struct *work)
 {
-	struct rtl9602c_ipmc *m = container_of(work, struct rtl9602c_ipmc, sync);
+	struct rtl9602c_ipmc *m = container_of(to_delayed_work(work), struct rtl9602c_ipmc, sync);
 	struct rtl9602c_eth *ep = container_of(m, struct rtl9602c_eth, l34.ipmc);
 	unsigned int n_sg, n_want = 0;
+	int ret;
 
 	n_sg = ipmc_snapshot(ep, m);
 	if (n_sg) {
@@ -342,8 +365,15 @@ static void rtl9602c_ipmc_sync(struct work_struct *work)
 					 m->want, IPMC_GROUPS);
 		m->why = n_want ? NULL : "no route goes from the WAN to the LAN bridge alone";
 	}
-	if (n_want && ipmc_provision(ep, m->snap[m->want[0]].src))
-		n_want = 0;
+	if (n_want) {
+		ret = ipmc_provision(ep, m->snap[m->want[0]].src);
+		if (ret == -EAGAIN) {	/* next hop or WAN address not there yet: the stream must not wait for another event */
+			ipmc_kick_next_hop(ep, m->snap[m->want[0]].src);
+			mod_delayed_work(system_wq, &m->sync, HZ / 10);	/* ARP answers in ms; each 1 s of wait is 1 s of a stream on the CPU */
+		}
+		if (ret)
+			n_want = 0;
+	}
 	mutex_lock(&ep->l34.lock);
 	ipmc_apply(ep, m, n_want);
 	m->n_want = n_want;
@@ -357,7 +387,7 @@ static void rtl9602c_ipmc_stop(void *data)
 
 	unregister_fib_notifier(&init_net, &m->fib_nb);
 	unregister_switchdev_blocking_notifier(&m->mdb_nb);
-	cancel_work_sync(&m->sync);
+	cancel_delayed_work_sync(&m->sync);
 	mutex_lock(&ep->l34.lock);
 	ipmc_apply(ep, m, 0);
 	mutex_unlock(&ep->l34.lock);
@@ -371,7 +401,7 @@ static int rtl9602c_ipmc_start(struct rtl9602c_eth *ep)
 	int ret;
 
 	spin_lock_init(&m->lock);
-	INIT_WORK(&m->sync, rtl9602c_ipmc_sync);
+	INIT_DELAYED_WORK(&m->sync, rtl9602c_ipmc_sync);
 	m->why = "no multicast route yet";
 	m->mdb_nb.notifier_call = rtl9602c_ipmc_mdb_event;
 	ret = register_switchdev_blocking_notifier(&m->mdb_nb);

@@ -2,21 +2,52 @@
 	"luci-app-gpon": {
 		"description": "Grant access to the PON page: state, identity, captures",
 		"read": {
-			"uci": [ "gpon" ],
+			"uci": [
+				"gpon",
+				"igmpproxy"
+			],
 			"ubus": {
-				"gpon": [ "status", "detail", "capture", "provisioning", "wan_result", "crash" ],
-				"network.interface.wan": [ "status" ],
-				"onu-health": [ "status" ]
+				"gpon": [
+					"status",
+					"detail",
+					"capture",
+					"provisioning",
+					"wan_result",
+					"crash"
+				],
+				"network.interface.wan": [
+					"status"
+				],
+				"onu-health": [
+					"status"
+				],
+				"luci": [
+					"getInitList"
+				]
 			},
 			"file": {
-				"/usr/sbin/rtk_factory": [ "exec" ],
-				"/usr/sbin/gpon-bundle --stdout": [ "exec" ]
+				"/usr/sbin/rtk_factory": [
+					"exec"
+				],
+				"/usr/sbin/gpon-bundle --stdout": [
+					"exec"
+				]
 			}
 		},
 		"write": {
-			"uci": [ "gpon" ],
+			"uci": [
+				"gpon",
+				"igmpproxy"
+			],
 			"ubus": {
-				"gpon": [ "wan_discover", "apply", "bundle_meta" ]
+				"gpon": [
+					"wan_discover",
+					"apply",
+					"bundle_meta"
+				],
+				"luci": [
+					"setInitAction"
+				]
 			}
 		}
 	}

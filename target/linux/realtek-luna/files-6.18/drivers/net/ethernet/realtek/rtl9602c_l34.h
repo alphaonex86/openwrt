@@ -208,7 +208,7 @@ struct l34_neigh {
 #define IPMC_GROUPS	32
 struct rtl9602c_ipmc {
 	struct notifier_block	fib_nb, mdb_nb;
-	struct work_struct	sync;
+	struct delayed_work	sync;
 	spinlock_t		lock;		/* the notifier copies below */
 	int			vif_ifindex[IPMC_VIFS];
 	struct ipmc_sg		sg[IPMC_GROUPS];

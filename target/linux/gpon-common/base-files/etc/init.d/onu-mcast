@@ -1,0 +1,31 @@
+#!/bin/sh /etc/rc.common
+# IPTV for the wired LAN ports only (igmpproxy.@igmpproxy[0].wired_only=1): the bridge drops the
+# IGMP/MLD reports WiFi stations send, so no WiFi port joins a group and nothing keeps a group on
+# the CPU for WiFi; an ONU whose switch routes multicast then carries every stream alone.
+START=99
+USE_PROCD=1
+TABLE=onu_mcast_wired
+
+service_triggers() {
+	procd_add_reload_trigger igmpproxy
+}
+
+stop_service() {
+	nft list table bridge $TABLE >/dev/null 2>&1 || return 0
+	nft delete table bridge $TABLE ||
+		logger -t onu-mcast "table $TABLE not removed: WiFi stations still cannot join multicast groups"
+}
+
+start_service() {
+	stop_service
+	[ "$(uci -q get igmpproxy.@igmpproxy[0].wired_only)" = 1 ] || return 0
+	nft -f - <<NFT || logger -t onu-mcast "wired-only not applied: WiFi stations still join multicast groups"
+table bridge $TABLE {
+	chain prerouting {
+		type filter hook prerouting priority -200; policy accept;
+		iifname "phy*-ap*" ip protocol igmp drop
+		iifname "phy*-ap*" icmpv6 type { mld-listener-report, mld-listener-done, mld2-listener-report } drop
+	}
+}
+NFT
+}

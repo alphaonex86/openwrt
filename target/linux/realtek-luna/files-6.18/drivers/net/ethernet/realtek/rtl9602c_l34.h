@@ -19,8 +19,12 @@
 #include <linux/bitmap.h>
 #include <linux/mutex.h>
 #include <linux/io.h>
+#include <linux/notifier.h>
+#include <linux/spinlock.h>
+#include <linux/workqueue.h>
 
 #include "gpon_edge.h"	/* core: the router edge, read from the live kernel */
+#include "rtl9602c_l34_logic.h"	/* struct ipmc_sg, IPMC_VIFS */
 
 /* Indirect table-access block (byte offsets within the ...
  * dev/MEASURED-rtl9602c_l34.h.md sec 7. */
@@ -199,6 +203,36 @@ struct l34_neigh {
 	bool ready, arp_live, l2_pinned, arp_was_used;
 };
 
+/* Routed IPv4 multicast in the switch (rtl9602c_ipmc.c): what ipmr and the bridge
+ * said, copied in atomic context, and the groups the LUT holds. */
+#define IPMC_GROUPS	32
+struct rtl9602c_ipmc {
+	struct notifier_block	fib_nb, mdb_nb;
+	struct work_struct	sync;
+	spinlock_t		lock;		/* the notifier copies below */
+	int			vif_ifindex[IPMC_VIFS];
+	struct ipmc_sg		sg[IPMC_GROUPS];
+	unsigned int		n_sg;
+	bool			lost;		/* an (S,G) did not fit: route nothing */
+	/* the sync work's own (one work item never runs twice at once) */
+	struct ipmc_sg		snap[IPMC_GROUPS];
+	u8			vif_kind[IPMC_VIFS];
+	u16			vif_vid[IPMC_VIFS];
+	u32			keep_cpu[IPMC_GROUPS];
+	unsigned int		n_keep;
+	unsigned int		want[IPMC_GROUPS];
+	unsigned int		n_want;
+	u32			hw_next[IPMC_GROUPS][3];
+	struct ipmc_hw {
+		u32	grp;
+		u16	idx;
+		u32	w[3];
+	}			hw[IPMC_GROUPS];	/* under rtl9602c_l34.lock */
+	unsigned int		n_hw;
+	u32			installs, removals, failures;
+	const char		*why;		/* the last reason nothing is routed */
+};
+
 struct rtl9602c_l34 {
 	void __iomem	*sw;		/* switch-core MMIO base (offsets above are relative) */
 	struct mutex	lock;		/* serialises table ops */
@@ -277,6 +311,7 @@ struct rtl9602c_l34 {
 		const char	*why;
 		u32		n;
 	} refuse_tally[L34_REFUSE_REASONS];
+	struct rtl9602c_ipmc ipmc;
 };
 
 /* Public API (mainline flow-offload glue calls these). */

@@ -199,6 +199,60 @@ void l34_arp_encode(u32 *w, u32 dst_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);
 int l34_l2uc_sts_index(u32 sts);
 
+/* L3 multicast route: the L2 table's IPv4 group entry (3 words, LSW-first). The
+ * key is the group's low 28 bits plus FID (SVL) or VID (IVL); each egress port
+ * names, in its own nibble, the IPMC_TRAN row that rewrites its routed copy.
+ * Field positions: the chip's table descriptor; the WAN_SA and NOT_SALEARN bits
+ * as stock programs them (X111W raw entry, 2026-11-01). */
+#define L3MC_GIP_LSP		0
+#define L3MC_GIP_W		28
+#define L3MC_TRAN_LSP		28	/* + 4 * port */
+#define L3MC_TRAN_W		4
+#define L3MC_KEY_LSP		48
+#define L3MC_KEY_W		12
+#define L3MC_L3LOOKUP_LSP	61
+#define L3MC_NOSALEARN_LSP	62
+#define L3MC_IVL_LSP		63
+#define L3MC_WANSA_LSP		65
+#define L3MC_MBR_LSP		66
+#define L3MC_MBR_W		4
+#define L3MC_VALID_LSP		77
+#define L3MC_PORTS		4
+
+/* L34_IPMC_TRAN[i], one word: the egress rewrite of a routed multicast copy.
+ * EN_SIP_TRANS (bit 8) would replace the source address, so it stays clear. */
+#define IPMC_TRAN_UNTAG_LSP	13
+#define IPMC_TRAN_UNTAG_W	4
+#define IPMC_TRAN_NETIF_LSP	9
+#define IPMC_TRAN_NETIF_W	4
+#define IPMC_TRAN_PPPOE_ACT_LSP	3
+#define IPMC_TRAN_PPPOE_ACT_W	2
+#define IPMC_TRAN_PPPOE_REMOVE	2
+
+/* VLAN table entry: the two bits that make a frame's L2 lookup key */
+#define SW_VLAN_FID_LSP		8
+#define SW_VLAN_IVL_LSP		10
+
+void l34_l3mc_encode(u32 *w, u32 group, u16 key, bool ivl, u8 ports, u8 tran);
+u32 l34_ipmc_tran_encode(u8 untag_ports, u8 netif);
+u16 l34_vlan_lut_key(u32 vlan_entry, u16 vid, bool *ivl);
+
+/* One ipmr (S,G) route as the offload judges it: its parent VIF, the VIFs it
+ * forwards to (bit v = TTL threshold below 255), and whether its source routes
+ * out of the WAN (the RPF check: igmpproxy also roots LAN sources at the WAN). */
+#define IPMC_VIFS		32	/* MAXVIFS */
+enum ipmc_vif_kind { IPMC_VIF_NONE, IPMC_VIF_WAN, IPMC_VIF_LAN, IPMC_VIF_OTHER };
+struct ipmc_sg {
+	u32	src, grp;
+	u8	parent;
+	bool	via_wan;
+	u32	oifs;
+};
+unsigned int l34_ipmc_wanted(const struct ipmc_sg *sg, unsigned int n_sg,
+			     const u8 *vif_kind, const u32 *keep_cpu,
+			     unsigned int n_keep, unsigned int *out,
+			     unsigned int max);
+
 /* blackhole-safety: an interface program is ALL-OR-NOTHING
  * dev/MEASURED-rtl9602c_l34_logic.h.md sec 3. */
 #define L34_WORDS_MAX		4	/* NETIF, the widest entry programmed here */

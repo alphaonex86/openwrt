@@ -2345,6 +2345,7 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
  * at the top, because it needs `struct rtl9602c_eth` complete and the WAN ops
  * table defined -- and the LAN ops table below needs ITS ndo_setup_tc. */
 #include "rtl9602c_l34_tc.c"
+#include "rtl9602c_ipmc.c"
 #endif
 
 static const struct net_device_ops rtl9602c_eth_netdev_ops = {
@@ -2823,6 +2824,10 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			}
 			/* the flowdump node renders the lifecycle's own diag line */
 			ep->l34.fo = ep->fo;
+			if (rtl9602c_ipmc_start(ep))
+				dev_warn(dev, "L34: no multicast route notifier; the CPU routes every group\n");
+			else if (devm_add_action_or_reset(dev, rtl9602c_ipmc_stop, ep))
+				dev_warn(dev, "L34: multicast offload not bound to the device; the CPU routes every group\n");
 #endif
 		}
 	}

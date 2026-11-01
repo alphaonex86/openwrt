@@ -1346,6 +1346,12 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 			seq_printf(sf, "  [%4u] 0x%08x\n", i * 32, w);
 	}
 	seq_printf(sf, "hits_now %u\nhits_seen %u\n", now, l->hits_seen);
+	seq_printf(sf, "ipmc routes %u wanted %u kept_for_cpu %u in_switch %u installs %u removals %u failures %u why %s\n",
+		   l->ipmc.n_sg, l->ipmc.n_want, l->ipmc.n_keep, l->ipmc.n_hw, l->ipmc.installs,
+		   l->ipmc.removals, l->ipmc.failures, l->ipmc.why ?: "-");
+	for (i = 0; i < l->ipmc.n_hw; i++)
+		seq_printf(sf, "  ipmc %pI4h at %u: %08x %08x %08x\n", &l->ipmc.hw[i].grp,
+			   l->ipmc.hw[i].idx, l->ipmc.hw[i].w[0], l->ipmc.hw[i].w[1], l->ipmc.hw[i].w[2]);
 	mutex_unlock(&l->lock);
 	return 0;
 }

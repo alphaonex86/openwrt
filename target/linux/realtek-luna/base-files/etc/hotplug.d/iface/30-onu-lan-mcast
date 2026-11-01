@@ -1,0 +1,13 @@
+#!/bin/sh
+# The LAN bridge as the switch's multicast routing needs it (rtl9602c_ipmc.c):
+# IGMP snooping, so its MDB names the groups a WiFi station joined (those stay on
+# the CPU), and the bridge itself a permanent multicast router port, so every
+# LAN report reaches igmpproxy. With the default (1, learned from queries) the
+# X111W's igmpproxy aged a group 36 s into a stream (2026-11-01): the reports
+# stopped reaching it once the bridge snooped. netifd can only write 0 or 1 here.
+[ "$ACTION" = ifup ] && [ "$INTERFACE" = lan ] || exit 0
+b=/sys/class/net/$DEVICE/bridge
+[ -d "$b" ] || exit 0
+echo 1 > "$b/multicast_snooping" && echo 2 > "$b/multicast_router" ||
+	logger -t onu-lan-mcast "$DEVICE: snooping/router not set; the CPU routes every multicast group"
+exit 0

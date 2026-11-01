@@ -300,6 +300,83 @@ int l34_l2uc_sts_index(u32 sts)
 	return ((sts & L2_STS_CAM) ? (1 << 10) : 0) | (sts & L2_STS_ADDR_MASK);
 }
 
+/* The routed group entry: every member port rewrites through TRAN row `tran`. */
+void l34_l3mc_encode(u32 *w, u32 group, u16 key, bool ivl, u8 ports, u8 tran)
+{
+	unsigned int p;
+
+	w[0] = w[1] = w[2] = 0;
+	l34_field_set(w, L3MC_GIP_LSP, L3MC_GIP_W, group);
+	for (p = 0; p < L3MC_PORTS; p++)
+		if (ports & (1u << p))
+			l34_field_set(w, L3MC_TRAN_LSP + L3MC_TRAN_W * p,
+				      L3MC_TRAN_W, tran);
+	l34_field_set(w, L3MC_KEY_LSP, L3MC_KEY_W, key);
+	l34_field_set(w, L3MC_L3LOOKUP_LSP, 1, 1);
+	l34_field_set(w, L3MC_NOSALEARN_LSP, 1, 1);
+	l34_field_set(w, L3MC_IVL_LSP, 1, ivl);
+	l34_field_set(w, L3MC_WANSA_LSP, 1, 1);
+	l34_field_set(w, L3MC_MBR_LSP, L3MC_MBR_W, ports);
+	l34_field_set(w, L3MC_VALID_LSP, 1, 1);
+}
+
+u32 l34_ipmc_tran_encode(u8 untag_ports, u8 netif)
+{
+	u32 w = 0;
+
+	l34_field_set(&w, IPMC_TRAN_UNTAG_LSP, IPMC_TRAN_UNTAG_W, untag_ports);
+	l34_field_set(&w, IPMC_TRAN_NETIF_LSP, IPMC_TRAN_NETIF_W, netif);
+	l34_field_set(&w, IPMC_TRAN_PPPOE_ACT_LSP, IPMC_TRAN_PPPOE_ACT_W,
+		      IPMC_TRAN_PPPOE_REMOVE);
+	return w;
+}
+
+/* The key a frame of VLAN `vid` is looked up with: its FID under SVL, else the VID. */
+u16 l34_vlan_lut_key(u32 vlan_entry, u16 vid, bool *ivl)
+{
+	*ivl = l34_field_get(&vlan_entry, SW_VLAN_IVL_LSP, 1);
+	return *ivl ? vid : l34_field_get(&vlan_entry, SW_VLAN_FID_LSP, 1);
+}
+
+static bool ipmc_sg_offloadable(const struct ipmc_sg *s, const u8 *vif_kind)
+{
+	unsigned int v;
+
+	if (!s->via_wan || s->parent >= IPMC_VIFS || vif_kind[s->parent] != IPMC_VIF_WAN ||
+	    !s->oifs)
+		return false;
+	for (v = 0; v < IPMC_VIFS; v++)
+		if ((s->oifs & (1u << v)) && vif_kind[v] != IPMC_VIF_LAN)
+			return false;
+	return true;
+}
+
+/* The groups the switch may route WAN -> LAN: every (S,G) of the group comes from
+ * the WAN and goes to the LAN bridge alone, and no listener only the CPU reaches
+ * (keep_cpu) joined it. out[] = the index of one (S,G) per group. */
+unsigned int l34_ipmc_wanted(const struct ipmc_sg *sg, unsigned int n_sg,
+			     const u8 *vif_kind, const u32 *keep_cpu,
+			     unsigned int n_keep, unsigned int *out,
+			     unsigned int max)
+{
+	unsigned int i, j, n = 0;
+	bool ok;
+
+	for (i = 0; i < n_sg && n < max; i++) {
+		ok = true;
+		for (j = 0; j < n_sg && ok; j++)
+			if (sg[j].grp == sg[i].grp &&
+			    (j < i || !ipmc_sg_offloadable(&sg[j], vif_kind)))
+				ok = false;	/* seen already, or a sibling is not ours */
+		for (j = 0; j < n_keep && ok; j++)
+			if (keep_cpu[j] == sg[i].grp)
+				ok = false;
+		if (ok)
+			out[n++] = i;
+	}
+	return n;
+}
+
 /* ===== hoisted from rtl9602c_eth.c (same shell TU) ...
  * dev/MEASURED-rtl9602c_l34_logic.c.md sec 6. */
 void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add)

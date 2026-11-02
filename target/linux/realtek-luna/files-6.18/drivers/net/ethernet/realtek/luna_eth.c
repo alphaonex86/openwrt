@@ -273,6 +273,8 @@ struct luna_eth_chip {
 	u32	cfg_phy_ini;	/* per-port PHY enable; U-Boot loads it from efuse*/
 	u32	cfg_phy_ctrl;	/* MSK_MDI[8:5] | BASE_PHYAD[4:0]; 0 = not known */
 	u32	cfg_pcsxf;	/* RST_RXFIFO[13:10] | MIIRX_IPG[9:5] | PCSXF[4:1] */
+	u32	igr_bwctrl_glb;	/* bit0: OMCI/OAM/IGMP bypass ingress rate and flow
+				 * control; 0 = stock leaves it clear, not written */
 
 	/* --- port-isolation packing, which differs in SHAPE not just offset -- */
 	u8	piso_per_word;	/* how many ports share one 32-bit word		*/
@@ -351,6 +353,7 @@ static const struct luna_eth_chip luna_chip_rtl9603cvd = {
 	.cfg_phy_ini	= 0x00050,
 	.cfg_phy_ctrl	= 0x0004C,
 	.cfg_pcsxf	= 0x00048,
+	.igr_bwctrl_glb	= 0x230E0,	/* stock G24W reads 1 (swcore capture 2026-11-02) */
 	.piso_per_word	= 2,
 	.piso_bits	= 12,
 	.piso_all	= 0xFFF,
@@ -1512,6 +1515,11 @@ static int eth_switch_init(struct luna_eth *ep)
 		sw_or(ep, ep->c->cpu_tag_insert, BIT(0));
 		sw_or(ep, ep->c->cpu_tag_aware, BIT(0));
 	}
+
+	/* 7. Control frames (OMCI, OAM, IGMP) bypass ingress rate and flow control,
+	 *    as stock leaves it: a policed port must not starve them. */
+	if (ep->c->igr_bwctrl_glb)
+		sw_or(ep, ep->c->igr_bwctrl_glb, BIT(0));
 
 	dev_info(ep->dev,
 		 "switch: %s open-L2 up (cpu-port %u of 0..%u, src-permit=%08x, cpu-ablty=%04x)\n",

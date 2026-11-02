@@ -3142,8 +3142,9 @@ static void rtw8192xb_ctrl_tx_path_tmac(struct rtw89_dev *rtwdev, u8 tx_path,
 	rtw89_phy_write32_idx(rtwdev, R_MAC_SEL, B_MAC_SEL_MOD, 0, RTW89_PHY_0);
 	rtw89_phy_write32_idx(rtwdev, R_MAC_SEL, B_MAC_SEL_MOD, 0, RTW89_PHY_1);
 
-	for (addr = R_AX_MACID_ANT_TABLE;
-	     addr <= R_AX_MACID_ANT_TABLE_LAST; addr += 4) {
+	/* the 8192XB per-MACID antenna table sits 0x100 below the 8852C's */
+	for (addr = R_AX_MACID_ANT_TABLE - 0x100;
+	     addr <= R_AX_MACID_ANT_TABLE_LAST - 0x100; addr += 4) {
 		reg = rtw89_mac_reg_by_idx(rtwdev, addr, mac_idx);
 		rtw89_write32(rtwdev, reg, 0);
 	}

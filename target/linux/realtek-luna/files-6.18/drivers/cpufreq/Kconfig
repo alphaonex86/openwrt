@@ -264,7 +264,7 @@ endif
 
 if MIPS
 config LUNA_CPUFREQ
-	bool "Realtek RTL9602C/RTL9601D CPUfreq driver"
+	bool "Realtek RTL9602C/RTL9601D/RTL9603CVD CPUfreq driver"
 	depends on REALTEK_LUNA
 	help
 	  Scales the CPU clock with the OC0 clock management unit divider, to

@@ -693,6 +693,8 @@ config REALTEK_LUNA
 	select SYS_SUPPORTS_32BIT_KERNEL
 	select SYS_SUPPORTS_BIG_ENDIAN
 	select CPU_R4K_CACHE_TLB
+	select CPU_SUPPORTS_CPUFREQ
+	select MIPS_EXTERNAL_TIMER
 	select HAVE_PCI
 	# Two SoC families share this platform; gate each one's CPU features on
 	# its CPU choice so the per-subtarget config selects exactly one:

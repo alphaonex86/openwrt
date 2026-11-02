@@ -911,7 +911,7 @@ enum cortina_ni_win {
 
 /* L3 TE congestion buffer (stock reg.txt TE_TE_GLB_CTRL / TE_CB_VOQ_THRSH_*); tables indirect, DATA first. */
 #define CA_NI_L3TE_GLB_CTRL		0x9004
-#define  CA_NI_L3TE_GLB_TAILDROP_EN	BIT(2)
+#define  CA_NI_L3TE_GLB_TAILDROP_EN	BIT(2)	/* never set: HW-forwarded voq buffer counts saturate, every offloaded flow drops */
 #define CA_NI_L3TE_CB_VOQ_PROF_ACCESS	0x95f8
 #define CA_NI_L3TE_CB_VOQ_PROF_DATA2	0x95fc
 #define  CA_NI_L3TE_CB_PROF_D2_PRVT_HI	GENMASK(5, 0)	/* prvt[13:8] */

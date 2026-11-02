@@ -11,7 +11,7 @@ refused=$(get refused)
 [ -n "$refused" ] && once refused "a value the OLT provisioned was refused: $refused"
 url=$(get url)
 [ "$(get admin)" = 0 ] && [ -n "$url" ] || exit 0
-[ -x /etc/init.d/onu-cwmp ] || exit 0
+[ -x /etc/init.d/onu-cwmp ] || { once cpe "the OLT provisioned the ACS $url and this image has no TR-069 CPE (onu-cwmp)"; exit 0; }
 set -- $(gpon-wan-discover --mgmt)
 iface=$(uci -q show network | tr -d "'" | awk -F= -v ip="${2%/*}" '$1 ~ /^network\.[^.]+\.ipaddr$/ {
 	n = split($2, a, " "); for (i = 1; i <= n; i++) { sub(/\/.*/, "", a[i]); if (a[i] == ip) { split($1, k, "."); print k[2]; exit } } }')

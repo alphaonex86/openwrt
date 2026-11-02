@@ -16,7 +16,7 @@ define Package/gpon-provision
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=Per-board GPON ONU provisioning (MAC/SN from factory partition)
-  DEPENDS:=+zlib +PACKAGE_ppp:pppoe-discovery
+  DEPENDS:=+zlib +PACKAGE_ppp:pppoe-discovery +onu-cwmp
 endef
 
 define Package/gpon-provision/description

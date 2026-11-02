@@ -143,12 +143,14 @@ static const struct luna_pcie_chip luna_pcie_9602c = {
 	.misc_strobe = PCI_MISC_MDIO_P0 | PCI_MISC_MDIO_P1,
 	.ip_mac_bit = IP_SEL_EN_PCIE0,
 	.ip_pre_or = IP_SEL_EN_PCIE_PHY | IP_SEL_EN_EXTRA,
-	/* PERST# is not driven by an SoC GPIO here: probing shows the ...
-	 * dev/MEASURED-pcie-luna.c.md sec 8. */
-	.perst_pad_en = 0, .perst_dir = 0, .perst_data = 0, .perst_bit = 0,
+	/* PERST# = GPIO 32 = bank 1 bit 0, ACTIVE LOW: both 9602C stock kernels
+	 * (X111W, V2801RGW) hold it through the PHY setup and release it before
+	 * a ~1 s link poll. Without it ~4 % of V2801RGW boots never trained. */
+	.perst_pad_en = 0xbb00004cul, .perst_dir = 0xb8003324ul,
+	.perst_data = 0xb8003328ul, .perst_bit = 0,
 	/* resolved at init: stock's five by default, the full table with
 	 * `pcie_phy_full` on the command line. See luna_pcie_phy_9602c_stock. */
-	.phy = luna_pcie_phy_9602c_stock, .retries = 3, .link_polls = 10,
+	.phy = luna_pcie_phy_9602c_stock, .retries = 3, .link_polls = 100,
 };
 
 static const struct luna_pcie_chip luna_pcie_9603cvd = {
@@ -340,8 +342,7 @@ static int __init luna_pcie_reset(void)
 	u32 v;
 	int i;
 
-	/* 0. Hold the endpoint in reset for the whole bring-up (RTL9603CVD), or
-	 *    just spend the bare timing budget where PERST is tied (RTL9602C). */
+	/* 0. Hold the endpoint in reset for the whole bring-up. */
 	luna_pcie_perst(true);
 	mdelay(10);
 
@@ -400,10 +401,10 @@ static int __init luna_pcie_reset(void)
 	/* 5. Let the endpoint out of reset, immediately before training. */
 	luna_pcie_perst(false);
 
-	/* 6. Poll for link-up (L0). */
+	/* 6. Poll for link-up (L0): -> the 10 ms polls it took. */
 	for (i = 0; i < (int)chip->link_polls; i++) {
 		if ((readl(pcie_hostcfg() + HOSTCFG_LINK) & 0x1f) == LINK_UP_STATE)
-			return 0;
+			return i;
 		mdelay(10);
 	}
 	return -ETIMEDOUT;
@@ -440,14 +441,17 @@ static int __init luna_pcie_init(void)
 
 	for (attempt = 0; attempt < chip->retries; attempt++) {
 		ret = luna_pcie_reset();
-		if (!ret)
+		if (ret >= 0) {
+			pr_info("realtek-pcie: %s link up after %d ms (attempt %u)\n",
+				chip->name, ret * 10, attempt + 1);
 			break;
+		}
 		pr_info("realtek-pcie: %s link not trained (state=0x%x), retry %u/%u\n",
 			chip->name,
 			readl(pcie_hostcfg() + HOSTCFG_LINK) & 0x1f,
 			attempt + 1, chip->retries);
 	}
-	if (ret) {
+	if (ret < 0) {
 		pr_warn("realtek-pcie: %s link did not train after %u attempts (state=0x%x)\n",
 			chip->name, chip->retries,
 			readl(pcie_hostcfg() + HOSTCFG_LINK) & 0x1f);

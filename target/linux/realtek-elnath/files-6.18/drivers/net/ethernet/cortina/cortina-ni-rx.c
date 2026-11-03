@@ -190,7 +190,9 @@ static_assert(CA_NI_RX_CPU_POOL0_BYTES +
 /* The deep queue has no software-owned overflow reserve, so eqp1 is an EQ this driver never enables.
  * It must not be EQ12 again: with eqp0 == eqp1 the L3TE CB charges an enqueue to pool slot 0 and credits
  * its release to slot 1, so the HW-forward voqs (88, 136) saturate and tail-drop kills every offloaded flow
- * (live A/B 2026-11-02: {EQ12, EQ12} drifts, {EQ12, EQ15} stays at 0 with tail-drop on, 941/925 Mbit/s). */
+ * (live A/B 2026-11-02: {EQ12, EQ12} drifts, {EQ12, EQ15} stays at 0 with tail-drop on, 941/925 Mbit/s).
+ * NOT stock's profile 12, 0xec = {EQ12, EQ14}: there EQ14 is a 10193-buffer overflow pool shared with
+ * profile 13; this driver has no EQ14 pool, so profile 12 is single-pool like stock's 3/7/8 (eqp1 EQ15). */
 #define CA_NI_RX_EQ_NEVER_ENABLED	15
 #define CA_NI_RX_DQ_PROFILE_VAL \
 	(FIELD_PREP(CA_NI_QM_EQ_PROF_EQP0, CA_NI_RX_EQ12_ID) | \

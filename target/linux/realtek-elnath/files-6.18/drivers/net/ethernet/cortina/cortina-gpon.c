@@ -9,6 +9,7 @@
 #include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mutex.h>
@@ -132,23 +133,14 @@
 #define CG_PERGPIO_CFG0		0x300
 #define CG_PERGPIO_OUT0		0x304
 #define CG_GLB_GPIO_MUX0	0x130	/* stock 0x00001FFF: pins 0-12 are GPIO */
-#define CG_GLB_GPIO_MUX3	0x13c	/* stock 0x000390FF: pins 96-103,108,111-113 */
-#define CG_GLB_GPIO_MUX4	0x140	/* stock 0x00003B00: pins 136,137,139-141 */
 #define CG_GLB_PINROUTE		0x42c	/* stock 0x01101101; bit20 = laser net */
 #define CG_PINROUTE_LASER	BIT(20)
-#define CG_GPIO0_LASER_PINS	(BIT(6) | BIT(11) | BIT(12))
-#define CG_GPIO0_PIN6		BIT(6)
 /* GPIO groups 3 and 4 (PERI +0x36c/+0x370, +0x390/+0x394): ...
  * dev/MEASURED-cortina-gpon.c.md sec 11. */
 #define CG_PERGPIO_CFG3		0x36c
 #define CG_PERGPIO_OUT3		0x370
 #define CG_PERGPIO_CFG4		0x390
 #define CG_PERGPIO_OUT4		0x394
-#define CG_GPIO3_CFG_STOCK	0xfffdef00
-#define CG_GPIO3_OUT_STOCK	0x00021010
-#define CG_GPIO3_LAMP_PINS	0x000010db	/* gpio-leds: WPS 0, LAN 1/3/6/7, PON 4, NET 12 */
-#define CG_GPIO4_CFG_STOCK	0xffffc5ff
-#define CG_GPIO4_OUT_STOCK	0x00003200
 /* Dying-gasp detector in the PERI block (stock ca-ne aal_pon_init, re-armed
  * by its OMCC-up interrupt path): armed, the PON MAC itself sends the
  * Dying_Gasp PLOAM when the supply fails -- no software runs that late. */
@@ -462,7 +454,8 @@ struct cortina_gpon {
 	void __iomem *pon;		/* ioremap of the whole PON window */
 	void __iomem *mac;		/* pon + CG_GPON_MAC_OFF, the GPON MAC block */
 	void __iomem *glb;		/* ioremap of the GLB reset/clock window */
-	void __iomem *gpio;		/* ioremap of the PER_GPIO window */
+	void __iomem *gpio;		/* ioremap of the PER_GPIO window: read-only diagnostics + dying gasp */
+	struct gpio_descs *laser_en;	/* DT laser-enable-gpios: logical 1 = the level stock drives at Online */
 	struct proc_dir_entry *proc;
 	struct proc_dir_entry *health_proc;
 	int optical_init_error;
@@ -764,39 +757,26 @@ static void cg_dying_gasp_arm(struct cortina_gpon *cg)
 	writel(1, cg->gpio + CG_PERDG_INT_EN);
 }
 
-static void cg_laser_on(struct cortina_gpon *cg)
+static int cg_laser_on(struct cortina_gpon *cg)
 {
-	u32 v;
+	unsigned int i;
+	int ret;
 
-	if (!cg->gpio)
-		return;
+	if (!cg->glb)
+		return -ENODEV;
 	/* route the laser-enable net (stock 0x01101101; ours cold lacks bit20) */
-	v = readl(cg->glb + CG_GLB_PINROUTE);
-	writel(v | CG_PINROUTE_LASER, cg->glb + CG_GLB_PINROUTE);
-	/* pin muxes to EXACT stock: group 0 = 0x1fff (ours' cold 0xffff has
-	 * pins 13-15 wrongly GPIO), groups 3/4 = the stock-driven pin sets */
-	writel(0x00001fff, cg->glb + CG_GLB_GPIO_MUX0);
-	writel(0x000390ff, cg->glb + CG_GLB_GPIO_MUX3);
-	writel(0x00003b00, cg->glb + CG_GLB_GPIO_MUX4);
-	/* group-0 drive: pin6=HIGH, pin11=LOW, pin12=LOW ... */
-	v = readl(cg->gpio + CG_PERGPIO_OUT0);
-	writel((v & ~CG_GPIO0_LASER_PINS) | CG_GPIO0_PIN6, cg->gpio + CG_PERGPIO_OUT0);
-	/* ... then make pins 6/11/12 outputs (cfg bit 0 = output) */
-	v = readl(cg->gpio + CG_PERGPIO_CFG0);
-	writel(v & ~CG_GPIO0_LASER_PINS, cg->gpio + CG_PERGPIO_CFG0);
-	/* groups 3/4: whole-group stock state, OUT before CFG so each pin
-	 * drives the correct level the moment it becomes an output; a lamp keeps
-	 * the level its LED driver set (stock's were its lamps at capture time) */
-	v = readl(cg->gpio + CG_PERGPIO_OUT3);
-	writel((CG_GPIO3_OUT_STOCK & ~CG_GPIO3_LAMP_PINS) | (v & CG_GPIO3_LAMP_PINS),
-	       cg->gpio + CG_PERGPIO_OUT3);
-	writel(CG_GPIO3_CFG_STOCK, cg->gpio + CG_PERGPIO_CFG3);
-	writel(CG_GPIO4_OUT_STOCK, cg->gpio + CG_PERGPIO_OUT4);
-	writel(CG_GPIO4_CFG_STOCK, cg->gpio + CG_PERGPIO_CFG4);
-	/* pin 34: leave the reset state.  Stock at Online has GLOBAL_GPIO_MUX_1 = 0
-	 * (pin 34 NOT muxed to GPIO) and PER_GPIO1_CFG all-inputs -- the live golden
-	 * refutes the earlier "stock mux1 bit2=1" claim, so write nothing here.
-	 * PER_GPIO1_IN bit2 still serves as the net-level readback in /proc/gpon. */
+	writel(readl(cg->glb + CG_GLB_PINROUTE) | CG_PINROUTE_LASER, cg->glb + CG_GLB_PINROUTE);
+	/* The pads stock drives at Online (one of them is the GN25L95 TX_DIS net), through the GPIO driver:
+	 * its lock serialises them with the lamps of the same groups, and the pad mux is its DT cortina,pinmux.
+	 * Pin 34 stays in its reset state (stock: not muxed, input), the net-level readback in /proc/gpon. */
+	for (i = 0; cg->laser_en && i < cg->laser_en->ndescs; i++) {
+		ret = gpiod_direction_output(cg->laser_en->desc[i], 1);
+		if (ret) {
+			dev_err(cg->dev, "laser-enable pad %u not driven: %d\n", i, ret);
+			return ret;
+		}
+	}
+	return 0;
 }
 
 /* The poll half of the indirect transaction. FOUR spellings ...
@@ -1144,10 +1124,11 @@ static int cg_mac_activate(struct cortina_gpon *cg, bool identity_changed,
 
 	/* De-assert the laser TX-disable net BEFORE programming the ...
 	 * dev/MEASURED-cortina-gpon.c.md sec 56. */
-	cg_laser_on(cg);
-	mdelay(10);	/* let the TX_DIS net settle before the i2c stream */
-
-	ret = cg_bosa_init(cg->dev);
+	ret = cg_laser_on(cg);
+	if (!ret) {
+		mdelay(10);	/* let the TX_DIS net settle before the i2c stream */
+		ret = cg_bosa_init(cg->dev);
+	}
 	cg->optical_init_error = ret;
 	if (ret) {
 		cg->activated = false;
@@ -3681,6 +3662,9 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 	 * dev/MEASURED-cortina-gpon.c.md sec 119. */
 	cg->glb = devm_ioremap(dev, CG_GLB_WINDOW_PHYS, CG_GLB_WINDOW_SIZE);
 	cg->gpio = devm_ioremap(dev, CG_PERGPIO_PHYS, CG_PERGPIO_SIZE);
+	cg->laser_en = devm_gpiod_get_array_optional(dev, "laser-enable", GPIOD_ASIS);
+	if (IS_ERR(cg->laser_en))
+		return dev_err_probe(dev, PTR_ERR(cg->laser_en), "laser-enable-gpios\n");
 	cg_dying_gasp_arm(cg);
 	if (cg->glb) {
 		dev_info(dev, "GLB reset regs (ours): EPON_CNTL=0x%08x GPON_CNTL=0x%08x PON_CNTL=0x%08x PSDS_INIT=0x%08x\n",

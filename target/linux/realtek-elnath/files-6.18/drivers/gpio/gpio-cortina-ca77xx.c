@@ -115,7 +115,7 @@ static int ca77xx_gpio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct ca77xx_gpio *cg;
 	struct resource *res;
-	u32 ngpios;
+	u32 ngpios, pinmux;
 
 	cg = devm_kzalloc(dev, sizeof(*cg), GFP_KERNEL);
 	if (!cg)
@@ -139,6 +139,9 @@ static int ca77xx_gpio_probe(struct platform_device *pdev)
 		cg->mux = devm_ioremap(dev, res->start, resource_size(res));
 		if (!cg->mux)
 			return -ENOMEM;
+		/* the board's whole pad-function word, before any consumer can request a pin of this group */
+		if (!device_property_read_u32(dev, "cortina,pinmux", &pinmux))
+			writel(pinmux, cg->mux);
 	}
 
 	if (device_property_read_u32(dev, "ngpios", &ngpios))

@@ -384,7 +384,7 @@
 	 * number prefix).  The same window is also listed positionally in the
 	 * cortina,ni-interface node; the gpon driver ioremaps it non-exclusively.
 	 */
-	gpon@f5500000 {
+	gpon: gpon@f5500000 {
 		compatible = "realtek,rtl9607f-gpon";
 		reg = <0x04 0xf5500000 0x00 0xc000>;
 		/*

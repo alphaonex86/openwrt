@@ -273,8 +273,26 @@
 	deviation = <2000>;	/* the stock tree's value */
 };
 
+/* The pad-function words stock runs with at Online (live golden 2026-07-16): group 0 pins 0-12 are GPIO
+ * (cold 0xffff also muxes 13-15), groups 3/4 the pins stock drives. */
+&gpio0 {
+	cortina,pinmux = <0x1fff>;
+};
+
+&gpio3 {
+	cortina,pinmux = <0x390ff>;
+};
+
+/* The non-lamp pads stock drives at Online (groups 3/4, PERST and the PA supply excepted): the GN25L95
+ * TX_DIS net hangs on one of them (live 2026-07-16). Flags make logical 1 = the stock level:
+ * group 3 pins 2/5 low, 17 high; group 4 pin 11 low. Driven by the gpon driver at each ranging. */
+&gpon {
+	laser-enable-gpios = <&gpio3 0x02 0x01>, <&gpio3 0x05 0x01>, <&gpio3 0x11 0x00>, <&gpio4 0x0b 0x01>;
+};
+
 /* The 5 GHz PA supply, "usb_vbus" in the stock tree: held high as stock does, not left to the bootloader. */
 &gpio4 {
+	cortina,pinmux = <0x3b00>;
 	pa-5g-hog {
 		gpio-hog;
 		gpios = <0x0d 0x00>;

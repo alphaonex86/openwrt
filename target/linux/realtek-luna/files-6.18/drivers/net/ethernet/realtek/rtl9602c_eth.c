@@ -26,6 +26,7 @@
 #include "luna_gpon_nic.h"
 #include "luna_wan_vlan.h"
 #include "luna_eth_mib.h"
+#include "luna_loop.h"		/* LAN loop detection, the switch engine on this die */
 #include "luna_gmac_logic.h"	/* family GMAC ring packings (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
 
@@ -443,6 +444,8 @@ struct rtl9602c_eth {
 	u32		dbg_omci_rx;	/* DS OMCI frames trapped to the CPU */
 	u32		dbg_omci_rxlen;	/* length of the last OMCI frame */
 	u8		dbg_omci_rxbuf[48];	/* the last DS OMCI baseline message */
+
+	struct luna_loop	*loop;	/* LAN loop detection (luna_loop.c) */
 };
 
 static struct rtl9602c_eth *g_ep;	/* single-instance, for /proc diag */
@@ -2224,6 +2227,7 @@ static int rtl9602c_eth_open(struct net_device *ndev)
 		if (ret)
 			return ret;
 		luna_mib_phy_reapply(ndev);
+		luna_loop_start(ep->loop);
 	}
 	netif_carrier_on(ndev);
 	netif_start_queue(ndev);
@@ -2598,13 +2602,95 @@ static void rtl9602c_eth_tx_fence(void *cookie)
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 }
 
+/* Gate ONE copper port: down = its MAC link forced down and its PHY powered
+ * down, up = both released. The UNI administrative lock and a LAN loop share
+ * it; @who names the caller in the log. rtl9602c_gphy_lock held. */
+static int rtl9602c_port_gate__locked(struct rtl9602c_eth *ep, unsigned int port, bool down,
+				      const char *who, u16 *bmcr_back, u32 *mode_back)
+{
+	u32 force, mode, guard;
+	bool phy_allowed = true;
+	u16 bmcr, want;
+	int rc;
+
+	force = ioread32(ep->sw + SW_FORCE_P_ABLTY(ep, port));
+	mode = ioread32(ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
+	if (down) {
+		iowrite32(force & ~ABLTY_LINK, ep->sw + SW_FORCE_P_ABLTY(ep, port));
+		iowrite32(mode | ABLTY_LINK, ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
+	} else {
+		iowrite32(mode & ~ABLTY_LINK, ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
+	}
+	force = ioread32(ep->sw + SW_FORCE_P_ABLTY(ep, port));
+	mode = ioread32(ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
+	/* BOTH words: the mode says the LINK ability is forced, the value says
+	 * what it is forced TO. */
+	if (!(mode & ABLTY_LINK) != !down || (down && (force & ABLTY_LINK))) {
+		dev_err(ep->dev,
+			"%s port %u: the MAC gate did not take -- FORCE_P_ABLTY %08x, ABLTY_FORCE_MODE %08x, so the port is NOT gated\n",
+			who, port, force, mode);
+		return -EIO;
+	}
+
+	if (port == 0) {
+		guard = ioread32(ep->sw + SW_PHY_PWRDN_GUARD);
+		phy_allowed = (guard & PHY_PWRDN_GUARD_OK) == PHY_PWRDN_GUARD_OK;
+	}
+	if (!phy_allowed) {
+		/* ⚠ THIS IS A FAILURE, NOT A PARTIAL SUCCESS. The board's own ...
+		 * dev/MEASURED-rtl9602c_eth.c.md sec 138. */
+		dev_err(ep->dev,
+			"%s port %u: the MAC gate took but this die guards port 0's PHY power on %#05x, which reads %08x -- the port is NOT fully gated and the gate stays owed\n",
+			who, port, SW_PHY_PWRDN_GUARD, guard);
+		return -EBUSY;
+	}
+
+	rc = rtl9602c_gphy_read__locked(ep, port, 0, &bmcr);
+	if (rc) {
+		dev_err(ep->dev,
+			"%s port %u: its BMCR could not be read (%d); nothing is written back and the state is owed\n",
+			who, port, rc);
+		return rc;
+	}
+	/* ONLY THE POWER BIT MOVES: this board's own power-down ...
+	 * dev/MEASURED-rtl9602c_eth.c.md sec 115. */
+	want = (u16)(bmcr | BMCR_PDOWN);
+	rc = rtl9602c_gphy_write__locked(ep, port, 0, want);
+	if (!rc && !down) {
+		u16 mid;
+
+		rc = rtl9602c_gphy_read__locked(ep, port, 0, &mid);
+		if (!rc && !(mid & BMCR_PDOWN)) {
+			dev_err(ep->dev,
+				"%s port %u: the power-down half of the unlock pulse did not land (BMCR %04x) -- the far end would never re-negotiate\n",
+				who, port, mid);
+			rc = -EIO;
+		}
+		if (!rc)
+			rc = rtl9602c_gphy_write__locked(ep, port, 0,
+							 (u16)(mid & ~BMCR_PDOWN));
+	}
+	if (!rc)
+		rc = rtl9602c_gphy_read__locked(ep, port, 0, &bmcr);
+	if (!rc && (!(bmcr & BMCR_PDOWN) != !down))
+		rc = -EIO;
+	if (rc) {
+		dev_err(ep->dev,
+			"%s port %u: the PHY did not reach %s (%d, BMCR %04x); the gate is owed\n",
+			who, port, down ? "power-down" : "power-up", rc, bmcr);
+		return rc;
+	}
+	*bmcr_back = bmcr;
+	*mode_back = mode;
+	return 0;
+}
+
 /* the UNI administrative state -- dev/MEASURED-rtl9602c_eth.c.md sec 114. */
 static int rtl9602c_uni_admin_set(void *cookie, unsigned int port, bool locked)
 {
 	struct rtl9602c_eth *ep = cookie;
-	u32 force, mode, guard;
-	bool phy_allowed = true;
-	u16 bmcr, want;
+	u16 bmcr = 0;
+	u32 mode = 0;
 	int rc;
 
 	/* A UNI is a COPPER port.  The PON and CPU ports share this index space,
@@ -2620,77 +2706,11 @@ static int rtl9602c_uni_admin_set(void *cookie, unsigned int port, bool locked)
 	WRITE_ONCE(rtl9602c_uni_locked_ports,
 		   locked ? (rtl9602c_uni_locked_ports | BIT(port))
 			  : (rtl9602c_uni_locked_ports & ~BIT(port)));
-	force = ioread32(ep->sw + SW_FORCE_P_ABLTY(ep, port));
-	mode = ioread32(ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
-	if (locked) {
-		iowrite32(force & ~ABLTY_LINK, ep->sw + SW_FORCE_P_ABLTY(ep, port));
-		iowrite32(mode | ABLTY_LINK, ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
-	} else {
-		iowrite32(mode & ~ABLTY_LINK, ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
-	}
-	force = ioread32(ep->sw + SW_FORCE_P_ABLTY(ep, port));
-	mode = ioread32(ep->sw + SW_ABLTY_FORCE_MODE(ep, port));
-	/* BOTH words: the mode says the LINK ability is forced, the value says
-	 * what it is forced TO. */
-	if (!(mode & ABLTY_LINK) != !locked || (locked && (force & ABLTY_LINK))) {
-		mutex_unlock(&rtl9602c_gphy_lock);
-		dev_err(ep->dev,
-			"UNI port %u: the MAC gate did not take -- FORCE_P_ABLTY %08x, ABLTY_FORCE_MODE %08x, so the administrative state is NOT applied\n",
-			port, force, mode);
-		return -EIO;
-	}
-
-	if (port == 0) {
-		guard = ioread32(ep->sw + SW_PHY_PWRDN_GUARD);
-		phy_allowed = (guard & PHY_PWRDN_GUARD_OK) == PHY_PWRDN_GUARD_OK;
-	}
-	if (!phy_allowed) {
-		/* ⚠ THIS IS A FAILURE, NOT A PARTIAL SUCCESS. The board's own ...
-		 * dev/MEASURED-rtl9602c_eth.c.md sec 138. */
-		mutex_unlock(&rtl9602c_gphy_lock);
-		dev_err(ep->dev,
-			"UNI port %u: the MAC gate took but this die guards port 0's PHY power on %#05x, which reads %08x -- the administrative state is NOT fully applied and stays owed\n",
-			port, SW_PHY_PWRDN_GUARD, guard);
-		return -EBUSY;
-	}
-
-	rc = rtl9602c_gphy_read__locked(ep, port, 0, &bmcr);
-	if (rc) {
-		mutex_unlock(&rtl9602c_gphy_lock);
-		dev_err(ep->dev,
-			"UNI port %u: its BMCR could not be read (%d); nothing is written back and the state is owed\n",
-			port, rc);
-		return rc;
-	}
-	/* ONLY THE POWER BIT MOVES: this board's own power-down ...
-	 * dev/MEASURED-rtl9602c_eth.c.md sec 115. */
-	want = (u16)(bmcr | BMCR_PDOWN);
-	rc = rtl9602c_gphy_write__locked(ep, port, 0, want);
-	if (!rc && !locked) {
-		u16 mid;
-
-		rc = rtl9602c_gphy_read__locked(ep, port, 0, &mid);
-		if (!rc && !(mid & BMCR_PDOWN)) {
-			dev_err(ep->dev,
-				"UNI port %u: the power-down half of the unlock pulse did not land (BMCR %04x) -- the far end would never re-negotiate\n",
-				port, mid);
-			rc = -EIO;
-		}
-		if (!rc)
-			rc = rtl9602c_gphy_write__locked(ep, port, 0,
-							 (u16)(mid & ~BMCR_PDOWN));
-	}
-	if (!rc)
-		rc = rtl9602c_gphy_read__locked(ep, port, 0, &bmcr);
-	if (!rc && (!(bmcr & BMCR_PDOWN) != !locked))
-		rc = -EIO;
+	rc = rtl9602c_port_gate__locked(ep, port, locked || luna_loop_port_down(ep->loop, port),
+					"UNI", &bmcr, &mode);
 	mutex_unlock(&rtl9602c_gphy_lock);
-	if (rc) {
-		dev_err(ep->dev,
-			"UNI port %u: the PHY did not reach %s (%d, BMCR %04x); the administrative state is owed\n",
-			port, locked ? "power-down" : "power-up", rc, bmcr);
+	if (rc)
 		return rc;
-	}
 	dev_info(ep->dev, "UNI port %u %s (BMCR %04x, ABLTY_FORCE_MODE %08x)\n",
 		 port, locked ? "LOCKED" : "UNLOCKED", bmcr, mode);
 	return 0;
@@ -2701,6 +2721,24 @@ static void rtl9602c_eth_omci_release(void *cookie)
 	WRITE_ONCE(g_ep, NULL);
 	luna_omci_detach(cookie);
 }
+
+static int rtl9602c_loop_gate(struct net_device *ndev, unsigned int port, bool down)
+{
+	struct rtl9602c_eth *ep = netdev_priv(ndev);
+	u16 bmcr;
+	u32 mode;
+	int rc;
+
+	mutex_lock(&rtl9602c_gphy_lock);
+	rc = rtl9602c_port_gate__locked(ep, port, down || rtl9602c_uni_port_locked(port),
+					"LAN loop", &bmcr, &mode);
+	mutex_unlock(&rtl9602c_gphy_lock);
+	return rc;
+}
+
+static const struct luna_loop_ops rtl9602c_loop_ops = {
+	.gate	= rtl9602c_loop_gate,
+};
 
 static int rtl9602c_eth_probe(struct platform_device *pdev)
 {
@@ -2836,6 +2874,9 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ret = luna_mib_attach(ndev, ep->sw, ep->swm, &rtl9602c_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
+	ep->loop = luna_loop_attach(dev, ndev, ep->sw, ep->swm, &rtl9602c_loop_ops);
+	if (!ep->loop)
+		return -ENOMEM;
 	/* TC feature bit; nftables TC_SETUP_FT registration does not consult it. */
 	ndev->hw_features |= NETIF_F_HW_TC;
 	ndev->features |= NETIF_F_HW_TC;

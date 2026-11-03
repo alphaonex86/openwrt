@@ -52,7 +52,6 @@
 #include <linux/of_device.h>
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
-#include <linux/random.h>
 #include <linux/timer.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "luna_ponmac.h"	/* LUNA_MODEL_NAME_INFO and the RTL9607C revision decode */
@@ -62,7 +61,7 @@
 #include "luna_wan_vlan.h"
 #include "luna_eth_mib.h"
 #include "luna_flow.h"
-#include "lan_loop_logic.h"	/* LAN loop detection: probe + verdict (flowcore) */
+#include "luna_loop.h"		/* LAN loop detection, shared with the other Luna shell */
 #include "gpon_omci_core.h"	/* omci_onu_input, omci_onu_emit_veip_up_avc, OMCI_LEN.
 				 * NOT the OMCI_MT_* codes any more: this shell
 				 * stopped decoding message types on 2026-09-10 */
@@ -194,22 +193,6 @@ static bool lan_flood_direct = true;
 module_param(lan_flood_direct, bool, 0644);
 MODULE_PARM_DESC(lan_flood_direct, "send CPU-originated multicast/broadcast to an explicit egress mask (the flood set minus the CPU port) instead of letting the switch flood it back at us");
 
-/* LAN loop detection, on by default like stock (operator 2026-11-02). The
- * RTL9603CVD has no RLDP engine (its own register map lists no RLDP register),
- * so the CPU probes each LAN port and blocks, in the switch, the port its own
- * probe comes back on. Stock G24W period/recovery: 5 s / 300 s. */
-static bool loop_detect = true;
-module_param(loop_detect, bool, 0644);
-MODULE_PARM_DESC(loop_detect, "LAN loop detection: probe every LAN port, block the port our own probe returns on");
-
-static unsigned int loop_probe_s = 5;
-module_param(loop_probe_s, uint, 0644);
-MODULE_PARM_DESC(loop_probe_s, "seconds between two loop-detection probes on each LAN port");
-
-static unsigned int loop_block_s = 300;
-module_param(loop_block_s, uint, 0644);
-MODULE_PARM_DESC(loop_block_s, "seconds a looped LAN port stays blocked before it is probed again");
-
 /* ---- GMAC0 register block (offsets from the DT reg base 0x18012000) -------- */
 #define R_MAR0		0x08	/* multicast hash [31:0]				*/
 #define R_MAR4		0x0C	/* multicast hash [63:32]			*/
@@ -261,7 +244,6 @@ MODULE_PARM_DESC(msr_top, "MSR(0x58) top byte (0x10 = healthy with our init; 0xf
 
 /* switch core (SWCORE), phys 0x1b000000 -- dev/MEASURED-luna_eth.c.md sec 5. */
 #define   STP_STATE_MASK	0x3
-#define   STP_BLOCKING		0x1
 #define   STP_FORWARDING	0x3
 
 /* THE PER-CHIP TABLE. Everything in it MOVED between the two parts, and every
@@ -516,12 +498,7 @@ struct luna_eth {
 	 * dev/MEASURED-luna_eth.c.md sec 16. */
 	u32			rx_pon_sid_seen[4];
 
-	/* LAN loop detection: blocked ports and when each is probed again */
-	struct timer_list	loop_timer;
-	spinlock_t		loop_lock;
-	u8			loop_id[LAN_LOOP_ID_LEN];
-	u32			loop_blocked;
-	unsigned long		loop_until[32];
+	struct luna_loop	*loop;	/* LAN loop detection (luna_loop.c) */
 };
 
 /* The single instance, for the exported glue the GPON driver calls.  Same
@@ -1439,11 +1416,69 @@ out:
 
 /* Drive ONE Ethernet UNI's administrative state onto its ...
  * dev/MEASURED-luna_eth.c.md sec 30. */
+/* Gate ONE copper port: down = its MAC link forced down and its PHY powered
+ * down, up = both released. The UNI administrative lock and a LAN loop share
+ * it; @who names the caller in the log. luna_gphy_lock held. */
+static int eth_port_gate__locked(struct luna_eth *ep, unsigned int port, bool down,
+				 const char *who, u16 *bmcr_back, u32 *mode_back)
+{
+	u32 force, mode, back;
+	u16 bmcr, want;
+	int rc;
+
+	force = sw_rd(ep, SW_FORCE_ABLTY(ep, port));
+	mode = sw_rd(ep, SW_ABLTY_FORCE(ep, port));
+	if (down) {
+		sw_wr(ep, SW_FORCE_ABLTY(ep, port), force & ~ABLTY_LINK);
+		sw_wr(ep, SW_ABLTY_FORCE(ep, port), mode | ABLTY_LINK);
+	} else {
+		sw_wr(ep, SW_ABLTY_FORCE(ep, port), mode & ~ABLTY_LINK);
+	}
+	back = sw_rd(ep, SW_ABLTY_FORCE(ep, port));
+	force = sw_rd(ep, SW_FORCE_ABLTY(ep, port));
+	/* BOTH words, because the claim is two gates: the MODE word says the
+	 * LINK ability is forced, and the VALUE word says what it is forced TO.
+	 * Checking only the first would report a lock that forces the link UP. */
+	if (!(back & ABLTY_LINK) != !down ||
+	    (down && (force & ABLTY_LINK))) {
+		dev_err(ep->dev,
+			"%s port %u: the MAC gate did not take -- FORCE_P_ABLTY %08x, ABLTY_FORCE_MODE %08x, so the port is NOT gated\n",
+			who, port, force, back);
+		return -EIO;
+	}
+
+	rc = gphy_read_ocp__locked(ep, port, gphy_ocp_miim(ep, port, 0), &bmcr);
+	if (rc) {
+		dev_err(ep->dev,
+			"%s port %u: its BMCR could not be read (%d); nothing is written back and the state is owed\n",
+			who, port, rc);
+		return rc;
+	}
+	/* ★ ONLY THE POWER BIT MOVES. This board's own phyPowerDown ...
+	 * dev/MEASURED-luna_eth.c.md sec 31. */
+	want = (u16)(down ? (bmcr | BMCR_PDOWN) : (bmcr & ~BMCR_PDOWN));
+	rc = gphy_write_ocp__locked(ep, port, gphy_ocp_miim(ep, port, 0), want);
+	if (!rc)
+		rc = gphy_read_ocp__locked(ep, port,
+					   gphy_ocp_miim(ep, port, 0), &bmcr);
+	if (!rc && (!(bmcr & BMCR_PDOWN) != !down))
+		rc = -EIO;
+	if (rc) {
+		dev_err(ep->dev,
+			"%s port %u: the PHY did not reach %s (%d, BMCR %04x); the gate is owed\n",
+			who, port, down ? "power-down" : "power-up", rc, bmcr);
+		return rc;
+	}
+	*mode_back = back;
+	*bmcr_back = bmcr;
+	return 0;
+}
+
 static int luna_eth_uni_admin_set(void *cookie, unsigned int port, bool locked)
 {
 	struct luna_eth *ep = cookie;
-	u32 force, mode, back;
-	u16 bmcr, want;
+	u16 bmcr = 0;
+	u32 back = 0;
 	int rc;
 
 	/* ★ A UNI IS A COPPER PORT.  The port index comes from the board's own
@@ -1461,52 +1496,11 @@ static int luna_eth_uni_admin_set(void *cookie, unsigned int port, bool locked)
 		   locked ? (luna_uni_locked_ports | BIT(port))
 			  : (luna_uni_locked_ports & ~BIT(port)));
 
-	force = sw_rd(ep, SW_FORCE_ABLTY(ep, port));
-	mode = sw_rd(ep, SW_ABLTY_FORCE(ep, port));
-	if (locked) {
-		sw_wr(ep, SW_FORCE_ABLTY(ep, port), force & ~ABLTY_LINK);
-		sw_wr(ep, SW_ABLTY_FORCE(ep, port), mode | ABLTY_LINK);
-	} else {
-		sw_wr(ep, SW_ABLTY_FORCE(ep, port), mode & ~ABLTY_LINK);
-	}
-	back = sw_rd(ep, SW_ABLTY_FORCE(ep, port));
-	force = sw_rd(ep, SW_FORCE_ABLTY(ep, port));
-	/* BOTH words, because the claim is two gates: the MODE word says the
-	 * LINK ability is forced, and the VALUE word says what it is forced TO.
-	 * Checking only the first would report a lock that forces the link UP. */
-	if (!(back & ABLTY_LINK) != !locked ||
-	    (locked && (force & ABLTY_LINK))) {
-		mutex_unlock(&luna_gphy_lock);
-		dev_err(ep->dev,
-			"UNI port %u: the MAC gate did not take -- FORCE_P_ABLTY %08x, ABLTY_FORCE_MODE %08x, so the administrative state is NOT applied\n",
-			port, force, back);
-		return -EIO;
-	}
-
-	rc = gphy_read_ocp__locked(ep, port, gphy_ocp_miim(ep, port, 0), &bmcr);
-	if (rc) {
-		mutex_unlock(&luna_gphy_lock);
-		dev_err(ep->dev,
-			"UNI port %u: its BMCR could not be read (%d); nothing is written back and the state is owed\n",
-			port, rc);
-		return rc;
-	}
-	/* ★ ONLY THE POWER BIT MOVES. This board's own phyPowerDown ...
-	 * dev/MEASURED-luna_eth.c.md sec 31. */
-	want = (u16)(locked ? (bmcr | BMCR_PDOWN) : (bmcr & ~BMCR_PDOWN));
-	rc = gphy_write_ocp__locked(ep, port, gphy_ocp_miim(ep, port, 0), want);
-	if (!rc)
-		rc = gphy_read_ocp__locked(ep, port,
-					   gphy_ocp_miim(ep, port, 0), &bmcr);
-	if (!rc && (!(bmcr & BMCR_PDOWN) != !locked))
-		rc = -EIO;
+	rc = eth_port_gate__locked(ep, port, locked || luna_loop_port_down(ep->loop, port),
+				   "UNI", &bmcr, &back);
 	mutex_unlock(&luna_gphy_lock);
-	if (rc) {
-		dev_err(ep->dev,
-			"UNI port %u: the PHY did not reach %s (%d, BMCR %04x); the administrative state is owed\n",
-			port, locked ? "power-down" : "power-up", rc, bmcr);
+	if (rc)
 		return rc;
-	}
 	dev_info(ep->dev, "UNI port %u %s (BMCR %04x, ABLTY_FORCE_MODE %08x)\n",
 		 port, locked ? "LOCKED" : "UNLOCKED", bmcr, back);
 	return 0;
@@ -2070,42 +2064,6 @@ static void luna_eth_omci_input(struct luna_eth *ep, const u8 *msg,
 		ep->dbg_omci_unhandled++;
 }
 
-static u32 eth_loop_lan_mask(struct luna_eth *ep)
-{
-	return GENMASK(ep->c->sw_map->n_copper - 1, 0);
-}
-
-static void eth_loop_port_state(struct luna_eth *ep, unsigned int p, u32 state)
-{
-	u32 v = sw_rd(ep, SW_MSTI_CTRL(ep, p));
-
-	sw_wr(ep, SW_MSTI_CTRL(ep, p), (v & ~STP_STATE_MASK) | state);
-}
-
-/* Our own frame came back from the switch: block its port if it is our probe. */
-static void eth_loop_rx(struct luna_eth *ep, const u8 *f, unsigned int len,
-			unsigned int rx_port)
-{
-	int tx = lan_loop_probe_tx_port(f, len, ep->ndev->dev_addr, ep->loop_id);
-	unsigned long flags;
-	int p;
-
-	if (tx < 0 || !READ_ONCE(loop_detect))
-		return;
-	spin_lock_irqsave(&ep->loop_lock, flags);
-	p = lan_loop_port_to_block(tx, rx_port, eth_loop_lan_mask(ep), ep->loop_blocked);
-	if (p >= 0) {
-		eth_loop_port_state(ep, p, STP_BLOCKING);
-		ep->loop_blocked |= BIT(p);
-		ep->loop_until[p] = jiffies + msecs_to_jiffies(READ_ONCE(loop_block_s) * 1000U);
-	}
-	spin_unlock_irqrestore(&ep->loop_lock, flags);
-	if (p >= 0)
-		netdev_warn(ep->ndev,
-			    "loop detected: probe sent on LAN port %d came back on LAN port %u, port %d blocked for %u s\n",
-			    tx, rx_port, p, READ_ONCE(loop_block_s));
-}
-
 static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 {
 	struct net_device *ndev = ep->ndev;
@@ -2250,9 +2208,9 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 			if (skb->len >= 2 * ETH_ALEN &&
 			    ether_addr_equal(skb->data + ETH_ALEN, rdev->dev_addr)) {
 				if (rdev == ndev)
-					eth_loop_rx(ep, skb->data, skb->len,
-						    luna_gmac_rx_src_port(ep->c->sw_map->rx_layout,
-									  q->ring[i].opts3));
+					luna_loop_rx(ep->loop, skb->data, skb->len,
+						     luna_gmac_rx_src_port(ep->c->sw_map->rx_layout,
+									   q->ring[i].opts3));
 				dev_kfree_skb_any(skb);
 			} else if (!netif_running(rdev)) {
 				rdev->stats.rx_dropped++;
@@ -2485,56 +2443,6 @@ static netdev_tx_t eth_xmit(struct sk_buff *skb, struct net_device *ndev)
 	return eth_tx_frame(ep, ndev, skb, opts2, 0, true);
 }
 
-static void eth_loop_probe_send(struct luna_eth *ep, unsigned int port)
-{
-	struct sk_buff *skb = netdev_alloc_skb(ep->ndev, LAN_LOOP_FRAME_LEN);
-
-	if (!skb) {
-		ep->ndev->stats.tx_dropped++;
-		return;
-	}
-	lan_loop_probe_build(skb_put(skb, LAN_LOOP_FRAME_LEN), ep->ndev->dev_addr,
-			     ep->loop_id, port);
-	if (eth_tx_frame(ep, ep->ndev, skb, luna_gmac_cputag_txd_pmask(BIT(port)),
-			 0, true) == NETDEV_TX_BUSY) {
-		ep->ndev->stats.tx_dropped++;
-		dev_kfree_skb_any(skb);
-	}
-}
-
-/* Each period: release the ports whose block expired, then probe every LAN port
- * that is neither blocked nor administratively locked. */
-static void eth_loop_timer(struct timer_list *t)
-{
-	struct luna_eth *ep = timer_container_of(ep, t, loop_timer);
-	bool on = READ_ONCE(loop_detect);
-	u32 lan = eth_loop_lan_mask(ep), freed = 0, blocked;
-	unsigned long flags;
-	unsigned int p;
-
-	spin_lock_irqsave(&ep->loop_lock, flags);
-	for (p = 0; p < 32; p++) {
-		if ((ep->loop_blocked & BIT(p)) &&
-		    (!on || time_after_eq(jiffies, ep->loop_until[p]))) {
-			eth_loop_port_state(ep, p, STP_FORWARDING);
-			freed |= BIT(p);
-		}
-	}
-	ep->loop_blocked &= ~freed;
-	blocked = ep->loop_blocked;
-	spin_unlock_irqrestore(&ep->loop_lock, flags);
-	for (p = 0; p < 32; p++)
-		if (freed & BIT(p))
-			netdev_warn(ep->ndev, "loop detection: LAN port %u forwarding again\n", p);
-
-	if (on && netif_running(ep->ndev))
-		for (p = 0; p < 32; p++)
-			if ((lan & ~blocked & BIT(p)) && !luna_uni_port_locked(p))
-				eth_loop_probe_send(ep, p);
-	mod_timer(&ep->loop_timer,
-		  jiffies + msecs_to_jiffies(max(READ_ONCE(loop_probe_s), 1U) * 1000U));
-}
-
 /* Defined with the WAN netdev below; eth0's address setter needs it because the
  * WAN identity is derived from eth0's and must move when eth0's does. */
 static void luna_eth_wan_hwaddr(struct luna_eth *ep, u8 out[ETH_ALEN]);
@@ -2598,9 +2506,7 @@ static int eth_hw_start(struct luna_eth *ep)
 	ep->diag_left = diag_count;
 	timer_setup(&ep->diag, eth_diag_timer, 0);
 	INIT_WORK(&ep->diag_work, eth_diag_work);
-	get_random_bytes(ep->loop_id, sizeof(ep->loop_id));
-	timer_setup(&ep->loop_timer, eth_loop_timer, 0);
-	mod_timer(&ep->loop_timer, jiffies + msecs_to_jiffies(max(loop_probe_s, 1U) * 1000U));
+	luna_loop_start(ep->loop);
 	if (diag_ms && diag_count > 0)
 		mod_timer(&ep->diag, jiffies + msecs_to_jiffies(diag_ms));
 
@@ -2802,6 +2708,34 @@ static void luna_eth_omci_release(void *cookie)
 	luna_omci_detach(cookie);
 }
 
+static int eth_loop_gate(struct net_device *ndev, unsigned int port, bool down)
+{
+	struct luna_eth *ep = netdev_priv(ndev);
+	u16 bmcr;
+	u32 mode;
+	int rc;
+
+	mutex_lock(&luna_gphy_lock);
+	rc = eth_port_gate__locked(ep, port, down || luna_uni_port_locked(port),
+				   "LAN loop", &bmcr, &mode);
+	mutex_unlock(&luna_gphy_lock);
+	return rc;
+}
+
+static int eth_loop_xmit(struct net_device *ndev, struct sk_buff *skb, unsigned int port)
+{
+	if (eth_tx_frame(netdev_priv(ndev), ndev, skb, luna_gmac_cputag_txd_pmask(BIT(port)),
+			 0, true) != NETDEV_TX_BUSY)
+		return 0;
+	dev_kfree_skb_any(skb);
+	return -EBUSY;
+}
+
+static const struct luna_loop_ops eth_loop_ops = {
+	.gate	= eth_loop_gate,
+	.xmit	= eth_loop_xmit,
+};
+
 static int luna_eth_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -2833,7 +2767,6 @@ static int luna_eth_probe(struct platform_device *pdev)
 	ep->ndev = ndev;
 	ep->dev = dev;
 	spin_lock_init(&ep->tx_lock);
-	spin_lock_init(&ep->loop_lock);
 
 	ep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ep->base))
@@ -2874,6 +2807,9 @@ static int luna_eth_probe(struct platform_device *pdev)
 	ret = luna_mib_attach(ndev, ep->sw, ep->c->sw_map, &luna_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
+	ep->loop = luna_loop_attach(dev, ndev, ep->sw, ep->c->sw_map, &eth_loop_ops);
+	if (!ep->loop)
+		return -ENOMEM;
 	netif_carrier_off(ndev);
 	netif_napi_add(ndev, &ep->napi, eth_napi_poll);
 

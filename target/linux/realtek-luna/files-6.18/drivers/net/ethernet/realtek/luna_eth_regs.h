@@ -508,6 +508,12 @@ struct luna_sw_map {
 	 * the parser then decodes nothing rather than borrowing a sibling's
 	 * shifts, which is the defect this field exists to end. */
 	const struct luna_rx_layout *rx_layout;
+	/* The switch RLDP loop-detection engine (block 0x1A000, the same on every
+	 * die that has it): ports 0..rldp_ports-1, rldp_pnum_bits per port in its
+	 * returned-on word. 0 = no engine on this die (its register map has none). */
+	u8  rldp_ports;
+	u8  rldp_pnum_bits;
+	u32 switch_mac;		/* the switch's own address: the engine's probe source */
 };
 
 static const struct luna_sw_map rtl9602c_sw_map = {
@@ -540,6 +546,9 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.gmac_mib16	= 0x10,		/* the 16-bit MAC MIB array [tier 2, stock hw_reg] */
 	.omci_cpu_reason = 246,	/* RTL9602C_CHIP_ID -> omciRsn 246 [tier 3, gponapi.c] */
 	.rx_layout	= &luna_rx_layout_rtl9602c,
+	.rldp_ports	= 4,		/* [tier 3, its register map: RLDP_PORT_* ports 0..3] */
+	.rldp_pnum_bits	= 3,
+	.switch_mac	= 0x23044,	/* [tier 3, its register map: SWITCH_MAC] */
 };
 
 static const struct luna_sw_map rtl9603cvd_sw_map = {
@@ -572,6 +581,7 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */
 	.omci_cpu_reason = 229,	/* RTL9603CVD_CHIP_ID -> omciRsn 229 [tier 3, gponapi.c] */
 	.rx_layout	= &luna_rx_layout_rtl9603cvd,
+	.rldp_ports	= 0,		/* no RLDP register in its register map: CPU probe */
 };
 
 /* The RTL9607C's eight LUT offsets were CROSS-READ from its own register map on
@@ -629,6 +639,9 @@ static const struct luna_sw_map rtl9607c_sw_map = {
 	 *   borrowing that used to be invisible is now written down. It is a
 	 *   candidate for its own row the moment 9607C stock evidence exists. */
 	.rx_layout	= &luna_rx_layout_rtl9603cvd,
+	.rldp_ports	= 5,		/* [tier 3, its register map: RLDP_PORT_* ports 0..4] */
+	.rldp_pnum_bits	= 4,
+	.switch_mac	= 0x23108,	/* [tier 3, its register map: SWITCH_MAC] */
 };
 
 

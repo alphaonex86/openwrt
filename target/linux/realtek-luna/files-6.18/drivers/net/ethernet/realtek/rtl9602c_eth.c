@@ -2604,9 +2604,12 @@ static void rtl9602c_eth_tx_fence(void *cookie)
 
 /* Gate ONE copper port: down = its MAC link forced down and its PHY powered
  * down, up = both released. The UNI administrative lock and a LAN loop share
- * it; @who names the caller in the log. rtl9602c_gphy_lock held. */
+ * it; @who names the caller in the log. @mac_suffices (only a loop holds it
+ * down): a port whose PHY this die will not power down is held at its MAC link
+ * alone, since forwarding is what must stop. rtl9602c_gphy_lock held. */
 static int rtl9602c_port_gate__locked(struct rtl9602c_eth *ep, unsigned int port, bool down,
-				      const char *who, u16 *bmcr_back, u32 *mode_back)
+				      bool mac_suffices, const char *who, u16 *bmcr_back,
+				      u32 *mode_back)
 {
 	u32 force, mode, guard;
 	bool phy_allowed = true;
@@ -2636,7 +2639,15 @@ static int rtl9602c_port_gate__locked(struct rtl9602c_eth *ep, unsigned int port
 		guard = ioread32(ep->sw + SW_PHY_PWRDN_GUARD);
 		phy_allowed = (guard & PHY_PWRDN_GUARD_OK) == PHY_PWRDN_GUARD_OK;
 	}
-	if (!phy_allowed) {
+	if (!phy_allowed && down && mac_suffices) {
+		dev_warn_once(ep->dev,
+			      "%s port %u: this die guards port 0's PHY power on %#05x (%08x): the port is held down at its MAC link only\n",
+			      who, port, SW_PHY_PWRDN_GUARD, guard);
+		*bmcr_back = 0;
+		*mode_back = mode;
+		return 0;
+	}
+	if (!phy_allowed && down) {
 		/* ⚠ THIS IS A FAILURE, NOT A PARTIAL SUCCESS. The board's own ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 138. */
 		dev_err(ep->dev,
@@ -2653,10 +2664,11 @@ static int rtl9602c_port_gate__locked(struct rtl9602c_eth *ep, unsigned int port
 		return rc;
 	}
 	/* ONLY THE POWER BIT MOVES: this board's own power-down ...
-	 * dev/MEASURED-rtl9602c_eth.c.md sec 115. */
-	want = (u16)(bmcr | BMCR_PDOWN);
-	rc = rtl9602c_gphy_write__locked(ep, port, 0, want);
-	if (!rc && !down) {
+	 * dev/MEASURED-rtl9602c_eth.c.md sec 115. A PHY this die guards was never
+	 * powered down by us: its release has no pulse, only a power-up if needed. */
+	want = (u16)(phy_allowed ? bmcr | BMCR_PDOWN : bmcr & ~BMCR_PDOWN);
+	rc = phy_allowed || want != bmcr ? rtl9602c_gphy_write__locked(ep, port, 0, want) : 0;
+	if (!rc && !down && phy_allowed) {
 		u16 mid;
 
 		rc = rtl9602c_gphy_read__locked(ep, port, 0, &mid);
@@ -2707,7 +2719,7 @@ static int rtl9602c_uni_admin_set(void *cookie, unsigned int port, bool locked)
 		   locked ? (rtl9602c_uni_locked_ports | BIT(port))
 			  : (rtl9602c_uni_locked_ports & ~BIT(port)));
 	rc = rtl9602c_port_gate__locked(ep, port, locked || luna_loop_port_down(ep->loop, port),
-					"UNI", &bmcr, &mode);
+					!locked, "UNI", &bmcr, &mode);
 	mutex_unlock(&rtl9602c_gphy_lock);
 	if (rc)
 		return rc;
@@ -2731,7 +2743,7 @@ static int rtl9602c_loop_gate(struct net_device *ndev, unsigned int port, bool d
 
 	mutex_lock(&rtl9602c_gphy_lock);
 	rc = rtl9602c_port_gate__locked(ep, port, down || rtl9602c_uni_port_locked(port),
-					"LAN loop", &bmcr, &mode);
+					!rtl9602c_uni_port_locked(port), "LAN loop", &bmcr, &mode);
 	mutex_unlock(&rtl9602c_gphy_lock);
 	return rc;
 }

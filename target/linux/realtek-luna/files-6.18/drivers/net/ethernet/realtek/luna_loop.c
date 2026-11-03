@@ -35,6 +35,10 @@ static unsigned int loop_block_s = 300;
 module_param(loop_block_s, uint, 0644);
 MODULE_PARM_DESC(loop_block_s, "seconds a looped LAN port stays down before it is probed again (stock: 300)");
 
+static unsigned int loop_ethertype;
+module_param(loop_ethertype, uint, 0444);
+MODULE_PARM_DESC(loop_ethertype, "the ethertype of the loop probe this die sends; 0 while no detector runs");
+
 /* The switch RLDP engine [tier 3, the RTL9602C and RTL9607C register maps]. */
 #define RLDP_CTRL	0x1A000	/* bit 0: the engine runs			*/
 #define RLDP_CHECK	0x1A004	/* [23:8] probe period (ms), [7:0] count	*/
@@ -47,6 +51,7 @@ MODULE_PARM_DESC(loop_block_s, "seconds a looped LAN port stays down before it i
 #define RLDP_LOOPING	0x1A028	/* bit per port: looping now		*/
 #define RLDP_PNUM	0x1A02C	/* per port: the port its probe came back on	*/
 #define RLDP_TIMING	((2000u << 8) | 4)	/* the init value of both pairs	*/
+#define RLDP_ETHERTYPE	0x8899	/* the Realtek protocol ethertype the engine's probe carries */
 
 struct luna_loop {
 	struct net_device		*ndev;
@@ -56,6 +61,8 @@ struct luna_loop {
 	struct delayed_work		work;
 	spinlock_t			lock;	/* @seen and @hold.down vs the RX path */
 	u32				seen;	/* CPU probe: ports to take down */
+	u32				retry;	/* looped, but the take-down failed: no second port */
+	u32				failed;	/* ports whose last gate call failed */
 	struct lan_loop_hold		hold;
 	bool				engine;
 	u8				id[LAN_LOOP_ID_LEN];
@@ -77,7 +84,7 @@ static int loop_set(struct luna_loop *l, u32 reg, u32 mask, u32 val)
 	back = ioread32(l->sw + reg);
 	if ((back & mask) == (val & mask))
 		return 0;
-	netdev_err(l->ndev, "loop detection: switch engine register %#x reads %08x, %08x was written under %08x\n",
+	netdev_err(l->ndev, "loop detection FAILED: switch engine register %#x reads %08x, %08x was written under %08x\n",
 		   reg, back, val, mask);
 	return -EIO;
 }
@@ -116,7 +123,7 @@ static u32 loop_engine_read(struct luna_loop *l, bool on)
 	looped = (ioread32(l->sw + RLDP_ENTER) | ioread32(l->sw + RLDP_LOOPING)) & lan;
 	iowrite32(looped, l->sw + RLDP_ENTER);
 	return lan_loop_engine_to_block(looped, ioread32(l->sw + RLDP_PNUM),
-					l->map->rldp_pnum_bits, lan, READ_ONCE(l->hold.down));
+					l->map->rldp_pnum_bits, lan, READ_ONCE(l->hold.down) | READ_ONCE(l->retry));
 }
 
 static void loop_engine_rearm(struct luna_loop *l, u32 ports)
@@ -141,51 +148,67 @@ static void loop_probe_send(struct luna_loop *l, unsigned int port)
 		l->ndev->stats.tx_dropped++;
 }
 
+/* Gate @p, logging a failure once per run of failures; -> true when it took. */
+static bool loop_gate(struct luna_loop *l, unsigned int p, bool down)
+{
+	int rc = l->ops->gate(l->ndev, p, down);
+
+	if (!rc) {
+		l->failed &= ~BIT(p);
+		return true;
+	}
+	if (!(l->failed & BIT(p)))
+		netdev_err(l->ndev, "loop detection FAILED: LAN port %u %s (%d), retried every %u s, logged again once it takes\n",
+			   p, down ? "looped but did not go down" : "did not come back up", rc,
+			   max(READ_ONCE(loop_probe_s), 1U));
+	l->failed |= BIT(p);
+	return false;
+}
+
 /* Each period: release the ports whose hold expired, take down the ports found
- * looped, then probe (a die without the engine). */
+ * looped (and those whose take-down failed before), then probe (a die without
+ * the engine). A port is held only once its take-down took. */
 static void loop_work(struct work_struct *w)
 {
 	struct luna_loop *l = container_of(to_delayed_work(w), struct luna_loop, work);
 	bool on = READ_ONCE(loop_detect);
 	unsigned long now = jiffies, flags;
-	u32 due, take, released = 0;
+	u32 due, take, released = 0, downed = 0, again = 0;
 	unsigned int p;
-	int rc;
 
 	take = l->engine ? loop_engine_read(l, on) : 0;
 	spin_lock_irqsave(&l->lock, flags);
-	take = on ? (take | l->seen) & ~l->hold.down : 0;
+	take = on ? (take | l->seen | l->retry) & ~l->hold.down : 0;
+	due = lan_loop_hold_due(&l->hold, now, !on) | (on ? 0 : l->retry);
 	l->seen = 0;
-	due = lan_loop_hold_due(&l->hold, now, !on);
-	lan_loop_hold_add(&l->hold, take, now, msecs_to_jiffies(READ_ONCE(loop_block_s) * 1000U));
 	spin_unlock_irqrestore(&l->lock, flags);
 
 	for (p = 0; p < LAN_LOOP_PORTS; p++) {
 		if (!(due & BIT(p)))
 			continue;
-		rc = l->ops->gate(l->ndev, p, false);
-		if (rc) {
-			netdev_err(l->ndev, "loop detection: LAN port %u did not come back up (%d), retried in %u s\n",
-				   p, rc, max(READ_ONCE(loop_probe_s), 1U));
+		if (!loop_gate(l, p, false)) {
+			again |= BIT(p) & ~l->hold.down;	/* a half-gated port, detection off */
 			continue;
 		}
 		released |= BIT(p);
-		netdev_warn(l->ndev, "loop detection: LAN port %u forwarding again\n", p);
+		if (l->hold.down & BIT(p))
+			netdev_warn(l->ndev, "loop detection: LAN port %u forwarding again\n", p);
 	}
-	spin_lock_irqsave(&l->lock, flags);
-	l->hold.down &= ~released;
-	spin_unlock_irqrestore(&l->lock, flags);
 	for (p = 0; p < LAN_LOOP_PORTS; p++) {
 		if (!(take & BIT(p)))
 			continue;
-		rc = l->ops->gate(l->ndev, p, true);
-		if (rc)
-			netdev_err(l->ndev, "loop detection: LAN port %u looped but did not go down (%d)\n",
-				   p, rc);
-		else
-			netdev_warn(l->ndev, "loop detected: LAN port %u down for %u s\n",
-				    p, READ_ONCE(loop_block_s));
+		if (!loop_gate(l, p, true)) {
+			again |= BIT(p);
+			continue;
+		}
+		downed |= BIT(p);
+		netdev_warn(l->ndev, "loop detected: LAN port %u down for %u s\n", p, READ_ONCE(loop_block_s));
 	}
+	spin_lock_irqsave(&l->lock, flags);
+	l->hold.down &= ~released;
+	l->retry = again;
+	lan_loop_hold_add(&l->hold, downed, now, msecs_to_jiffies(READ_ONCE(loop_block_s) * 1000U));
+	spin_unlock_irqrestore(&l->lock, flags);
 	if (released && l->engine)
 		loop_engine_rearm(l, released);
 
@@ -223,12 +246,13 @@ void luna_loop_start(struct luna_loop *l)
 		return;
 	get_random_bytes(l->id, sizeof(l->id));
 	if (l->engine ? loop_engine_arm(l) : !l->ops->xmit) {
-		netdev_err(l->ndev, "loop detection UNAVAILABLE: %s\n",
+		netdev_err(l->ndev, "loop detection FAILED: unavailable, %s\n",
 			   l->engine ? "the switch engine did not take" : "no engine and no CPU probe path");
 		return;
 	}
-	netdev_info(l->ndev, "loop detection: %s on LAN ports %#x, on=%d\n",
-		    l->engine ? "switch engine" : "CPU probe", loop_lan_mask(l),
+	loop_ethertype = l->engine ? RLDP_ETHERTYPE : LAN_LOOP_ETHERTYPE;
+	netdev_info(l->ndev, "loop detection: %s (ethertype %#06x) on LAN ports %#x, on=%d\n",
+		    l->engine ? "switch engine" : "CPU probe", loop_ethertype, loop_lan_mask(l),
 		    READ_ONCE(loop_detect));
 	schedule_delayed_work(&l->work, max(READ_ONCE(loop_probe_s), 1U) * HZ);
 }
@@ -247,7 +271,7 @@ void luna_loop_rx(struct luna_loop *l, const u8 *f, unsigned int len,
 	if (tx < 0)
 		return;
 	spin_lock_irqsave(&l->lock, flags);
-	p = lan_loop_port_to_block(tx, rx_port, loop_lan_mask(l), l->hold.down | l->seen);
+	p = lan_loop_port_to_block(tx, rx_port, loop_lan_mask(l), l->hold.down | l->retry | l->seen);
 	if (p >= 0)
 		l->seen |= BIT(p);
 	spin_unlock_irqrestore(&l->lock, flags);

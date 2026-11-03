@@ -6,7 +6,7 @@ for led in /sys/class/leds/green:net /sys/class/leds/*:green:net; do
 	[ -e "$led/brightness" ] && break
 done
 [ -e "$led/brightness" ] || exit 0
-dump=$(ubus call network.interface dump) || {
+dump=$(ubus -t 2 call network.interface dump) || {
 	logger -t led-net "$ACTION $INTERFACE: netifd did not answer, lamp left as it was"
 	exit 0
 }

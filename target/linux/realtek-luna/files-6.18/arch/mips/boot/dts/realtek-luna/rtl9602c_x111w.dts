@@ -92,10 +92,26 @@
 		};
 	};
 
-	/* Board C's pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
+	/* Board C's pad routing: IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH.
+	 * Stock's live words, but GPIO 35 high (the internet lamp dark): it lights only
+	 * once the WAN gives a default route. */
 	pon-optics {
 		realtek,gpio-pads = <0x40202006 0x00000819 0x40002006 0xdbff1246
-				     0x00000819 0x000037e5>;
+				     0x00000819 0x000037ed>;
+	};
+
+	/* The internet lamp: GPIO 35, lit low. Stock's board LED hook sends its LED 6
+	 * (internet, green) there and its systemd lights it through /proc/internet_flag;
+	 * read on stock 2026-11-02: flag 0 -> pin high, flag 1 -> pin low. Driven by
+	 * /etc/hotplug.d/iface/50-led-net from the IPv4 default route. */
+	leds {
+		compatible = "gpio-leds";
+
+		led-net {
+			label = "green:net";
+			gpios = <&gpio1 3 1>;	/* GPIO 35, active low */
+			default-state = "off";
+		};
 	};
 
 	/*

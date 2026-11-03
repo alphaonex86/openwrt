@@ -41,7 +41,7 @@ define Device/hsgq_x111w
   # (urngd is excluded target-wide in target/linux/realtek-luna/Makefile: it
   #  burned ~60s of boot CPU on this core for nothing - crng seeds itself.)
   DEVICE_PACKAGES := gpon-provision luci-app-gpon luci-base luci-mod-admin-full luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file \
-	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls
+	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls kmod-leds-gpio
 endef
 TARGET_DEVICES += hsgq_x111w
 

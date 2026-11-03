@@ -49,7 +49,11 @@ vendor (stock) firmware and on our OpenWrt image.
 
 1. Copy `gpon_bundle.sh` to the board's `/tmp` (scp, or paste it into `cat > /tmp/gpon_bundle.sh` in a telnet or
    serial session).
-2. Run `sh /tmp/gpon_bundle.sh /tmp`. It prints the path of the `.tar`. Copy that file to your PC.
+2. Run `sh /tmp/gpon_bundle.sh /tmp` once the ONU has been in service for at least 2 minutes, so the capture
+   holds the OLT's periodic checks. On stock firmware the first run switches the vendor log on: wait 2 minutes
+   and run it again. It prints the path of the `.tar`. Copy that file to your PC.
+   Send one bundle from each firmware on the same fibre and OLT port: the original (stock) and ours. We compare
+   them field by field; a difference that one bundle cannot show stays unsolved.
 3. Stock firmware only, if you can: from your PC, `ssh <board> 'sh /tmp/gpon_bundle.sh --binaries' > binaries.tar`.
    This streams the vendor OMCI programs to your PC without storing them on the board.
 4. Fill `bundle.json` (next to this guide):

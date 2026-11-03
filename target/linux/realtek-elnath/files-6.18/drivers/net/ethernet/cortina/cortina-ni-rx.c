@@ -187,11 +187,16 @@ static_assert(CA_NI_RX_CPU_POOL0_BYTES +
  * only choice that collides with nothing this driver writes (profiles 0..7 are
  * filled wholesale by a loop in eq_init and 13 is the direct punt's). */
 #define CA_NI_RX_DQ_PROFILE_SEL		CA_NI_RX_EQ12_PROFILE	/* = 12 */
-/* the deep-queue pool is hardware-managed, so BOTH halves of the profile point
- * at it - there is no software-owned overflow reserve for this consumer */
+/* The deep queue has no software-owned overflow reserve, so eqp1 is an EQ this driver never enables.
+ * It must not be EQ12 again: with eqp0 == eqp1 the L3TE CB charges an enqueue to pool slot 0 and credits
+ * its release to slot 1, so the HW-forward voqs (88, 136) saturate and tail-drop kills every offloaded flow
+ * (live A/B 2026-11-02: {EQ12, EQ12} drifts, {EQ12, EQ15} stays at 0 with tail-drop on, 941/925 Mbit/s). */
+#define CA_NI_RX_EQ_NEVER_ENABLED	15
 #define CA_NI_RX_DQ_PROFILE_VAL \
 	(FIELD_PREP(CA_NI_QM_EQ_PROF_EQP0, CA_NI_RX_EQ12_ID) | \
-	 FIELD_PREP(CA_NI_QM_EQ_PROF_EQP1, CA_NI_RX_EQ12_ID))
+	 FIELD_PREP(CA_NI_QM_EQ_PROF_EQP1, CA_NI_RX_EQ_NEVER_ENABLED))
+static_assert(CA_NI_RX_EQ_NEVER_ENABLED != CA_NI_RX_EQ12_ID && CA_NI_RX_EQ_NEVER_ENABLED != CA_NI_RX_EQ_ID &&
+	      CA_NI_RX_EQ_NEVER_ENABLED != CA_NI_RX_EQ_ID2, "deep-queue eqp1 must be a pool distinct from every enabled one");
 static_assert(CA_NI_RX_EQ12_TOTAL_BUF * 2048u <= CA_NI_RX_DQ_DRAM_SIZE,
 	      "deep-queue pool: total_buf x buffer_size overflows its region");
 
@@ -2633,6 +2638,41 @@ static const struct { u16 idx; u32 w[CA_NI_L3FE_CLS_FIB_WORDS]; } cls_fib_golden
 	{ 264, { 0, 0, 0, 0, 0x1C000000 | CA_NI_CLS_FIB_W4_COS_CONTROL, 0x01000004, 0x00000600 } },
 };
 
+/* L3TE congestion buffer of the CPU port: the data voqs tail-drop before they empty the shared CPU pool (EQ5 + EQ6,
+ * 1024 buffers), the control voq keeps private buffers, so a WAN flood cannot starve ARP/DHCP/PPPoE discovery. */
+#define CA_NI_L3TE_PROF_DATA		3
+#define CA_NI_L3TE_PROF_CONTROL		4
+#define CA_NI_L3TE_DATA_LTH		640
+#define CA_NI_L3TE_DATA_HTH		768
+#define CA_NI_L3TE_DATA_PRVT		3
+#define CA_NI_L3TE_CONTROL_PRVT		100
+
+static void cortina_ni_rx_l3te_voq_profile(struct cortina_ni *ni, unsigned int prof, u32 lth, u32 hth, u32 prvt)
+{
+	writel(FIELD_PREP(CA_NI_L3TE_CB_PROF_D2_PRVT_HI, prvt >> 8), ni_base(ni) + CA_NI_L3TE_CB_VOQ_PROF_DATA2);
+	writel(FIELD_PREP(CA_NI_L3TE_CB_PROF_D1_PRVT_LO, prvt & 0xff) | CA_NI_L3TE_CB_PROF_D1_GRP,
+	       ni_base(ni) + CA_NI_L3TE_CB_VOQ_PROF_DATA1);
+	writel(CA_NI_L3TE_CB_PROF_D0_GRP | FIELD_PREP(CA_NI_L3TE_CB_PROF_D0_HTH, hth) |
+	       FIELD_PREP(CA_NI_L3TE_CB_PROF_D0_LTH, lth), ni_base(ni) + CA_NI_L3TE_CB_VOQ_PROF_DATA0);
+	cortina_ni_rx_ind_store(ni, CA_NI_L3TE_CB_VOQ_PROF_ACCESS, prof);
+}
+
+static void cortina_ni_rx_l3te_cb_init(struct cortina_ni *ni)
+{
+	unsigned int voq;
+
+	cortina_ni_rx_l3te_voq_profile(ni, CA_NI_L3TE_PROF_DATA, CA_NI_L3TE_DATA_LTH, CA_NI_L3TE_DATA_HTH,
+				       CA_NI_L3TE_DATA_PRVT);
+	cortina_ni_rx_l3te_voq_profile(ni, CA_NI_L3TE_PROF_CONTROL, CA_NI_L3TE_CB_THRSH_OFF,
+				       CA_NI_L3TE_CB_THRSH_OFF, CA_NI_L3TE_CONTROL_PRVT);
+	for (voq = 0; voq < CA_NI_RX_VOQ_COUNT; voq++) {
+		writel(voq == CA_NI_RX_VOQ_CONTROL ? CA_NI_L3TE_PROF_CONTROL : CA_NI_L3TE_PROF_DATA,
+		       ni_base(ni) + CA_NI_L3TE_CB_VOQ_SEL_DATA);
+		cortina_ni_rx_ind_store(ni, CA_NI_L3TE_CB_VOQ_SEL_ACCESS, CA_NI_L3TE_CB_VOQ(CA_NI_RX_CPU_PORT, voq));
+	}
+	writel(readl(ni_base(ni) + CA_NI_L3TE_GLB_CTRL) | CA_NI_L3TE_GLB_TAILDROP_EN, ni_base(ni) + CA_NI_L3TE_GLB_CTRL);
+}
+
 static void cortina_ni_rx_l3fe_glb_init(struct cortina_ni *ni)
 {
 	writel(CA_NI_L3FE_GLB_CFG_VAL, ni_base(ni) + CA_NI_L3FE_GLB_CFG);
@@ -2849,6 +2889,7 @@ static int cortina_ni_rx_steer_init(struct cortina_ni *ni)
 	/* ★★★ build71: the L3-CLS special-packet trap - broadcast ...
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 178. */
 	cortina_ni_rx_cls_init(ni);
+	cortina_ni_rx_l3te_cb_init(ni);
 
 	/* full FE path: byp OFF, pass OAM, drop unknown opcodes (stock policy).
 	 * ★ Apply to EVERY GPHY LAN port, not just CA_NI_RX_PORT, so whichever port
@@ -3347,8 +3388,7 @@ static int cortina_ni_rx_eq_init(struct cortina_ni *ni)
 					  CA_NI_RX_EQ12_BID_START,
 					  CA_NI_RX_EQ12_TOTAL_BUF,
 					  CA_NI_RX_DQ_CFG2);
-			/* BOTH halves of the profile point at EQ12, deliberately: this
-			 * dev/MEASURED-cortina-ni-rx.c.md sec 106. */
+			/* eqp1 never EQ6: the deep queue cannot use a pushed buffer (dev/MEASURED-cortina-ni-rx.c.md sec 106) */
 		writel(CA_NI_RX_DQ_PROFILE_VAL,
 		       ni_base(ni) +
 		       CA_NI_QM_EQ_PROFILE(CA_NI_RX_DQ_PROFILE_SEL));

@@ -920,7 +920,7 @@ enum cortina_ni_win {
 #define CA_NI_L3TE_CB_VOQ_ENTRIES	(CA_NI_L3_PORT_COUNT * CA_NI_L3TE_CB_VOQS_PER_PORT)
 #define CA_NI_L3TE_CB_VOQ(port, cos)	((port) * CA_NI_L3TE_CB_VOQS_PER_PORT + (cos))
 #define CA_NI_L3TE_GLB_CTRL		0x9004
-#define  CA_NI_L3TE_GLB_TAILDROP_EN	BIT(2)	/* never set: HW-forwarded voq buffer counts saturate, every offloaded flow drops */
+#define  CA_NI_L3TE_GLB_TAILDROP_EN	BIT(2)	/* needs distinct pools in every dest-port EQ profile (CA_NI_RX_DQ_PROFILE_VAL) */
 #define CA_NI_L3TE_CB_INT		0x9500
 #define  CA_NI_L3TE_CB_INT_PORT_FREECNT_OVFL	BIT(5)
 #define  CA_NI_L3TE_CB_INT_PORT_FREECNT_UDFL	BIT(4)

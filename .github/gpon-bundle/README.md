@@ -40,7 +40,7 @@ vendor (stock) firmware and on our OpenWrt image.
   (`/proc/oltcap`), the PLOAM exchange (`/proc/ploamcap`, Realtek Luna only) and the register dumps.
 - On our image also: what the OLT provisioned (`/proc/gpon_prov`, kept after the OMCI ring forgets it), the
   latest exchange of each kind the ONU did not identify (`/proc/gpon_unknown`, `/proc/ploam_unknown`: periodic
-  polls, tests, power levels a live capture misses), their decoding, the last WAN discovery, the VLAN devices, routes and addresses (no configuration file, so no password).
+  polls, tests, power levels a live capture misses), the last WAN discovery, the VLAN devices, routes and addresses (no configuration file, so no password).
 - On stock firmware: the vendor OMCI log, the vendor PON state (`diag ... get onu-state`), the OMCI device mode,
   and the md5 of each OMCI program and library.
 - The script itself, so we know which version ran.

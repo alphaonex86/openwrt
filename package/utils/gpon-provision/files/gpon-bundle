@@ -55,10 +55,6 @@ if [ -n "$protocol" ]; then (cd "$PREFIX/" && md5sum $protocol) > "$B/protocol.m
 for f in gpon gpon_log gpon_timing gpon_health oltcap ploamcap gpon_prov gpon_unknown ploam_unknown swdump pidump bosadump; do
 	grab "/proc/$f" "gpon-$f.txt"
 done
-if command -v gpon-omci-view > /dev/null 2>&1; then
-	step omci-provisioning.txt gpon-omci-view
-	step omci-not-identified.txt gpon-omci-view --unknown
-fi
 grab /tmp/gpon/wan-discover.txt wan-discover.txt
 grab /tmp/gpon/bundle.json bundle.json
 grab /proc/net/vlan/config network-vlan.txt

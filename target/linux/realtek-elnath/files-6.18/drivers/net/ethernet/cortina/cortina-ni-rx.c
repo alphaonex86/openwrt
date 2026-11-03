@@ -2099,10 +2099,9 @@ static void cortina_ni_rx_flow_ctrl_init(struct cortina_ni *ni)
 		 readl(ni_base(ni) + CA_NI_L2TM_BM_DQ_TO_TM_PORT_MAP),
 		 dq_tmport_map);
 
-	/* per-port flow-control thresholds 0x9798..0x97b0 (stock bfxil+bfi) */
-	for (i = 0; i < CA_NI_NI_FLOWCTRL_THRESH_CNT; i++)
-		ni_rmw(ni, CA_NI_NI_FLOWCTRL_THRESH + i * 4,
-		       CA_NI_NI_FLOWCTRL_THRESH_CLR, CA_NI_NI_FLOWCTRL_THRESH_VAL);
+	for (i = 0; i < CA_NI_L3TE_CB_SP_BP_THRSH_CNT; i++)
+		ni_rmw(ni, CA_NI_L3TE_CB_SP_BP_THRSH0 + i * 4,
+		       CA_NI_L3TE_CB_SP_BP_THRSH_CLR, CA_NI_L3TE_CB_SP_BP_THRSH_VAL);
 
 	/* ★★ L2TM TM-egress -> CPU-queue map block (stock values; U-Boot leaves these,
 	 * esp. 0x2100, unset).  Without them a non-deep CPU frame is BM-dequeued (tm
@@ -2245,9 +2244,9 @@ static const struct cortina_ni_reg_run cortina_ni_deepq_cb_cfg[] = {
 	{ 0x2d94, 1, 0x7fff3fffu },
 	{ 0x2d98, 1, 0x7fff7fffu },
 	{ 0x2db0, 1, 0x00000002u },
-	/* stock's RESTING values of the CB port-freecnt indirect ACCESS/DATA
-	 * pair; step (2) of deepq_sched_init later drives the same pair
-	 * properly, once per port */
+	/* stock's RESTING values of the L2TM CB port-freecnt indirect ACCESS/DATA
+	 * pair (WR, last port 15); step (2) of deepq_sched_init later drives the
+	 * same pair properly, once per port */
 	{ CA_NI_L2TM_CB_PORT_FREECNT_ACCESS, 1, 0x4000000fu },
 	{ CA_NI_L2TM_CB_PORT_FREECNT_DATA, 1, 0x8e308000u },
 	{ 0x2dcc, 1, 0x0e200020u },
@@ -2520,7 +2519,7 @@ static void cortina_ni_rx_deepq_sched_init(struct cortina_ni *ni)
 	cortina_ni_rx_write_runs(ni, cortina_ni_deepq_cb_cfg,
 				 ARRAY_SIZE(cortina_ni_deepq_cb_cfg));
 
-	/* (2) CB per-port free-buffer count (indexed, all 48 ports) - without it the CB
+	/* (2) L2TM CB per-port free-buffer count (indexed, ports 0-15) - without it the CB
 	 * has 0 free deep-queue buffers and drops the frame at the L2TM->CB enqueue. */
 	for (i = 0; i < CA_NI_L2TM_CB_PORT_COUNT; i++) {
 		writel(CA_NI_L2TM_CB_FREECNT_VAL,
@@ -3236,7 +3235,7 @@ static const struct cortina_ni_reg_run cortina_ni_stock_qm_cfg[] = {
 static void cortina_ni_rx_eqm_readback(struct cortina_ni *ni, const char *label)
 {
 	dev_info(ni->dev,
-		 "eqm-readback(%s): pa_req eq13(0x63bc)=0x%08x eq14(0x63c0)=0x%08x | eq_prof5(0x613c)=0x%08x | fifo_prof4(0x66b4)=0x%08x (want 0xE00040F1) | int_en0(0x6110)=0x%08x en1(0x6114)=0x%08x refill_en(0x611c)=0x%08x REAL_int_src(0x6120)=0x%08x [b22=eqm_cfg_err b21=buf_size b20=cpuepp_fifo] | no_buf(0x6940)=%u rmu_rx(0x6900)=%u tx_cntr(0x690c)=%u epp_wptr(0x7000)=0x%06x\n",
+		 "eqm-readback(%s): pa_req eq13(0x63bc)=0x%08x eq14(0x63c0)=0x%08x | eq_prof13(0x615c)=0x%08x | fifo_prof4(0x66b4)=0x%08x (want 0xE00040F1) | int_en0(0x6110)=0x%08x en1(0x6114)=0x%08x refill_en(0x611c)=0x%08x REAL_int_src(0x6120)=0x%08x [b22=eqm_cfg_err b21=buf_size b20=cpuepp_fifo] | no_buf(0x6940)=%u rmu_rx(0x6900)=%u tx_cntr(0x690c)=%u epp_wptr(0x7000)=0x%06x\n",
 		 label,
 		 /* 0x63bc/0x63c0: NOT in the vendor NAME->ADDRESS table, so there
 		  * is nothing to name them FROM -- see
@@ -3244,7 +3243,7 @@ static void cortina_ni_rx_eqm_readback(struct cortina_ni *ni, const char *label)
 		  * for the same shape in another window.  Bare is honest here. */
 		 readl(ni_base(ni) + 0x63bc),
 		 readl(ni_base(ni) + 0x63c0),
-		 readl(ni_base(ni) + CA_NI_QM_EQ_PROFILE(CA_NI_RX_EQ_PROFILE_SEL)),
+		 readl(ni_base(ni) + CA_NI_QM_EQ_PROFILE(CA_NI_RX_EQ_PROFILE)),
 		 readl(ni_base(ni) + CA_NI_QM_CPU_EPP_FIFO_PROF(CA_NI_RX_PROFILE_ID)),
 		 readl(ni_base(ni) + CA_NI_QM_EPP64_INT_EN0),
 		 readl(ni_base(ni) + CA_NI_QM_EPP64_INT_EN1),
@@ -3366,16 +3365,16 @@ static int cortina_ni_rx_eq_init(struct cortina_ni *ni)
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 107. */
 	writel(CA_NI_RX_EQ_PROFILE_VAL,
 	       ni_base(ni) + CA_NI_QM_EQ_PROFILE(CA_NI_RX_EQ_PROFILE));
-	/* ★ Program ALL 8 3-bit-reachable profiles (0..7) = ...
+	/* ★ Program profiles 0..7 = ...
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 108. */
 	for (i = 0; i < 8; i++)
 		writel(CA_NI_RX_EQ_PROFILE_VAL,
 		       ni_base(ni) + CA_NI_IDX(CA_NI_QM_EQ_PROFILE, i,
 						CA_NI_QM_EQ_PROFILE_COUNT));
-	for (i = 0; i < CA_NI_QM_EQ_PROFILE_GLOBAL_COUNT; i++)
+	for (i = CA_NI_RX_DEST_PORT_P13_FIRST; i <= CA_NI_RX_DEST_PORT_P13_LAST; i++)
 		writel(CA_NI_RX_CPU_PROFILE_VAL,
-		       ni_base(ni) + CA_NI_IDX(CA_NI_QM_EQ_PROFILE_GLOBAL, i,
-						CA_NI_QM_EQ_PROFILE_GLOBAL_COUNT));
+		       ni_base(ni) + CA_NI_IDX(CA_NI_QM_DEST_PORT_EQ_CFG, i,
+						CA_NI_QM_DEST_PORT_ENTRIES));
 	/* build77: cpu_port 0 (CPU_0) -> profile_sel=2 -> EQ_PROFILE[2]={EQ5,EQ6} (the
 	 * stock CPU pools, now configured+seeded).  Our 0..7 loop above set EQ_PROFILE[2]
 	 * to {EQ5,EQ6}; point destport0 at profile 2 (stock value; was 0xf8=profile 8). */
@@ -3393,7 +3392,7 @@ static int cortina_ni_rx_eq_init(struct cortina_ni *ni)
 						CA_NI_QM_DEST_PORT_ENTRIES));
 	/* ★ 2026-07-23: stock configures DEST_PORT_EQ_CFG for the ...
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 110. */
-	for (i = CA_NI_RX_DEEPQ_DEST_PORT_HI + 1; i <= CA_NI_QM_DEST_PORT_LAST; i++)
+	for (i = CA_NI_RX_DEEPQ_DEST_PORT_HI + 1; i <= CA_NI_RX_DEST_PORT_LAST; i++)
 		writel(cpu_pool_push ?
 		       FIELD_PREP(CA_NI_QM_DEST_PORT_PROF_SEL,
 				  CA_NI_RX_DQ_PROFILE_SEL) :
@@ -4254,7 +4253,7 @@ static const struct {
 	 * dequeues CPU frames to the wrong port -> qm_rx=0. */
 	{ "bm_dq_port_map_2124", CA_NI_L2TM_BM_DQ_PORT_MAP },
 	{ "ni_flowctrl_en_3400", CA_NI_NI_FLOWCTRL_EN },
-	{ "ni_flowthr0_9798",	CA_NI_NI_FLOWCTRL_THRESH },
+	{ "te_cb_sp_bp_thrsh0_9798", CA_NI_L3TE_CB_SP_BP_THRSH0 },
 	/* port-0 MAC block */
 	{ "p0_glb",		CA_NI_PORT_GLB_CFG(CA_NI_RX_PORT) },
 	{ "p0_rxmac",		CA_NI_PORT_RXMAC_CFG(CA_NI_RX_PORT) },

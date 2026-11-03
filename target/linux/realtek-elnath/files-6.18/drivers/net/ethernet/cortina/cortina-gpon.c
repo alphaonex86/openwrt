@@ -304,6 +304,9 @@ static const struct gpon_ind_tbl cg_ds_gem_tbl =
 #define CG_PUC_BPCNTL		(CG_PUC_BASE + 0x0e4)	/* bpen[0], dropen[4], bpth[30:16] */
 #define CG_PUC_VOQBPREMAP_ACCESS (CG_PUC_BASE + 0x0e8)	/* addr[7:0]=VoQ, rbw[30], go[31] */
 #define CG_PUC_VOQBPREMAP_DATA	(CG_PUC_BASE + 0x0ec)	/* tqmvoqid[7:0] */
+/* PUC voq q (<= 63) -> QM voq q & 7; the 9607F mapping is v -> v + 64 (H3 of the pending voq-drift A/B) */
+#define CG_PUC_BPREMAP_LAST_VOQ	63
+#define CG_PUC_BPREMAP_QM_VOQ(q)	((q) & 0x7)
 #define CG_PUC_PONCNTL_INTEN	(CG_PUC_BASE + 0x0f4)
 #define CG_PUC_CTRL		(CG_PUC_BASE + 0x13c)	/* dft 0x3300007c; shp_en[30], rl_en[26] */
 #define CG_PUC_CTRL1		(CG_PUC_BASE + 0x140)	/* rlovhd[4:0], shpovhd[9:5], agrshpovhd[14:10] */
@@ -911,8 +914,8 @@ static int cg_puc_pvtbl_program(struct cortina_gpon *cg, u32 tcont, bool ena)
 	for (q = 0; q < CG_PUC_QUEUE_PER_TCONT; q++) {
 		u32 qid = q + tcont * CG_PUC_QUEUE_PER_TCONT;
 
-		if (qid <= 63) {
-			writel(qid & 0x7, pon + CG_PUC_VOQBPREMAP_DATA);
+		if (qid <= CG_PUC_BPREMAP_LAST_VOQ) {
+			writel(CG_PUC_BPREMAP_QM_VOQ(qid), pon + CG_PUC_VOQBPREMAP_DATA);
 			if (cg_puc_ind_write(cg, CG_PUC_VOQBPREMAP_ACCESS, qid))
 				return -ETIMEDOUT;
 		}

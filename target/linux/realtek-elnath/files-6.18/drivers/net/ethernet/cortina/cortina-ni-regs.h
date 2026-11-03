@@ -909,9 +909,48 @@ enum cortina_ni_win {
 #define CA_NI_L2TM_DQSCH_VOQ_THRSH_DATA		0x2e74
 #define CA_NI_L2TM_CB_ABR_CTRL		0x2eec	/* stock 0x88000200 */
 
-/* L3 TE congestion buffer (stock reg.txt TE_TE_GLB_CTRL / TE_CB_VOQ_THRSH_*); tables indirect, DATA first. */
+/* L3 TE congestion buffer (stock reg.txt TE_TE_GLB_CTRL / TE_CB_*); tables indirect, DATA first,
+ * ACCESS = CA_NI_IND_ACCESS_GO [| _WR] | idx.  48 ports x 8 voqs (stock bounds port <= 0x2f, voq
+ * <= 0x17f).  Port = QM dest port = ldpid - 0x10: 0-5 CPU, 6/7 PE0/PE1, 8-14 the deep queue of
+ * NI0-6, 15 NI7, 16-47 T-CONT/LLID 0-31; e.g. voq 88 = NI3 deep queue, 136 = T-CONT 1 cos 0. */
+#define CA_NI_L3_PORT_COUNT		48
+#define CA_NI_L3_PORT_NI_DQ(n)		(8 + (n))
+#define CA_NI_L3_PORT_PON(t)		(16 + (t))
+#define CA_NI_L3TE_CB_VOQS_PER_PORT	8
+#define CA_NI_L3TE_CB_VOQ_ENTRIES	(CA_NI_L3_PORT_COUNT * CA_NI_L3TE_CB_VOQS_PER_PORT)
+#define CA_NI_L3TE_CB_VOQ(port, cos)	((port) * CA_NI_L3TE_CB_VOQS_PER_PORT + (cos))
 #define CA_NI_L3TE_GLB_CTRL		0x9004
 #define  CA_NI_L3TE_GLB_TAILDROP_EN	BIT(2)	/* never set: HW-forwarded voq buffer counts saturate, every offloaded flow drops */
+#define CA_NI_L3TE_CB_INT		0x9500
+#define  CA_NI_L3TE_CB_INT_PORT_FREECNT_OVFL	BIT(5)
+#define  CA_NI_L3TE_CB_INT_PORT_FREECNT_UDFL	BIT(4)
+#define  CA_NI_L3TE_CB_INT_VOQ_PCNT_OVFL	BIT(3)
+#define  CA_NI_L3TE_CB_INT_VOQ_PCNT_UDFL	BIT(2)
+#define  CA_NI_L3TE_CB_INT_VOQ_BUFCNT_OVFL	BIT(1)
+#define  CA_NI_L3TE_CB_INT_VOQ_BUFCNT_UDFL	BIT(0)
+#define CA_NI_L3TE_CB_ERR_INFO		0x9508	/* voq indices only, no direction */
+#define  CA_NI_L3TE_CB_ERR_PKT_VOQ	GENMASK(24, 16)
+#define  CA_NI_L3TE_CB_ERR_BUF_VOQ	GENMASK(8, 0)	/* width inferred from the 384 voqs */
+/* Per-port free count; stock seeds every port with both msb set + its EQ pool sizes, ours never
+ * writes it (hypothesis H1 of the pending voq-drift A/B). */
+#define CA_NI_L3TE_CB_PORT_FREECNT_ACCESS 0x95f0
+#define CA_NI_L3TE_CB_PORT_FREECNT_DATA	0x95f4
+#define  CA_NI_L3TE_CB_FREECNT_MSB1	BIT(30)
+#define  CA_NI_L3TE_CB_FREECNT_MSB0	BIT(14)
+#define CA_NI_L3TE_CB_VOQ_BUFCNT_ACCESS	0x9610
+#define CA_NI_L3TE_CB_VOQ_BUFCNT_DATA	0x9614
+#define  CA_NI_L3TE_CB_BUFCNT_MSB1	GENMASK(31, 30)
+#define  CA_NI_L3TE_CB_BUFCNT_MSB0	GENMASK(15, 14)
+/* the two 14-bit counts of FREECNT_DATA and VOQ_BUFCNT_DATA */
+#define  CA_NI_L3TE_CB_CNT1		GENMASK(29, 16)
+#define  CA_NI_L3TE_CB_CNT0		GENMASK(13, 0)
+/* TE_CB_SP_BASE_BP_THRSH_P0..6 (reg.txt): two 14-bit source-port back-pressure thresholds per
+ * port.  Stock live P0 = 0x81a80178 (bit 31 not identified, left clear), P1 = 0x01a80178; P2-6
+ * known only as these two fields from the init loop. */
+#define CA_NI_L3TE_CB_SP_BP_THRSH0	0x9798
+#define  CA_NI_L3TE_CB_SP_BP_THRSH_CNT	7
+#define  CA_NI_L3TE_CB_SP_BP_THRSH_CLR	0x3fff3fffu
+#define  CA_NI_L3TE_CB_SP_BP_THRSH_VAL	0x01a80178u
 #define CA_NI_L3TE_CB_VOQ_PROF_ACCESS	0x95f8
 #define CA_NI_L3TE_CB_VOQ_PROF_DATA2	0x95fc
 #define  CA_NI_L3TE_CB_PROF_D2_PRVT_HI	GENMASK(5, 0)	/* prvt[13:8] */
@@ -954,7 +993,8 @@ enum cortina_ni_win {
 #define CA_NI_L2TM_CB_VOQ_BUFCNT_DATA	0x2dc0
 #define CA_NI_L2TM_CB_PORT_FREECNT_ACCESS 0x2db4
 #define CA_NI_L2TM_CB_PORT_FREECNT_DATA	0x2db8
-/* The VOQ index space the occupancy scan walks, and where the PAGE count sits
+/* The L2TM CB VOQ index space the occupancy scan walks (stock bound voq < 0x80 =
+ * 16 ports x 8; the L3TE CB has its own 384), and where the PAGE count sits
  * inside the returned word.  Proven arithmetic, from the recorded wedge: the
  * scan printed q64=160956416 q72=1835008 q107=80216064 and the meta line read
  * 2456/28/1224 pages = 3708 = 102 % of the free pool - i.e. the pages are the
@@ -966,16 +1006,13 @@ enum cortina_ni_win {
  * literal nobody can check. */
 #define CA_NI_RX_CB_PORT_LAN		0
 #define CA_NI_RX_CB_PORT_CPU		8
-/* ★★★ THE deep-queue POPULATE step (ca-ne.ko: aal_l3qm_init_DQ_pools_pool0 ->
- * aal_l3_te_cb_port_free_buf_cnt_set, looped over ports 0-47).  Initialises the
- * CB's per-port FREE-BUFFER count; without it the CB has 0 free deep-queue
- * buffers and DROPS a deep_q frame at the L2TM->CB enqueue (cb-occupancy=0).
- * DATA fields = cnt0[14:0], cnt0_msb[15], cnt1[30:16], cnt1_msb[31].  Tier-1
- * stock value (read live under ping, UNIFORM on all ports) = 0x8E308000 =
- * {cnt0=0x8000(32768), cnt1=0x8E30(36400)} - the REAL central-buffer free-buffer
- * counts (~32K, the CB SRAM size), not a per-DQ-pool 256.  Our 256 guess was
- * orders of magnitude too small so the CB rejected the enqueue. Write verbatim. */
-#define CA_NI_L2TM_CB_PORT_COUNT	48	/* ports 0..47 (stock loop range) */
+/* The L2TM CB per-port free count (stock setter bounds port <= 15, stock resting
+ * ACCESS = WR|15).  Not the L3TE CB per-port free count (CA_NI_L3TE_CB_PORT_FREECNT_*,
+ * unseeded).  DATA = cnt0[14:0] msb0[15] cnt1[30:16] msb1[31]; stock live, uniform:
+ * 0x8E308000 = both msb set, cnt0 0, cnt1 0xe30 (3632, equal to a
+ * healthy CA_NI_L2TM_QM_EQ_GLB_FREECNT).  Without it a deep_q frame drops at the L2TM->CB
+ * enqueue (cb-occupancy=0).  Write verbatim. */
+#define CA_NI_L2TM_CB_PORT_COUNT	16
 #define  CA_NI_L2TM_CB_FREECNT_VAL	0x8e308000u	/* tier-1 stock, all ports */
 #define CA_NI_L2TM_DEEPQ_VOQ_ENTRIES	8	/* 8 VOQs per deep-queue port */
 #define  CA_NI_L2TM_CB_VOQ_THRSH_D1	0x0fffffffu	/* stock CB VOQ thr (last entry) */
@@ -1620,7 +1657,7 @@ enum cortina_ni_win {
 #define  CA_NI_QM_HDM_UNLOCK		0x05102013u
 #define CA_NI_QM_EQ_CFG_LOAD		0x6408	/* ELNATH EQ_CFG_LOAD (rtl 0x63a8) */
 #define  CA_NI_QM_EQ_CFG_LOAD_ALL	0xffffu
-/* EQ profile n (0..7): pool0/pool1 EQ ids + fill rule (0 = SW push) */
+/* EQ profile n (0..15): pool0/pool1 EQ ids + fill rule (0 = SW push) */
 #define CA_NI_QM_EQ_PROFILE(n)		(0x6128 + (n) * 4)
 #define  CA_NI_QM_EQ_PROF_EQP0		GENMASK(3, 0)
 #define  CA_NI_QM_EQ_PROF_EQP1		GENMASK(7, 4)
@@ -1636,16 +1673,9 @@ enum cortina_ni_win {
 #define CA_NI_RX_EQ_PROFILE_VAL \
 	(FIELD_PREP(CA_NI_QM_EQ_PROF_EQP0, CA_NI_RX_EQ_ID) | \
 	 FIELD_PREP(CA_NI_QM_EQ_PROF_EQP1, CA_NI_RX_EQ_ID2))
-/* ★★ FIELD-WIDTH FIX: DEST_PORT_EQ_CFG.profile_sel is only 3 bits [2:0] (max 7),
- * and EQ_PROFILE has 8 entries (0-7).  Our DEST_PORT value 0x0d therefore selects
- * profile_sel = 0x0d & 0x7 = 5, NOT 13 - but we configured EQ_PROFILE(13) (out of
- * the DEST_PORT-reachable range).  So a deep_q frame selects the UNCONFIGURED
- * EQ_PROFILE(5) -> wrong/empty EQ -> RMU has no buffer -> no admission (0x6900=0).
- * Fix: ALSO program EQ_PROFILE(5) = {EQ13,EQ14} = the profile the 3-bit field
- * actually selects.  (We keep the EQ_PROFILE(13) write too, harmlessly, in case
- * the Elnath field is wider.)  The vendor sets DEST_PORT.profile_sel == the
- * EQ_PROFILE index it configures - ours diverged by the [3:0]-vs-[2:0] misread. */
-#define CA_NI_RX_EQ_PROFILE_SEL		(CA_NI_RX_EQ_PROFILE & 0x7)	/* = 5, the reachable profile */
+/* DEST_PORT_EQ_CFG.profile_sel is 4 bits [3:0]: EQ_PROFILE has 16 entries
+ * (0x6128..0x6164) and stock selects 13 (0xD) for dest ports 15-47.  The driver
+ * gives EQ_PROFILE 0-7 and 13 the same CPU-pool value. */
 /* ★ The CPU physical-dest port in the QM DEST_PORT_EQ_CFG table is PHYSICAL
  * DEST 0x09 (AAL_PPORT_CPU), which sits at DEST_PORT index 15 (0x6168+15*4 =
  * 0x61a4 - stock-devmem confirmed: [0x61a4]=0x0D=EQ-profile 13).  Our old
@@ -1657,17 +1687,13 @@ enum cortina_ni_win {
  * QM VOQ picks (index 15 = the stock CPU slot CA_NI_RX_CPU_DEST_PORT). */
 #define CA_NI_RX_DEEPQ_DEST_PORT_LO	8
 #define CA_NI_RX_DEEPQ_DEST_PORT_HI	15
-/* highest DEST_PORT_EQ_CFG index (0x6168 + 0x2f*4 = 0x6224); stock configures the
- * whole CPU/PON range up to here, ours left 16..0x2f at profile 0 -> empty EQ0 */
-/* ★★ THE TABLE HAS 32 ENTRIES, so the LAST VALID INDEX IS 31 -- not 0x2f.
- * DEST_PORT_MAX is the dest-port NUMBER SPACE (0..0x2f), which is NOT the same
- * thing as the table length, and looping to it walks 16 entries off the end:
- * index 38/39/40 resolve to 0x6200/04/08, which is EQ_PROFILE_GLOBAL(0..2).
- * That silently overwrote the three global profiles written a few lines
- * earlier.  It was invisible while both writes happened to store the same
- * value, and became live the moment the dest-port loop started writing a
- * different profile for the tagged-WAN fix (2026-07-28).
- * Use CA_NI_QM_DEST_PORT_LAST to bound any loop over the table. */
+/* Dest ports 16-31 (T-CONT/LLID 0-15) get the deep-queue profile; stock gives 15-47
+ * profile 13 = {EQ13, EQ14}, owed until those pools are configured here. */
+#define CA_NI_RX_DEST_PORT_LAST		CA_NI_L3_PORT_PON(15)
+/* Dest ports 38-40 (T-CONT/LLID 22-24) keep the profile-13 value this driver has
+ * always written there (once believed a 3-word "global default" at 0x6200). */
+#define CA_NI_RX_DEST_PORT_P13_FIRST	CA_NI_L3_PORT_PON(22)
+#define CA_NI_RX_DEST_PORT_P13_LAST	CA_NI_L3_PORT_PON(24)
 /* ---------------------------------------------------------------------------
  * ★ DEBUG-ONLY BOUND CHECK FOR AN INDEXED REGISTER WRITE
  *
@@ -1684,11 +1710,8 @@ enum cortina_ni_win {
  * the index is past the array's declared entry count; with the option off it
  * compiles to the plain macro expansion and costs nothing.
  *
- * It exists because CA_NI_QM_DEST_PORT_EQ_CFG was written sixteen entries past
- * its 32-entry table -- the loop was bounded by CA_NI_QM_DEST_PORT_MAX (0x2f),
- * which is the dest-port NUMBER SPACE and not the table length -- and the
- * overshoot landed on EQ_PROFILE_GLOBAL(0..2).  It was invisible while both
- * writes happened to store the same value.  A static guard in the host suite
+ * It exists because two names once covered the same QM words (0x6200-0x6208),
+ * invisible while both writers stored the same value.  A static guard in the host suite
  * catches the declared case; this catches the one a static check cannot: an
  * index that only goes out of range at runtime.
  */
@@ -1712,28 +1735,21 @@ enum cortina_ni_win {
 #define CA_NI_QM_EQ_PROFILE_COUNT	16
 #define CA_NI_NI_RXMUX_FC_THR_COUNT	8
 
-#define CA_NI_QM_DEST_PORT_MAX		0x2f
-#define CA_NI_QM_DEST_PORT_ENTRIES	32
-#define CA_NI_QM_DEST_PORT_LAST		(CA_NI_QM_DEST_PORT_ENTRIES - 1)
+#define CA_NI_QM_DEST_PORT_ENTRIES	CA_NI_L3_PORT_COUNT
 /* dest-port (index = ldpid - 0x10; CPU port 0 = 0) -> EQ-profile select */
 /* per-dest-port EQ-profile select: authoritative base QM_QM_DEST_PORT0_EQ_CFG
- * = ELNATH 0x6168 (rtl8277c 0x6148), stride 4, 32 entries.  CPU dest port = 8,
+ * = ELNATH 0x6168 (rtl8277c 0x6148), stride 4, 48 entries.  CPU dest port = 8,
  * so the CPU entry is 0x6168 + 8*4 = 0x6188.  (The old 0x6148 base put the CPU
  * entry at 0x6168 = Elnath dest-port-0 - wrong; the full-driver offset audit
  * against arch-elnath/registers.h corrected the whole QM block.) */
 #define CA_NI_QM_DEST_PORT_EQ_CFG(p)	(0x6168 + (p) * 4)	/* ELNATH (rtl 0x6148) */
 #define  CA_NI_QM_DEST_PORT_PROF_SEL	GENMASK(3, 0)
-/* ★ Global-default EQ-profile (3 entries @0x6200/0x6204/0x6208): the EQ profile a
- * dest with no specific DEST_PORT_EQ_CFG entry uses.  Stock = 0x0D (profile 13) each
- * - this is what steers a CPU-dest (physical 0x09) frame to the CPU pool EQ13/EQ14. */
-#define CA_NI_QM_EQ_PROFILE_GLOBAL(n)	(0x6200 + (n) * 4)
-#define CA_NI_QM_EQ_PROFILE_GLOBAL_COUNT 3
 /* CPU EQ-profile selector value = the CPU pool's EQ_PROFILE index (13) */
 #define CA_NI_RX_CPU_PROFILE_VAL	CA_NI_RX_EQ_PROFILE	/* 0x0D -> EQ_PROFILE(13) */
 /* dest-port head/tail room in 16-byte units; head_room_first = 4 is what
  * puts HEADER_A at buffer+0x40 - it is PROGRAMMED, not innate */
 /* authoritative base QM_QM_DEST_PORT0_PKT_BUF_CFG = 0x61c8, stride 4, only 8
- * entries (indexed by CPU-port number, not the 0..31 dest-port number) */
+ * entries (indexed by CPU-port number, not the 0..47 dest-port number) */
 #define CA_NI_QM_DEST_PORT_PKT_BUF_CFG(p) (0x6228 + (p) * 4)	/* ELNATH (rtl 0x61c8) */
 #define  CA_NI_QM_PKT_BUF_HEAD_FIRST	GENMASK(5, 0)
 #define  CA_NI_QM_PKT_BUF_TAIL_FIRST	GENMASK(13, 8)
@@ -2671,10 +2687,6 @@ static_assert(CA_NI_L3FE_STG0_CTRL_VAL & CA_NI_NI_FLOWCTRL_EN_BIT,
  * on ours.  This map lets us FORCE the physical port: 0x88888888 = every DQ -> TM-port 8
  * = ES8/L3QM.  Swept via the dq_tmport_map module param (rebuild-free A/B). */
 #define CA_NI_L2TM_BM_DQ_TO_TM_PORT_MAP	0x212c
-#define CA_NI_NI_FLOWCTRL_THRESH	0x9798		/* per-port flow-ctrl thresholds  */
-#define  CA_NI_NI_FLOWCTRL_THRESH_CNT	7		/* 0x9798..0x97b0, stride 4       */
-#define  CA_NI_NI_FLOWCTRL_THRESH_CLR	0x3fff3fffu	/* stock bfxil[0:13]+bfi[16:29]   */
-#define  CA_NI_NI_FLOWCTRL_THRESH_VAL	0x01a80178u	/* [0:13]=0x178 [16:29]=0x1a8     */
 
 /* driver-side RX geometry */
 #define CA_NI_RX_CPU_PORT		0	/* CPU port 0, voq 0 */

@@ -18,6 +18,7 @@
 #include "hw.h"
 #include "../pwrseqcmd.h"
 #include "pwrseq.h"
+#include "txbf.h"
 
 /* The module's reference crystal. Mainline programs the AFE for a 40 MHz
  * crystal (AFE_CTRL2 = 0x83); the V2801RGW's RTL8192EE runs on 25 MHz -- its
@@ -1674,6 +1675,7 @@ void rtl92ee_card_disable(struct ieee80211_hw *hw)
 	enum nl80211_iftype opmode;
 
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD, "RTL8192ee card disable\n");
+	rtl92ee_txbf_stop(hw);
 
 	RT_SET_PS_LEVEL(ppsc, RT_RF_OFF_LEVL_HALT_NIC);
 

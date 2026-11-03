@@ -946,6 +946,8 @@ static int rtl_op_sta_add(struct ieee80211_hw *hw,
 		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
 			"Add sta addr is %pM\n", sta->addr);
 		rtlpriv->cfg->ops->update_rate_tbl(hw, sta, 0, true);
+		if (rtlpriv->cfg->ops->txbf_sta_add)
+			rtlpriv->cfg->ops->txbf_sta_add(hw, vif, sta);
 	}
 
 	return 0;
@@ -961,6 +963,8 @@ static int rtl_op_sta_remove(struct ieee80211_hw *hw,
 	if (sta) {
 		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
 			"Remove sta addr is %pM\n", sta->addr);
+		if (rtlpriv->cfg->ops->txbf_sta_remove)
+			rtlpriv->cfg->ops->txbf_sta_remove(hw, sta);
 		sta_entry = (struct rtl_sta_info *)sta->drv_priv;
 		sta_entry->wireless_mode = 0;
 		sta_entry->ratr_index = 0;

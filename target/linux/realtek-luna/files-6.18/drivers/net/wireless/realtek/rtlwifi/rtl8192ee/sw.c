@@ -13,6 +13,7 @@
 #include "trx.h"
 #include "led.h"
 #include "table.h"
+#include "txbf.h"
 
 #include "../btcoexist/rtl_btc.h"
 
@@ -158,6 +159,8 @@ static int rtl92ee_init_sw_vars(struct ieee80211_hw *hw)
 	}
 
 	rtl_lamp_register(hw, "rtl8192ee", rtl92ee_lamp_set);
+	if (rtl92ee_txbf_init(hw))
+		pr_err("no memory for the TX beamformer: it stays off\n");
 	return 0;
 }
 
@@ -166,6 +169,7 @@ static void rtl92ee_deinit_sw_vars(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 
 	rtl_lamp_unregister(hw);
+	rtl92ee_txbf_deinit(hw);
 
 	if (rtlpriv->rtlhal.pfirmware) {
 		vfree(rtlpriv->rtlhal.pfirmware);
@@ -229,6 +233,10 @@ static const struct rtl_hal_ops rtl8192ee_hal_ops = {
 	.fill_h2c_cmd = rtl92ee_fill_h2c_cmd,
 	.get_btc_status = rtl92ee_get_btc_status,
 	.c2h_ra_report_handler = rtl92ee_c2h_ra_report_handler,
+	.txbf_assoc_req = rtl92ee_txbf_assoc_req,
+	.txbf_sta_add = rtl92ee_txbf_sta_add,
+	.txbf_sta_remove = rtl92ee_txbf_sta_remove,
+	.txbf_report = rtl92ee_txbf_report,
 };
 
 static struct rtl_mod_params rtl92ee_mod_params = {

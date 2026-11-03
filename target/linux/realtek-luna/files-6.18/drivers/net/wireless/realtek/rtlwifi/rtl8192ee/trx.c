@@ -2,6 +2,7 @@
 /* Copyright(c) 2009-2014  Realtek Corporation.*/
 
 #include "../wifi.h"
+#include "../core.h"
 #include "../pci.h"
 #include "../base.h"
 #include "../stats.h"
@@ -645,6 +646,17 @@ static void rtl92ee_pre_fill_tx_bd_desc(struct ieee80211_hw *hw,
 	set_tx_desc_tx_buffer_size(desc, (u16)(pkt_len));
 }
 
+/* The beamformer's HT NDP announcement (txbf.c): MCS8 so the NDP behind it sounds both
+ * streams, its own duration as NAV, 5 tries; the MAC appends the NDP. */
+static void _rtl92ee_fill_ndpa_desc(__le32 *pdesc)
+{
+	set_tx_desc_tx_rate(pdesc, DESC_RATEMCS8);
+	set_tx_desc_ndpa(pdesc, 1);
+	set_tx_desc_nav_use_hdr(pdesc, 1);
+	set_tx_desc_retry_limit_enable(pdesc, 1);
+	set_tx_desc_data_retry_limit(pdesc, 5);
+}
+
 void rtl92ee_tx_fill_desc(struct ieee80211_hw *hw,
 			  struct ieee80211_hdr *hdr, u8 *pdesc8,
 			  u8 *pbd_desc_tx,
@@ -721,6 +733,8 @@ void rtl92ee_tx_fill_desc(struct ieee80211_hw *hw,
 
 		if (ieee80211_is_mgmt(fc)) {
 			ptcb_desc->use_driver_rate = true;
+			if (unlikely(rtl_is_ht_ndpa(fc)))
+				_rtl92ee_fill_ndpa_desc(pdesc);
 		} else {
 			if (rtlpriv->ra.is_special_data) {
 				ptcb_desc->use_driver_rate = true;

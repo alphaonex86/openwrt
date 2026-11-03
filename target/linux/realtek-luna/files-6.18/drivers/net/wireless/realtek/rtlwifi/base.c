@@ -2311,6 +2311,8 @@ static void rtl_c2h_content_parsing(struct ieee80211_hw *hw,
 	case C2H_TXBF:
 		rtl_dbg(rtlpriv, COMP_FW, DBG_TRACE,
 			"[C2H], C2H_TXBF!!\n");
+		if (hal_ops->txbf_report)
+			hal_ops->txbf_report(hw, cmd_buf, cmd_len);
 		break;
 	case C2H_TX_REPORT:
 		rtl_tx_report_handler(hw, cmd_buf, cmd_len);

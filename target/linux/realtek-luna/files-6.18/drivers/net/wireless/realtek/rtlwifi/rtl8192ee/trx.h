@@ -147,6 +147,12 @@ static inline void set_tx_desc_max_agg_num(__le32 *__pdesc, u32 __val)
 	le32p_replace_bits((__pdesc + 3), __val, GENMASK(21, 17));
 }
 
+/* 1: an HT NDP announcement, the MAC sends the NDP after it */
+static inline void set_tx_desc_ndpa(__le32 *__pdesc, u32 __val)
+{
+	le32p_replace_bits((__pdesc + 3), __val, GENMASK(23, 22));
+}
+
 /* Dword 4 */
 static inline void set_tx_desc_tx_rate(__le32 *__pdesc, u32 __val)
 {
@@ -161,6 +167,16 @@ static inline void set_tx_desc_data_rate_fb_limit(__le32 *__pdesc, u32 __val)
 static inline void set_tx_desc_rts_rate_fb_limit(__le32 *__pdesc, u32 __val)
 {
 	le32p_replace_bits((__pdesc + 4), __val, GENMASK(16, 13));
+}
+
+static inline void set_tx_desc_retry_limit_enable(__le32 *__pdesc, u32 __val)
+{
+	le32p_replace_bits((__pdesc + 4), __val, BIT(17));
+}
+
+static inline void set_tx_desc_data_retry_limit(__le32 *__pdesc, u32 __val)
+{
+	le32p_replace_bits((__pdesc + 4), __val, GENMASK(23, 18));
 }
 
 static inline void set_tx_desc_rts_rate(__le32 *__pdesc, u32 __val)

@@ -589,11 +589,13 @@ static void _rtl_pci_tx_isr(struct ieee80211_hw *hw, int prio)
 				rtlpriv->psc.state_inap = false;
 			}
 		}
-		if (ieee80211_is_action(fc)) {
+		/* frames the driver built itself (SMPS action, HT NDPA) never reach mac80211 */
+		if (ieee80211_is_mgmt(fc)) {
 			struct ieee80211_mgmt *action_frame =
 				(struct ieee80211_mgmt *)skb->data;
-			if (action_frame->u.action.u.ht_smps.action ==
-			    WLAN_HT_ACTION_SMPS) {
+			if ((ieee80211_is_action(fc) &&
+			     action_frame->u.action.u.ht_smps.action ==
+			     WLAN_HT_ACTION_SMPS) || rtl_is_ht_ndpa(fc)) {
 				dev_kfree_skb(skb);
 				goto tx_status_ok;
 			}
@@ -867,6 +869,10 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 			/* for sw lps */
 			rtl_swlps_beacon(hw, (void *)skb->data, skb->len);
 			rtl_recognize_peer(hw, (void *)skb->data, skb->len);
+			if (unlikely(rtl_is_any_assoc_req(fc)) &&
+			    rtlpriv->cfg->ops->txbf_assoc_req)
+				rtlpriv->cfg->ops->txbf_assoc_req(hw, skb->data,
+								 skb->len - FCS_LEN);
 			if (rtlpriv->mac80211.opmode == NL80211_IFTYPE_AP &&
 			    rtlpriv->rtlhal.current_bandtype == BAND_ON_2_4G &&
 			    (ieee80211_is_beacon(fc) ||

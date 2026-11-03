@@ -65,6 +65,22 @@ bool rtl_cmd_send_packet(struct ieee80211_hw *hw, struct sk_buff *skb);
 bool rtl_btc_status_false(void);
 void rtl_dm_diginit(struct ieee80211_hw *hw, u32 cur_igval);
 void rtl_update_beacon_work_callback(struct work_struct *work);
+/* The HT NDP announcement rtl8192ee's beamformer builds: Action No Ack + Order (HT Control). */
+#define RTL_FC_HT_NDPA	(IEEE80211_FTYPE_MGMT | 0x00e0 | IEEE80211_FCTL_ORDER)
+
+static inline bool rtl_is_ht_ndpa(__le16 fc)
+{
+	return fc == cpu_to_le16(RTL_FC_HT_NDPA);
+}
+
+/* Association or reassociation request: their subtypes differ in bit 5 only, one compare. */
+static inline bool rtl_is_any_assoc_req(__le16 fc)
+{
+	return (fc & cpu_to_le16(IEEE80211_FCTL_FTYPE |
+				 (IEEE80211_FCTL_STYPE & ~IEEE80211_STYPE_REASSOC_REQ))) ==
+	       cpu_to_le16(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ);
+}
+
 /* rtlpriv->status bit beside RTL_STATUS_INTERFACE_START (wifi.h, bit 0) */
 #define RTL_STATUS_HW_RESTART		1
 void rtl_restart_hw(struct ieee80211_hw *hw);

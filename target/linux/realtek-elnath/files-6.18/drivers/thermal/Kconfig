@@ -414,6 +414,13 @@ config CORTINA_THERMAL
 	  The SoC temperature sensor of the Realtek RTL9607F "Elnath" GPON ONU
 	  (Cortina-Access CA77xx design), exposed as a thermal zone.
 
+config CORTINA_DDR_REFRESH
+	bool "RTL9607F DDR refresh derating by temperature"
+	depends on OF && HAVE_ARM_SMCCC
+	help
+	  A cooling device that doubles, then quadruples, the DDR refresh rate of the
+	  Realtek RTL9607F through its secure firmware, bound to thermal zone trips.
+
 config DA9062_THERMAL
 	tristate "DA9062/DA9061 Dialog Semiconductor thermal driver"
 	depends on MFD_DA9062 || COMPILE_TEST

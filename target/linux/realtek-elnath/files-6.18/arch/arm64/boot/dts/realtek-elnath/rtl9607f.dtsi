@@ -223,12 +223,43 @@
 		#thermal-sensor-cells = <0>;
 	};
 
-	/* The zone stock names cpu-thermal, polled as stock does; stock declares no trip either. */
+	/* DDR refresh derating, set through the secure firmware: the DDR controller is secure-only. */
+	ddr_refresh: ddr-refresh {
+		compatible = "cortina,ddr-refresh-sip";
+		#cooling-cells = <2>;
+	};
+
+	/* The zone stock names cpu-thermal, polled as stock does. Its only trips are stock's DDR refresh
+	 * derating (x2 from 75 C, x4 from 85 C), with a hysteresis stock lacks. */
 	thermal-zones {
 		cpu-thermal {
 			polling-delay-passive = <500>;
 			polling-delay = <3000>;
 			thermal-sensors = <&soc_thermal>;
+
+			trips {
+				ddr_hot: ddr-hot {
+					temperature = <75000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				ddr_hotter: ddr-hotter {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&ddr_hot>;
+					cooling-device = <&ddr_refresh 1 1>;
+				};
+				map1 {
+					trip = <&ddr_hotter>;
+					cooling-device = <&ddr_refresh 2 2>;
+				};
+			};
 		};
 	};
 

@@ -63,6 +63,7 @@ struct luna_loop {
 	u32				seen;	/* CPU probe: ports to take down */
 	u32				retry;	/* looped, but the take-down failed: no second port */
 	u32				failed;	/* ports whose last gate call failed */
+	u32				taking;	/* being taken down: already down to an OMCI unlock */
 	struct lan_loop_hold		hold;
 	bool				engine;
 	u8				id[LAN_LOOP_ID_LEN];
@@ -179,6 +180,7 @@ static void loop_work(struct work_struct *w)
 	take = l->engine ? loop_engine_read(l, on) : 0;
 	spin_lock_irqsave(&l->lock, flags);
 	take = on ? (take | l->seen | l->retry) & ~l->hold.down : 0;
+	l->taking = take;
 	due = lan_loop_hold_due(&l->hold, now, !on) | (on ? 0 : l->retry);
 	l->seen = 0;
 	spin_unlock_irqrestore(&l->lock, flags);
@@ -208,6 +210,7 @@ static void loop_work(struct work_struct *w)
 	l->hold.down &= ~released;
 	l->retry = again;
 	lan_loop_hold_add(&l->hold, downed, now, msecs_to_jiffies(READ_ONCE(loop_block_s) * 1000U));
+	l->taking = 0;
 	spin_unlock_irqrestore(&l->lock, flags);
 	if (released && l->engine)
 		loop_engine_rearm(l, released);
@@ -280,9 +283,20 @@ void luna_loop_rx(struct luna_loop *l, const u8 *f, unsigned int len,
 }
 EXPORT_SYMBOL_GPL(luna_loop_rx);
 
+static bool loop_held(struct luna_loop *l, unsigned int port)
+{
+	unsigned long flags;
+	bool held;
+
+	spin_lock_irqsave(&l->lock, flags);
+	held = (l->hold.down | l->taking) & BIT(port);
+	spin_unlock_irqrestore(&l->lock, flags);
+	return held;
+}
+
 bool luna_loop_port_down(struct luna_loop *l, unsigned int port)
 {
-	return l && port < LAN_LOOP_PORTS && (READ_ONCE(l->hold.down) & BIT(port));
+	return l && port < LAN_LOOP_PORTS && loop_held(l, port);
 }
 EXPORT_SYMBOL_GPL(luna_loop_port_down);
 

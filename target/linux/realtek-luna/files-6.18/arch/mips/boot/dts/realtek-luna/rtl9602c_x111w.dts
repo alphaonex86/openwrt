@@ -103,7 +103,7 @@
 	/* The internet lamp: GPIO 35, lit low. Stock's board LED hook sends its LED 6
 	 * (internet, green) there and its systemd lights it through /proc/internet_flag;
 	 * read on stock 2026-11-02: flag 0 -> pin high, flag 1 -> pin low. Driven by
-	 * /etc/hotplug.d/iface/50-led-net from the IPv4 default route. */
+	 * /etc/hotplug.d/iface/10-led-net from the IPv4 default route. */
 	leds {
 		compatible = "gpio-leds";
 

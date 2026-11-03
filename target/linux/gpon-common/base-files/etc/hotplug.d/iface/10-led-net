@@ -1,0 +1,20 @@
+#!/bin/sh
+# The NET lamp, every ONU: lit while an interface netifd holds up carries an IPv4
+# default route. Asked of netifd inside its own event: the kernel can still hold the
+# route of an interface this ifdown already reports down. A board without one: no-op.
+for led in /sys/class/leds/green:net /sys/class/leds/*:green:net; do
+	[ -e "$led/brightness" ] && break
+done
+[ -e "$led/brightness" ] || exit 0
+dump=$(ubus call network.interface dump) || {
+	logger -t led-net "$ACTION $INTERFACE: netifd did not answer, lamp left as it was"
+	exit 0
+}
+jsonfilter -s "$dump" -e '@.interface[@.up=true].route[@.target="0.0.0.0" && @.mask=0].nexthop' >/dev/null
+case $? in
+0) on=1 ;;
+1) on=0 ;;
+*) logger -t led-net "$ACTION $INTERFACE: netifd's dump did not parse, lamp left as it was"; exit 0 ;;
+esac
+echo $on > "$led/brightness" || logger -t led-net "cannot set $led to $on"
+exit 0

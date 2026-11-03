@@ -56,14 +56,15 @@
 		};
 	};
 
-	/* The X111W's pad routing, which this board has run with so far:
+	/* Its own stock's pads at O5 (device_api gpio_pads, 2026-11-03): GPIO 13, 32
+	 * and 34 outputs, every other pin left to its function or an input.
 	 * IO_GPIO_EN w0 w1, GPIO dir/data ABCD, dir/data EFGH. */
 	pon-optics {
 		/* MENTECHOPTO NOG22-D6C-ST: its stock kernel carries no host laser
 		 * calibration at all (no RTL8290B, no GN25L95 symbol) */
 		realtek,optics-self-managed;
-		realtek,gpio-pads = <0x40202006 0x00000819 0x40002006 0xdbff1246
-				     0x00000819 0x000037e5>;
+		realtek,gpio-pads = <0x00002000 0x00000005 0x00002000 0xefff173e
+				     0x00000005 0x00003ff1>;
 	};
 
 	/* What the OLT counts, from this board's own stock MIB (stock_gpon_oracle

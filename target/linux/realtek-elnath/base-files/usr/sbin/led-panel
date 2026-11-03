@@ -5,7 +5,7 @@
 #
 # WHY A SCRIPT AND NOT DRIVER CODE / A KERNEL TRIGGER
 # ---------------------------------------------------
-# Four of the ten panel LEDs track state that has no in-kernel LED trigger:
+# PON and LOS track state that has no in-kernel LED trigger:
 #
 #   PON / LOS  GPON activation state and the downstream optical alarm.  There is
 #              no "gpon" LED trigger in Linux.  Stock does not use one either:
@@ -14,7 +14,7 @@
 #              so a script here is the same architecture with none of the
 #              driver-side code or footprint.
 #
-#   NET        internet/WAN reachability.  Cheap and honest: a default route.
+# NET is every ONU's, not this board's: gpon-common's hotplug.d/iface/10-led-net.
 #
 # ★ LAN1-4 ARE NOT DRIVEN HERE ANY MORE — DO NOT ADD THEM BACK.  They are the
 # kernel's now: cortina_ni publishes one LED trigger per switch port and drives
@@ -61,7 +61,6 @@ GPON=/proc/gpon
 
 LED_PON="x400axf:green:pon"
 LED_LOS="x400axf:red:los"
-LED_NET="x400axf:green:net"
 
 POLL="${LED_PANEL_POLL:-2}"
 
@@ -116,22 +115,7 @@ poll_gpon() {
 	esac
 }
 
-# NET: lit once the WAN actually gives us a default route (a DHCP lease or a
-# PPPoE session up, either way).  Deliberately not "the interface exists".
-# Read straight out of /proc/net/route (destination and mask both 0.0.0.0) so
-# this needs no `ip`/`route` binary at all - one less thing that can be absent
-# from a trimmed image and silently leave the LED dark.
-poll_net() {
-	if awk 'NR>1 && $2=="00000000" && $8=="00000000" { found=1 }
-		END { exit !found }' /proc/net/route 2>/dev/null; then
-		set_led "$LED_NET" on
-	else
-		set_led "$LED_NET" off
-	fi
-}
-
 while :; do
 	poll_gpon
-	poll_net
 	sleep "$POLL"
 done

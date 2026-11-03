@@ -76,8 +76,8 @@
 			default-state = "on";
 		};
 
-		led-internet {
-			label = "green:internet";
+		led-net {
+			label = "green:net";
 			gpios = <&gpio1 25 1>;	/* GPIO 57 */
 		};
 

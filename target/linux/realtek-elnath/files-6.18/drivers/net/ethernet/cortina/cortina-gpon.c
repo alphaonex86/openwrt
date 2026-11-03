@@ -146,6 +146,7 @@
 #define CG_PERGPIO_OUT4		0x394
 #define CG_GPIO3_CFG_STOCK	0xfffdef00
 #define CG_GPIO3_OUT_STOCK	0x00021010
+#define CG_GPIO3_LAMP_PINS	0x000010db	/* gpio-leds: WPS 0, LAN 1/3/6/7, PON 4, NET 12 */
 #define CG_GPIO4_CFG_STOCK	0xffffc5ff
 #define CG_GPIO4_OUT_STOCK	0x00003200
 /* Dying-gasp detector in the PERI block (stock ca-ne aal_pon_init, re-armed
@@ -784,8 +785,11 @@ static void cg_laser_on(struct cortina_gpon *cg)
 	v = readl(cg->gpio + CG_PERGPIO_CFG0);
 	writel(v & ~CG_GPIO0_LASER_PINS, cg->gpio + CG_PERGPIO_CFG0);
 	/* groups 3/4: whole-group stock state, OUT before CFG so each pin
-	 * drives the correct level the moment it becomes an output */
-	writel(CG_GPIO3_OUT_STOCK, cg->gpio + CG_PERGPIO_OUT3);
+	 * drives the correct level the moment it becomes an output; a lamp keeps
+	 * the level its LED driver set (stock's were its lamps at capture time) */
+	v = readl(cg->gpio + CG_PERGPIO_OUT3);
+	writel((CG_GPIO3_OUT_STOCK & ~CG_GPIO3_LAMP_PINS) | (v & CG_GPIO3_LAMP_PINS),
+	       cg->gpio + CG_PERGPIO_OUT3);
 	writel(CG_GPIO3_CFG_STOCK, cg->gpio + CG_PERGPIO_CFG3);
 	writel(CG_GPIO4_OUT_STOCK, cg->gpio + CG_PERGPIO_OUT4);
 	writel(CG_GPIO4_CFG_STOCK, cg->gpio + CG_PERGPIO_CFG4);

@@ -104,16 +104,6 @@
 	 * (internet, green) there and its systemd lights it through /proc/internet_flag;
 	 * read on stock 2026-11-02: flag 0 -> pin high, flag 1 -> pin low. Driven by
 	 * /etc/hotplug.d/iface/10-led-net from the IPv4 default route. */
-	leds {
-		compatible = "gpio-leds";
-
-		led-net {
-			label = "green:net";
-			gpios = <&gpio1 3 1>;	/* GPIO 35, active low */
-			default-state = "off";
-		};
-	};
-
 	/*
 	 * The UNI panel this board presents over OMCI, MEASURED from its own
 	 * stock firmware (omcicli mib get 11/264, 2026-09-12, archived under

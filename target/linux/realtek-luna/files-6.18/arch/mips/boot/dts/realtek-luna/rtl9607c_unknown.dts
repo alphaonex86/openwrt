@@ -75,16 +75,6 @@
 			gpios = <&gpio1 28 0>;	/* GPIO 60 */
 			default-state = "on";
 		};
-
-		led-net {
-			label = "green:net";
-			gpios = <&gpio1 25 1>;	/* GPIO 57 */
-		};
-
-		led-wps {
-			label = "green:wps";
-			gpios = <&gpio1 24 1>;	/* GPIO 56 */
-		};
 	};
 
 	/* ethernet@18012000 KEPT (2026-09-29): luna_eth binds it and needs none of

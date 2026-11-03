@@ -335,8 +335,9 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 		dev_warn(dev, "timeout out of range, keeping %u s\n",
 			 wdt->wdd.timeout);
 
-	/* Deliberately NO watchdog_stop_on_reboot(). The watchdog ...
-	 * dev/MEASURED-cortina-wdt.c.md sec 11. */
+	/* Deliberately NO watchdog_stop_on_reboot(): armed, a shutdown that wedges is reset.
+	 * Measured 2026-08-10: after a warm reset (PSCI SYSTEM_RESET) and a cold control (power
+	 * cut) CTRL reads 0 at U-Boot -- the loader re-arms its own 23 s window, then stops it. */
 	watchdog_set_nowayout(&wdt->wdd, nowayout);
 
 	if (wdt->reset) {

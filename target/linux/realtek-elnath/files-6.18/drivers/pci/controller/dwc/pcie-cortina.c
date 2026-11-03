@@ -1145,7 +1145,8 @@ static ssize_t cortina_pcie_dbg_write(struct file *f, const char __user *ubuf,
 {
 	struct cortina_pcie *cp = pde_data(file_inode(f));
 	char buf[64];
-	u32 o, v;
+	u32 o, v, rb;
+	int ret;
 
 	if (!cp || len >= sizeof(buf))
 		return -EINVAL;
@@ -1172,14 +1173,20 @@ static ssize_t cortina_pcie_dbg_write(struct file *f, const char __user *ubuf,
 		dev_info(cp->pci.dev, "glbl+0x%03x = 0x%08x\n",
 			 o, cortina_glbl_readl(cp, o));
 	} else if (sscanf(buf, "C %x %x", &o, &v) == 2) {
-		o &= 0x3fc;					/* soc_clks/reset-mgr 0xf4320000 */
-		writel(v, cp->rstmgr + o);
-		dev_info(cp->pci.dev, "rstmgr+0x%03x <- 0x%08x (rb 0x%08x)\n",
-			 o, v, readl(cp->rstmgr + o));
+		/* GLB 0xf4320000 via the syscon: its lock also serialises the watchdog's GLOBAL_CONFIG */
+		o &= 0x3fc;
+		ret = regmap_write(cp->glb, o, v);
+		if (!ret)
+			ret = regmap_read(cp->glb, o, &rb);
+		if (ret)
+			return ret;
+		dev_info(cp->pci.dev, "rstmgr+0x%03x <- 0x%08x (rb 0x%08x)\n", o, v, rb);
 	} else if (sscanf(buf, "c %x", &o) == 1) {
 		o &= 0x3fc;
-		dev_info(cp->pci.dev, "rstmgr+0x%03x = 0x%08x\n",
-			 o, readl(cp->rstmgr + o));
+		ret = regmap_read(cp->glb, o, &rb);
+		if (ret)
+			return ret;
+		dev_info(cp->pci.dev, "rstmgr+0x%03x = 0x%08x\n", o, rb);
 	}
 	return len;
 }
@@ -1195,7 +1202,7 @@ static void cortina_pcie_gate_unused(struct cortina_pcie *cp)
 	static const u32 clken[] = { CA_CLKEN_PCIE0, CA_CLKEN_PCIE1, CA_CLKEN_PCIE2 };
 	static unsigned long done;
 	struct device_node *np;
-	u32 id, used = 0, gate = 0;
+	u32 id, used = 0, gate = 0, now;
 	unsigned int i;
 
 	if (test_and_set_bit(0, &done))
@@ -1212,8 +1219,11 @@ static void cortina_pcie_gate_unused(struct cortina_pcie *cp)
 		if (!(used & BIT(i)))
 			gate |= clken[i];
 	ca_glb_config(cp, gate, 0);
-	dev_info(cp->pci.dev, "unused controller clocks gated (%#x): GLOBAL_CONFIG=%08x\n",
-		 gate, readl(cp->rstmgr + CA_GLOBAL_CONFIG));
+	if (regmap_read(cp->glb, CA_GLOBAL_CONFIG, &now))
+		dev_err(cp->pci.dev, "GLOBAL_CONFIG read back failed\n");
+	else
+		dev_info(cp->pci.dev, "unused controller clocks gated (%#x): GLOBAL_CONFIG=%08x\n",
+			 gate, now);
 }
 
 static int cortina_pcie_probe(struct platform_device *pdev)

@@ -946,6 +946,14 @@ config KERNEL_LUNA_SPI_NAND
 	  A NAND board's layer turns it on (RTL9607C UNKNOWN); NOR boards keep a
 	  kernel without the SPI-NAND, ECC and UBI code.
 
+config KERNEL_LUNA_GPHY_RTL9607C_REVB
+	bool "RTL9607C rev B GPHY analog patch"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  An RTL9607C board's layer turns it on; other Luna chips keep a kernel
+	  without its tables and code.
+
 config KERNEL_LUNA_DEBUG
 	bool "Luna bring-up markers and driver diagnostics"
 	depends on TARGET_realtek_luna

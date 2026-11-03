@@ -100,6 +100,17 @@ config LUNA_FLOWOFFLOAD
 	  SRAM IPv4 NAT backend for supported FLOWBASED switch layouts.
 	  Unsupported dies and flow shapes keep software forwarding.
 
+config LUNA_GPHY_RTL9607C_REVB
+	bool "RTL9607C rev B GPHY analog patch"
+	depends on LUNA_ETH
+	default n
+	help
+	  The rev B die's GPHY bring-up: PHY parameters, EN70 calibration from
+	  rtl9607c-revb-en70.fw, MDI amplitude, and the 220908 patch when asked
+	  for (luna_eth.gphy_cm220908=1, its file supplied). An RTL9607C board's
+	  layer turns it on; other chips keep a kernel without it. MEASURED
+	  2026-11-03 (gcc 14.3): luna_eth.o text 45661 -> 49582 bytes with it on.
+
 config LUNA_DEBUG
 	bool "Luna family bring-up diagnostics (boot markers, frame dumps, link diag, PHY survey)"
 	default n

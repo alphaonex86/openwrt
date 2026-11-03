@@ -31,7 +31,8 @@
  *    found non-forwarding at probe are the BOOT LOADER's doing, so the write
  *    below is a correction and must stay even if a future loader stops needing
  *    it.
- *  - The integrated copper PHYs need no analog calibration on either chip.
+ *  - The integrated copper PHYs need no analog calibration on either chip,
+ *    except a rev B RTL9607C (eth_gphy_analog_patch__locked).
  *  - The ordered sequence matters: replaying only the final register values is
  *    not sufficient on this hardware.
  *
@@ -41,6 +42,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/etherdevice.h>
+#include <linux/firmware.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mii.h>
@@ -53,6 +55,7 @@
 #include <linux/random.h>
 #include <linux/timer.h>
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
+#include "luna_ponmac.h"	/* LUNA_MODEL_NAME_INFO and the RTL9607C revision decode */
 #include "luna_gmac_logic.h"	/* family GMAC ring packings + this shell's hoisted RX verdicts (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
 #include "luna_gpon_nic.h"	/* the GPON<->NIC glue -- this shell now IMPLEMENTS it */
@@ -313,6 +316,9 @@ struct luna_eth_chip {
 	 * dev/MEASURED-luna_eth.c.md sec 6. */
 	u8	wan_mac_offset;
 	u32	cold_phy_status;	/* native cold PHY recipe; 0 keeps the warm path */
+	/* The one silicon revision (MODEL_NAME_INFO, read at bring-up) whose
+	 * stock kernel patches this chip's GPHYs; 0 = no analog patch. */
+	u8	gphy_patch_rev;
 };
 
 /* The RTL9607C entry is this file's previous constants, value for value: the
@@ -351,6 +357,7 @@ static const struct luna_eth_chip luna_chip_rtl9607c = {
 	 * be one model's answer standing in for another's. */
 	.wan_mac_offset	= 0,
 	.cold_phy_status = 0xb8000044,
+	.gphy_patch_rev	= LUNA_REV_B,	/* rev A/C dies run other patches: not ported */
 };
 
 /* The RTL9603CVD entry -- every field read from THIS chip's ...
@@ -861,6 +868,12 @@ static int gphy_read(struct luna_eth *ep, unsigned int phyad, unsigned int reg,
 	return rc;
 }
 
+/* Copper ports this package's strap disables (capability word 0x23024). */
+static u32 luna_gphy_strap_off(struct luna_eth *ep)
+{
+	return (sw_rd(ep, 0x23024) & 0x3f) >> 1;
+}
+
 /* The RTL9607C monitor's cold recipe (83c02524 in image 66ef3f7b), also
  * measured from a NAND cold boot on 2026-10-05. TFTP had hidden this missing
  * initialization. The done bit belongs LAST, after the patch and MIIM writes. */
@@ -891,7 +904,7 @@ static int eth_copper_cold_init__locked(struct luna_eth *ep)
 		dev_err(ep->dev, "cold PHY: MIIM window busy (%d); no PHY writes\n", rc);
 		return rc;
 	}
-	disabled = (sw_rd(ep, 0x23024) & 0x3f) >> 1;
+	disabled = luna_gphy_strap_off(ep);
 	ini = sw_rd(ep, ep->c->cfg_phy_ini);
 	sw_wr(ep, ep->c->cfg_phy_ini, (ini & ~(0x1fu << 10)) | (disabled << 10));
 	if ((sw_rd(ep, ep->c->cfg_phy_ini) & (0x1fu << 10)) != (disabled << 10)) {
@@ -956,6 +969,341 @@ static int eth_copper_cold_init__locked(struct luna_eth *ep)
 	return 1;
 }
 
+#if IS_ENABLED(CONFIG_LUNA_GPHY_RTL9607C_REVB)
+/* RTL9607C rev B GPHY analog bring-up, in the stock order and on all five PHYs:
+ * PHY parameters, EN70 calibration, MDI amplitude, then the optional 220908
+ * common-mode patch. The two PHY-MCU programs are firmware files: EN70 is
+ * extracted from the UNKNOWN's stock kernel, 220908 is in no stock image of a
+ * rev B unit. Each C record is one PHY-SRAM write: address, value. */
+#define GPHY_SRAM_ADDR		0xa436
+#define GPHY_SRAM_DATA		0xa438
+#define GPHY_PATCH_REQ		0xb820	/* bit 4: the PHY MCU takes a patch	*/
+#define GPHY_PATCH_RDY		0xb800	/* bit 6: ... and is ready for it	*/
+#define GPHY_PATCH_LOCK		0xb82e	/* bit 0				*/
+#define GPHY_PATCH_KEY		0x8028	/* SRAM; 0x3700 on this die		*/
+#define GPHY_OCP_A432		0xa432	/* bit 6 cleared after 220908; meaning unread */
+#define GPHY_PATCH_POLLS	10000	/* x 1 ms, the stock bound		*/
+#define GPHY_PORTS		5	/* the stock patches all five, present or not */
+#define GPHY_FW_MAGIC		"LUNAGPHY"	/* then a BE count, then BE (OCP, value) */
+#define GPHY_FW_HDR		10
+#define RTL9607C_EN70_FW	"rtl9607c-revb-en70.fw"
+#define RTL9607C_CM220908_FW	"rtl9607c-revb-cm220908.fw"
+#define RTL9607C_EFUSE_IND_CMD	0x0001c	/* CMD_EN bit 16 | entry [15:0]	*/
+#define RTL9607C_EFUSE_IND_RD	0x00020	/* BUSY bit 16 | data [15:0]	*/
+#define RTL9607C_GDAC_IB(speed, p) (0x1f068 + (speed) * 0x14 + (p) * 4)
+#define RTL9607C_OTP_EN70_LONG	18	/* minus the port: port 4 reads 14	*/
+#define RTL9607C_OTP_EN70_SHORT	23	/* minus the port: port 4 reads 19	*/
+
+static bool gphy_cm220908;
+module_param(gphy_cm220908, bool, 0444);
+MODULE_PARM_DESC(gphy_cm220908, "rev B GPHY: also load " RTL9607C_CM220908_FW
+		 " (default off: no stock image of a rev B unit carries it)");
+
+static const u16 rtl9607c_revb_phy[][2] = {
+	{0x809a, 0x7db4}, {0x809c, 0xb507}, {0x809e, 0x6106}, {0x80a0, 0x0980},
+	{0x80a2, 0x6019}, {0x80a4, 0x9a0c}, {0x80ac, 0x1a84}, {0x80ae, 0x3607},
+	{0x80b0, 0x2106}, {0x80b2, 0x0a6f}, {0x80b4, 0x3d19}, {0x80b6, 0x800c},
+	{0x8088, 0xa08b}, {0x808a, 0x4709}, {0x808c, 0xab08}, {0x808e, 0x20b4},
+	{0x8090, 0xc41f}, {0x8092, 0x801e}, {0x8065, 0x1b33}, {0x8069, 0x0822},
+	{0x805d, 0x0911}, {0x8061, 0x0820}, {0x804d, 0x2444}, {0x8051, 0x0823},
+	{0x8160, 0x3727}, {0x8162, 0xc487}, {0x8164, 0x2f84}, {0x8166, 0xeca5},
+	{0x8174, 0x04bd}, {0x8176, 0xe9e5}, {0x8178, 0x5ed9}, {0x817a, 0x348b},
+	{0x8211, 0x13d6}, {0x8213, 0xd5de}, {0x8215, 0x3fb3}, {0x8217, 0xcf97},
+};
+
+static const u32 rtl9607c_revb_gdac[3] = { 0x2ff00, 0x2aa00, 0x2aa00 };	/* 10/100/1000M */
+
+static int gphy_sram_write__locked(struct luna_eth *ep, unsigned int p,
+				   const u16 rec[][2], unsigned int n)
+{
+	unsigned int i;
+	int rc = 0;
+
+	for (i = 0; !rc && i < n; i++) {
+		rc = gphy_write_ocp__locked(ep, p, GPHY_SRAM_ADDR, rec[i][0]);
+		if (!rc)
+			rc = gphy_write_ocp__locked(ep, p, GPHY_SRAM_DATA, rec[i][1]);
+	}
+	return rc;
+}
+
+static u16 gphy_fw_count(const struct firmware *fw)
+{
+	return (fw->data[8] << 8) | fw->data[9];
+}
+
+static u16 gphy_fw_word(const struct firmware *fw, unsigned int i, unsigned int half)
+{
+	const u8 *b = fw->data + GPHY_FW_HDR + 4 * i + 2 * half;
+
+	return (b[0] << 8) | b[1];
+}
+
+/* Refused whole unless every record writes the SRAM window. */
+static int gphy_fw_load(struct luna_eth *ep, const char *name, const struct firmware **fw)
+{
+	unsigned int i, n;
+	int rc = request_firmware_direct(fw, name, ep->dev);
+
+	if (rc) {
+		dev_err(ep->dev, "gphy rev B: %s not loaded (%d): no analog patch\n", name, rc);
+		*fw = NULL;
+		return rc;
+	}
+	n = (*fw)->size >= GPHY_FW_HDR ? gphy_fw_count(*fw) : 0;
+	rc = n && (*fw)->size == GPHY_FW_HDR + 4 * n &&
+	     !memcmp((*fw)->data, GPHY_FW_MAGIC, 8) ? 0 : -EINVAL;
+	for (i = 0; !rc && i < n; i++)
+		if (gphy_fw_word(*fw, i, 0) != GPHY_SRAM_ADDR &&
+		    gphy_fw_word(*fw, i, 0) != GPHY_SRAM_DATA)
+			rc = -EINVAL;
+	if (rc) {
+		dev_err(ep->dev, "gphy rev B: %s malformed (%zu bytes): no analog patch\n",
+			name, (*fw)->size);
+		release_firmware(*fw);
+		*fw = NULL;
+	}
+	return rc;
+}
+
+static int gphy_fw_write__locked(struct luna_eth *ep, unsigned int p, const struct firmware *fw)
+{
+	unsigned int i, n = gphy_fw_count(fw);
+	int rc = 0;
+
+	for (i = 0; !rc && i < n; i++)
+		rc = gphy_write_ocp__locked(ep, p, gphy_fw_word(fw, i, 0), gphy_fw_word(fw, i, 1));
+	return rc;
+}
+
+static int gphy_modify__locked(struct luna_eth *ep, unsigned int p, u32 ocp,
+			       u16 clear, u16 set)
+{
+	u16 v;
+	int rc = gphy_read_ocp__locked(ep, p, ocp, &v);
+
+	return rc ? rc : gphy_write_ocp__locked(ep, p, ocp, (v & ~clear) | set);
+}
+
+static int gphy_patch_wait__locked(struct luna_eth *ep, unsigned int p, bool ready)
+{
+	unsigned int i;
+	u16 v;
+	int rc;
+
+	for (i = 0; i < GPHY_PATCH_POLLS; i++) {
+		rc = gphy_read_ocp__locked(ep, p, GPHY_PATCH_RDY, &v);
+		if (rc)
+			return rc;
+		if (!!(v & BIT(6)) == ready)
+			return 0;
+		usleep_range(1000, 1100);
+	}
+	return -ETIMEDOUT;
+}
+
+static int gphy_patch_open__locked(struct luna_eth *ep, unsigned int p)
+{
+	static const u16 key[][2] = { {GPHY_PATCH_KEY, 0x3700} };
+	int rc = gphy_modify__locked(ep, p, GPHY_PATCH_REQ, 0, BIT(4));
+
+	if (!rc)
+		rc = gphy_patch_wait__locked(ep, p, true);
+	return rc ? rc : gphy_sram_write__locked(ep, p, key, 1);
+}
+
+/* Leave no PHY in patch mode: the lock bit first, then the request. */
+static void gphy_patch_abort__locked(struct luna_eth *ep)
+{
+	unsigned int p;
+	u16 lock, req;
+	int rc;
+
+	for (p = 0; p < GPHY_PORTS; p++) {
+		rc = gphy_read_ocp__locked(ep, p, GPHY_PATCH_LOCK, &lock);
+		if (!rc && (lock & BIT(0)))
+			rc = gphy_write_ocp__locked(ep, p, GPHY_PATCH_LOCK, lock & ~BIT(0));
+		if (!rc)
+			rc = gphy_read_ocp__locked(ep, p, GPHY_PATCH_REQ, &req);
+		if (!rc && (req & BIT(4)))
+			rc = gphy_write_ocp__locked(ep, p, GPHY_PATCH_REQ, req & ~BIT(4));
+		if (rc)
+			dev_err(ep->dev, "gphy rev B: port %u may be left in patch mode (%d)\n", p, rc);
+	}
+}
+
+static int rtl9607c_otp_read(struct luna_eth *ep, u16 entry, u16 *out)
+{
+	unsigned int i;
+	u32 v;
+
+	sw_wr(ep, RTL9607C_EFUSE_IND_CMD, BIT(16) | entry);
+	for (i = 0; i < 1000; i++) {
+		v = sw_rd(ep, RTL9607C_EFUSE_IND_RD);
+		if (!(v & BIT(16))) {
+			*out = v & 0xffff;
+			return 0;
+		}
+		udelay(1);
+	}
+	return -ETIMEDOUT;
+}
+
+static int rtl9607c_revb_en70__locked(struct luna_eth *ep, unsigned int p,
+				      const struct firmware *fw, u16 len_long, u16 len_short)
+{
+	const u16 lengths[][2] = {
+		{0x8777, 0x4600},	/* cable-length threshold */
+		{0x8778, len_long}, {0x877a, len_short}, {0x877c, len_short}, {0x877e, len_short},
+	};
+	int rc = gphy_patch_open__locked(ep, p);
+
+	if (!rc)
+		rc = gphy_modify__locked(ep, p, GPHY_PATCH_LOCK, 0, BIT(0));
+	if (!rc)
+		rc = gphy_fw_write__locked(ep, p, fw);
+	if (!rc)
+		rc = gphy_sram_write__locked(ep, p, lengths, ARRAY_SIZE(lengths));
+	if (!rc)
+		rc = gphy_modify__locked(ep, p, GPHY_PATCH_LOCK, BIT(0), 0);
+	return rc ? rc : gphy_write_ocp__locked(ep, p, GPHY_PATCH_REQ, 0);
+}
+
+static int rtl9607c_revb_cm220908__locked(struct luna_eth *ep, unsigned int p,
+					  const struct firmware *fw)
+{
+	static const u16 start[][2] = { {GPHY_PATCH_LOCK, 0x0001}, {GPHY_PATCH_REQ, 0x0090} };
+	static const u16 end[][2] = { {GPHY_PATCH_REQ, 0x0000} };
+	int rc = gphy_patch_open__locked(ep, p);
+
+	if (!rc)
+		rc = gphy_sram_write__locked(ep, p, start, ARRAY_SIZE(start));
+	if (!rc)
+		rc = gphy_fw_write__locked(ep, p, fw);
+	if (!rc)
+		rc = gphy_sram_write__locked(ep, p, end, ARRAY_SIZE(end));
+	if (!rc)
+		rc = gphy_patch_wait__locked(ep, p, false);
+	return rc ? rc : gphy_modify__locked(ep, p, GPHY_OCP_A432, BIT(6), 0);
+}
+
+/* Stage-major like the stock; EN70 runs from the highest port down. The OTP
+ * lengths are read first; any failure takes every PHY out of patch mode. */
+static int rtl9607c_revb_patch__locked(struct luna_eth *ep, const struct firmware *en70,
+				       const struct firmware *cm)
+{
+	u16 len_long[GPHY_PORTS], len_short[GPHY_PORTS];
+	const char *stage = "EN70 OTP read";
+	unsigned int p, s;
+	int rc;
+
+	for (p = 0; p < GPHY_PORTS; p++) {
+		rc = rtl9607c_otp_read(ep, RTL9607C_OTP_EN70_LONG - p, &len_long[p]);
+		if (!rc)
+			rc = rtl9607c_otp_read(ep, RTL9607C_OTP_EN70_SHORT - p, &len_short[p]);
+		if (rc)
+			goto fail;
+	}
+	stage = "PHY parameters";
+	for (p = 0; p < GPHY_PORTS; p++) {
+		rc = gphy_sram_write__locked(ep, p, rtl9607c_revb_phy, ARRAY_SIZE(rtl9607c_revb_phy));
+		if (rc)
+			goto fail;
+	}
+	stage = "EN70 calibration";
+	for (p = GPHY_PORTS; p-- > 0;) {
+		rc = rtl9607c_revb_en70__locked(ep, p, en70, len_long[p], len_short[p]);
+		if (rc)
+			goto fail;
+	}
+	for (p = 0; p < GPHY_PORTS; p++)
+		for (s = 0; s < ARRAY_SIZE(rtl9607c_revb_gdac); s++)
+			sw_wr(ep, RTL9607C_GDAC_IB(s, p), rtl9607c_revb_gdac[s]);
+	stage = "common-mode 220908";
+	for (p = 0; cm && p < GPHY_PORTS; p++) {
+		rc = rtl9607c_revb_cm220908__locked(ep, p, cm);
+		if (rc)
+			goto fail;
+	}
+	return 0;
+fail:
+	dev_err(ep->dev, "gphy rev B: port %u %s failed (%d)\n", p, stage, rc);
+	gphy_patch_abort__locked(ep);
+	return rc;
+}
+
+/* Patch with the present PHYs powered down, as the stock does, then give each
+ * back its BMCR. A missing firmware or a failed patch leaves the PHYs unpatched
+ * but the LAN up; a BMCR write that does not land fails the bring-up. */
+static int rtl9607c_revb_analog_patch__locked(struct luna_eth *ep)
+{
+	const struct firmware *en70 = NULL, *cm = NULL;
+	u32 model, present, down = 0;
+	u16 bmcr[GPHY_PORTS] = { 0 };
+	unsigned int p;
+	int rev, rc = 0;
+
+	model = sw_rd(ep, LUNA_MODEL_NAME_INFO - SWCORE_PHYS);
+	rev = luna_rtl9607c_rev(model);
+	if (rev != ep->c->gphy_patch_rev) {
+		dev_info(ep->dev, "gphy: MODEL_NAME_INFO %08x (rev %d): no GPHY analog patch\n",
+			 model, rev);
+		return 0;
+	}
+	if (gphy_fw_load(ep, RTL9607C_EN70_FW, &en70) ||
+	    (gphy_cm220908 && gphy_fw_load(ep, RTL9607C_CM220908_FW, &cm)))
+		goto out;
+	present = GENMASK(ep->c->sw_map->n_copper - 1, 0) & ~luna_gphy_strap_off(ep) &
+		  GENMASK(GPHY_PORTS - 1, 0);
+	for (p = 0; !rc && p < GPHY_PORTS; p++) {
+		if (!(present & BIT(p)))
+			continue;
+		rc = gphy_read_ocp__locked(ep, p, gphy_ocp_miim(ep, p, MII_BMCR), &bmcr[p]);
+		if (!rc)
+			rc = gphy_write_ocp__locked(ep, p, gphy_ocp_miim(ep, p, MII_BMCR),
+						    bmcr[p] | BMCR_PDOWN);
+		if (!rc)
+			down |= BIT(p);
+	}
+	if (rc)
+		dev_err(ep->dev, "gphy rev B: power-down failed (%d): no analog patch\n", rc);
+	else if (!rtl9607c_revb_patch__locked(ep, en70, cm))
+		dev_info(ep->dev, "gphy rev B: analog patch applied%s (MODEL_NAME_INFO %08x)\n",
+			 cm ? " with 220908" : "", model);
+	for (p = 0; p < GPHY_PORTS; p++) {
+		u16 v = bmcr[p];
+		int err;
+
+		if (!(down & BIT(p)))
+			continue;
+		if ((v & BMCR_ANENABLE) && !(v & BMCR_PDOWN))
+			v |= BMCR_ANRESTART;
+		err = gphy_write_ocp__locked(ep, p, gphy_ocp_miim(ep, p, MII_BMCR), v);
+		if (err) {
+			dev_err(ep->dev, "gphy rev B: port %u BMCR restore did not land (%d): its power state is UNKNOWN\n",
+				p, err);
+			rc = err;
+		}
+	}
+out:
+	release_firmware(cm);
+	release_firmware(en70);
+	return rc;
+}
+#endif
+
+static int eth_gphy_analog_patch__locked(struct luna_eth *ep)
+{
+	if (!ep->c->gphy_patch_rev)
+		return 0;
+#if IS_ENABLED(CONFIG_LUNA_GPHY_RTL9607C_REVB)
+	return rtl9607c_revb_analog_patch__locked(ep);
+#else
+	dev_info(ep->dev, "gphy: rev B analog patch not built (CONFIG_LUNA_GPHY_RTL9607C_REVB)\n");
+	return 0;
+#endif
+}
+
 /* No gphy_write() wrapper: its only writer today is the ...
  * dev/MEASURED-luna_eth.c.md sec 26. */
 static int eth_copper_phy_up(struct luna_eth *ep)
@@ -969,7 +1317,7 @@ static int eth_copper_phy_up(struct luna_eth *ep)
 	rc = eth_copper_cold_init__locked(ep);
 	if (rc) {
 		if (rc > 0)
-			rc = 0;
+			rc = eth_gphy_analog_patch__locked(ep);
 		goto out;
 	}
 
@@ -1080,6 +1428,7 @@ static int eth_copper_phy_up(struct luna_eth *ep)
 	 * survey, and changing two things at once makes one boot say nothing. */
 	if (phy_settle_ms > 0)
 		msleep(phy_settle_ms);
+	rc = eth_gphy_analog_patch__locked(ep);
 out:
 	/* ONE acquisition, ONE release: the patch-done sticky and the settle are
 	 * part of the same sequence, and handing the window back between them

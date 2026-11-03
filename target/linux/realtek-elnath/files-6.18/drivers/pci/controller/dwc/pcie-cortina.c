@@ -9,12 +9,14 @@
 #include <linux/irqdomain.h>
 #include <linux/build_bug.h>	/* static_assert() for the lane composition */
 #include <linux/kernel.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/proc_fs.h>
+#include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/uaccess.h>
 
@@ -114,6 +116,7 @@ struct cortina_pcie {
 	void __iomem *serdes;		/* serdes_phy */
 	resource_size_t serdes_size;
 	void __iomem *rstmgr;		/* GLB reset/phy/mux window 0xf4320000 */
+	struct regmap *glb;		/* GLB syscon: the only writer path to GLOBAL_CONFIG */
 	void __iomem *gpio;		/* PER_GPIO window 0xf4329000 (PERST#) */
 
 	phys_addr_t dbi_start;		/* rc_dbi resource bounds (for glue decoder) */
@@ -356,10 +359,20 @@ static int cortina_pcie_parse_serdes_cfg(struct cortina_pcie *cp)
  * dev/MEASURED-pcie-cortina.c.md sec 14. */
 #define CA_CLKEN_PCIE0		BIT(10)	/* gate_pcie0   : controller clock */
 #define CA_CLKEN_PCIE0_PS	BIT(22)	/* gate_pcie0_ps: SerDes PHY / refclk */
+#define CA_CLKEN_PCIE1		BIT(12)	/* gate_pcie1   : controller clock */
 
 static inline void ca_rmw(void __iomem *base, u32 off, u32 clr, u32 set)
 {
 	writel((readl(base + off) & ~clr) | set, base + off);
+}
+
+/* GLOBAL_CONFIG also holds the watchdog's reset enables: update it under the syscon lock only. */
+static void ca_glb_config(struct cortina_pcie *cp, u32 clr, u32 set)
+{
+	int ret = regmap_update_bits(cp->glb, CA_GLOBAL_CONFIG, clr | set, set);
+
+	if (ret)
+		dev_err(cp->pci.dev, "GLOBAL_CONFIG clr %#x set %#x failed: %d\n", clr, set, ret);
 }
 
 /* Hard CMU relock (stock LONG-cal @0x914108): re-assert ...
@@ -586,7 +599,7 @@ static bool cortina_pcie0_done;		/* S0 bring-up runs once, globally */
  * dev/MEASURED-pcie-cortina.c.md sec 16. */
 static void cortina_pcie0_bringup_seq(struct cortina_pcie *cp, void __iomem *s)
 {
-	ca_rmw(cp->rstmgr, CA_GLOBAL_CONFIG, 0, CA_CLKEN_PCIE0 | CA_CLKEN_PCIE0_PS);
+	ca_glb_config(cp, 0, CA_CLKEN_PCIE0 | CA_CLKEN_PCIE0_PS);
 	usleep_range(1000, 2000);
 
 	ca_rmw(cp->rstmgr, CA_GLB_GPIO_MUX4, 0, S0_PERST);	/* GLB pinmux: route PERST0 pad -> GPIO */
@@ -667,7 +680,7 @@ static bool cortina_pcie_host_reset(struct cortina_pcie *cp)
 	/* Ungate the SerDes PHY/refclk (gate_pcie2_ps) -- the bootloader leaves it
 	 * gated, which is why the cold RX CMU/PLL never locks (0x7c stuck 0x500e).
 	 * Ungate the controller clock too (idempotent if the bootloader set it). */
-	ca_rmw(cp->rstmgr, CA_GLOBAL_CONFIG, 0, CA_CLKEN_PCIE2 | CA_CLKEN_PCIE2_PS);
+	ca_glb_config(cp, 0, CA_CLKEN_PCIE2 | CA_CLKEN_PCIE2_PS);
 	usleep_range(1000, 2000);
 
 	/* PERST# assert: route pin140 via the GLB pinmux, then drive it as a GPIO
@@ -1118,6 +1131,10 @@ static int cortina_pcie_map_regions(struct platform_device *pdev,
 	if (!cp->rstmgr || !cp->gpio)
 		return -ENOMEM;
 
+	cp->glb = syscon_regmap_lookup_by_compatible("cortina,glb");
+	if (IS_ERR(cp->glb))
+		return dev_err_probe(dev, PTR_ERR(cp->glb), "no GLB syscon\n");
+
 	return 0;
 }
 
@@ -1172,6 +1189,33 @@ static const struct proc_ops cortina_pcie_dbg_ops = {
 	.proc_lseek = noop_llseek,
 };
 
+/* Stock gates the controller clock of a root port the board leaves unwired (pcie1 on the X400AXF). */
+static void cortina_pcie_gate_unused(struct cortina_pcie *cp)
+{
+	static const u32 clken[] = { CA_CLKEN_PCIE0, CA_CLKEN_PCIE1, CA_CLKEN_PCIE2 };
+	static unsigned long done;
+	struct device_node *np;
+	u32 id, used = 0, gate = 0;
+	unsigned int i;
+
+	if (test_and_set_bit(0, &done))
+		return;
+	for_each_compatible_node(np, NULL, "cortina,venus-pcie") {
+		if (!of_device_is_available(np))
+			continue;
+		if (of_property_read_u32(np, "id", &id))
+			id = 0;		/* same default as probe */
+		if (id < ARRAY_SIZE(clken))
+			used |= BIT(id);
+	}
+	for (i = 0; i < ARRAY_SIZE(clken); i++)
+		if (!(used & BIT(i)))
+			gate |= clken[i];
+	ca_glb_config(cp, gate, 0);
+	dev_info(cp->pci.dev, "unused controller clocks gated (%#x): GLOBAL_CONFIG=%08x\n",
+		 gate, readl(cp->rstmgr + CA_GLOBAL_CONFIG));
+}
+
 static int cortina_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1196,6 +1240,7 @@ static int cortina_pcie_probe(struct platform_device *pdev)
 
 	if (of_property_read_u32(np, "id", &cp->idx))
 		cp->idx = 0;
+	cortina_pcie_gate_unused(cp);
 
 	if (of_property_read_u32(np, "num-lanes", &lanes) ||
 	    lanes < 1 || lanes > CORTINA_PCIE_MAX_LANES)

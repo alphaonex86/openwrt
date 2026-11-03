@@ -187,10 +187,9 @@
 	 *
 	 *   0  0xf432902c  the 12-register PER_WDT block
 	 *   1  0xf43200c8  GLOBAL_GLOBAL_CONFIG -- the SoC reset enables that
-	 *                  turn an expired counter into an actual reset. They
-	 *                  are outside the block, which is why the driver takes
-	 *                  a second window; the word also holds power-down bits
-	 *                  for other subsystems, so it is read-modify-written.
+	 *                  turn an expired counter into an actual reset. Kept
+	 *                  for the binding; the driver updates the word through
+	 *                  the GLB syscon, whose lock it shares with the PCIe glue.
 	 *   2  0xf43203c8  GLOBAL_DDR_RESET_MODE. Declared to keep the binding
 	 *                  faithful to the vendor's; NOT consumed -- this part
 	 *                  resets DDR cold and the register reads 0 on a working
@@ -205,6 +204,11 @@
 	 * notification for boards that want the timeout WITHOUT a reset. With
 	 * reset-on-timeout the hardware restarts the SoC by itself.
 	 */
+	glb: syscon@f4320000 {
+		compatible = "cortina,glb", "syscon";
+		reg = <0x00 0xf4320000 0x00 0x1000>;
+	};
+
 	watchdog@f432902c {
 		compatible = "cortina,wdt";
 		reg = <0x00 0xf432902c 0x00 0x30>,

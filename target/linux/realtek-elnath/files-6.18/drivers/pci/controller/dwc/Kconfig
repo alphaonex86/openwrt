@@ -522,6 +522,7 @@ config PCIE_CORTINA
 	bool "Cortina-Access Venus PCIe controller"
 	depends on OF && (ARM64 || COMPILE_TEST)
 	depends on PCI_MSI
+	select MFD_SYSCON
 	select PCIE_DW_HOST
 	help
 	  Say Y here to enable the Synopsys DesignWare-based PCIe root

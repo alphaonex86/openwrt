@@ -514,6 +514,7 @@ config CORTINA_WDT
 	tristate "Cortina-Access peripheral watchdog (PER_WDT)"
 	depends on HAS_IOMEM
 	depends on OF
+	select MFD_SYSCON
 	select WATCHDOG_CORE
 	help
 	  Hardware watchdog found in the peripheral block of Cortina-Access

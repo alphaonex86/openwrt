@@ -9,11 +9,13 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/mfd/syscon.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/spinlock.h>
 #include <linux/watchdog.h>
 
@@ -40,6 +42,7 @@
 
 /* GLOBAL_GLOBAL_CONFIG, the SoC reset glue (a single 32-bit ...
  * dev/MEASURED-cortina-wdt.c.md sec 2. */
+#define GLOBAL_CONFIG			0xc8	/* in the GLB syscon, shared with the PCIe glue */
 #define GLOBAL_WD_RESET_SUBSYS_ENABLE	BIT(4)
 #define GLOBAL_WD_RESET_PCIE		BIT(5)
 #define GLOBAL_WD_RESET_ALL_BLOCKS	BIT(6)
@@ -82,7 +85,7 @@ MODULE_PARM_DESC(nowayout,
 struct cortina_wdt {
 	struct watchdog_device	wdd;
 	void __iomem		*base;
-	void __iomem		*rstcfg;
+	struct regmap		*glb;
 	struct clk		*clk;
 	u32			prescaler;
 	u32			delay;
@@ -230,11 +233,10 @@ static const struct watchdog_ops cortina_wdt_ops = {
 
 /* Turn an expired counter into a chip reset. These bits are ...
  * dev/MEASURED-cortina-wdt.c.md sec 8. */
-static void cortina_wdt_enable_soc_reset(struct cortina_wdt *wdt)
+static int cortina_wdt_enable_soc_reset(struct cortina_wdt *wdt)
 {
-	u32 val = readl(wdt->rstcfg);
-
-	writel(val | GLOBAL_WD_RESET_ENABLES, wdt->rstcfg);
+	return regmap_update_bits(wdt->glb, GLOBAL_CONFIG, GLOBAL_WD_RESET_ENABLES,
+				  GLOBAL_WD_RESET_ENABLES);
 }
 
 static int cortina_wdt_probe(struct platform_device *pdev)
@@ -271,13 +273,10 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 
 	wdt->reset = of_property_read_bool(dev->of_node, "reset-on-timeout");
 	if (wdt->reset) {
-		res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-		if (!res)
-			return dev_err_probe(dev, -EINVAL,
-					     "reset-on-timeout needs the SoC reset-config window\n");
-		wdt->rstcfg = devm_ioremap(dev, res->start, resource_size(res));
-		if (!wdt->rstcfg)
-			return -ENOMEM;
+		wdt->glb = syscon_regmap_lookup_by_compatible("cortina,glb");
+		if (IS_ERR(wdt->glb))
+			return dev_err_probe(dev, PTR_ERR(wdt->glb),
+					     "reset-on-timeout needs the GLB syscon\n");
 	}
 
 	wdt->clk = devm_clk_get_enabled(dev, NULL);
@@ -340,8 +339,11 @@ static int cortina_wdt_probe(struct platform_device *pdev)
 	 * dev/MEASURED-cortina-wdt.c.md sec 11. */
 	watchdog_set_nowayout(&wdt->wdd, nowayout);
 
-	if (wdt->reset)
-		cortina_wdt_enable_soc_reset(wdt);
+	if (wdt->reset) {
+		ret = cortina_wdt_enable_soc_reset(wdt);
+		if (ret)
+			return dev_err_probe(dev, ret, "cannot enable the SoC reset\n");
+	}
 
 	if (adopted) {
 		/* Take the window OVER rather than inherit it. Two reasons, ...

@@ -1832,9 +1832,10 @@ static bool omci_row_listed(const struct omci_onu *o, u16 class_id, u16 inst)
 bool omci_vendor_absent(struct omci_onu *o, u16 class_id, u16 inst)
 {
 	/* Served by Get and never uploaded, as stock's: CTC LoID authentication,
-	 * ZTE's 65319 #0, and a described vendor ME the OLT created. */
+	 * ZTE's 65319 #0 and 247 #0, and a described vendor ME the OLT created. */
 	return omci_vendor_class(class_id) && class_id != OMCI_ME_CTC_LOID_AUTH &&
-	       !(IS_ENABLED(CONFIG_OLT_ZTE) && class_id == 65319 && !inst) &&
+	       !(IS_ENABLED(CONFIG_OLT_ZTE) && !inst &&
+		 (class_id == 65319 || class_id == 247)) &&
 	       !omci_row_listed(o, class_id, inst) &&
 	       !(omci_me_find(class_id) && omci_store_find(o, class_id, inst));
 }
@@ -2910,8 +2911,6 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	a = prop(ctx, "extra-me-instances", &alen);
 	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
 		      "extra-me-instances");
-	prop(ctx, "vendor-me-absent-unknown-instance", &alen);
-	o->cap.vendor_absent_rc5 = alen >= 0;
 #undef OMCI_DECLARED
 	return first;
 }

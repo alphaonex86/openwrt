@@ -127,7 +127,6 @@ struct omci_capacity {
 	bool	usq;
 	u8	usq_per[OMCI_TCONT_MAX];	/* upstream queues per T-CONT, 0 = 8 */
 	u8	ctc[4];			/* ME 65529 #2..#5 */
-	bool	vendor_absent_rc5;	/* an unlisted vendor ME's Get is 0x05, not an empty 0 */
 };
 
 /* The one VEIP every board's model carries. */
@@ -642,8 +641,8 @@ typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
 
 /* Declare everything of the board's equipment beside its UNIs: circuit-packs,
  * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity,
- * downstream-queue-ports, upstream-queues-per-tcont, ctc-onu-capability,
- * extra-me-instances and vendor-me-absent-unknown-instance.  Each is applied on its own; -> the first property
+ * downstream-queue-ports, upstream-queues-per-tcont, ctc-onu-capability and
+ * extra-me-instances.  Each is applied on its own; -> the first property
  * refused (its reason in @why), or NULL when none was. */
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why);
@@ -752,9 +751,8 @@ bool omci_class_described(u16 class_id);
 bool omci_absent_until_created(u16 class_id);
 u8 omci_me_attr_size(u16 class_id, u8 attr);
 
-/* a vendor-reserved (class, inst) this board does not upload?  Its stock
- * exposes only the vendor MEs it uploads, and answers any other with result 0
- * and every mask zero. */
+/* a vendor-reserved (class, inst) this board neither uploads, serves by Get
+ * nor holds from an OLT Create?  Its Get answers every mask zero. */
 bool omci_vendor_absent(struct omci_onu *o, u16 class_id, u16 inst);
 
 /* is (class, inst) a MIB instance this ONU holds? */

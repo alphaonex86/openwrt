@@ -2783,6 +2783,16 @@ static bool _dpk_bypass_check(struct rtw89_dev *rtwdev, enum rtw89_phy_idx phy,
 		return true;
 	}
 
+	/* An external front end (rfe_type > 50) puts its own PA after the loopback the
+	 * internal DPK measures: its coefficients would predistort for the wrong PA.
+	 * The stock driver skips it on every such board, whatever the efuse says.
+	 */
+	if (rtwdev->efuse.rfe_type > 50) {
+		rtw89_debug(rtwdev, RTW89_DBG_RFK, "[DPK] Skip DPK: external front end (rfe_type %u)\n",
+			    rtwdev->efuse.rfe_type);
+		return true;
+	}
+
 	return false;
 }
 

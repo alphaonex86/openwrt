@@ -2033,6 +2033,25 @@ void rtl92fe_card_disable(struct ieee80211_hw *hw)
 	rtlpriv->phy.iqk_initialized = false;
 }
 
+/* The BE payload segments around the HW read index: length, bus address, '+' when it crosses 4 KiB. */
+static void rtl92fe_txbd_dump(struct rtl_priv *rtlpriv, struct rtl8192_tx_ring *ring, u32 idx_reg)
+{
+	u16 rp = (idx_reg >> 16) & 0x0fff;
+	char line[160];
+	int i, n = 0;
+
+	if (!ring->buffer_desc || !ring->entries)
+		return;
+	for (i = -3; i <= 1; i++) {
+		const u32 *bd = ring->buffer_desc[(rp + ring->entries + i) % ring->entries].dword;
+		u32 len = le32_to_cpu(bd[4]) & 0xffff, addr = le32_to_cpu(bd[5]);
+
+		n += scnprintf(line + n, sizeof(line) - n, " %d:%u@%08x%s", i, len, addr,
+			       (addr & 0xfff) + len > 0x1000 ? "+" : "");
+	}
+	pr_warn_ratelimited("TXDMA error BE rp %u wp %u:%s\n", rp, idx_reg & 0x0fff, line);
+}
+
 /* Vendor 8192cd on TXERR: read TXDMA_STATUS, log, count, write it back.
  * Also polled once per watchdog tick: 0x8006 raised no interrupt (measured).
  */
@@ -2059,6 +2078,8 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 			    rtl_read_dword(rtlpriv, REG_DWBCN0_CTRL),
 			    rtl_read_byte(rtlpriv, REG_MULTI_BCNQ_OFFSET),
 			    rtl_read_dword(rtlpriv, REG_MGQ_TXBD_IDX));
+	rtl92fe_txbd_dump(rtlpriv, &rtlpci->tx_ring[BE_QUEUE],
+			  rtl_read_dword(rtlpriv, REG_BEQ_TXBD_IDX));
 }
 
 void rtl92fe_interrupt_recognized(struct ieee80211_hw *hw,

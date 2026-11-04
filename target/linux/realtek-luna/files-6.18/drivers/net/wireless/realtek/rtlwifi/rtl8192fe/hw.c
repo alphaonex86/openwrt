@@ -59,6 +59,12 @@ module_param(pokes, charp, 0444);
 MODULE_PARM_DESC(pokes, "DIAGNOSTIC: byte writes 0xADDR:VAL,... applied after init and after "
 		 "each beacon-control update (default none)");
 
+/* A BISECT KNOB: the firmware RA bitmap of every peer is ANDed with it, so an arm can
+ * force e.g. 2ss only (0x0ff00000) at the next association without a rebuild. */
+static uint ra_mask = 0xffffffff;
+module_param(ra_mask, uint, 0644);
+MODULE_PARM_DESC(ra_mask, "DIAGNOSTIC: AND-mask on each peer's firmware RA bitmap (default all)");
+
 /* The beacon preparation budget the guards in pci.c consume: the time after the early
  * interrupt within which a beacon write still lands before the chip's download at
  * BCNDMATIM. Zero means "no guard" to pci.c, so a window of one TU or less is not a
@@ -2731,12 +2737,8 @@ static void rtl92fe_update_hal_rate_mask(struct ieee80211_hw *hw,
 	    mac->opmode == NL80211_IFTYPE_MESH_POINT)
 		curtxbw_40mhz = mac->bw_40;
 	else if (mac->opmode == NL80211_IFTYPE_AP ||
-		 mac->opmode == NL80211_IFTYPE_ADHOC) {
+		 mac->opmode == NL80211_IFTYPE_ADHOC)
 		macid = sta->aid + 1;
-		/* This board's 8192FR has a single usable TX chain, so ...
-		 * dev/MEASURED-hw.c.md sec 31. */
-		sta->deflink.ht_cap.mcs.rx_mask[1] = 0;
-	}
 
 	ratr_bitmap = sta->deflink.supp_rates[0];
 	if (mac->opmode == NL80211_IFTYPE_ADHOC)
@@ -2803,13 +2805,8 @@ static void rtl92fe_update_hal_rate_mask(struct ieee80211_hw *hw,
 			}
 		}
 
-		if ((curtxbw_40mhz && b_curshortgi_40mhz) ||
-		    (!curtxbw_40mhz && b_curshortgi_20mhz)) {
-			if (macid == 0)
-				b_shortgi = true;
-			else if (macid == 1)
-				b_shortgi = false;
-		}
+		b_shortgi = (curtxbw_40mhz && b_curshortgi_40mhz) ||
+			    (!curtxbw_40mhz && b_curshortgi_20mhz);
 		break;
 	default:
 		ratr_index = RATR_INX_WIRELESS_NGB;
@@ -2820,6 +2817,7 @@ static void rtl92fe_update_hal_rate_mask(struct ieee80211_hw *hw,
 			ratr_bitmap &= 0x0f8ff0ff;
 		break;
 	}
+	ratr_bitmap &= ra_mask;
 	ratr_index = _rtl92fe_mrate_idx_to_arfr_id(hw, ratr_index);
 	sta_entry->ratr_index = ratr_index;
 

@@ -402,10 +402,16 @@ static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
  * day a third revision moves only half the block.
  */
 /* The ingress ACL [tier 3, its register map and table list] */
+static const struct luna_ctl_acl rtl9602c_ctl_acl = {
+	.tmpl = 0x15008, .en = 0x15040, .permit = 0x15044, .act_ctrl = 0x15048, .pri_sel = 0x1C0F4,
+	.care_is_one = true,
+	.data_base = 128, .rule_tbl = 2, .act_tbl = 3, .act_words = 3, .rules = 96, .ports = 0xf,
+	.pri_shift = 11, .pri_groups = 2, .acl_weight_shift = 9, .addr_shift = 9,
+};
 static const struct luna_ctl_acl rtl9603cvd_ctl_acl = {
 	.tmpl = 0x15008, .en = 0x15048, .permit = 0x1504C, .act_ctrl = 0x15050, .pri_sel = 0x1C23C,
-	.data_base = 128, .rule_tbl = 2, .act_tbl = 3, .rules = 64, .ports = 0x3f,
-	.pri_shift = 16, .acl_weight_shift = 9, .addr_shift = 12,
+	.data_base = 128, .rule_tbl = 2, .act_tbl = 3, .act_words = 2, .rules = 64, .ports = 0x3f,
+	.pri_shift = 16, .pri_groups = 4, .acl_weight_shift = 9, .addr_shift = 12,
 };
 
 struct luna_sw_map {
@@ -549,6 +555,7 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.rldp_ports	= 4,		/* [tier 3, its register map: RLDP_PORT_* ports 0..3] */
 	.rldp_pnum_bits	= 3,
 	.switch_mac	= 0x23044,	/* [tier 3, its register map: SWITCH_MAC] */
+	.ctl_acl	= &rtl9602c_ctl_acl,
 };
 
 static const struct luna_sw_map rtl9603cvd_sw_map = {

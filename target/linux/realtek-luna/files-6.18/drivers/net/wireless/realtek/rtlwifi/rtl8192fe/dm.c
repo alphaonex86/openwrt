@@ -345,32 +345,6 @@ void rtl92fe_dm_write_dig(struct ieee80211_hw *hw, u8 current_igi)
 	dm_dig->cur_igvalue = current_igi;
 }
 
-static void rtl92fe_rssi_dump_to_register(struct ieee80211_hw *hw)
-{
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-
-	rtl_write_byte(rtlpriv, RA_RSSIDUMP,
-		       rtlpriv->stats.rx_rssi_percentage[0]);
-	rtl_write_byte(rtlpriv, RB_RSSIDUMP,
-		       rtlpriv->stats.rx_rssi_percentage[1]);
-	/* Rx EVM */
-	rtl_write_byte(rtlpriv, RS1_RXEVMDUMP, rtlpriv->stats.rx_evm_dbm[0]);
-	rtl_write_byte(rtlpriv, RS2_RXEVMDUMP, rtlpriv->stats.rx_evm_dbm[1]);
-	/* Rx SNR */
-	rtl_write_byte(rtlpriv, RA_RXSNRDUMP,
-		       (u8)(rtlpriv->stats.rx_snr_db[0]));
-	rtl_write_byte(rtlpriv, RB_RXSNRDUMP,
-		       (u8)(rtlpriv->stats.rx_snr_db[1]));
-	/* Rx Cfo_Short */
-	rtl_write_word(rtlpriv, RA_CFOSHORTDUMP,
-		       rtlpriv->stats.rx_cfo_short[0]);
-	rtl_write_word(rtlpriv, RB_CFOSHORTDUMP,
-		       rtlpriv->stats.rx_cfo_short[1]);
-	/* Rx Cfo_Tail */
-	rtl_write_word(rtlpriv, RA_CFOLONGDUMP, rtlpriv->stats.rx_cfo_tail[0]);
-	rtl_write_word(rtlpriv, RB_CFOLONGDUMP, rtlpriv->stats.rx_cfo_tail[1]);
-}
-
 static void rtl92fe_dm_find_minimum_rssi(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -484,7 +458,6 @@ static void rtl92fe_dm_check_rssi_monitor(struct ieee80211_hw *hw)
 	} else {
 		rtl_write_byte(rtlpriv, 0x4fe, dm->undec_sm_pwdb);
 	}
-	rtl92fe_rssi_dump_to_register(hw);
 	rtl92fe_dm_find_minimum_rssi(hw);
 	dm_dig->rssi_val_min = rtlpriv->dm_digtable.min_undec_pwdb_for_dm;
 }

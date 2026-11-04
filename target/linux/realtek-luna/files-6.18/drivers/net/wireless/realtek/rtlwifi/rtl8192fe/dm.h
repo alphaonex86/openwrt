@@ -208,16 +208,6 @@
 #define	CFO_THRESHOLD_ATC			80	/* kHz */
 
 /* RSSI dump message registers */
-#define RA_RSSIDUMP				0xcb0
-#define RB_RSSIDUMP				0xcb1
-#define RS1_RXEVMDUMP				0xcb2
-#define RS2_RXEVMDUMP				0xcb3
-#define RA_RXSNRDUMP				0xcb4
-#define RB_RXSNRDUMP				0xcb5
-#define RA_CFOSHORTDUMP				0xcb6
-#define RB_CFOSHORTDUMP				0xcb8
-#define RA_CFOLONGDUMP				0xcba
-#define RB_CFOLONGDUMP				0xcbc
 
 void rtl92fe_dm_init(struct ieee80211_hw *hw);
 void rtl92fe_dm_watchdog(struct ieee80211_hw *hw);

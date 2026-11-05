@@ -946,14 +946,29 @@ config KERNEL_SLUB_TINY
 	  For 16-32 MB boards: no per-CPU partial lists and no slab sysfs
 	  (/sys/kernel/slab was 3764 of the X100DG's 7419 kernfs nodes).
 
+config KERNEL_MTD_LUNA_NOR
+	bool "Luna SPI-NOR flash"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  A board whose flash is SPI-NAND turns it off.
+
 config KERNEL_MTD_LUNA_NOR_WRITE
 	bool "Luna SPI-NOR erase/program (off = read-only flash)"
-	depends on TARGET_realtek_luna
+	depends on KERNEL_MTD_LUNA_NOR
 	default y
 	help
 	  A bench unit booted from RAM over a vendor bank turns it off: the flash
 	  stays readable (the unit's identity) and nothing can write it
 	  (build-openwrt.py variant "ram").
+
+config KERNEL_MTD_PHRAM
+	bool "phram: a RAM region as an MTD"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  A board whose RAM boot maps its squashfs root through phram (its
+	  RAM_ROOTFS declaration) turns it on.
 
 config KERNEL_LUNA_SPI_NAND
 	bool "Luna SPI-NAND flash and UBI"

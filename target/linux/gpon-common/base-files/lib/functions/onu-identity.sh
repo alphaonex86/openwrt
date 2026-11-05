@@ -25,16 +25,32 @@ cmdline_mac() {
 		"${ONU_CMDLINE:-/proc/cmdline}" 2>/dev/null | tr 'A-F' 'a-f'
 }
 
+# One key of this unit's own identity volume (UBI "onu_identity", key=value lines),
+# written once by the installer on a unit with no factory partition whose
+# bootloader passes no boot parameter (operator, 2026-11-04). Empty when absent.
+unit_identity() {
+	local d
+	for d in "${ONU_UBI_CLASS:-/sys/class/ubi}"/ubi*_*; do
+		[ "$(cat "$d/name" 2>/dev/null)" = onu_identity ] || continue
+		sed -n "s/^$1=//p" "${ONU_DEV:-/dev}/${d##*/}" 2>/dev/null | head -n 1
+		return
+	done
+}
+
 # This unit's MAC in the operator's order (2026-10-01): its factory config
-# partition, else a boot parameter a flasher pinned, else none -- nothing is
-# invented, and never eth0's current address (without a pin, the driver's
-# random). Sets UNIT_MAC and UNIT_MAC_SRC; returns 1 when no source has one.
+# partition, else a boot parameter a flasher pinned, else its identity volume,
+# else none -- nothing is invented, and never eth0's current address (without a
+# pin, the driver's random). Sets UNIT_MAC and UNIT_MAC_SRC; returns 1 when no
+# source has one.
 unit_mac() {
 	UNIT_MAC=$(${ONU_RTK_FACTORY:-/usr/sbin/rtk_factory} -p config mac 2>/dev/null | tr 'A-F' 'a-f')
 	UNIT_MAC_SRC="this unit's factory config partition"
 	unit_mac_valid "$UNIT_MAC" && return 0
 	UNIT_MAC=$(cmdline_mac)
 	UNIT_MAC_SRC="the mac= boot parameter"
+	unit_mac_valid "$UNIT_MAC" && return 0
+	UNIT_MAC=$(unit_identity mac | tr 'A-F' 'a-f')
+	UNIT_MAC_SRC="this unit's onu_identity volume"
 	unit_mac_valid "$UNIT_MAC" && return 0
 	UNIT_MAC= UNIT_MAC_SRC=
 	return 1

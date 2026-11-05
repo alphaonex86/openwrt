@@ -136,8 +136,9 @@ provision() {
 		# from the command line: eth0's current address without one is the
 		# driver's random, and adopting it pinned an invented MAC into uci.
 		mac=$(cmdline_mac)
+		unit_mac_valid "$mac" || mac=$(unit_identity mac | tr 'A-F' 'a-f')
 		if unit_mac_valid "$mac"; then
-			log "no factory MAC on '$part' - using $mac from the mac= boot parameter; PROVISIONING MISSING on this unit"
+			log "no factory MAC on '$part' - using $mac from the boot parameter or the onu_identity volume"
 		else
 			mac=""
 			# No identity from any source: none is invented (operator, 2026-10-01).
@@ -371,7 +372,7 @@ try_identity() {
 	config_load gpon
 	config_get part storage config_part config
 	rtk_load "$part"
-	sn=$(gpon_serial "${RTK_sn:-}")
+	sn=$(gpon_serial "${RTK_sn:-$(unit_identity sn)}")
 	[ -n "$sn" ] || { log "no GPON serial available; will retry"; return 1; }
 
 	backend=$(optics_backend)

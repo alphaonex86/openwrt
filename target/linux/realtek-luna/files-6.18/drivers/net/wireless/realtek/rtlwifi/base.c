@@ -172,8 +172,8 @@ static void _rtl_init_hw_ht_capab(struct ieee80211_hw *hw,
 	 */
 	ht_cap->ampdu_factor = IEEE80211_HT_MAX_AMPDU_64K;
 
-	/*Minimum MPDU start spacing , */
-	ht_cap->ampdu_density = IEEE80211_HT_MPDU_DENSITY_16;
+	/* Minimum MPDU start spacing: 8192E and 8192F both receive at 4 us. */
+	ht_cap->ampdu_density = IEEE80211_HT_MPDU_DENSITY_4;
 
 	ht_cap->mcs.tx_params = IEEE80211_HT_MCS_TX_DEFINED;
 

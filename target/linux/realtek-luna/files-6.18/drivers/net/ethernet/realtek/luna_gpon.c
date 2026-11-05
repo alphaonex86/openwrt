@@ -4306,6 +4306,7 @@ static int __init gpon_wait_rst_done(void)
 	return -ETIMEDOUT;
 }
 
+#if IS_ENABLED(CONFIG_RTL9602C_ETH)	/* the RTL9602C Ethernet driver is the only caller */
 /* Faithful port of the stock all-module GPON datapath ...
  * dev/MEASURED-luna_gpon.c.md sec 126. */
 static unsigned int full_datapath_init = 1;
@@ -4314,6 +4315,7 @@ MODULE_PARM_DESC(full_datapath_init, "1=run the full datapath init on the quiesc
 static unsigned int table_engine_ok;	/* 0: the operational VLAN setup (our Ethernet driver) owns the VLAN table now; isolate the VLAN_CTRL=0x19 enable test */
 module_param(table_engine_ok, uint, 0644);
 MODULE_PARM_DESC(table_engine_ok, "1=also run the L2 LUT clear + VLAN-enable table-engine steps (risky), 0=field-writes only");
+#endif
 /* "harmful write" hypothesis: stock NEVER writes the US-NIC ...
  * dev/MEASURED-luna_gpon.c.md sec 127. */
 static unsigned int usnic_strip;	/* 0 = KEEP the US-NIC writes: live-stock same-board diff shows stock HAS
@@ -4394,6 +4396,7 @@ static bool us_intr_svc;
 module_param(us_intr_svc, bool, 0644);
 MODULE_PARM_DESC(us_intr_svc, "1=read-to-clear the US GPON interrupt deltas (0x5000/0x5008/0x6000/0x6008) each O5 tick (default off)");
 
+#if IS_ENABLED(CONFIG_RTL9602C_ETH)	/* the RTL9602C Ethernet driver is the only caller */
 /* swcore TBL_ACCESS engine (L2/VLAN tables) */
 #define TBL_BUSY_BIT	(1u << 13)
 /* The bound, named the way LUNA_SMI_TRIES and L3FE_ACCESS_TRIES already are
@@ -4611,6 +4614,7 @@ void rtl9602c_datapath_tables_init(void)
 	pr_info("luna-gpon: datapath_tables_init done (tbl_ok=%d)\n", tbl_ok);
 }
 EXPORT_SYMBOL(rtl9602c_datapath_tables_init);
+#endif
 
 /* Configure the PON packet datapath (PON-IP) for GPON before ...
  * dev/MEASURED-luna_gpon.c.md sec 142. */
@@ -7288,6 +7292,7 @@ static void luna_omci_report_alarm(void)
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 }
 
+#if IS_ENABLED(CONFIG_RTL9602C_ETH)	/* the RTL9602C Ethernet driver is the only caller */
 void luna_omci_rx_errors(u32 *bad_mic, u32 *runt)
 {
 	unsigned long flags;
@@ -7298,6 +7303,7 @@ void luna_omci_rx_errors(u32 *bad_mic, u32 *runt)
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 }
 EXPORT_SYMBOL(luna_omci_rx_errors);
+#endif
 
 /* Called only by the timer's existing AVC cadence. */
 void luna_omci_report_oper_up(void)
@@ -9347,6 +9353,7 @@ static void gpon_apply_identity_change(void)
 
 static bool luna_vlan_filter_ok;
 
+#if IS_ENABLED(CONFIG_RTL9602C_ETH)	/* the RTL9602C Ethernet driver is the only caller */
 /* The Ethernet driver's VLAN table carries the CPU's extension ports and a PON VLAN of its
  * own: the LAN then stays open WITH the filter, and the filter keeps WAN broadcasts off it. */
 void luna_gpon_vlan_filter_ok(bool ok)
@@ -9354,6 +9361,7 @@ void luna_gpon_vlan_filter_ok(bool ok)
 	WRITE_ONCE(luna_vlan_filter_ok, ok);
 }
 EXPORT_SYMBOL(luna_gpon_vlan_filter_ok);
+#endif
 
 /* Ahead of the activation gate: a board whose activation never becomes ready kept
  * VLAN_FILTER on and its LAN dark (X100DG, 2026-10-01). */

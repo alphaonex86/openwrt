@@ -18,7 +18,6 @@ CONFIG_SYS_HAS_CPU_MIPS32_R2=y
 # CONFIG_CPU_MIPSR1 is not set
 CONFIG_CPU_MIPSR2=y
 CONFIG_CPU_HAS_PREFETCH=y
-CONFIG_CPU_R4K_FPU=y
 
 #
 # Coherent Processing System: GIC interrupt controller, Coherency Manager,

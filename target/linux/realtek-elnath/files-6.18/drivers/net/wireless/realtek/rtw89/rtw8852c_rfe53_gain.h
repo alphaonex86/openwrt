@@ -22,6 +22,4 @@
 extern const struct rtw89_reg2_def rtw8852c_rfe53_fem_gain[];
 extern const unsigned int rtw8852c_rfe53_fem_gain_num;
 
-void rtw8852c_apply_rfe53_fem_gain(struct rtw89_dev *rtwdev);
-
 #endif

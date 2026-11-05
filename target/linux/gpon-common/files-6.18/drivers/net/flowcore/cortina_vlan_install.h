@@ -69,9 +69,11 @@ u32 cortina_vlan_aft_map_word(u8 lspid_map, u8 fib);
 
 /* What this engine would have to do for @r, or a named ...
  * dev/MEASURED-cortina_vlan_install.h.md sec 5. */
+#ifndef __KERNEL__
 int cortina_vlan_rule_to_aft(const struct gpon_vlan_rule *r, u16 *vid,
 			     u8 *tag_cnt);
 
 extern const struct gpon_vlan_ops cortina_vlan_ops;
+#endif
 
 #endif /* _CORTINA_VLAN_INSTALL_H */

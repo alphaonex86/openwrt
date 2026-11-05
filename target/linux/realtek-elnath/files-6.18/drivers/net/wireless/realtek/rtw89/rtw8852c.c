@@ -3088,7 +3088,7 @@ static const struct wiphy_wowlan_support rtw_wowlan_stub_8852c = {
  * there is exactly one implementation of the (type/path/band/cfg_type) encoding
  * and this cannot drift away from it.
  */
-void rtw8852c_apply_rfe53_fem_gain(struct rtw89_dev *rtwdev)
+static void rtw8852c_apply_rfe53_fem_gain(struct rtw89_dev *rtwdev)
 {
 	const struct rtw89_chip_info *chip = rtwdev->chip;
 	unsigned int i;

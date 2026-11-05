@@ -6,22 +6,6 @@
 
 #include <linux/types.h>
 
-/** Reverse the bits of a byte. */
-u8 flowcore_bitrev8(u8 v);
-/** Reverse the bits of a 32-bit word. */
-u32 flowcore_bitrev32(u32 v);
-
-/* flowcore_key_bitrev() - reverse a key's WORD ORDER, ... -- dev/MEASURED-flowcore.h.md sec 2. */
-void flowcore_key_bitrev(u32 *w, int n_words);
-
-/* flowcore_crc32_reflected() - reflected CRC-32 (Ethernet ...
- * dev/MEASURED-flowcore.h.md sec 5. */
-u32 flowcore_crc32_reflected(const u8 *p, u32 len);
-
-/* flowcore_crc16_ccitt_reflected() - reflected CRC-16/CCITT ...
- * dev/MEASURED-flowcore.h.md sec 3. */
-u16 flowcore_crc16_ccitt_reflected(const u8 *p, u32 len);
-
 /* Packed-array slot math: where a `bits`-wide entry lives ...
  * dev/MEASURED-flowcore.h.md sec 4. */
 struct pi_packed_slot {

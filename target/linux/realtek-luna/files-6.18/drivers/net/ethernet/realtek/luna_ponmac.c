@@ -58,7 +58,6 @@ static int r960_run(const struct luna_ops *o,
 /* core / SerDes digital + analog block */
 #define C3_SOFTWARE_RST		0x1b0000e0u /* global soft-reset command word     */
 #define C3_SDS_CFG		0x1b000200u /* SerDes lane mode select            */
-#define C3_DYNGASP_CTRL		0x1b00021cu /* dying-gasp comparator control      */
 #define C3_P_MISC_PON		0x1b020404u /* P_MISC[pon4]: PpReg 0x20004 + 4*MACPP_INTERVAL(0x100) */
 #define C3_PON_INBW_LBOUND	0x1b023180u /* DS in-band accumulation low bound  */
 #define C3_WSDS_DIG_00		0x1b040030u /* SerDes digital: clock control      */
@@ -76,12 +75,9 @@ static int r960_run(const struct luna_ops *o,
 #define C3_SDS_ANA_COM26	0x1b0405e8u /* analog common: GPHY CMU LDO vref    */
 #define C3_SDS_ANA_COM27	0x1b0405ecu /* analog common: GPHY CMU KVCO        */
 #define C3_FIB_EXT_REG21	0x1b040e54u /* fiber ext: analog-ready status      */
-#define C3_PON_TRAP_CFG		0x1b0110ecu /* OMCI/MPCP trap priority            */
 /* PON-IP block */
 #define C3_PON_SIDVALID		0x1bf0218cu /* per-flow SID-valid bitmap (1b/elem) */
-#define C3_PON_BW_THRES		0x1bf021a0u /* upstream BW request thresholds     */
 #define C3_PON_OMCI_CFG		0x1bf021a4u /* OMCI flow/SID select               */
-#define C3_PON_SCH_CTRL		0x1bf021e4u /* scheduler control                  */
 #define C3_PON_SID2QID		0x1bf0210cu /* flow(SID) -> physical queue (7-bit/elem) */
 
 /* fixed chip parameters for the GPON datapath */
@@ -107,17 +103,6 @@ static void c3_flow2queue(const struct luna_ops *o, u32 flow, u32 pqid)
 
 	luna_rfwr(o, C3_PON_SID2QID + (flow / 4u) * 4u, lsb + 6u, lsb, pqid);
 }
-
-/* ponmac_init: PON-MAC global defaults applied once before ...
- * dev/MEASURED-luna_ponmac.c.md sec 15. */
-static const struct r960_op c3_init[] = {
-	FLD(C3_SDS_ANA_COM09,  0,  0, 1),	/* BEN drive: TTL output enabled  */
-	FLD(C3_PON_BW_THRES,  29, 16, 5),	/* US last-grant BW threshold     */
-	FLD(C3_PON_BW_THRES,  13,  0, 5),	/* US runt BW request threshold   */
-	FLD(C3_PON_SCH_CTRL,  18, 18, 1),	/* drop on PIR overflow           */
-	FLD(C3_PON_TRAP_CFG,   2,  0, 7),	/* OMCI/MPCP trap = top priority  */
-	FLD(C3_DYNGASP_CTRL,   3,  3, 1),	/* invert dying-gasp comparator   */
-};
 
 /*
  * GPON SerDes/PON-MAC bring-up phase 1: analog pre-config with the lane held
@@ -181,30 +166,6 @@ static const struct r960_op c3_sds_post[] = {
 	FLD(C3_FORCE_BEN,      0,  0, 0),	/* burst-enable force mode: off     */
 };
 
-/* the analog CDR / SD-power-on select bit, bit 10 of the analog common word */
-#define LUNA_SDS_ANA_CDR_SEL	BIT(10)
-
-/* CDR re-seat, one owner for every Luna part: pulse the ...
- * dev/MEASURED-luna_ponmac.c.md sec 4. */
-static int luna_cdr_reset(const struct luna_ops *o, u32 ana_reg, u32 wsds_reg)
-{
-	u32 v = o->rd(ana_reg);
-
-	o->wr(ana_reg, v ^ LUNA_SDS_ANA_CDR_SEL);
-	mdelay(10);
-	o->wr(ana_reg, v);			/* restore the original word */
-
-	luna_rfwr(o, wsds_reg, 14, 14, 0);	/* transfer FIFO: assert rstb  */
-	mdelay(10);
-	luna_rfwr(o, wsds_reg, 14, 14, 1);	/* transfer FIFO: release rstb */
-	return 0;
-}
-
-static int c3_cdr_reset(const struct luna_ops *o)
-{
-	return luna_cdr_reset(o, C3_SDS_ANA_COM03, C3_WSDS_DIG_1D);
-}
-
 /* GPON bring-up driver: pre-config tables + flow/OMCI wiring + analog gate. */
 static int c3_gpon_mode_set(const struct luna_ops *o)
 {
@@ -249,11 +210,6 @@ static int c3_gpon_mode_set(const struct luna_ops *o)
 }
 
 /* RTL9603CVD top-level entry points (thin wrappers over the c3_* internals). */
-static int rtl9603cvd_ponmac_init(const struct luna_ops *o)
-{
-	return r960_run(o, c3_init, ARRAY_SIZE(c3_init));
-}
-
 static int rtl9603cvd_ponmac_mode_set(const struct luna_ops *o,
 				      int rev, int subtype)
 {
@@ -261,34 +217,17 @@ static int rtl9603cvd_ponmac_mode_set(const struct luna_ops *o,
 	return c3_gpon_mode_set(o);
 }
 
-static int rtl9603cvd_serdes_cdr_reset(const struct luna_ops *o)
-{
-	return c3_cdr_reset(o);
-}
-
 /* RTL9607C. SerDes here is DIRECT MMIO: every analog/digital ...
  * dev/MEASURED-luna_ponmac.c.md sec 5. */
 #define C7_PON_SIDVALID		0x1bf02188u /* per-flow SID-valid bitmap (1b/elem)  */
 #define C7_PON_OMCI_CFG		0x1bf021a0u /* OMCI flow/SID select                 */
-#define C7_PON_BW_THRES		0x1bf0219cu /* upstream BW request thresholds       */
-#define C7_PON_SCH_CTRL		0x1bf021e0u /* scheduler control                    */
-#define C7_DRN_CMD		0x1bf020f4u /* T-cont drain command / status        */
-#define C7_IO_CMD_0_US		0x1bf05434u /* upstream NIC GMII TX/RX enables       */
 #define C7_PON_SID2QID		0x1bf02108u /* flow(SID) -> physical queue map       */
-#define C7_PON_QID_CIR_RATE	0x1bf021e4u /* per-queue committed (CIR) rate        */
-#define C7_PON_QID_PIR_RATE	0x1bf023e4u /* per-queue peak (PIR) rate             */
-#define C7_PON_SCH_QMAP		0x1bf025e4u /* per-tcont queue membership mask       */
-#define C7_PON_WFQ_TYPE		0x1bf02668u /* per-queue strict/WFQ select           */
-#define C7_PON_WFQ_WEIGHT	0x1bf0267cu /* per-queue WFQ weight                  */
-#define C7_PON_TCONT_EN		0x1bf02664u /* per-tcont schedule enable             */
 
 /* PON trap / accept-length (0x1b011xxx) */
-#define C7_PON_TRAP_CFG		0x1b011144u /* OMCI/MPCP trap priority              */
 #define C7_ACCEPT_MAX_LEN	0x1b011028u /* per-port accept max length (stride 4) */
 
 /* switch global (0x1b000xxx / 0x1b002xxx) */
 #define C7_SOFTWARE_RST		0x1b000108u /* soft-reset: SW core / SerDes+GPON-MAC */
-#define C7_DYNGASP_CTRL		0x1b00029cu /* dying-gasp comparator control         */
 #define C7_SDS_CFG		0x1b000270u /* SerDes lane mode select               */
 #define C7_PON_INBW_LBOUND	0x1b023288u /* DS in-band accumulation low bound     */
 #define C7_P_MISC_PON		0x1b020504u /* per-port misc, PON port (base 0x20004 + port5*0x100) */
@@ -334,16 +273,10 @@ static int rtl9603cvd_serdes_cdr_reset(const struct luna_ops *o)
 #define C7_PON_PORT		5	/* PON port index for per-port registers */
 #define C7_MACPP_STRIDE		0x100u	/* per-port MAC register stride          */
 #define C7_SID_COUNT		128	/* classifier SID / flow slots           */
-#define C7_GPON_TCONT_MAX	32	/* T-cont count                          */
-#define C7_PON_QUEUE_MAX	128	/* physical PON queue count              */
 #define C7_TCONT_QUEUE_MAX	32	/* queues per T-cont scheduler           */
-#define C7_RATE_MAX		0x3ffffu/* CIR/PIR rate saturation value         */
 #define C7_OMCI_FLOW		127	/* flow id reserved for OMCI            */
 #define C7_OMCI_TCONT		31	/* T-cont id for the OMCI flow           */
 #define C7_OMCI_QUEUE		24	/* queue id for the OMCI flow            */
-
-/* one-shot init guard: drain T-conts only on a re-init */
-static int c7_init_done;
 
 /* Packed/strided array element write. For arroff<32 one ...
  * dev/MEASURED-luna_ponmac.c.md sec 16. */
@@ -369,74 +302,6 @@ static void c7_flow2queue(const struct luna_ops *o, u32 flow, u32 sched, u32 q)
 {
 	c7_arr(o, C7_PON_SID2QID, 7, flow, 0, 7,
 	       C7_TCONT_QUEUE_MAX * (sched / 8u) + q);
-}
-
-/* CIR/PIR are stored as (rate-1) except for the 0/1/max sentinels */
-static u32 c7_rate(u32 rate)
-{
-	if (rate != 0 && rate != 1 && rate != C7_RATE_MAX)
-		return rate - 1u;
-	return rate;
-}
-
-/* Drain one T-cont, busy-polling the drain flag. On timeout, recover the
- * upstream NIC by toggling its GMII enables (RX off, TX off->on, RX on). */
-static void c7_tcont_drain(const struct luna_ops *o, u32 tcont)
-{
-	u32 i;
-
-	/* queue-mode=0, drain-index=tcont, drain-pulse=1 */
-	o->wr(C7_DRN_CMD, ((tcont & 0x7fu) << 3) | (1u << 1));
-
-	for (i = 0; i < 200000u; i++)
-		if (!(o->rd(C7_DRN_CMD) & 0x1u))	/* drain flag cleared */
-			break;
-
-	if (i >= 200000u) {
-		luna_rfwr(o, C7_IO_CMD_0_US, 5, 5, 0);	/* US NIC RX off */
-		luna_rfwr(o, C7_IO_CMD_0_US, 4, 4, 0);	/* US NIC TX off */
-		luna_rfwr(o, C7_IO_CMD_0_US, 4, 4, 1);	/* US NIC TX on  */
-		luna_rfwr(o, C7_IO_CMD_0_US, 5, 5, 1);	/* US NIC RX on  */
-	}
-}
-
-/*
- * ponmac_init: PON-MAC global defaults applied once before mode selection.
- * (rev>A would also init switch-PBO; that lives in a separate subsystem.)
- */
-static int c7_ponmac_init(const struct luna_ops *o, int rev, int subtype)
-{
-	u32 i;
-
-	(void)subtype; (void)rev;
-
-	luna_rfwr(o, C7_SDS_ANA_COM17, 0, 0, 1);	/* BEN TTL output on    */
-	luna_rfwr(o, C7_PON_BW_THRES, 29, 16, 5);	/* US last-grant thresh */
-	luna_rfwr(o, C7_PON_BW_THRES, 13,  0, 5);	/* US runt-request thresh*/
-
-	if (c7_init_done)
-		for (i = 0; i < C7_GPON_TCONT_MAX; i++)
-			c7_tcont_drain(o, i);
-
-	for (i = 0; i < C7_GPON_TCONT_MAX - 1u; i++) {
-		c7_arr(o, C7_PON_TCONT_EN, 1, i, 0, 1, 0);	/* T-cont disable */
-		c7_arr(o, C7_PON_SCH_QMAP, 32, i, 0, 32, 0);	/* clear queue mask*/
-	}
-
-	luna_rfwr(o, C7_PON_SCH_CTRL, 18, 18, 1);	/* drop on PIR overflow */
-
-	for (i = 0; i < C7_PON_QUEUE_MAX; i++) {
-		c7_arr(o, C7_PON_WFQ_TYPE,    1,  i, 0,  1, 0);			/* strict   */
-		c7_arr(o, C7_PON_QID_CIR_RATE,18, i, 0, 18, c7_rate(0));		/* CIR = 0  */
-		c7_arr(o, C7_PON_QID_PIR_RATE,18, i, 0, 18, c7_rate(C7_RATE_MAX));/* PIR = max*/
-		c7_arr(o, C7_PON_WFQ_WEIGHT,  10, i, 0, 10, 1);			/* weight=1 */
-	}
-
-	luna_rfwr(o, C7_PON_TRAP_CFG, 2, 0, 7);	/* OMCI/MPCP top priority */
-	luna_rfwr(o, C7_DYNGASP_CTRL, 3, 3, 1);	/* invert dying-gasp cmp  */
-
-	c7_init_done = 1;
-	return 0;
 }
 
 /* Shared GPON SID/OMCI front matter, identical before each ...
@@ -628,30 +493,11 @@ static int c7_gpon_mode_set(const struct luna_ops *o, int rev, int subtype)
 	return c7_gpon_post(o);
 }
 
-/*
- * SerDes CDR reseat: flip the RX CDR re-seat bit, settle, restore the analog
- * word, bounce the 16<->20-bit transfer FIFO release-B. No full re-bring-up.
- */
-static int c7_cdr_reset(const struct luna_ops *o)
-{
-	return luna_cdr_reset(o, C7_SDS_ANA_COM09, C7_WSDS_DIG_1D);
-}
-
 /* RTL9607C top-level entry points (thin wrappers over the c7_* internals). */
-static int rtl9607c_ponmac_init(const struct luna_ops *o)
-{
-	return c7_ponmac_init(o, LUNA_REV_A, LUNA_SUBTYPE_NONE);
-}
-
 static int rtl9607c_ponmac_mode_set(const struct luna_ops *o,
 				    int rev, int subtype)
 {
 	return c7_gpon_mode_set(o, rev, subtype);
-}
-
-static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
-{
-	return c7_cdr_reset(o);
 }
 
 /* RTL9602C GPON PON-MAC / SerDes bring-up, clean-room ...
@@ -687,10 +533,6 @@ static int rtl9607c_serdes_cdr_reset(const struct luna_ops *o)
 
 /* Named PON-MAC / PON-IP config registers used by c2_ponmac_init; the names are
  * this chip's own, and the C3_/C7_ sections use them for the same roles. */
-#define C2_DYNGASP_CTRL		0x1B0001ECu	/* [3] DYNGASP_CMP_INV          */
-#define C2_PON_BW_THRES		0x1BF02150u	/* upstream BW request thresholds */
-#define C2_PON_SCH_CTRL		0x1BF02194u	/* [18] PON_GEN_PIR_DROP        */
-#define C2_PON_TRAP_CFG		0x1B0111F8u	/* [2:0] OMCI_MPCP_PRIORITY     */
 
 /* Register-PAGE address macros for the golden analog table below, so every entry
  * names its register instead of a bare address. The WSDS_DIG page numbers its
@@ -843,22 +685,6 @@ static const struct { u32 off; u32 val; } c2_analog[] = {
 	{ C2_FIB_REG(3, 30),          0x0000071e },
 };
 
-/*
- * ponmac_init scheduler / OMCI-egress steering. PIR_DROP is asserted then
- * cleared for rev-A, matching the sibling driver's set/clear pair.
- */
-static const struct r960_op c2_ponmac_init[] = {
-	/* REG01 (SDS_ANA_COM 0x22584) is handled in rtl9602c_ponmac_init() below: the
-	 * stock post-reset value 0x73a4 cannot be reached by a golden-table write
-	 * before the reset. See luna_c2_stock_analog. */
-	FLD(C2_DYNGASP_CTRL,  3,  3, 1),	/* DYNGASP_CMP_INV = 1              */
-	FLD(C2_PON_BW_THRES, 29, 16, 5),	/* last-grant threshold             */
-	FLD(C2_PON_BW_THRES, 13,  0, 5),	/* runt-grant threshold             */
-	FLD(C2_PON_SCH_CTRL, 18, 18, 1),	/* PON_GEN_PIR_DROP = 1             */
-	FLD(C2_PON_TRAP_CFG,  2,  0, 7),	/* OMCI_MPCP_PRIORITY = 7           */
-	FLD(C2_PON_SCH_CTRL, 18, 18, 0),	/* rev-A: clear PON_GEN_PIR_DROP    */
-};
-
 /* Drive SDS_ANA_COM REG01 (0x22584) = 0x73a4 (BEN_TTL_OUT ...
  * dev/MEASURED-luna_ponmac.c.md sec 9. */
 int luna_c2_stock_analog = 1;
@@ -866,22 +692,6 @@ int luna_c2_stock_analog = 1;
 /* Program the FULL analog CMU/CDR golden table AFTER the SDS ...
  * dev/MEASURED-luna_ponmac.c.md sec 20. */
 int luna_c2_analog_postreset = 1;
-
-static int rtl9602c_ponmac_init(const struct luna_ops *o)
-{
-	int ret = r960_run(o, c2_ponmac_init, ARRAY_SIZE(c2_ponmac_init));
-
-	if (ret)
-		return ret;
-	if (luna_c2_stock_analog) {
-		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),  14, 14, 1); /* REG_BEN_TTL_OUT = 1 (stock) */
-		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),   0,  0, 0); /* BENLA_LDOVREF[0] = 0 (stock) */
-		luna_rfwr(o, C2_SDS_ANA_COM_REG(11),  7,  0, 0); /* RX_FILT_CONFIG = 0 (stock) */
-	} else {
-		luna_rfwr(o, C2_SDS_ANA_COM_REG(1),   0,  0, 1); /* legacy BENLA_LDOVREF[0] = 1 */
-	}
-	return 0;
-}
 
 /* SerDes CDR-lock pulse (the stock CDR-reset behaviour): ...
  * dev/MEASURED-luna_ponmac.c.md sec 10. */
@@ -1157,24 +967,6 @@ void luna_c7_diag(const struct luna_ops *o, struct seq_file *s)
 		!!(wsd18 & BIT(14)), !!(fib16 & BIT(2)), !!(fib16 & BIT(10)));
 }
 
-/* NO CALLER TODAY (measured 2026-09-10 over the whole overlay)
- * dev/MEASURED-luna_ponmac.c.md sec 24. */
-int luna_ponmac_init(enum luna_chip chip, int rev, int subtype,
-			const struct luna_ops *o)
-{
-	(void)rev; (void)subtype;	/* per-chip init takes (o) only */
-	switch (chip) {
-	case LUNA_CHIP_9602C:
-		return rtl9602c_ponmac_init(o);
-	case LUNA_CHIP_9603CVD:
-		return rtl9603cvd_ponmac_init(o);
-	case LUNA_CHIP_9607C:
-		return rtl9607c_ponmac_init(o);
-	default:
-		return -ENOTSUPP;
-	}
-}
-
 int luna_ponmac_mode_set(enum luna_chip chip, int rev, int subtype,
 			    const struct luna_ops *o)
 {
@@ -1185,21 +977,6 @@ int luna_ponmac_mode_set(enum luna_chip chip, int rev, int subtype,
 		return rtl9603cvd_ponmac_mode_set(o, rev, subtype);
 	case LUNA_CHIP_9607C:
 		return rtl9607c_ponmac_mode_set(o, rev, subtype);
-	default:
-		return -ENOTSUPP;
-	}
-}
-
-int luna_ponmac_serdes_cdr_reset(enum luna_chip chip,
-				    const struct luna_ops *o)
-{
-	switch (chip) {
-	case LUNA_CHIP_9602C:
-		return rtl9602c_serdes_cdr_reset(o);
-	case LUNA_CHIP_9603CVD:
-		return rtl9603cvd_serdes_cdr_reset(o);
-	case LUNA_CHIP_9607C:
-		return rtl9607c_serdes_cdr_reset(o);
 	default:
 		return -ENOTSUPP;
 	}

@@ -62,12 +62,8 @@ static inline void luna_rfwr(const struct luna_ops *o, u32 phys,
 }
 
 /* Bring-up entry points. rev = LUNA_REV_A or the HW ... -- dev/MEASURED-luna_ponmac.h.md sec 3. */
-int luna_ponmac_init(enum luna_chip chip, int rev, int subtype,
-			const struct luna_ops *o);
 int luna_ponmac_mode_set(enum luna_chip chip, int rev, int subtype,
 			    const struct luna_ops *o);
-int luna_ponmac_serdes_cdr_reset(enum luna_chip chip,
-				    const struct luna_ops *o);
 
 struct seq_file;
 void luna_c7_diag(const struct luna_ops *o, struct seq_file *s);

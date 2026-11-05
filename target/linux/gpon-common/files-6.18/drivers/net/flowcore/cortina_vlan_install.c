@@ -35,6 +35,7 @@ u32 cortina_vlan_aft_map_word(u8 lspid_map, u8 fib)
 	       ((u32)fib & CORTINA_AFT_MAP_FIB_MASK);
 }
 
+#ifndef __KERNEL__	/* the gpon_vlan_ops back-end serves the host tests only */
 int cortina_vlan_rule_to_aft(const struct gpon_vlan_rule *r, u16 *vid,
 			     u8 *tag_cnt)
 {
@@ -177,3 +178,4 @@ const struct gpon_vlan_ops cortina_vlan_ops = {
 	.rule_install	= cortina_vlan_rule_install,
 	.rule_remove	= cortina_vlan_rule_remove,
 };
+#endif

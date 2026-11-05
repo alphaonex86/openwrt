@@ -652,16 +652,6 @@ int cortina_l3fe_pppoe_l3if_set(void __iomem *ne, u32 idx, u16 session,
 /* L3FE HW flow-offload next-hop L2 rewrite (defect A2) ...
  * dev/MEASURED-cortina-l3fe.c.md sec 40. */
 
-#define L3FE_MACDA_IDX_ENTRIES		1024
-
-/* ★ CRASH FIX (async SError on the first AUTO flow install) + ...
- * dev/MEASURED-cortina-l3fe.c.md sec 41. */
-int cortina_l3fe_macda_idx_set(void __iomem *ne, u32 idx, const u8 *mac)
-{
-	(void)ne; (void)idx; (void)mac;
-	return -EOPNOTSUPP;
-}
-
 /* IPoE egress L3-IF entry: substitute the egress SMAC from ...
  * dev/MEASURED-cortina-l3fe.c.md sec 43. */
 int cortina_l3fe_ipoe_l3if_set(void __iomem *ne, u32 idx, u8 an_sel)

@@ -120,7 +120,9 @@ int gpon_olt_diag_line(const struct gpon_olt_rec *r, char *out, size_t sz);
 
 /* The inverse.  @r is UNTOUCHED on any error, so a rejected line cannot reach
  * a replay half-filled. */
+#ifndef __KERNEL__
 int gpon_olt_diag_parse(const char *line, struct gpon_olt_rec *r);
+#endif
 
 /* The header line a dump starts with: how complete the capture is. */
 int gpon_olt_diag_header(const struct gpon_olt_capture *c, char *out, size_t sz);

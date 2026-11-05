@@ -239,6 +239,7 @@ int gpon_olt_diag_line(const struct gpon_olt_rec *r, char *out, size_t sz)
 	return pos;
 }
 
+#ifndef __KERNEL__	/* the parser serves the host replay tools only */
 static int nib(char ch)
 {
 	if (ch >= '0' && ch <= '9')
@@ -341,3 +342,4 @@ int gpon_olt_diag_parse(const char *line, struct gpon_olt_rec *r)
 	*r = t;			/* committed only once the whole line parsed */
 	return GPON_OLT_PARSE_OK;
 }
+#endif

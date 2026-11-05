@@ -50,11 +50,10 @@ int cortina_l3fe_swo_crc(void __iomem *ne, const u32 *words, int nwords,
  * dev/MEASURED-cortina-l3fe.h.md sec 7. */
 int cortina_l3fe_pppoe_l3if_set(void __iomem *ne, u32 idx, u16 session,
 				u8 an_sel);
-/* A2 next-hop L2 rewrite: mac_da_idx MAC table + IPoE egress-SMAC L3-IF entry.
+/* A2 next-hop L2 rewrite: the IPoE egress-SMAC L3-IF entry.
  * cortina_l3fe_ipoe_l3if_set is used for BOTH egress directions - the entry is
  * just "substitute the egress SMAC named by @an_sel": idx 2 / an_sel 2 = the
  * WAN MAC (US leg), idx 3 / an_sel 1 = the LAN router MAC (DS leg). */
-int cortina_l3fe_macda_idx_set(void __iomem *ne, u32 idx, const u8 *mac);
 int cortina_l3fe_ipoe_l3if_set(void __iomem *ne, u32 idx, u8 an_sel);
 
 /* Point ONE main-hash profile's TUPLE0 maskptr at the routed ...

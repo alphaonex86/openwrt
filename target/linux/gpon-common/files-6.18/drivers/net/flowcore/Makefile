@@ -59,4 +59,3 @@ obj-$(CONFIG_GPON_OPTIC_UX3320) += gn25l95_cal_logic.o ux3320_cal_logic.o
 # those arrive in the per-die table the shell fills -- so both build on x86 and
 # their write SEQUENCE is asserted by dev/rtl9607c-test/gpon_vlan_install_diff_test.
 obj-$(CONFIG_CORTINA_GPON) += cortina_vlan_install.o
-obj-$(CONFIG_LUNA_GPON) += luna_vlan_install.o

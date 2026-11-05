@@ -25,6 +25,7 @@ obj-$(CONFIG_CORTINA_NI) += cortina_ni_rx_logic.o cortina_ni_tx_logic.o
 obj-$(CONFIG_CORTINA_NI_FLOWOFFLOAD) += cortina_ni_flowoffload_logic.o \
 	cortina_l3fe_logic.o
 obj-$(CONFIG_LUNA_GPON) += luna_gpon_logic.o luna_ponmac_logic.o
+obj-$(CONFIG_GPON_OPTIC_RTL8290B) += rtl8290b_cal_logic.o
 # ★ REMOVED 2026-09-10: CONFIG_RTL9607C_GPON is not a Kconfig symbol -- no
 #   `config RTL9607C_GPON` exists anywhere in target/linux, so this line was
 #   always empty. It was harmless (line 27 already builds the object under

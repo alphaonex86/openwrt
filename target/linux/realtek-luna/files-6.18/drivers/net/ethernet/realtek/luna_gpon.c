@@ -6196,10 +6196,12 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 	{
 		/* RX optical power: the live RSSI ADC byte at 0x311 (slave ...
 		 * dev/MEASURED-luna_gpon.c.md sec 310. */
-		int rxc = bosa_read_reg(0x311) & 0xff;	/* raw 8-bit RSSI tap: kept as instrument */
-		u32 rx_code = bosa_rx_code();
-		u32 rssi_uv = bosa_rssi_uv();			/* ratiometric fraction*10000, info */
-		int txw = bosa_read16_median(0x166);
+		/* only an RTL8290B is read: a foreign module is not polled over I2C */
+		bool live = bosa_regs_live();
+		int rxc = live ? bosa_read_reg(0x311) & 0xff : 0;	/* raw 8-bit RSSI tap: kept as instrument */
+		u32 rx_code = live ? bosa_rx_code() : BOSA_RX_CODE_NA;
+		u32 rssi_uv = live ? bosa_rssi_uv() : 0;		/* ratiometric fraction*10000, info */
+		int txw = live ? bosa_read16_median(0x166) : -1;
 		char cdbm_s[16];
 
 		/* Same rule as the "fiber:" line: a chain that produced no reading

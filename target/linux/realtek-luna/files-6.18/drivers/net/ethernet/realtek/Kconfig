@@ -48,6 +48,7 @@ config RTL9602C_ETH
 	depends on REALTEK_LUNA
 	select LUNA_ETH_MIB
 	select LUNA_LOOP
+	select GPON_EDGE if GPON_CORE	# rtl9602c_ipmc, rtl9602c_l34_tc
 	default y
 	help
 	  Clean-room driver for the RTL9602C GMAC + on-chip switch core.
@@ -74,6 +75,7 @@ config LUNA_GPON
 	tristate "Realtek Luna GPON MAC"
 	depends on REALTEK_LUNA
 	select GPON_CORE	# shared core: drivers/net/gpon/Kconfig
+	select GPON_REGSEQ	# luna_ponmac
 	default y
 	help
 	  Clean-room GPON MAC foundation driver for the Luna family. Maps the
@@ -100,6 +102,7 @@ config LUNA_FLOWOFFLOAD
 	bool "Realtek Luna FLOWBASED hardware flow offload"
 	depends on LUNA_ETH
 	select GPON_FLOW_OFFLOAD
+	select GPON_EDGE	# luna_flow
 	default y
 	help
 	  SRAM IPv4 NAT backend for supported FLOWBASED switch layouts.

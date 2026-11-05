@@ -170,6 +170,20 @@ config GPON_FLOW_OFFLOAD
 	  Selected by each family's accelerator backend. Targets without an
 	  accelerator must not select this shared lifecycle.
 
+config GPON_REGSEQ
+	bool
+	depends on GPON_CORE
+	help
+	  The register-sequence interpreter (gpon_regseq.c), selected by each
+	  family whose bring-up is written as a table.
+
+config GPON_EDGE
+	bool
+	depends on GPON_CORE
+	help
+	  The router edge read from the live kernel (gpon_edge.c), selected by
+	  each driver that calls it.
+
 config GPON_OLT_ROLE
 	bool
 	depends on GPON_CORE

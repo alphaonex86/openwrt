@@ -290,7 +290,7 @@ obj-y += gpon_ploam.o
 # udelay() directly, which this tier forbids.  With the two delays as ops the
 # same interpreter runs on silicon and against a FIXTURE clock on a host, which
 # is this project's stated preference over one ~200 s board boot.
-obj-y += gpon_regseq.o
+obj-$(CONFIG_GPON_REGSEQ) += gpon_regseq.o
 
 # The OLT role of the core: activation and provisioning that check every
 # answer.  Gated: only an OLT target selects it (CONFIG_GPON_OLT_ROLE).
@@ -321,7 +321,6 @@ obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_flow_offload.o
 obj-$(CONFIG_GPON_FLOW_DIAG) += gpon_flow_diag.o
 
 # gpon_edge.o -- the router EDGE (WAN address/MAC, next hop, LAN subnet) read
-# out of the LIVE kernel, once for every family.  Gated with the lifecycle:
-# only a board with an accelerator has anything to tell, and this tree ships to
-# parts with <= 64 MB of RAM.
-obj-$(CONFIG_GPON_FLOW_OFFLOAD) += gpon_edge.o
+# out of the LIVE kernel, once for every family.  Built only for a driver that
+# calls it (CONFIG_GPON_EDGE): this tree ships to parts with <= 64 MB of RAM.
+obj-$(CONFIG_GPON_EDGE) += gpon_edge.o

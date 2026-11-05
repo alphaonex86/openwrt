@@ -41,6 +41,14 @@ int gn25l95_cal_ops(const u8 *cal, u32 cal_len, const struct gn_variant *v,
 
 #define GN_OPS_MAX	1200u
 
+/* Append one op; -ENOSPC past `max`. The builders' common step. */
+int gn_emit(struct gn_op *o, u32 *n, u32 max, u8 kind, u8 slave,
+	    u16 reg, u8 val, u8 mask);
+#define GN_EMIT(k, s, r, v, m) do { \
+	int _e = gn_emit(out, &n, out_max, (k), (s), (r), (v), (m)); \
+	if (_e) return _e; \
+} while (0)
+
 /* Byte I/O, supplied by the family shell. The core builds and ...
  * dev/MEASURED-gn25l95_cal_logic.h.md sec 3. */
 struct gn_io {
@@ -73,6 +81,17 @@ int gn25l95_cal_apply(const struct gn_op *ops, u32 n, struct gn_io *io,
 #define GN_PROBE_NOTES	3u
 
 int gn25l95_probe_ops(struct gn_op *out, u32 out_max);
+
+/* UX3320 (ux3320_cal_logic.c, RTL9607C unit 2). It names itself nowhere; probe
+ * notes: table 3 registers 0x8c, 0x87, 0x9d, then 0xf0. ux3320_identified: no
+ * EEPROM (0xf0 = 0xff) and the three at 0 (power-on) or at this unit's file
+ * (calibrated). Cal: the 1024-byte file into A0, A2 and tables 0/4/5/6/3;
+ * t3_9e_set: Luna sets table 3 0x9e bit 5. */
+#define UX_PROBE_NOTES	4u
+int ux3320_probe_ops(struct gn_op *out, u32 out_max);
+bool ux3320_identified(const u8 notes[UX_PROBE_NOTES], const u8 *cal, u32 cal_len);
+int ux3320_cal_ops(const u8 *cal, u32 cal_len, bool t3_9e_set,
+		   struct gn_op *out, u32 out_max);
 
 /* > true when the three noted bytes are a GN28L9x family id, ...
  * dev/MEASURED-gn25l95_cal_logic.h.md sec 7. */

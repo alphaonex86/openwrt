@@ -66,6 +66,32 @@ config GPON_CORE
 	  driver set to =m would fail modpost with "undefined!" on those symbols;
 	  the fix then is EXPORT_SYMBOL_GPL in the core, not a change here.
 
+config GPON_OPTIC_RTL8290B
+	bool "RTL8290B BOSA: calibration, APC and DDM"
+	depends on GPON_CORE
+	help
+	  The board's layer turns on the optic parts it carries; identifying
+	  the part stays in every build, so a part found but not built is logged
+	  and left untouched (laser off). A self-managed SFF module needs none.
+
+	  Text cost, measured 2026-11-04 by compiling each object with the symbol
+	  on and off: RTL8290B 16572 B of luna_gpon.o (interaptiv). In luna_gpon.o
+	  (taroko) GN25L95 alone 1180 B, UX3320 alone 1460 B, both 1844 B; plus
+	  gn25l95_cal_logic.o 1920 B for GN25L95, ux3320_cal_logic.o 1184 B for
+	  UX3320 and the shared executor 816 B with either.
+
+config GPON_OPTIC_GN25L95
+	bool "Semtech GN25L95 BOSA: per-unit calibration"
+	depends on GPON_CORE
+	help
+	  See GPON_OPTIC_RTL8290B.
+
+config GPON_OPTIC_UX3320
+	bool "UX3320 BOSA: per-unit calibration"
+	depends on GPON_CORE
+	help
+	  See GPON_OPTIC_RTL8290B.
+
 config OLT_ZTE
 	bool "Serve ZTE OLTs"
 	depends on GPON_CORE

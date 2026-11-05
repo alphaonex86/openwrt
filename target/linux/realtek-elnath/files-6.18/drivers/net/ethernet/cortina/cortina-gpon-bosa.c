@@ -156,6 +156,10 @@ int cg_bosa_init(struct device *dev)
 	ret = cg_i2c_init(dev);
 	if (ret)
 		return ret;
+	if (!IS_ENABLED(CONFIG_GPON_OPTIC_GN25L95)) {
+		dev_err(dev, "BOSA: GN25L95 support is not built (CONFIG_GPON_OPTIC_GN25L95) - laser stays unprogrammed\n");
+		return -ENODEV;
+	}
 
 	ret = bosa_identify(dev);
 	if (ret)

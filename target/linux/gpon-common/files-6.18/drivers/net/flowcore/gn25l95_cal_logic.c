@@ -18,15 +18,10 @@
 #define CAL_P2(reg)	(CAL_PAGE2_HIGH + (reg) - 0x80u)
 #define REG_BB		0xbbu			/* the one register read back   */
 
-/* The two places the units' own loaders differ. Settled by comparing both
- * binaries; everything else about the sequence is still owed a trace. */
-const struct gn_variant gn_variant_g24w    = { .bb_set = true,  .tail_c4_7f = true  };
-const struct gn_variant gn_variant_x400axf = { .bb_set = false, .tail_c4_7f = false };
-
 /* ★★★ THE SEQUENCE, AGAINST AN ACTUAL REPLAY OF BOTH STOCK ...
  * dev/MEASURED-gn25l95_cal_logic.c.md sec 4. */
-static int emit(struct gn_op *o, u32 *n, u32 max, u8 kind, u8 slave,
-		u16 reg, u8 val, u8 mask)
+int gn_emit(struct gn_op *o, u32 *n, u32 max, u8 kind, u8 slave,
+	    u16 reg, u8 val, u8 mask)
 {
 	if (*n >= max)
 		return -ENOSPC;
@@ -36,10 +31,11 @@ static int emit(struct gn_op *o, u32 *n, u32 max, u8 kind, u8 slave,
 	return 0;
 }
 
-#define EMIT(k, s, r, v, m) do { \
-	int _e = emit(out, &n, out_max, (k), (s), (r), (v), (m)); \
-	if (_e) return _e; \
-} while (0)
+#ifdef CONFIG_GPON_OPTIC_GN25L95
+/* The two places the units' own loaders differ. Settled by comparing both
+ * binaries; everything else about the sequence is still owed a trace. */
+const struct gn_variant gn_variant_g24w    = { .bb_set = true,  .tail_c4_7f = true  };
+const struct gn_variant gn_variant_x400axf = { .bb_set = false, .tail_c4_7f = false };
 
 int gn25l95_cal_ops(const u8 *cal, u32 cal_len, const struct gn_variant *v,
 		    struct gn_op *out, u32 out_max)
@@ -60,53 +56,53 @@ int gn25l95_cal_ops(const u8 *cal, u32 cal_len, const struct gn_variant *v,
 		return -EINVAL;
 
 	for (k = 0; k < ARRAY_SIZE(BULK); k++) {
-		EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, BULK[k].table, 0);
+		GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, BULK[k].table, 0);
 		for (i = 0; i < BULK[k].len; i++)
-			EMIT(GN_WRITE, SLAVE_CAL, BULK[k].reg + i,
+			GN_EMIT(GN_WRITE, SLAVE_CAL, BULK[k].reg + i,
 			     cal[BULK[k].off + i], 0);
 	}
 
 	/* Page 2 again: D2..E7 is written a SECOND time, from the SAME file
 	 * bytes the bulk copy above already sent. Stock does it twice; the
 	 * repeat is kept because the order is the thing being reproduced. */
-	EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 2, 0);		/* index 516 */
+	GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 2, 0);		/* index 516 */
 	for (i = 0; i <= 0xe7 - 0xd2; i++)
-		EMIT(GN_WRITE, SLAVE_CAL, 0xd2 + i, cal[CAL_P2(0xd2) + i], 0);
+		GN_EMIT(GN_WRITE, SLAVE_CAL, 0xd2 + i, cal[CAL_P2(0xd2) + i], 0);
 	for (i = 0; i < 0x50; i++)
-		EMIT(GN_WRITE, SLAVE_CAL, 0x00 + i, cal[0x100 + i], 0);
+		GN_EMIT(GN_WRITE, SLAVE_CAL, 0x00 + i, cal[0x100 + i], 0);
 	for (i = 0; i < ARRAY_SIZE(LOW_SPARSE); i++)
-		EMIT(GN_WRITE, SLAVE_CAL, LOW_SPARSE[i],
+		GN_EMIT(GN_WRITE, SLAVE_CAL, LOW_SPARSE[i],
 		     cal[0x100 + LOW_SPARSE[i]], 0);
 
-	EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 1, 0);		/* index 623 */
-	EMIT(GN_WRITE,  SLAVE_CAL, 0xf8, cal[0x1f8], 0);
-	EMIT(GN_RMW,    SLAVE_CAL, 0xf9, 0xc0, 0xc0);
-	EMIT(GN_WRITE,  SLAVE_CAL, 0xfc, cal[0x1fc], 0);
-	EMIT(GN_RMW,    SLAVE_CAL, 0xfd, 0xc0, 0xc0);
+	GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 1, 0);		/* index 623 */
+	GN_EMIT(GN_WRITE,  SLAVE_CAL, 0xf8, cal[0x1f8], 0);
+	GN_EMIT(GN_RMW,    SLAVE_CAL, 0xf9, 0xc0, 0xc0);
+	GN_EMIT(GN_WRITE,  SLAVE_CAL, 0xfc, cal[0x1fc], 0);
+	GN_EMIT(GN_RMW,    SLAVE_CAL, 0xfd, 0xc0, 0xc0);
 	/* ONE read, TWO writes from that same byte -- a pulse, not two RMWs. */
-	EMIT(GN_PULSE,  SLAVE_CAL, 0x6e, 0x40, 0xbf);
+	GN_EMIT(GN_PULSE,  SLAVE_CAL, 0x6e, 0x40, 0xbf);
 
-	EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 2, 0);		/* index 633 */
-	EMIT(GN_WRITE,  SLAVE_CAL, 0xa0, 0x6a, 0);
+	GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 2, 0);		/* index 633 */
+	GN_EMIT(GN_WRITE,  SLAVE_CAL, 0xa0, 0x6a, 0);
 	for (i = 0x7b; i <= 0x7e; i++)
-		EMIT(GN_WRITE, SLAVE_CAL, i, 0xff, 0);
+		GN_EMIT(GN_WRITE, SLAVE_CAL, i, 0xff, 0);
 
 	/* BB is judged on the WHOLE byte, and the expected value is ...
 	 * dev/MEASURED-gn25l95_cal_logic.c.md sec 5. */
-	EMIT(GN_SELECT,      SLAVE_CAL, REG_PAGE, 2, 0);	/* index 639 */
-	EMIT(GN_RMW,         SLAVE_CAL, REG_BB, v->bb_set ? 0x01 : 0x00, 0x01);
-	EMIT(GN_READ_EXPECT, SLAVE_CAL, REG_BB,
+	GN_EMIT(GN_SELECT,      SLAVE_CAL, REG_PAGE, 2, 0);	/* index 639 */
+	GN_EMIT(GN_RMW,         SLAVE_CAL, REG_BB, v->bb_set ? 0x01 : 0x00, 0x01);
+	GN_EMIT(GN_READ_EXPECT, SLAVE_CAL, REG_BB,
 	     (u8)((cal[CAL_P2(REG_BB)] & 0xfe) | (v->bb_set ? 0x01 : 0x00)), 0xff);
 
-	EMIT(GN_SELECT,    SLAVE_CAL, REG_PAGE, 2, 0);		/* index 643 */
-	EMIT(GN_READ_NOTE, SLAVE_CAL, 0xb1, 0, 0);
-	EMIT(GN_READ_NOTE, SLAVE_CAL, 0xb7, 0, 0);
+	GN_EMIT(GN_SELECT,    SLAVE_CAL, REG_PAGE, 2, 0);		/* index 643 */
+	GN_EMIT(GN_READ_NOTE, SLAVE_CAL, 0xb1, 0, 0);
+	GN_EMIT(GN_READ_NOTE, SLAVE_CAL, 0xb7, 0, 0);
 
 	/* the G24W tail, AFTER the diagnostics */
 	if (v->tail_c4_7f) {
-		EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 2, 0);	/* index 646 */
-		EMIT(GN_WRITE,  SLAVE_CAL, 0xc4, 0x7f, 0);
-		EMIT(GN_WRITE,  SLAVE_SFF, 0x7f, cal[0x7f], 0);
+		GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 2, 0);	/* index 646 */
+		GN_EMIT(GN_WRITE,  SLAVE_CAL, 0xc4, 0x7f, 0);
+		GN_EMIT(GN_WRITE,  SLAVE_SFF, 0x7f, cal[0x7f], 0);
 	}
 	return (int)n;
 }
@@ -123,16 +119,16 @@ int gn25l95_probe_ops(struct gn_op *out, u32 out_max)
 	if (!out)
 		return -EINVAL;
 
-	EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 0x00, 0);
+	GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 0x00, 0);
 	for (i = 0; i < ARRAY_SIZE(PASSWORD); i++)
-		EMIT(GN_READ_EXPECT, SLAVE_CAL, PASSWORD[i], 0x00, 0xff);
+		GN_EMIT(GN_READ_EXPECT, SLAVE_CAL, PASSWORD[i], 0x00, 0xff);
 
-	EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 0xff, 0);
+	GN_EMIT(GN_SELECT, SLAVE_CAL, REG_PAGE, 0xff, 0);
 	for (i = 0; i < ARRAY_SIZE(FAMILY_ID); i++)
-		EMIT(GN_READ_NOTE, SLAVE_CAL, FAMILY_ID[i], 0, 0);
+		GN_EMIT(GN_READ_NOTE, SLAVE_CAL, FAMILY_ID[i], 0, 0);
 
-	EMIT(GN_SELECT,      SLAVE_CAL, REG_PAGE, 0x02, 0);
-	EMIT(GN_READ_EXPECT, SLAVE_CAL, 0xd1, 0xa0, 0xf0);
+	GN_EMIT(GN_SELECT,      SLAVE_CAL, REG_PAGE, 0x02, 0);
+	GN_EMIT(GN_READ_EXPECT, SLAVE_CAL, 0xd1, 0xa0, 0xf0);
 	return (int)n;
 }
 
@@ -153,6 +149,7 @@ bool gn25l95_is_gn28l9x(const u8 id[GN_PROBE_NOTES])
 			return true;
 	return false;
 }
+#endif /* CONFIG_GPON_OPTIC_GN25L95 */
 
 int gn25l95_cal_apply(const struct gn_op *ops, u32 n, struct gn_io *io,
 		      struct gn_fail *f)

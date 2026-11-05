@@ -187,7 +187,7 @@ static bool gpon_sn_differs(const char *s);	/* defined below; parsed-byte compar
 static char *onu_sn = "";
 static DEFINE_MUTEX(bosa_lock);
 static bool luna_driver_ready, luna_activation_ready, luna_stopping;
-static bool bosa_gn_identified, bosa_cal_ready;
+static bool bosa_gn_identified, bosa_ux_identified, bosa_cal_ready;
 static int bosa_cal_error;
 static int luna_optical_init_error;
 static int luna_health_los = -1;
@@ -2049,13 +2049,13 @@ static int bosa_status2 __ro_after_init = -1;
  * dev/MEASURED-luna_gpon.c.md sec 70. */
 static bool bosa_regs_live(void)
 {
-	return bosa_id_num == 0x8290 && !bosa_not_8290b;
+	return IS_ENABLED(CONFIG_GPON_OPTIC_RTL8290B) && bosa_id_num == 0x8290 && !bosa_not_8290b;
 }
 
 /* Does the module answer the standard SFF-8472 A2h monitor instead (V2801RGW)? */
 static bool bosa_reads_a2h(void)
 {
-	return bosa_gn_identified || bosa_not_8290b || optics_self_managed;
+	return bosa_gn_identified || bosa_ux_identified || bosa_not_8290b || optics_self_managed;
 }
 
 /* Read one 8-bit register from an I2C slave via the SoC ...
@@ -2396,13 +2396,14 @@ static int luna_gn_calibrate_locked(void)
 {
 	const struct firmware *fw;
 	struct gn_op *ops;
-	u8 notes[GN_PROBE_NOTES];
+	u8 notes[UX_PROBE_NOTES];	/* the larger of the two probes */
 	struct gn_io io = { .rd = luna_gn_rd, .wr = luna_gn_wr,
 		.notes = notes, .notes_max = ARRAY_SIZE(notes) };
 	struct gn_fail fail = { 0 };
 	int ret, n;
 
-	if (bosa_regs_live())
+	if (bosa_regs_live() ||
+	    !(IS_ENABLED(CONFIG_GPON_OPTIC_GN25L95) || IS_ENABLED(CONFIG_GPON_OPTIC_UX3320)))
 		return -ENODEV;
 	if (bosa_cal_ready)
 		return 0;
@@ -2419,32 +2420,61 @@ static int luna_gn_calibrate_locked(void)
 		ret = -ENOMEM;
 		goto release;
 	}
-	if (!bosa_gn_identified) {
+	if (IS_ENABLED(CONFIG_GPON_OPTIC_GN25L95) && !bosa_gn_identified && !bosa_ux_identified) {
 		n = gn25l95_probe_ops(ops, GN_OPS_MAX);
 		ret = n < 0 ? n : gn25l95_cal_apply(ops, n, &io, &fail);
-		if (ret)
+		if (ret == -EIO && fail.mask && !fail.err)
+			ret = -ENODEV;	/* it answers, but not as a GN25L95 */
+		else if (ret)
 			goto free;
-		if (io.notes_n != GN_PROBE_NOTES || gn25l95_is_gn28l9x(notes)) {
-			ret = -ENODEV;
+		else if (io.notes_n != GN_PROBE_NOTES || gn25l95_is_gn28l9x(notes)) {
+			ret = -ENODEV;	/* positively another Semtech part */
 			goto free;
-		}
-		/* This on-board part cannot change at runtime. Retain its positive
-		 * physical identity after a partial calibration changes the cold
-		 * probe's password predicate. An SFF name never establishes identity. */
-		bosa_gn_identified = true;
+		} else	/* an on-board part: its identity outlives a partial calibration */
+			bosa_gn_identified = true;
 	}
+	if (bosa_gn_identified) {
+		io.notes = NULL;
+		io.notes_max = 0;
+		n = gn25l95_cal_ops(fw->data, fw->size, &gn_variant_g24w,
+				      ops, GN_OPS_MAX);
+		ret = n < 0 ? n : gn25l95_cal_apply(ops, n, &io, &fail);
+		if (!ret)
+			bosa_cal_ready = true;
+		goto free;
+	}
+	if (!IS_ENABLED(CONFIG_GPON_OPTIC_UX3320)) {
+		pr_err("luna-gpon: not a GN25L95, and UX3320 support is not built (CONFIG_GPON_OPTIC_UX3320): nothing written\n");
+		ret = -ENODEV;
+		goto free;
+	}
+	io.notes = notes;
+	io.notes_max = UX_PROBE_NOTES;
+	io.notes_n = 0;
+	n = ux3320_probe_ops(ops, GN_OPS_MAX);
+	ret = n < 0 ? n : gn25l95_cal_apply(ops, n, &io, &fail);
+	if (ret)
+		goto free;
+	if (io.notes_n != UX_PROBE_NOTES ||
+	    (!bosa_ux_identified && !ux3320_identified(notes, fw->data, fw->size))) {
+		pr_err("luna-gpon: neither GN25L95 nor a blank UX3320 (table 3 0x8c/0x87/0x9d/0xf0 = %4ph): nothing written\n",
+		       notes);
+		ret = -ENODEV;
+		goto free;
+	}
+	bosa_ux_identified = true;
 	io.notes = NULL;
 	io.notes_max = 0;
-	io.notes_n = 0;
-	n = gn25l95_cal_ops(fw->data, fw->size, &gn_variant_g24w,
-			      ops, GN_OPS_MAX);
+	n = ux3320_cal_ops(fw->data, fw->size, true, ops, GN_OPS_MAX);
 	ret = n < 0 ? n : gn25l95_cal_apply(ops, n, &io, &fail);
-	if (!ret)
+	if (!ret) {
 		bosa_cal_ready = true;
+		pr_info("luna-gpon: UX3320 calibrated from this unit's file (%d ops)\n", n);
+	}
 free:
 	if (ret)
-		pr_err("luna-gpon: GN calibration refused: err=%d op=%u reg=0x%02x\n",
-		       ret, fail.op, fail.reg);
+		pr_err("luna-gpon: BOSA calibration refused: err=%d op=%u reg=0x%02x got=0x%02x\n",
+		       ret, fail.op, fail.reg, fail.got);
 	kfree(ops);
 release:
 	release_firmware(fw);
@@ -2638,7 +2668,7 @@ static s32 bosa_rx_power_cdbm(void)
 	/* A module that is not an RTL8290B has no RTL8290B analog RSSI chain to
 	 * read -- the "registers" that chain samples are bytes of its identity
 	 * EEPROM. Ask it the standard way instead. */
-	if (bosa_gn_identified || bosa_not_8290b)
+	if (bosa_gn_identified || bosa_ux_identified || bosa_not_8290b)
 		return bosa_rx_power_sff8472_cdbm();
 	if (!bosa_regs_live())
 		return BOSA_RX_CDBM_NA;
@@ -3912,6 +3942,8 @@ id_done:
 		bosa_w41 & 0xff, (bosa_w41 >> 4) & 1,
 		bosa_ctrl2 & 0xff, (bosa_ctrl2 >> 6) & 1,
 		bosa_status2 & 0xff, (bosa_status2 >> 2) & 1);
+	if (bosa_id_num == 0x8290 && !IS_ENABLED(CONFIG_GPON_OPTIC_RTL8290B))
+		pr_err("luna-gpon: an RTL8290B answers, but its support is not built (CONFIG_GPON_OPTIC_RTL8290B): nothing written, laser stays off\n");
 }
 
 /* One per-rate/lane analog bank of the table below: 22 ...
@@ -5573,7 +5605,8 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 	if (is_9607c)
 		luna_c7_diag(&rtl9602c_r960_ops, s);
 	seq_printf(s, "optics: backend=%s gn_cal_ready=%u upstream_ready=%u error=%d\n",
-		bosa_regs_live() ? "RTL8290B" : bosa_gn_identified ? "GN25L95" : "unknown",
+		bosa_regs_live() ? "RTL8290B" : bosa_gn_identified ? "GN25L95" :
+		bosa_ux_identified ? "UX3320" : "unknown",
 		bosa_cal_ready, luna_activation_ready, bosa_cal_error);
 	seq_printf(s, "version:     0x%02x\n", gpon_rd(GPON_VERSION) & GPON_VER_ID_MASK);
 	seq_printf(s, "reset:       0x%08x (soft_rst=%d rst_done=%d)\n",
@@ -9754,7 +9787,8 @@ static int luna_health_show(struct seq_file *s, void *v)
 		   luna_optical_init_error, READ_ONCE(gpon_fsm_state),
 		   active ? READ_ONCE(luna_health_los) : -1,
 		   optics_self_managed ? "self-managed" : bosa_regs_live() ? "RTL8290B" :
-		   bosa_gn_identified ? "GN25L95" : "unknown", READ_ONCE(o5loss.losses));
+		   bosa_gn_identified ? "GN25L95" : bosa_ux_identified ? "UX3320" : "unknown",
+		   READ_ONCE(o5loss.losses));
 	mutex_unlock(&bosa_lock);
 	return 0;
 }
@@ -10080,13 +10114,14 @@ static int __init rtl9602c_gpon_init(void)
 			       model);
 		else
 			rtl9607c_rev = rev;
-		skip_bosa = true;
+		/* No skip_bosa: the optic varies per board (unit 2: GN25L95/UX3320), the GN
+		 * probe at activation refuses any other part. */
 		/* Enable the switch-internal SMI master so the PHY-10 proxy can reach
 		 * the I2C-indirect hole (0xB0-0xD8) for the optical-module DDM read. */
 		iowrite32(ioread32(swcore_base + SW_IO_MODE_EN_9607C) | SW_MDX_M_EN,
 			  swcore_base + SW_IO_MODE_EN_9607C);
 		(void)ioread32(swcore_base + SW_IO_MODE_EN_9607C);
-		pr_info("luna-gpon: RTL9607C rev %c (MODEL_NAME_INFO 0x%08x), internal front-end (skip BOSA), SMI proxy on\n",
+		pr_info("luna-gpon: RTL9607C rev %c (MODEL_NAME_INFO 0x%08x), SMI proxy on\n",
 			'A' + rtl9607c_rev - LUNA_REV_A, model);
 	}
 

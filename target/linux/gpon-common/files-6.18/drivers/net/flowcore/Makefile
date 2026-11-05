@@ -43,14 +43,12 @@ obj-$(CONFIG_RTL9602C_ETH) += luna_gmac_logic.o
 obj-$(CONFIG_LUNA_ETH) += luna_gmac_logic.o
 obj-$(CONFIG_LUNA_ETH) += luna_flow_logic.o
 
-# The GN25L95 BOSA calibration: the ORDERED sequence and a fail-first executor,
-# both HW-decoupled.  Under BOTH GPON gates for the luna_gmac_logic.o reason --
-# the part is on the Cortina board today and on the Luna ones tomorrow, and an
-# object listed under one family's symbol alone links on one and breaks the
-# other.  Proven against stock on the real part by
+# BOSA calibration: ordered sequences and the fail-first executor they share
+# (gn25l95_cal_logic.o), one object per part, linked only for the parts the
+# board's layer declares.  Proven against stock by
 # dev/rtl9607c-test/gn25l95_cal_diff_test.c.
-obj-$(CONFIG_CORTINA_GPON) += gn25l95_cal_logic.o
-obj-$(CONFIG_LUNA_GPON) += gn25l95_cal_logic.o
+obj-$(CONFIG_GPON_OPTIC_GN25L95) += gn25l95_cal_logic.o
+obj-$(CONFIG_GPON_OPTIC_UX3320) += gn25l95_cal_logic.o ux3320_cal_logic.o
 
 # The OMCI WAN service model's VLAN half: the core DECIDES (drivers/net/gpon/
 # gpon_omci_vlan.h) and these two FILL struct gpon_vlan_ops.  Gated on each

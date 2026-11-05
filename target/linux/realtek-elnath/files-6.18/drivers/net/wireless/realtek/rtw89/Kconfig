@@ -44,6 +44,10 @@ config RTW89_8192XB
 config RTW89_8922A
 	tristate
 
+# The 802.11be (BE generation) MAC/PHY/efuse/PCI code: built only for a BE chip.
+config RTW89_GEN_BE
+	def_bool RTW89_8922A != n
+
 config RTW89_8851BE
 	tristate "Realtek 8851BE PCI wireless network (Wi-Fi 6) adapter"
 	depends on PCI

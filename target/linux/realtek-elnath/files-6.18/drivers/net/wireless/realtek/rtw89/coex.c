@@ -2989,7 +2989,8 @@ static void _set_gnt_v1(struct rtw89_dev *rtwdev, u8 phy_map,
 	}
 
 	if (!btc->ver->fcxosi) {
-		rtw89_mac_cfg_gnt_v2(rtwdev, &dm->gnt);
+		if (IS_ENABLED(CONFIG_RTW89_GEN_BE))
+			rtw89_mac_cfg_gnt_v2(rtwdev, &dm->gnt);
 		return;
 	}
 
@@ -4709,7 +4710,7 @@ static void _set_ant_v1(struct rtw89_dev *rtwdev, bool force_exec,
 static void _set_ant(struct rtw89_dev *rtwdev, bool force_exec,
 		     u8 phy_map, u8 type)
 {
-	if (rtwdev->chip->chip_id == RTL8922A)
+	if (IS_ENABLED(CONFIG_RTW89_GEN_BE) && rtwdev->chip->chip_id == RTL8922A)
 		_set_ant_v1(rtwdev, force_exec, phy_map, type);
 	else
 		_set_ant_v0(rtwdev, force_exec, phy_map, type);

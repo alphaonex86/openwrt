@@ -4,13 +4,10 @@ obj-$(CONFIG_RTW89_CORE) += rtw89_core.o
 rtw89_core-y += core.o \
 		mac80211.o \
 		mac.o \
-		mac_be.o \
 		phy.o \
-		phy_be.o \
 		fw.o \
 		cam.o \
 		efuse.o \
-		efuse_be.o \
 		regd.o \
 		sar.o \
 		coex.o \
@@ -21,6 +18,7 @@ rtw89_core-y += core.o \
 		util.o
 
 rtw89_core-$(CONFIG_PM) += wow.o
+rtw89_core-$(CONFIG_RTW89_GEN_BE) += mac_be.o phy_be.o efuse_be.o
 rtw89_core-$(CONFIG_RTW89_LEDS) += led.o
 
 obj-$(CONFIG_RTW89_8851B) += rtw89_8851b.o
@@ -96,7 +94,8 @@ rtw89_8922ae-objs := rtw8922ae.o
 rtw89_core-$(CONFIG_RTW89_DEBUG) += debug.o
 
 obj-$(CONFIG_RTW89_PCI) += rtw89_pci.o
-rtw89_pci-y := pci.o pci_be.o
+rtw89_pci-y := pci.o
+rtw89_pci-$(CONFIG_RTW89_GEN_BE) += pci_be.o
 
 obj-$(CONFIG_RTW89_USB) += rtw89_usb.o
 rtw89_usb-y := usb.o

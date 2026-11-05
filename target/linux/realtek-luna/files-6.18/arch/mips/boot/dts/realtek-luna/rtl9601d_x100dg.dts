@@ -101,7 +101,6 @@
  * k0 starts there and r0 is mtd5; the crashlog sits right behind k0 and is declared last. A RAM boot
  * maps its own rootfs through phram and names it root=/dev/mtdblock0, which wins over linux,rootfs. */
 &spi_nor {
-	compatible = "realtek,luna-spi-nor";
 	reg = <0x14000000 0x800000>, <0x18001200 0x10>;
 
 	partitions {

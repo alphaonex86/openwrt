@@ -122,7 +122,6 @@
  * are this unit's own /proc/mtd and U-Boot environment (8 MiB, one bank:
  * flashing bank 0 replaces stock, so the full NOR is dumped first). */
 &spi_nor {
-	compatible = "realtek,luna-spi-nor";
 	reg = <0x14000000 0x800000>, <0x18001200 0x10>;
 
 	partitions {

@@ -173,25 +173,14 @@
 	};
 
 	spi_nor: flash@14000000 {
+		/* 16 MB SPI-NOR: reads through the memory-mapped window,
+		 * erase/program through the SPI-F PIO block (luna_nor). */
+		compatible = "realtek,luna-spi-nor";
+		reg = <0x14000000 0x1000000>, <0x18001200 0x10>;
 		/*
-		 * 16 MB SPI-NOR, memory-mapped (physmap) at 0x14000000.
-		 *
-		 * READ-ONLY: this describes the controller's memory-map read
-		 * window only, so map_rom binds and the MTD carries
-		 * MTD_CAP_ROM. Program and erase live behind a separate
-		 * register interface (SoC "SPI-F Gen3" PIO block) for which no
-		 * driver exists yet -- until one does, nothing on this device
-		 * can be written and the board keeps no setting across a
-		 * reboot.
-		 */
-		compatible = "mtd-rom";
-		reg = <0x14000000 0x1000000>;
-		bank-width = <2>;
-		/*
-		 * The erase block, and it is LOAD-BEARING even on a read-only
-		 * mapping. drivers/mtd/chips/map_rom.c default_erasesize()
-		 * reads this property and, ABSENT IT, falls back to map->size
-		 * -- the whole 16 MB chip as ONE erase block. The squashfs
+		 * The erase block. A whole-chip erase block (what the earlier
+		 * read-only map_rom binding used when this was absent) breaks
+		 * the squashfs split. The squashfs
 		 * rootfs splitter rounds up to that block against the WHOLE
 		 * DEVICE (mtdsplit_squashfs.c: mtd_roundup_to_eb(part_offset +
 		 * squashfs_len, parent_mtd)), so a 3.2 MB rootfs rounded to

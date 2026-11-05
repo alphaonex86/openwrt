@@ -17,10 +17,9 @@
  *     addresses, so every witness above it is a phantom -- see
  *     dev/FINDING-g24w-gtc-window-returns-a-constant.md before touching an
  *     offset here.
- *   - Flash: READ-ONLY, claimed 2026-09-06 (the `mtd-rom` node below). It
- *     is what lets gpon-provision read this unit's own GPON_SN out of the
- *     vendor MIB in `config`, so the board announces ITS OWN serial with
- *     nothing on the kernel command line. Program/erase have no driver.
+ *   - Flash: luna_nor (node below). It is what lets gpon-provision read
+ *     this unit's own GPON_SN out of the vendor MIB in `config`, so the
+ *     board announces ITS OWN serial with nothing on the kernel command line.
  *   - Panel LEDs: PON, LOS and the four socket lamps through the SoC LED
  *     controller (the gpon node, at the end). PWR is a GPIO lamp and the
  *     GPIO block is still in the "DELIBERATELY ABSENT" list of
@@ -280,9 +279,8 @@
 	 *   "G3" driver): the vendor registers a physmap device whose resource
 	 *     ends at 0x17ffffff, and its READ path for any offset+len <= 16 MB
 	 *     is a plain memcpy from that window; the SPI-F PIO block at
-	 *     0x18001200 serves program/erase and parts above 16 MB only. So
-	 *     a read-only `mtd-rom` over the window IS the vendor's own read
-	 *     path minus the writes. Nothing to configure: the loader already
+	 *     0x18001200 serves program/erase and parts above 16 MB only. luna_nor
+	 *     reads through that same window. Nothing to configure: the loader already
 	 *     put the controller in MMIO read mode ("MMIO16-1/ModeC") to boot
 	 *     from it, and nothing in our image touches that mode.
 	 *   JEDEC id 5E4018 (both loader lines): capacity byte 0x18 ->
@@ -305,21 +303,9 @@
 		reg = <0x14000000 0x1000000>,	/* 16 MiB: JEDEC 5E4018 + the partition sum */
 		      <0x18001200 0x10>;
 		/*
-		 * 4: the width the vendor map declares (tier 3). It does not
-		 * alter the read path -- map_rom copies with memcpy_fromio at
-		 * any width -- so this records the vendor's bus, it chooses none.
-		 */
-		bank-width = <4>;
-
-		/*
 		 * MEASURED, and DIFFERENT from the X111W's declaration: this
 		 * board's /proc/mtd reports erasesize 0x1000 (4 KiB) on every
 		 * partition, and luna_nor erases in these sectors (opcode 0x20).
-		 * It was load-bearing on the earlier read-only mapping too --
-		 * map_rom falls back to the WHOLE CHIP as one erase block when
-		 * this property is absent, which makes the squashfs splitter
-		 * round a rootfs past the end of every partition and publish
-		 * rootfs_data at size 0.
 		 */
 		erase-size = <0x1000>;
 

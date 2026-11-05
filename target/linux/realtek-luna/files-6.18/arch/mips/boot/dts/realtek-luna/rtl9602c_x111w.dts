@@ -165,16 +165,9 @@
 	};
 };
 
+/* The OpenWrt overlay (rootfs_data, carved out of r0) persists; everything
+ * outside our own bank 0 stays read-only. */
 &spi_nor {
-	/*
-	 * Read through the memory-mapped window as before, and erase/program
-	 * through the controller's PIO block, so the OpenWrt overlay
-	 * (rootfs_data, carved out of r0) persists. Everything outside our own
-	 * bank 0 stays read-only.
-	 */
-	compatible = "realtek,luna-spi-nor";
-	reg = <0x14000000 0x1000000>, <0x18001200 0x10>;
-
 	partitions {
 		compatible = "fixed-partitions";
 		#address-cells = <1>;

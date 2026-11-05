@@ -36,8 +36,12 @@
  * (wrap/static_cfg/autosync/GLB/RXMAC) and does ONLY the CPU delivery chain -
  * leaving the GPHY<->MAC datapath exactly as U-Boot (working) left it.  Tests
  * whether our reconfig is the clobber.  Set via bootargs cortina_ni_rx.rx_skip_portcfg=1 */
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static bool rx_skip_portcfg;
 module_param(rx_skip_portcfg, bool, 0644);
+#else
+static const bool rx_skip_portcfg;
+#endif
 
 #if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static bool rx_debug;
@@ -49,6 +53,7 @@ static const bool rx_debug;	/* CONFIG_CORTINA_DEBUG off: dead code */
 
 /* ★ TEMPORARY DIAGNOSTIC (rx_frag_tap, 2026-07-27 - REVERT ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 2. */
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static int rx_frag_tap;
 module_param(rx_frag_tap, int, 0644);
 MODULE_PARM_DESC(rx_frag_tap,
@@ -58,6 +63,9 @@ static int rx_frag_tap_us = 20;
 module_param(rx_frag_tap_us, int, 0644);
 MODULE_PARM_DESC(rx_frag_tap_us,
 	"TEMP DIAG: delay before the rx_frag_tap re-read, microseconds (0 = control run)");
+#else
+static const int rx_frag_tap, rx_frag_tap_us;
+#endif
 
 static void cortina_ni_rx_frag_tap(struct net_device *ndev, const u8 *buf,
 				   u32 off, int len, u64 desc, u32 pa, u32 dlen,
@@ -65,10 +73,14 @@ static void cortina_ni_rx_frag_tap(struct net_device *ndev, const u8 *buf,
 
 /* ★ TEMPORARY DIAGNOSTIC (rx_ds_tap, 2026-07-28 - REVERT with ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 3. */
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static int rx_ds_tap;
 module_param(rx_ds_tap, int, 0644);
 MODULE_PARM_DESC(rx_ds_tap,
 	"TEMP DIAG: log descriptor+pool identity for the first N GPON downstream frames (HEADER_A lspid=PON or ldpid=L3_WAN), sampled before the PON/WAN delivery branches (0 = off)");
+#else
+static const int rx_ds_tap;
+#endif
 
 static void cortina_ni_rx_ds_tap(struct net_device *ndev, const u8 *buf,
 				 u32 off, int len, u64 desc, u32 pa, u32 dlen,
@@ -76,17 +88,25 @@ static void cortina_ni_rx_ds_tap(struct net_device *ndev, const u8 *buf,
 
 /* ★ TEMPORARY DIAGNOSTIC (P3 crc_ntfy tap, 2026-07-23 - ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 4. */
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static bool rx_crc_tap;
 module_param(rx_crc_tap, bool, 0644);
 MODULE_PARM_DESC(rx_crc_tap,
 	"TEMP DIAG: log the HW lookup CRC (HEADER_CPU crc_ntfy) of punted UDP:19555 frames");
+#else
+static const bool rx_crc_tap;
+#endif
 
 /* ★ TEMPORARY DIAGNOSTIC (P3 packet-STACK tap, 2026-07-23 - ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 5. */
+#if IS_ENABLED(CONFIG_CORTINA_DEBUG)
 static bool rx_stack_tap;
 module_param(rx_stack_tap, bool, 0644);
 MODULE_PARM_DESC(rx_stack_tap,
 	"TEMP DIAG: dump SW frame-stack vs HW HDR_I parse for punted UDP:19555 frames");
+#else
+static const bool rx_stack_tap;
+#endif
 
 /* ★ Decoupled datapath bring-up (default ON, 2026-07-22). The ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 6. */

@@ -3491,7 +3491,8 @@ int cortina_ni_l3fe_debug_show(struct seq_file *m, void *v)
 		 "stage-probe: boot cortina_ni.hw_ds_probe=1 (match-only, no datapath change) -> ds_hits>0 means ingress+hash are OK and the bug is the egress action; =2 (CPU_0 punt hit-action) only if 1 shows nothing\n");
 	seq_puts(m,
 		 "       echo 'latch [vector]' > /proc/cortina_l3fe  (default 2 = HDR_I before the packet editor, 0 = at ingress) then `cat` - captures ONE frame's descriptor and reports whether an installed entry's CRC32 is in it (stage B vs C)\n");
-	seq_puts(m, "       echo 'rawinst <crc32-hex> <crc16-hex> [mcgid]' (TEMP DIAG: install the rx_crc_tap HW-read crc verbatim) > /proc/cortina_l3fe\n");
+	if (IS_ENABLED(CONFIG_CORTINA_DEBUG))
+		seq_puts(m, "       echo 'rawinst <crc32-hex> <crc16-hex> [mcgid]' (TEMP DIAG: install the rx_crc_tap HW-read crc verbatim) > /proc/cortina_l3fe\n");
 	for (i = 0; i < CN_L3E_PROC_MAX_MANUAL; i++) {
 		struct cn_l3e_manual *e = &cn_l3e_manual[i];
 		u32 age = 0, key = 0, fib0 = 0;
@@ -3619,7 +3620,7 @@ ssize_t cortina_ni_l3fe_debug_write(struct file *file, const char __user *ubuf,
 		goto out;
 	}
 
-	if (!strcmp(cmd, "rawinst")) {
+	if (IS_ENABLED(CONFIG_CORTINA_DEBUG) && !strcmp(cmd, "rawinst")) {
 		/* ★ TEMPORARY DIAGNOSTIC (P3 crc_ntfy divergence hunt - remove
 		 * dev/MEASURED-cortina-ni-flowoffload.c.md sec 129. */
 		unsigned int c32, c16;

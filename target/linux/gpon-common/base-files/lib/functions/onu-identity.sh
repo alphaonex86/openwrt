@@ -29,12 +29,28 @@ cmdline_mac() {
 # written once by the installer on a unit with no factory partition whose
 # bootloader passes no boot parameter (operator, 2026-11-04). Empty when absent.
 unit_identity() {
+	local v
+	v=$(unit_volume onu_identity) || return 0
+	sed -n "s/^$1=//p" "$v" 2>/dev/null | head -n 1
+}
+
+# This unit's laser-driver calibration into $1: UBI "onu_calibration", its own stock
+# copy installed where stock keeps it in a filesystem we do not mount (2026-11-04).
+unit_calibration() {
+	local v
+	v=$(unit_volume onu_calibration) || { echo "no onu_calibration volume" >&2; return 1; }
+	head -c 1024 "$v" > "$1"
+}
+
+# The device node of this unit's UBI volume named $1; returns 1 when there is none.
+unit_volume() {
 	local d
 	for d in "${ONU_UBI_CLASS:-/sys/class/ubi}"/ubi*_*; do
-		[ "$(cat "$d/name" 2>/dev/null)" = onu_identity ] || continue
-		sed -n "s/^$1=//p" "${ONU_DEV:-/dev}/${d##*/}" 2>/dev/null | head -n 1
-		return
+		[ "$(cat "$d/name" 2>/dev/null)" = "$1" ] || continue
+		echo "${ONU_DEV:-/dev}/${d##*/}"
+		return 0
 	done
+	return 1
 }
 
 # This unit's MAC in the operator's order (2026-10-01): its factory config

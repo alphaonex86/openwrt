@@ -290,12 +290,13 @@ optical_from_unit() {
 	log "optical calibration from this unit:$vals"
 }
 
-# GN25L95: the host calibrates the part from this unit's rtkbosa file. A failed
+# GN25L95: the host calibrates the part from this unit's rtkbosa file (else its
+# onu_calibration volume). A failed
 # stage must not leave older bytes available to request_firmware.
 stage_gn_cal() {
 	local part="$1" tmp why=
 	tmp=$(mktemp -d /tmp/gpon-cal.XXXXXX) || return 1
-	if ! "$RTK" -p "$part" bosa_cal "$tmp/cal" 2>"$tmp/err" ||
+	if ! { "$RTK" -p "$part" bosa_cal "$tmp/cal" 2>"$tmp/err" || unit_calibration "$tmp/cal" 2>>"$tmp/err"; } ||
 	   ! gpon_cal_stage "$tmp/cal" "$tmp/cal.md5" "$BOSA_CAL_DST" 1024 2>>"$tmp/err"; then
 		why=$(cat "$tmp/err")
 		why=${why:-no reason given}

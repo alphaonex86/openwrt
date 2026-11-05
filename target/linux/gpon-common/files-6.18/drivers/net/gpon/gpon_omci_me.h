@@ -505,6 +505,7 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * which both our shells hardcode to
 					 * GPON_MCAST_GEM_PORT today */
 #define OMCI_ME_HSGQ_WAN_ACL	251	/* HSGQ vendor ME: WAN management ACL */
+#define OMCI_ME_LOOP_DETECT	253	/* mib_LoopDetect: every Realtek stock uploads it */
 #define OMCI_ME_CTC_LOID_AUTH	65530	/* 0xFFFA — CTC extension the OLT audits */
 #define OMCI_ME_CTC_EXT_MOP	65531	/* 0xFFFB — CTC extended multicast operations profile */
 

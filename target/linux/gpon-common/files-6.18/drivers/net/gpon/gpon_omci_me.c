@@ -872,6 +872,14 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(329, 4,  2, 0x0000),		/* #4  TCP/UDP pointer */
 	A_C(329, 5,  2, 0x0000),		/* #5  IANA assigned port */
 
+	/* ---- ME 253 loop detection (mib_LoopDetect), one per PPTP Ethernet UNI, never asked by an OLT;
+	 * origin: stock MIB upload of X100DG V2801RGW X111W G24W X400AXF (2026-10-30), all zero.  Widths
+	 * and OLT read/write access are the X111W plugin's (OMCI-simulate/me_attr_table.py) ---- */
+	A_POOL(253, 1, 1, 0),			/* #1  Admin state */
+	A_POOL(253, 2, 1, 0),			/* #2  ARC */
+	A_POOL(253, 3, 1, 0),			/* #3  ARC interval */
+	A_POOL(253, 4, 1, 0),			/* #4  Ethernet loop detect config */
+
 	/* ==== VENDOR MEs a board declares (extra-me-instances): each one OLT's, under its
 	 * CONFIG_OLT_<X> with its origin, never one nobody can place (olt_vendor_me_guard.py).  Widths are
 	 * its own plugins' (OMCI-simulate/me_attr_table.py on M225-260618; ME
@@ -1224,6 +1232,7 @@ bool omci_me_mutable(u16 class_id)
 	case OMCI_ME_NET_ADDR:
 	case OMCI_ME_AUTH_SECURITY:
 	case OMCI_ME_LARGE_STRING:
+	case OMCI_ME_LOOP_DETECT:
 #ifdef CONFIG_OLT_ZTE
 	case 65305:
 	case 65319:
@@ -1664,8 +1673,12 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		return;			/* validated equal to what we serve */
 	if (a->src == OMCI_SRC_STORE)
 		memcpy(e->body + a->v, v, a->size);
-	else if (a->src == OMCI_SRC_POOL)
+	else if (a->src == OMCI_SRC_POOL) {
 		memcpy(omci_pool_slot(o, a, inst)->v, v, a->size);
+		/* stock switches its loop detection on ME 253 #4; ours serves it back: COUNTED */
+		if (a->class_id == OMCI_ME_LOOP_DETECT && a->attr == 4)
+			o->vlan.attr_owed++;
+	}
 	else if (a->src == OMCI_SRC_OLT_G) {
 		memcpy(o->olt_g + a->v, v, a->size);
 		if (a->v == 0 && a->size >= sizeof(o->olt_vendor_seen)) {
@@ -2211,6 +2224,7 @@ static const struct {
 	{ OMCI_ME_PPTP_POTS_UNI, 0, OMCI_MI_POTS },
 	{ OMCI_ME_OLT_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_IP_HOST, 0, OMCI_MI_IP_HOST },
+	{ OMCI_ME_LOOP_DETECT, 0, OMCI_MI_PPTP },
 	{ OMCI_ME_ONU_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_ONU2_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_TCONT, 0, OMCI_MI_TCONT },
@@ -2278,6 +2292,18 @@ static u16 omci_mi_inst(const struct omci_onu *o, u8 from, u16 inst, u16 i)
 	default:
 		return inst;
 	}
+}
+
+/* A class whose instances follow a board inventory holds exactly those, vendor or not. */
+static bool omci_inventory_class(u16 class_id)
+{
+	unsigned int c;
+
+	for (c = 0; c < sizeof(omci_mib_classes) / sizeof(omci_mib_classes[0]); c++)
+		if (omci_mib_classes[c].class_id == class_id &&
+		    omci_mib_classes[c].from != OMCI_MI_ONE)
+			return true;
+	return false;
 }
 
 #define OMCI_UPLOAD_VALUE_LEN 26
@@ -3083,7 +3109,8 @@ bool omci_inst_exists(struct omci_onu *o, u16 class_id, u16 inst)
 {
 	u16 i;
 
-	if (omci_vendor_class(class_id) && !omci_absent_until_created(class_id))
+	if (omci_vendor_class(class_id) && !omci_absent_until_created(class_id) &&
+	    !omci_inventory_class(class_id))
 		return true;
 	if (omci_store_find(o, class_id, inst))
 		return true;

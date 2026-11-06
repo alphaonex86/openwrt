@@ -170,6 +170,11 @@ config KERNEL_UBSAN_BOUNDS
 	  {str,mem}*cpy() family of functions (that is addressed by
 	  FORTIFY_SOURCE).
 
+config KERNEL_UBSAN_BOUNDS_STRICT
+	bool "Strict flexible-array bounds checking"
+	depends on KERNEL_UBSAN_BOUNDS
+	default n
+
 config KERNEL_UBSAN_TRAP
 	bool "On Sanitizer warnings, abort the running kernel code"
 	depends on KERNEL_UBSAN
@@ -1031,6 +1036,43 @@ config KERNEL_SLUB_DEBUG_ON
 	help
 	  This enables by default sanity_checks, red_zone, poison and store_user
 	  debugging options for all caches.
+
+config KERNEL_DEBUG_KMEMLEAK
+	bool "Kernel memory leak detector (/sys/kernel/debug/kmemleak)"
+	select KERNEL_DEBUG_KERNEL
+	select KERNEL_DEBUG_FS
+	default n
+	help
+	  Scans memory for allocations nothing points to any more and reports
+	  them. Costs RAM per tracked object: diagnostic images only.
+
+config KERNEL_DEBUG_KMEMLEAK_MEM_POOL_SIZE
+	int "Kmemleak early object pool"
+	depends on KERNEL_DEBUG_KMEMLEAK
+	default 16000
+
+config KERNEL_DEBUG_KMEMLEAK_DEFAULT_OFF
+	bool "Kmemleak off until kmemleak=on"
+	depends on KERNEL_DEBUG_KMEMLEAK
+	default n
+
+config KERNEL_DEBUG_KMEMLEAK_AUTO_SCAN
+	bool "Kmemleak scans every 10 minutes"
+	depends on KERNEL_DEBUG_KMEMLEAK
+	default y
+
+config KERNEL_KMEMLEAK_TEST
+	bool "Kmemleak self-test module"
+	depends on KERNEL_DEBUG_KMEMLEAK
+	default n
+
+config KERNEL_KFENCE
+	bool "KFENCE sampling memory-error detector"
+	depends on aarch64 || arm || x86_64
+	default n
+	help
+	  Low-overhead sampling detector of out-of-bounds and use-after-free
+	  accesses. Diagnostic images only.
 
 config KERNEL_STACKDEPOT_MAX_FRAMES
 	int

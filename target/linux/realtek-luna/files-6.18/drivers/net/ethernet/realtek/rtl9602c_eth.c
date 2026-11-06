@@ -1419,9 +1419,15 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 		dma_unmap_single(ep->dev, q->buf_dma[i], RX_BUF_SIZE,
 				 DMA_FROM_DEVICE);
 
+		/* A frame longer than one buffer spans several descriptors; only a
+		 * whole one (first AND last segment) is a frame, as stock drops the rest. */
+		if ((opts1 & (D_FS | D_LS)) != (D_FS | D_LS)) {
+			ndev->stats.rx_length_errors++;
+			ndev->stats.rx_errors++;
+			dev_kfree_skb_any(skb);
 		/* DS-OMCI classifier + BOTH-ends length guard: hoisted to ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 71. */
-		if (rtl9602c_rx_is_ds_omci(ep->swm->rx_layout, ep->omci_trap_on,
+		} else if (rtl9602c_rx_is_ds_omci(ep->swm->rx_layout, ep->omci_trap_on,
 					   q->ring[i].opts2,
 					   q->ring[i].opts3,
 					   skb->data, len, ep->swm->pon_port,

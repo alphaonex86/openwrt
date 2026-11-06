@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * ZTE ZX279128: dual Cortex-A9 MPCore (private peripherals at 0x800000), PL310 L2 at 0xc00000. Addresses and
+ * interrupts as the unit's own stock device tree and console show them.
+ */
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "zte,zx279128";
+	interrupt-parent = <&gic>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		enable-method = "zte,zx279128-smp";
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a9";
+			reg = <0>;
+			next-level-cache = <&l2>;
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a9";
+			reg = <1>;
+			next-level-cache = <&l2>;
+		};
+	};
+
+	/* PERIPHCLK: the stock sched_clock and watchdog both run "at 400MHz". */
+	periph_clk: periph-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+	};
+
+	/* U-Boot's 115200 divisor (IBRD 13, FBRD 36) puts the UART reference at 25 MHz. */
+	uart_clk: uart-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+
+	/* topcrm 0x44 bit 0 resets the whole SoC, as the stock kernel's restart does. */
+	reboot {
+		compatible = "syscon-reboot";
+		regmap = <&topcrm>;
+		offset = <0x44>;
+		value = <1>;
+		mask = <1>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		scu@800000 {
+			compatible = "arm,cortex-a9-scu";
+			reg = <0x800000 0x100>;
+		};
+
+		gic: interrupt-controller@801000 {
+			compatible = "arm,cortex-a9-gic";
+			#interrupt-cells = <3>;
+			interrupt-controller;
+			reg = <0x801000 0x1000>, <0x800100 0x100>;
+		};
+
+		timer@800200 {
+			compatible = "arm,cortex-a9-global-timer";
+			reg = <0x800200 0x20>;
+			interrupts = <GIC_PPI 11 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&periph_clk>;
+		};
+
+		l2: cache-controller@c00000 {
+			compatible = "arm,pl310-cache";
+			reg = <0xc00000 0x1000>;
+			cache-unified;
+			cache-level = <2>;
+			arm,data-latency = <2 2 2>;
+			arm,tag-latency = <2 2 2>;
+			arm,double-linefill = <1>;
+			arm,double-linefill-incr = <0>;
+		};
+
+		topcrm: syscon@94000000 {
+			compatible = "zte,zx279128-topcrm", "syscon";
+			reg = <0x94000000 0x1000>;
+		};
+
+		/* A PL011 at ZTE register offsets: the periphid selects that layout in amba-pl011. */
+		uart0: serial@94405000 {
+			compatible = "arm,pl011", "arm,primecell";
+			arm,primecell-periphid = <0x001feffe>;
+			reg = <0x94405000 0x1000>;
+			interrupts = <GIC_SPI 10 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&uart_clk>, <&uart_clk>;
+			clock-names = "uartclk", "apb_pclk";
+		};
+
+		uart1: serial@94406000 {
+			compatible = "arm,pl011", "arm,primecell";
+			arm,primecell-periphid = <0x001feffe>;
+			reg = <0x94406000 0x1000>;
+			interrupts = <GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&uart_clk>, <&uart_clk>;
+			clock-names = "uartclk", "apb_pclk";
+			status = "disabled";
+		};
+	};
+};

@@ -70,9 +70,11 @@
 
 /* ---- bring-up knobs (live-tunable; the datapath framing is HW-uncertain on
  * first contact, so expose the few values most likely to need a tweak) ------ */
-static int rx_prefix = 2;
-module_param(rx_prefix, int, 0644);
-MODULE_PARM_DESC(rx_prefix, "bytes the CPU-port prepends ahead of each RX frame (stripped)");
+/* MEASURED (G24W ARP 2026-11-06: a 60-byte frame read len=64, its 2-byte prefix ahead of it): the
+ * descriptor length counts the frame AND its FCS, not the prefix -- a hardware fact, not a knob. */
+static const struct eth_rx_layout luna_eth_rx_layout = {
+	.prefix = 2, .fcs = ETH_RX_FCS_IN_LEN, .buf = RX_BUF_SIZE,
+};
 
 static unsigned int backstop_ms = 10;
 module_param(backstop_ms, uint, 0644);
@@ -2074,7 +2076,8 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 		u32 opts1 = q->ring[i].opts1;
 		struct sk_buff *skb, *fresh;
 		dma_addr_t fresh_dma;
-		u32 len;
+		struct eth_rx_frame fr = { 0 };
+		enum eth_rx_verdict geom;
 
 		if (opts1 & D_OWN)		/* still HW-owned */
 			break;
@@ -2090,22 +2093,25 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 			continue;
 		}
 
-		len = opts1 & RXD_LEN_MASK;
+		/* Only a whole frame (first AND last segment) is one: a frame longer than the
+		 * buffer spans several descriptors. */
+		geom = eth_rx_frame_geom(&luna_eth_rx_layout, eth_rx_dlen(opts1, RXD_LEN_MASK),
+					 (opts1 & (D_FS | D_LS)) == (D_FS | D_LS), &fr);
 		skb = q->skb[i];
 		dma_unmap_single(ep->dev, q->buf_dma[i], RX_BUF_SIZE,
 				 DMA_FROM_DEVICE);
 
-		if (rx_dump > 0 && ep->rx_dumped < rx_dump && len) {
+		if (rx_dump > 0 && ep->rx_dumped < rx_dump) {
 			ep->rx_dumped++;
 			/* The descriptor, beside the bytes. opts3[19:16] is the ...
 			 * dev/MEASURED-luna_eth.c.md sec 43. */
 			dev_info(ep->dev,
-				 "rx0 desc: opts1=%08x opts2=%08x opts3=%08x len=%u (src_port=%u reason=%u)\n",
+				 "rx0 desc: opts1=%08x opts2=%08x opts3=%08x frame=%u geom=%d (src_port=%u reason=%u)\n",
 				 opts1, q->ring[i].opts2, q->ring[i].opts3,
-				 len, luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, q->ring[i].opts3),
+				 fr.len, geom, luna_gmac_rx_src_port(ep->c->sw_map->rx_layout, q->ring[i].opts3),
 				 (q->ring[i].opts2 >> 21) & 0xff);
 			print_hex_dump(KERN_INFO, "rx0: ", DUMP_PREFIX_OFFSET,
-				       16, 1, skb->data, min_t(u32, len, 32), false);
+				       16, 1, skb->data, 32, false);
 		}
 
 		/* One line per DISTINCT cpu-tag reason, ever.  See the field. */
@@ -2115,9 +2121,9 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 			if (!(ep->rx_reason_seen[rsn >> 5] & BIT(rsn & 31))) {
 				ep->rx_reason_seen[rsn >> 5] |= BIT(rsn & 31);
 				netdev_info(ndev,
-					    "rx cpu-tag reason %u seen (opts2=%08x opts3=%08x len=%u); this chip traps DS OMCI as %u\n",
+					    "rx cpu-tag reason %u seen (opts2=%08x opts3=%08x frame=%u); this chip traps DS OMCI as %u\n",
 					    rsn, q->ring[i].opts2,
-					    q->ring[i].opts3, len,
+					    q->ring[i].opts3, fr.len,
 					    ep->c->sw_map->omci_cpu_reason);
 			}
 		}
@@ -2131,8 +2137,8 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 			if (!(ep->rx_src_port_seen & BIT(sp))) {
 				ep->rx_src_port_seen |= BIT(sp);
 				netdev_info(ndev,
-					    "rx ingress port %u seen (opts3=%08x len=%u); this chip's fibre port is %u, CPU port %u\n",
-					    sp, q->ring[i].opts3, len,
+					    "rx ingress port %u seen (opts3=%08x frame=%u); this chip's fibre port is %u, CPU port %u\n",
+					    sp, q->ring[i].opts3, fr.len,
 					    ep->c->sw_map->pon_port,
 					    ep->c->sw_map->cpu_port);
 			}
@@ -2148,8 +2154,8 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 			if (!(ep->rx_pon_sid_seen[sid >> 5] & BIT(sid & 31))) {
 				ep->rx_pon_sid_seen[sid >> 5] |= BIT(sid & 31);
 				netdev_info(ndev,
-					    "rx PON stream %u seen (opts3=%08x len=%u); OMCC is %u, WAN data is %u, multicast is %u\n",
-					    sid, q->ring[i].opts3, len,
+					    "rx PON stream %u seen (opts3=%08x frame=%u); OMCC is %u, WAN data is %u, multicast is %u\n",
+					    sid, q->ring[i].opts3, fr.len,
 					    ep->omci_sid, GPON_DATA_FLOW,
 					    GPON_MCAST_FLOW);
 			}
@@ -2158,21 +2164,22 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 		/* DS OMCI FIRST, before the Ethernet verdicts: an OMCI PDU has no DA, no
 		 * SA and no ethertype, so eth_type_trans() would invent a protocol from
 		 * bytes 12-13 of a G.988 header and the bridge would drop it silently. */
-		if (luna_gmac_rx_is_ds_omci(ep->c->sw_map->rx_layout,
+		if (geom != ETH_RX_OK) {
+			ndev->stats.rx_length_errors++;
+			ndev->stats.rx_errors++;
+			dev_kfree_skb_any(skb);
+		} else if (luna_gmac_rx_is_ds_omci(ep->c->sw_map->rx_layout,
 					    ep->omci_trap_on,
 					    q->ring[i].opts2,
-					    q->ring[i].opts3, len,
+					    q->ring[i].opts3, fr.off + fr.len,
 					    ep->c->sw_map->omci_cpu_reason,
-					    (unsigned int)rx_prefix,
-					    RX_BUF_SIZE)) {
+					    fr.off, RX_BUF_SIZE)) {
 			ep->dbg_omci_rx++;
-			ep->dbg_omci_rxlen = len - (u32)rx_prefix;
-			luna_eth_omci_input(ep, skb->data + rx_prefix,
-					    len - (u32)rx_prefix);
+			ep->dbg_omci_rxlen = fr.len;
+			luna_eth_omci_input(ep, skb->data + fr.off, fr.len);
 			dev_kfree_skb_any(skb);
-		} else if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF, len,
-					   (u32)rx_prefix + ETH_HLEN,
-					   RX_BUF_SIZE)) {
+		} else if (luna_gmac_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF, fr.off + fr.len,
+					   fr.off + ETH_HLEN, RX_BUF_SIZE)) {
 			ndev->stats.rx_errors++;
 			dev_kfree_skb_any(skb);
 		} else {
@@ -2180,9 +2187,7 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 			 *   [front prefix][DA][SA][switch tag][ethertype][payload]
 			 * Strip the fixed front prefix, then excise the 8-byte 0x8899
 			 * switch tag (if present) by sliding DA+SA over it. */
-			skb_put(skb, len);
-			if (rx_prefix)
-				skb_pull(skb, rx_prefix);
+			eth_rx_frame_put(skb, &fr);
 			/* Tag classifier hoisted to flowcore; the excision
 			 * memmove/skb_pull below stay -- buffer surgery, not
 			 * a decision. */
@@ -2221,9 +2226,10 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 					luna_mcast_untag(skb, rdev);
 				}
 				/* NAPI poll context: use the receive path, not netif_rx. */
+				luna_rx_len_note(skb->data, skb->len, rdev == ep->wan_ndev);
 				skb->protocol = eth_type_trans(skb, rdev);
 				rdev->stats.rx_packets++;
-				rdev->stats.rx_bytes += len;
+				rdev->stats.rx_bytes += fr.len;
 				napi_gro_receive(&ep->napi, skb);
 			}
 		}
@@ -2516,8 +2522,8 @@ static int eth_hw_start(struct luna_eth *ep)
 	mutex_lock(&luna_gphy_lock);
 	survey_ep = ep;
 	mutex_unlock(&luna_gphy_lock);
-	netdev_info(ndev, "up: irq=%d rx_prefix=%d backstop=%ums copper_phy=%d rtl8221b=%d\n",
-		    ep->irq, rx_prefix, backstop_ms, copper_phy, rtl8221b_phy);
+	netdev_info(ndev, "up: irq=%d rx_prefix=%u backstop=%ums copper_phy=%d rtl8221b=%d\n",
+		    ep->irq, luna_eth_rx_layout.prefix, backstop_ms, copper_phy, rtl8221b_phy);
 	ep->hw_up = true;
 	luna_gpon_nic_reset_end();
 	return 0;

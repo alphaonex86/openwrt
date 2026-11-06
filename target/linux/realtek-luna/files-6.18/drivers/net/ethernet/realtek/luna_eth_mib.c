@@ -101,6 +101,12 @@ struct luna_mib_state {
 };
 static struct luna_mib_state luna_mib;
 
+struct luna_rx_len luna_rx_len;
+EXPORT_SYMBOL_GPL(luna_rx_len);
+static const char *const luna_rx_len_names[] = {
+	"rx_len_long_lan", "rx_len_short_lan", "rx_len_long_wan", "rx_len_short_wan",
+};
+
 static bool luna_mib_has_rx(const struct luna_mib_state *s)
 {
 	return s->map && s->map->rx_mib && s->map->n_mib_ports;
@@ -117,8 +123,9 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 	       (luna_mib_has_rx(s) ? ARRAY_SIZE(luna_mib_rx) : 0);
 }
 
-/* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map. */
-#define LUNA_MIB_ROLES	2
+/* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map;
+ * then the received-frame length witnesses. */
+#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names))
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
@@ -163,6 +170,8 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 
 	ethtool_puts(&data, "pon_port");
 	ethtool_puts(&data, "cpu_port");
+	for (i = 0; i < ARRAY_SIZE(luna_rx_len_names); i++)
+		ethtool_puts(&data, luna_rx_len_names[i]);
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)
@@ -182,8 +191,13 @@ static void luna_mib_get_stats(struct net_device *ndev,
 
 	if (!n)
 		return;
+	BUILD_BUG_ON(ARRAY_SIZE(luna_rx_len_names) != sizeof(luna_rx_len) / sizeof(u64));
 	*data++ = s->map->pon_port;
 	*data++ = s->map->cpu_port;
+	*data++ = luna_rx_len.long_lan;
+	*data++ = luna_rx_len.short_lan;
+	*data++ = luna_rx_len.long_wan;
+	*data++ = luna_rx_len.short_wan;
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)

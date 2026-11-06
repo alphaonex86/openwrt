@@ -222,6 +222,10 @@ static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
 #define OMCI_RESV	2	/* LAN xmit stops this many slots early so the sparse shared-ring OMCI inject always has room (never dropped) */
 #define DUMMY_RING_SIZE	4	/* idle filler armed on the unused HW TX rings (gap rings) */
 #define RX_CPU_PREFIX	2	/* switch CPU-port prepends a 2-byte offset word on RX */
+/* MEASURED (field X111W capture 2026-11-06): the descriptor length counts the frame AND its FCS, not the prefix. */
+static const struct eth_rx_layout rtl9602c_rx_layout = {
+	.prefix = RX_CPU_PREFIX, .fcs = ETH_RX_FCS_IN_LEN, .buf = RX_BUF_SIZE,
+};
 /* TX_CPUTAG picks the CPU->switch egress method: 1 = prepend ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 13. */
 #define TX_CPUTAG	0
@@ -1397,7 +1401,8 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 		u32 opts1 = q->ring[i].opts1;
 		struct sk_buff *skb, *fresh;
 		dma_addr_t fresh_dma;
-		u32 len;
+		struct eth_rx_frame fr = { 0 };
+		enum eth_rx_verdict geom;
 
 		if (opts1 & D_OWN)		/* still HW-owned: nothing more */
 			break;
@@ -1414,14 +1419,15 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 			continue;
 		}
 
-		len = (opts1 & RXD_LEN_MASK);
+		/* A frame longer than one buffer spans several descriptors; only a
+		 * whole one (first AND last segment) is a frame, as stock drops the rest. */
+		geom = eth_rx_frame_geom(&rtl9602c_rx_layout, eth_rx_dlen(opts1, RXD_LEN_MASK),
+					 (opts1 & (D_FS | D_LS)) == (D_FS | D_LS), &fr);
 		skb = q->skb[i];
 		dma_unmap_single(ep->dev, q->buf_dma[i], RX_BUF_SIZE,
 				 DMA_FROM_DEVICE);
 
-		/* A frame longer than one buffer spans several descriptors; only a
-		 * whole one (first AND last segment) is a frame, as stock drops the rest. */
-		if ((opts1 & (D_FS | D_LS)) != (D_FS | D_LS)) {
+		if (geom != ETH_RX_OK) {
 			ndev->stats.rx_length_errors++;
 			ndev->stats.rx_errors++;
 			dev_kfree_skb_any(skb);
@@ -1430,21 +1436,19 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 		} else if (rtl9602c_rx_is_ds_omci(ep->swm->rx_layout, ep->omci_trap_on,
 					   q->ring[i].opts2,
 					   q->ring[i].opts3,
-					   skb->data, len, ep->swm->pon_port,
+					   skb->data, fr.off + fr.len, ep->swm->pon_port,
 					   ep->swm->omci_cpu_reason,
-					   RX_CPU_PREFIX, RX_BUF_SIZE)) {
+					   fr.off, RX_BUF_SIZE)) {
 			/* DS OMCI on the OMCC. Capture for /proc, then hand the raw G.988
 			 * message (prefix stripped) to the responder. */
 			ep->dbg_omci_rx++;
-			ep->dbg_omci_rxlen = len - RX_CPU_PREFIX;
-			memcpy(ep->dbg_omci_rxbuf, skb->data + RX_CPU_PREFIX,
-			       min_t(unsigned int, len - RX_CPU_PREFIX,
-				     sizeof(ep->dbg_omci_rxbuf)));
-			rtl9602c_eth_omci_input(ep, skb->data + RX_CPU_PREFIX,
-						len - RX_CPU_PREFIX);
+			ep->dbg_omci_rxlen = fr.len;
+			memcpy(ep->dbg_omci_rxbuf, skb->data + fr.off,
+			       min_t(unsigned int, fr.len, sizeof(ep->dbg_omci_rxbuf)));
+			rtl9602c_eth_omci_input(ep, skb->data + fr.off, fr.len);
 			dev_kfree_skb_any(skb);
 		} else if (rtl9602c_rx_frame_bad(opts1, RXD_CRCERR | RXD_RCDF,
-						 len, RX_CPU_PREFIX,
+						 fr.off + fr.len, fr.off,
 						 RX_BUF_SIZE)) {
 			/* bad-frame verdict hoisted to flowcore: completes the
 			 * RX classification trio fuzz_rx.c drives on x86 */
@@ -1455,17 +1459,16 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 			struct net_device *rdev = ndev;	/* receive netdev: eth0, or gpon0 for PON-port WAN frames */
 
 			ep->dbg_good++;
-			/* Do NOT software-strip a 4-byte FCS here: on this GMAC the ...
-			 * dev/MEASURED-rtl9602c_eth.c.md sec 72. */
-			skb_put(skb, len);
-			/* Capture the raw frame (pre-pull) for /proc diag. */
-			ep->dbg_rxlen = len;
+			/* Capture the raw frame (prefix included) for /proc diag; the frame itself
+			 * is what rtl9602c_rx_layout says, no prefix and no FCS. */
+			ep->dbg_rxlen = fr.len;
 			memcpy(ep->dbg_rxbuf, skb->data,
-			       min_t(unsigned int, len, sizeof(ep->dbg_rxbuf)));
+			       min_t(unsigned int, fr.off + fr.len, sizeof(ep->dbg_rxbuf)));
+			eth_rx_frame_put(skb, &fr);
 			/* opts3 src_port_num [19:16] = ingress port. WAN demux: ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 131. */
 			{
-				const u8 *dst = skb->data + RX_CPU_PREFIX;
+				const u8 *dst = skb->data;
 				unsigned int sp = luna_gmac_rx_src_port(ep->swm->rx_layout,
 						       q->ring[i].opts3);
 
@@ -1484,7 +1487,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 				 * it routed. dst = eth hdr; [12:13]=ethertype 0x0800,
 				 * [23]=IP proto 0x11(UDP), [36:37]=UDP dst port 0x0044(68). */
 				if (IS_ENABLED(CONFIG_LUNA_DEBUG) &&
-				    len >= RX_CPU_PREFIX + 38 &&
+				    fr.len >= 38 &&
 				    dst[12] == 0x08 && dst[13] == 0x00 &&
 				    dst[23] == 0x11 &&
 				    dst[36] == 0x00 && dst[37] == 0x44)
@@ -1492,9 +1495,6 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 						sp, q->ring[i].opts3, dst,
 						rdev == ep->wan_ndev ? "gpon0" : "host");
 			}
-			/* The switch CPU port prepends a 2-byte offset word ahead of ...
-			 * dev/MEASURED-rtl9602c_eth.c.md sec 74. */
-			skb_pull(skb, RX_CPU_PREFIX);
 			if (rdev == ep->wan_ndev) {
 				luna_vlan_note(GPON_VLAN_RX, skb);
 				luna_mcast_untag(skb, rdev);
@@ -1504,9 +1504,10 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 				dev_kfree_skb_any(skb);
 				goto rx_rearm;
 			}
+			luna_rx_len_note(skb->data, skb->len, rdev == ep->wan_ndev);
 			skb->protocol = eth_type_trans(skb, rdev);
 			rdev->stats.rx_packets++;
-			rdev->stats.rx_bytes += len;
+			rdev->stats.rx_bytes += fr.len;
 			/* NAPI poll context: napi_gro_receive, not netif_rx -- which ...
 			 * dev/MEASURED-rtl9602c_eth.c.md sec 75. */
 			if (napi_ctx)

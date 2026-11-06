@@ -296,6 +296,7 @@ obj-$(CONFIG_GPON_REGSEQ) += gpon_regseq.o
 # answer.  Gated: only an OLT target selects it (CONFIG_GPON_OLT_ROLE).
 obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_ploam.o
 obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_omci.o
+obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_platform.o
 
 # gpon_flow.o -- "which flow is this", decided once for every family.
 # ⚠ NOT in the strict host-buildable subset: it uses Linux's flow-offload API

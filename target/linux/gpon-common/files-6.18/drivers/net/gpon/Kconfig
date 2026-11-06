@@ -189,7 +189,8 @@ config GPON_OLT_ROLE
 	depends on GPON_CORE
 	help
 	  The OLT side of G.984.3 activation and G.988 provisioning
-	  (gpon_olt_ploam.c, gpon_olt_omci.c).  Selected only by an OLT
+	  (gpon_olt_ploam.c, gpon_olt_omci.c) and the contract every OLT
+	  hardware port registers through (gpon_olt_platform.c).  Selected only by an OLT
 	  target; an ONU build carries none of it.  Until one exists,
 	  dev/rtl9607c-test compiles and fuzzes it on x86.
 

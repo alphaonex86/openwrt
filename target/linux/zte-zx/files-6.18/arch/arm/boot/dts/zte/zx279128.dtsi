@@ -102,6 +102,49 @@
 			reg = <0x94000000 0x1000>;
 		};
 
+		/* GPIO 0..95, 16 lines per bank (GPIO n = bank n / 16, line n % 16), as the stock kernel maps them. */
+		gpio0: gpio@94404000 {
+			compatible = "zte,zx279128-gpio";
+			reg = <0x94404000 0x40>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio1: gpio@94404040 {
+			compatible = "zte,zx279128-gpio";
+			reg = <0x94404040 0x40>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio2: gpio@94404080 {
+			compatible = "zte,zx279128-gpio";
+			reg = <0x94404080 0x40>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio3: gpio@944040c0 {
+			compatible = "zte,zx279128-gpio";
+			reg = <0x944040c0 0x40>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio4: gpio@94404100 {
+			compatible = "zte,zx279128-gpio";
+			reg = <0x94404100 0x40>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio5: gpio@94404140 {
+			compatible = "zte,zx279128-gpio";
+			reg = <0x94404140 0x40>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
 		/* A PL011 at ZTE register offsets: the periphid selects that layout in amba-pl011. */
 		uart0: serial@94405000 {
 			compatible = "arm,pl011", "arm,primecell";

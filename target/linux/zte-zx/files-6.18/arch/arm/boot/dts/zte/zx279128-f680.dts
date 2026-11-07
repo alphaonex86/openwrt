@@ -21,3 +21,17 @@
 		reg = <0x40000000 0x8000000>;
 	};
 };
+
+/*
+ * The optics' TX switch: GPIO 72, the stock board table's optical-TX entry, which the stock firmware
+ * drives LOW to transmit and HIGH to stop. This image has no GPON stack to key the laser, so it holds
+ * the transmitter off from the GPIO probe on: an unkeyed laser is not an idle one on a shared splitter.
+ */
+&gpio4 {
+	pon-tx-off-hog {
+		gpio-hog;
+		gpios = <8 0>;
+		output-high;
+		line-name = "pon-tx-off";
+	};
+};

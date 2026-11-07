@@ -68,7 +68,7 @@ static const int rx_frag_tap, rx_frag_tap_us;
 #endif
 
 static void cortina_ni_rx_frag_tap(struct net_device *ndev, const u8 *buf,
-				   u32 off, int len, u64 desc, u32 pa, u32 dlen,
+				   u32 off, int len, u64 desc, u32 pa,
 				   u32 hdra_lo, const u8 *copied);
 
 /* ★ TEMPORARY DIAGNOSTIC (rx_ds_tap, 2026-07-28 - REVERT with ...
@@ -83,7 +83,7 @@ static const int rx_ds_tap;
 #endif
 
 static void cortina_ni_rx_ds_tap(struct net_device *ndev, const u8 *buf,
-				 u32 off, int len, u64 desc, u32 pa, u32 dlen,
+				 u32 off, int len, u64 desc, u32 pa,
 				 u32 hdra_hi, u32 hdra_lo);
 
 /* ★ TEMPORARY DIAGNOSTIC (P3 crc_ntfy tap, 2026-07-23 - ...
@@ -335,19 +335,6 @@ struct gpon_vlan_census cortina_vlan_census;
 u8 cortina_mcast_ds_control;
 EXPORT_SYMBOL_GPL(cortina_mcast_ds_control);
 
-/* The tag bytes to cut from a WAN frame: a multicast outer tag the OLT says to strip and no VLAN netdev claims. */
-static unsigned int cortina_ni_rx_mcast_cut(const u8 *f, unsigned int len, struct net_device *wan)
-{
-	int vid = gpon_mcast_ds_strip_vid(f, len, READ_ONCE(cortina_mcast_ds_control));
-	bool claimed;
-
-	if (vid < 0)
-		return 0;
-	rcu_read_lock();
-	claimed = __vlan_find_dev_deep_rcu(wan, htons(ETH_P_8021Q), vid);
-	rcu_read_unlock();
-	return claimed ? 0 : VLAN_HLEN;
-}
 EXPORT_SYMBOL_GPL(cortina_vlan_census);
 
 void cortina_ni_pon_wan_ndev_set(struct net_device *ndev)
@@ -606,11 +593,7 @@ static noinline void cortina_ni_rx_stack_tap(struct cortina_ni *ni,
 static inline void cortina_ni_rx_deliver(struct cortina_ni_rx *rx, struct sk_buff *skb,
 					 struct net_device *dev, bool wan)
 {
-	int excess = eth_rx_len_note(&rx->rx_len, skb->data, skb->len, wan);
-
-	if (unlikely(excess))
-		pr_warn_once("cortina-ni: a received %s frame is %d byte(s) off its IP length (%u B)\n",
-			     wan ? "WAN" : "LAN", excess, skb->len);
+	eth_rx_len_check(&rx->rx_len, "cortina-ni", skb->data, skb->len, wan);
 	skb_record_rx_queue(skb, onu_rx_is_control(skb->data, skb->len) ?
 			    ONU_RX_QUEUE_CONTROL : ONU_RX_QUEUE_DATA);
 	skb->protocol = eth_type_trans(skb, dev);
@@ -657,6 +640,16 @@ static inline struct eth_rx_layout ca_ni_rx_layout_of(u64 desc, u32 hdra_hi, u32
 
 	l.buf = buf_max;
 	return l;
+}
+
+/* A chain continuation's bytes start at +0x40, or past a CPU header when rx_chain_rest_hdra says one is there. */
+static inline struct eth_rx_chain_geom ca_ni_rx_chain_geom(bool rest_hdra)
+{
+	return (struct eth_rx_chain_geom){
+		.cont = CA_NI_RX_HDRA_OFF + (rest_hdra ? CA_NI_RX_HDR_CPU_LEN : 0),
+		.max_len = CA_NI_RX_CHAIN_MAX_LEN,
+		.max_segs = CA_NI_RX_CHAIN_MAX_SEGS,
+	};
 }
 
 /* Where a single-buffer frame sits; *stale: its two lengths disagree (a buffer reused under the
@@ -845,6 +838,29 @@ drop:
 	return rpa;
 }
 
+/* Diagnostics: the raw length fields as the chip wrote them. They size nothing (rx_frame_len_guard DIAG). */
+static noinline void cortina_ni_rx_stale_warn(struct net_device *ndev, u64 desc, u32 hdra_lo, u32 pa)
+{
+	net_warn_ratelimited("%s: RX stale buffer: desc pktlen=%u vs HEADER_A.pkt_size=%u at pa=%08x (buffer reused before the copy)\n",
+			     netdev_name(ndev), (u32)FIELD_GET(CA_NI_RX_DESC_LEN, desc),
+			     (u32)FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo), pa);
+}
+
+static noinline void cortina_ni_rx_debug_print(struct net_device *ndev, u64 desc, u32 hdra_hi, u32 hdra_lo,
+					       u32 pa, const u8 *buf, const struct eth_rx_frame *fr,
+					       enum eth_rx_verdict verdict)
+{
+	netdev_info(ndev,
+		    "RX desc=%016llx hdra=%08x:%08x (lspid=%u pkt_size=%u cpu=%u swid=%u dlen=%u) pa=%08x verdict=%d len=%u off=%u\n",
+		    desc, hdra_hi, hdra_lo,
+		    (u32)FIELD_GET(CA_NI_HDRA_W1_LSPID, hdra_lo),
+		    (u32)FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo),
+		    !!(hdra_hi & CA_NI_HDRA_W0_CPU_FLG), (u32)FIELD_GET(CA_NI_RX_DESC_SWID, desc),
+		    (u32)FIELD_GET(CA_NI_RX_DESC_LEN, desc), pa, verdict, fr->len, fr->off);
+	print_hex_dump(KERN_INFO, "RX buf+0x40: ", DUMP_PREFIX_OFFSET,
+		       16, 1, buf + CA_NI_RX_HDRA_OFF, 96, false);
+}
+
 /* consume one CPU-EPP descriptor. The frame sits in a ...
  * dev/MEASURED-cortina-ni-rx.c.md sec 29. */
 static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc)
@@ -865,7 +881,6 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	struct cortina_ni_rx *rx = ni->rx;
 	struct net_device *ndev = rx->netdev;
 	u32 pa = lower_32_bits(desc) & CA_NI_RX_DESC_PA;
-	u32 dlen = FIELD_GET(CA_NI_RX_DESC_LEN, desc);
 	u32 swid = FIELD_GET(CA_NI_RX_DESC_SWID, desc);
 	u32 base = lower_32_bits(rx->cpu_dram_dma);
 	u32 hdra_hi = 0, hdra_lo = 0, buf_max;
@@ -875,7 +890,6 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	struct ca_ni_rx_buf bufloc;
 	bool stale;
 	enum ca_ni_rx_pool pool;
-	int pkt_size = 0;	/* header-A's RAW packet size, before any header */
 	struct sk_buff *skb;
 	const u8 *buf;
 	unsigned int off;
@@ -920,7 +934,6 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 		hdra_hi = get_unaligned_be32(buf + CA_NI_RX_HDRA_OFF);
 		hdra_lo = get_unaligned_be32(buf + CA_NI_RX_HDRA_OFF + 4);
 		rx->last_hdra = ((u64)hdra_hi << 32) | hdra_lo;
-		pkt_size = FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo);
 	} else {
 		/* headerless format (stock: nonzero sw_id, WiFi-FF style):
 		 * frame at +0x10, length from the descriptor */
@@ -937,21 +950,11 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 33. */
 	if (unlikely(stale)) {
 		rx->stale_buf++;
-		net_warn_ratelimited("%s: RX stale buffer: desc pktlen=%u vs HEADER_A.pkt_size=%d at pa=%08x (buffer reused before the copy)\n",
-				     netdev_name(ndev), dlen, pkt_size, pa);
+		cortina_ni_rx_stale_warn(ndev, desc, hdra_lo, pa);
 	}
 
-	if (unlikely(rx_debug && rx->frames < 4)) {
-		netdev_info(ndev,
-			    "RX desc=%016llx hdra=%08x:%08x (lspid=%u pkt_size=%u cpu=%u swid=%u dlen=%u) pa=%08x len=%d off=%u\n",
-			    desc, hdra_hi, hdra_lo,
-			    (u32)FIELD_GET(CA_NI_HDRA_W1_LSPID, hdra_lo),
-			    (u32)FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo),
-			    !!(hdra_hi & CA_NI_HDRA_W0_CPU_FLG), swid, dlen,
-			    pa, len, off);
-		print_hex_dump(KERN_INFO, "RX buf+0x40: ", DUMP_PREFIX_OFFSET,
-			       16, 1, buf + CA_NI_RX_HDRA_OFF, 96, false);
-	}
+	if (unlikely(rx_debug && rx->frames < 4))
+		cortina_ni_rx_debug_print(ndev, desc, hdra_hi, hdra_lo, pa, buf, &fr, verdict);
 
 	if (unlikely(verdict != ETH_RX_OK)) {
 		rx->drop_len++;
@@ -971,7 +974,7 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	 * which return early: a downstream frame must be visible to the tap
 	 * whichever branch it goes on to take. */
 	if (unlikely(rx_ds_tap > 0 && !swid))
-		cortina_ni_rx_ds_tap(ndev, buf, off, len, desc, pa, dlen,
+		cortina_ni_rx_ds_tap(ndev, buf, off, len, desc, pa,
 				     hdra_hi, hdra_lo);
 
 	/* DS-WAN delivery spy (rx_debug): a DHCP frame (UDP src/dst ...
@@ -1064,7 +1067,8 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 			else
 				rx->wan_frames++;
 			gpon_vlan_census_note(&cortina_vlan_census, GPON_VLAN_RX, gpon_vlan_frame_vid(buf + off, len));
-			cut = cortina_ni_rx_mcast_cut(buf + off, len, wan);
+			cut = eth_rx_vid_cut(wan, gpon_mcast_ds_strip_vid(buf + off, len,
+								    READ_ONCE(cortina_mcast_ds_control)));
 			skb = eth_rx_frame_copy(&rx->napi, buf, &fr, cut);
 			if (unlikely(!skb)) {
 				rx->drop_nobuf++;
@@ -1095,7 +1099,7 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	 * Must run before eth_type_trans(), which pulls the Ethernet header off
 	 * the skb; skb->data still points at the copied frame here. */
 	if (unlikely(rx_frag_tap > 0))
-		cortina_ni_rx_frag_tap(ndev, buf, off, len, desc, pa, dlen,
+		cortina_ni_rx_frag_tap(ndev, buf, off, len, desc, pa,
 				       hdra_lo, skb->data);
 	cortina_ni_rx_deliver(rx, skb, ndev, false);
 
@@ -1112,7 +1116,7 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
  * bytes are read with explicit byte math, never a struct cast. */
 static noinline void cortina_ni_rx_frag_tap(struct net_device *ndev,
 					    const u8 *buf, u32 off, int len,
-					    u64 desc, u32 pa, u32 dlen,
+					    u64 desc, u32 pa,
 					    u32 hdra_lo, const u8 *copied)
 {
 	static atomic_t seen = ATOMIC_INIT(0);
@@ -1153,7 +1157,7 @@ static noinline void cortina_ni_rx_frag_tap(struct net_device *ndev,
 		    "frag_tap#%d pa=%08x eqid=%u sop=%u eop=%u csum_err=%u dlen=%u hdra_pkt_size=%u len=%d off=%u ip{id=%04x frag=%04x tot_len=%u} crc=%08x/%08x %s%s\n",
 		    n, pa, (u32)(desc & CA_NI_RX_DESC_EQID),
 		    !!(desc & CA_NI_RX_DESC_SOP), !!(desc & CA_NI_RX_DESC_EOP),
-		    !!(desc & CA_NI_RX_DESC_CSUM_ERR), dlen,
+		    !!(desc & CA_NI_RX_DESC_CSUM_ERR), (u32)FIELD_GET(CA_NI_RX_DESC_LEN, desc),
 		    (u32)FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo),
 		    len, off, ip_id, frag, tot_len,
 		    crc_skb, crc_reread,
@@ -1165,7 +1169,7 @@ static noinline void cortina_ni_rx_frag_tap(struct net_device *ndev,
  * dev/MEASURED-cortina-ni-rx.c.md sec 42. */
 static noinline void cortina_ni_rx_ds_tap(struct net_device *ndev,
 					  const u8 *buf, u32 off, int len,
-					  u64 desc, u32 pa, u32 dlen,
+					  u64 desc, u32 pa,
 					  u32 hdra_hi, u32 hdra_lo)
 {
 	static atomic_t seen = ATOMIC_INIT(0);
@@ -1191,7 +1195,7 @@ static noinline void cortina_ni_rx_ds_tap(struct net_device *ndev,
 		    "ds_tap#%d pa=%08x eqid=%u sop=%u eop=%u csum_err=%u dlen=%u hdra_pkt_size=%u len=%d off=%u lspid=%u ldpid=0x%02x cpu_flg=%u deep_q=%u etype=%04x %s\n",
 		    n, pa, (u32)(desc & CA_NI_RX_DESC_EQID),
 		    !!(desc & CA_NI_RX_DESC_SOP), !!(desc & CA_NI_RX_DESC_EOP),
-		    !!(desc & CA_NI_RX_DESC_CSUM_ERR), dlen,
+		    !!(desc & CA_NI_RX_DESC_CSUM_ERR), (u32)FIELD_GET(CA_NI_RX_DESC_LEN, desc),
 		    (u32)FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo),
 		    len, off, lspid, ldpid,
 		    !!(hdra_hi & CA_NI_HDRA_W0_CPU_FLG),
@@ -5475,11 +5479,7 @@ int cortina_ni_rx_probe(struct cortina_ni *ni)
 	INIT_DELAYED_WORK(&rx->recovery_work, cortina_ni_rx_recovery_work);
 	/* where a chain continuation's payload starts.  Resolved once, at probe,
 	 * so the receive path reads a field instead of a module parameter. */
-	rx->chain_geom = (struct eth_rx_chain_geom){
-		.cont = CA_NI_RX_HDRA_OFF + (rx_chain_rest_hdra ? CA_NI_RX_HDR_CPU_LEN : 0),
-		.max_len = CA_NI_RX_CHAIN_MAX_LEN,
-		.max_segs = CA_NI_RX_CHAIN_MAX_SEGS,
-	};
+	rx->chain_geom = ca_ni_rx_chain_geom(rx_chain_rest_hdra);
 	ni->rx = rx;
 	if (rx_chain)
 		dev_info(ni->dev,

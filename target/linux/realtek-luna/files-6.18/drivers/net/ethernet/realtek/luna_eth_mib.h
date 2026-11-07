@@ -32,11 +32,7 @@ extern struct eth_rx_len luna_rx_len;
 
 static inline void luna_rx_len_note(const u8 *frame, u32 len, bool wan)
 {
-	int excess = eth_rx_len_note(&luna_rx_len, frame, len, wan);
-
-	if (excess)
-		pr_warn_once("luna: a received %s frame is %d byte(s) off its IP length (%u B)\n",
-			     wan ? "WAN" : "LAN", excess, len);
+	eth_rx_len_check(&luna_rx_len, "luna", frame, len, wan);
 }
 
 #endif /* _LUNA_ETH_MIB_H */

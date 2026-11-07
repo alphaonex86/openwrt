@@ -211,9 +211,33 @@ static inline int eth_rx_len_note(struct eth_rx_len *c, const u8 *frame, u32 len
 }
 
 #ifdef __KERNEL__
+#include <linux/if_vlan.h>
 #include <linux/skbuff.h>
 #define ETH_RX_GEOM_SKB
 #define ETH_RX_GEOM_COPY
+
+/* The `cut` for an outer tag of `vid` the stack must not see: none for vid < 0, nor one a VLAN netdev claims. */
+static inline u32 eth_rx_vid_cut(struct net_device *dev, int vid)
+{
+	bool claimed;
+
+	if (vid < 0)
+		return 0;
+	rcu_read_lock();
+	claimed = __vlan_find_dev_deep_rcu(dev, htons(ETH_P_8021Q), vid);
+	rcu_read_unlock();
+	return claimed ? 0 : VLAN_HLEN;
+}
+
+/* eth_rx_len_note(), the first frame off its IP length logged once per driver. */
+static inline void eth_rx_len_check(struct eth_rx_len *c, const char *drv, const u8 *frame, u32 len, bool wan)
+{
+	int excess = eth_rx_len_note(c, frame, len, wan);
+
+	if (unlikely(excess))
+		pr_warn_once("%s: a received %s frame is %d byte(s) off its IP length (%u B)\n",
+			     drv, wan ? "WAN" : "LAN", excess, len);
+}
 #endif
 
 #ifdef ETH_RX_GEOM_SKB		/* the kernel's, or a host test's own skb calls */

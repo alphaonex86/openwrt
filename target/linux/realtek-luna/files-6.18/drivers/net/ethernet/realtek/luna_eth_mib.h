@@ -28,24 +28,15 @@ int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
 void luna_mib_phy_reapply(struct net_device *ndev);
 
 /* Received frames whose length is off their own IP header, by side: ethtool -S rx_len_*. */
-struct luna_rx_len {
-	u64 long_lan, short_lan, long_wan, short_wan;
-};
-extern struct luna_rx_len luna_rx_len;
+extern struct eth_rx_len luna_rx_len;
 
-/* Count, never trim: trimming would hide the bug this exists to show. */
 static inline void luna_rx_len_note(const u8 *frame, u32 len, bool wan)
 {
-	int excess;
+	int excess = eth_rx_len_note(&luna_rx_len, frame, len, wan);
 
-	if (!eth_frame_l3_excess(frame, len, &excess) || !excess)
-		return;
-	if (excess > 0)
-		wan ? luna_rx_len.long_wan++ : luna_rx_len.long_lan++;
-	else
-		wan ? luna_rx_len.short_wan++ : luna_rx_len.short_lan++;
-	pr_warn_once("luna: a received %s frame is %d byte(s) off its IP length (%u B)\n",
-		     wan ? "WAN" : "LAN", excess, len);
+	if (excess)
+		pr_warn_once("luna: a received %s frame is %d byte(s) off its IP length (%u B)\n",
+			     wan ? "WAN" : "LAN", excess, len);
 }
 
 #endif /* _LUNA_ETH_MIB_H */

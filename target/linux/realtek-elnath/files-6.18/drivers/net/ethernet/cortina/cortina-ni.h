@@ -15,6 +15,7 @@
 #include <linux/workqueue.h>
 
 #include "cortina-ni-regs.h"
+#include "eth_rx_geom.h"	/* the one RX frame geometry, chains included */
 
 /* platform driver name; also what `ethtool -i` reports */
 #define CA_NI_DRV_NAME		"cortina-ni"
@@ -197,15 +198,6 @@ struct cortina_ni_rx_irqctx {
  * dev/MEASURED-cortina-ni.h.md sec 32. */
 #define CA_NI_RX_CHAIN_MAX_SEGS		8u
 
-/* Multi-buffer receive: the arithmetic of one in-flight ...
- * dev/MEASURED-cortina-ni.h.md sec 8. */
-struct ca_ni_chain_state {
-	u32	total;		/* payload bytes the SOP HEADER_A promised */
-	u32	got;		/* payload bytes accounted so far */
-	u16	segs;		/* descriptors consumed by this chain */
-	bool	open;		/* a chain is in flight on this voq */
-};
-
 /* One in-flight chain, PER CPU-port VOQ.  Per-voq and not global: a frame's
  * descriptors are appended to one voq's FIFO in order, while the NAPI budget
  * can cut a chain in half - so the state must survive into the next poll
@@ -215,7 +207,7 @@ struct cortina_ni_rx_chain {
 	/* HEADER_A word 1 of the SOP buffer. The delivery decision ...
 	 * dev/MEASURED-cortina-ni.h.md sec 33. */
 	u32				hdra_lo;
-	struct ca_ni_chain_state	st;
+	struct eth_rx_chain		st;
 };
 
 struct cortina_ni_rx {
@@ -272,13 +264,14 @@ struct cortina_ni_rx {
 	u64			drop_runt;	/* len < ETH_HLEN */
 	u64			drop_oversize;	/* off + len past the usable window */
 	u64			drop_nobuf;	/* refill alloc failed */
+	struct eth_rx_len	rx_len;		/* delivered frames off their own IP length */
 	u64			slot_dead;	/* buffer lost (remap failed) */
 	/* ---- multi-buffer receive (rx_chain).  One in-flight chain per voq,
 	 * plus the malformation ledger: the hardware is not trusted to
 	 * terminate a chain, so every way one can go wrong is counted and
 	 * logged rather than assumed impossible. */
 	struct cortina_ni_rx_chain chain[CA_NI_RX_VOQ_COUNT];
-	u32			chain_rest_off;	/* payload offset in a non-first buffer */
+	struct eth_rx_chain_geom chain_geom;	/* continuation offset and bounds, set at probe */
 	u64			chain_frames;	/* chains assembled and delivered */
 	u64			chain_segs;	/* segments those frames consumed */
 	u64			chain_max_segs;	/* deepest chain seen */
@@ -289,10 +282,10 @@ struct cortina_ni_rx {
 	u64			chain_toolong;	/* segment cap hit / segments overran total */
 	u64			chain_short;	/* EOP with fewer bytes than promised */
 	u64			chain_swid;	/* headerless format: geometry unknown */
-	/* Per-segment descriptor pkt_size as REPORTED by the ...
+	/* Per-segment end as the descriptor length REPORTS it, beside the chain's own: an observation. ...
 	 * dev/MEASURED-cortina-ni.h.md sec 34. */
-	u32			chain_dlen_seen[CA_NI_RX_CHAIN_MAX_SEGS];
-	u32			chain_dlen_calc[CA_NI_RX_CHAIN_MAX_SEGS];
+	u32			chain_end_desc[CA_NI_RX_CHAIN_MAX_SEGS];
+	u32			chain_end_calc[CA_NI_RX_CHAIN_MAX_SEGS];
 	u64			chain_dlen_diff;	/* how often the two disagreed */
 	/* ★ RX-buffer ownership witnesses (see cpu_pool_push in ...
 	 * dev/MEASURED-cortina-ni.h.md sec 11. */

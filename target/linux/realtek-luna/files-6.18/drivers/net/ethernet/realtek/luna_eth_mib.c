@@ -101,7 +101,7 @@ struct luna_mib_state {
 };
 static struct luna_mib_state luna_mib;
 
-struct luna_rx_len luna_rx_len;
+struct eth_rx_len luna_rx_len;
 EXPORT_SYMBOL_GPL(luna_rx_len);
 static const char *const luna_rx_len_names[] = {
 	"rx_len_long_lan", "rx_len_short_lan", "rx_len_long_wan", "rx_len_short_wan",

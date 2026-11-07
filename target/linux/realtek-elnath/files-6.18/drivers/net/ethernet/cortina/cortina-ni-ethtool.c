@@ -139,6 +139,11 @@ static const struct ca_ni_stat_grp cortina_ni_stat_grps[] = {
 	{ "rx_drop_no_buffer",		1, CA_ST_RX_U64, S_RX(drop_nobuf) },
 	{ "rx_slot_dead",		1, CA_ST_RX_U64, S_RX(slot_dead) },
 	{ "rx_stale_buffer",		1, CA_ST_RX_U64, S_RX(stale_buf) },
+	/* delivered frames off their own IP length: the field X111W fault's witness (eth_rx_geom.h) */
+	{ "rx_len_long_lan",		1, CA_ST_RX_U64, S_RX(rx_len.long_lan) },
+	{ "rx_len_short_lan",		1, CA_ST_RX_U64, S_RX(rx_len.short_lan) },
+	{ "rx_len_long_wan",		1, CA_ST_RX_U64, S_RX(rx_len.long_wan) },
+	{ "rx_len_short_wan",		1, CA_ST_RX_U64, S_RX(rx_len.short_wan) },
 	{ "rx_pool_push_fail",		1, CA_ST_RX_U64, S_RX(push_fail) },
 	{ "rx_gphy_recoveries",		1, CA_ST_RX_U64, S_RX(recoveries) },
 	{ "rx_link_rearms",		1, CA_ST_RX_U64, S_RX(rearms) },

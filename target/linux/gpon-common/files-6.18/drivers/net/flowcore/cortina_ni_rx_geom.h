@@ -78,73 +78,7 @@ ca_ni_rx_buf_locate(u32 pa, u32 base, const struct ca_ni_rx_pool_geom *g,
 	return CA_NI_RX_POOL_DQ;
 }
 
-/* ------------------------------------------------------------------ */
-/* 2. WHERE THE FRAME STARTS, HOW LONG IT IS, AND IS IT WELL FORMED    */
-/* ------------------------------------------------------------------ */
-
-enum ca_ni_rx_geom_verdict {
-	CA_NI_RX_GEOM_OK = 0,
-	CA_NI_RX_GEOM_RUNT,	/* shorter than an Ethernet header: a bad frame */
-	CA_NI_RX_GEOM_OVERSIZE,	/* a good frame that does not fit the usable window */
-};
-
-/* The buffer's fixed layout, all of it the shell's: ...
- * dev/MEASURED-cortina_ni_rx_geom.h.md sec 7. */
-struct ca_ni_rx_layout {
-	u32 hdra_off;
-	u32 frame_off;
-	u32 hdr_cpu_len;
-	u32 desc_hdr_len;
-	u32 eth_hlen;
-};
-
-/* @off: where the frame starts inside the buffer @len: how ...
- * dev/MEASURED-cortina_ni_rx_geom.h.md sec 8. */
-struct ca_ni_rx_geom {
-	u32 off;
-	int len;
-	bool stale;
-};
-
-/* ca_ni_rx_frame_geom() - decide a received frame's offset, ...
- * dev/MEASURED-cortina_ni_rx_geom.h.md sec 9. */
-static inline enum ca_ni_rx_geom_verdict
-ca_ni_rx_frame_geom(const struct ca_ni_rx_layout *l, u32 swid, u32 dlen,
-		    bool hdra_cpu_flg, int hdra_pkt_size, u32 buf_max,
-		    struct ca_ni_rx_geom *out)
-{
-	u32 off;
-	int len;
-
-	out->stale = false;
-
-	if (!swid) {
-		len = hdra_pkt_size;
-		out->stale = ((u32)(len + (int)(l->frame_off - l->hdra_off)) !=
-			      dlen);
-		off = l->frame_off;
-		if (hdra_cpu_flg) {
-			off += l->hdr_cpu_len;
-			len -= (int)l->hdr_cpu_len;
-		}
-	} else {
-		/* headerless format: frame at a fixed offset, length from the
-		 * descriptor.  There is no second witness here, so no staleness
-		 * verdict is available -- and none is invented. */
-		off = l->desc_hdr_len;
-		len = (int)dlen - (int)l->desc_hdr_len;
-	}
-
-	out->off = off;
-	out->len = len;
-
-	if (len < (int)l->eth_hlen)
-		return CA_NI_RX_GEOM_RUNT;
-	/* len >= eth_hlen here, so the widening to u32 cannot go wrong */
-	if (off + (u32)len > buf_max)
-		return CA_NI_RX_GEOM_OVERSIZE;
-	return CA_NI_RX_GEOM_OK;
-}
+/* 2. Where the frame starts and how long it is: the common eth_rx_geom.h. */
 
 /* 3. THE PDC's CONTROL PUNT: is this a PON control frame, and ...
  * dev/MEASURED-cortina_ni_rx_geom.h.md sec 10. */

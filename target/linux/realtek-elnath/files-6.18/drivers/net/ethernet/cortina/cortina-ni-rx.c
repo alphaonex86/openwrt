@@ -4,7 +4,7 @@
 
 #include <linux/bitfield.h>
 #include "cortina_ni_rx_logic.h"	/* hoisted logic */
-#include "cortina_ni_rx_geom.h"	/* RX pool + frame geometry, host-tested */
+#include "cortina_ni_rx_geom.h"	/* RX pool ownership + PON punt, host-tested */
 #include "cortina_l3fe_logic.h"	/* l3fe_wan_mac_derive(): the ONE WAN-MAC = LAN-MAC + 1 */
 #include "gpon_omci_vlan.h"	/* gpon_vlan_census_note(), gpon_vlan_frame_vid() */
 #include <linux/crc32.h>	/* ★ TEMP DIAG rx_frag_tap - revert with it */
@@ -603,13 +603,18 @@ static noinline void cortina_ni_rx_stack_tap(struct cortina_ni *ni,
 }
 
 /* Into the stack; link control rides the RX queue without an RPS map (onu_rx_control.h). */
-static inline void cortina_ni_rx_deliver(struct napi_struct *napi, struct sk_buff *skb,
-					 struct net_device *dev)
+static inline void cortina_ni_rx_deliver(struct cortina_ni_rx *rx, struct sk_buff *skb,
+					 struct net_device *dev, bool wan)
 {
+	int excess = eth_rx_len_note(&rx->rx_len, skb->data, skb->len, wan);
+
+	if (unlikely(excess))
+		pr_warn_once("cortina-ni: a received %s frame is %d byte(s) off its IP length (%u B)\n",
+			     wan ? "WAN" : "LAN", excess, skb->len);
 	skb_record_rx_queue(skb, onu_rx_is_control(skb->data, skb->len) ?
 			    ONU_RX_QUEUE_CONTROL : ONU_RX_QUEUE_DATA);
 	skb->protocol = eth_type_trans(skb, dev);
-	napi_gro_receive(napi, skb);
+	napi_gro_receive(&rx->napi, skb);
 }
 
 /* multi-buffer receive: the SOP..EOP descriptor chain Where a ...
@@ -631,81 +636,44 @@ static inline struct net_device *cortina_ni_rx_wan_dest(u32 hdra_lo, bool *is_l3
 	return READ_ONCE(cortina_ni_pon_wan_ndev);
 }
 
-/* what one descriptor of a chain contributes */
-struct ca_ni_chain_seg {
-	u32	off;		/* payload offset inside this buffer */
-	u32	len;		/* payload bytes to take from it */
-	u32	dlen_expect;	/* what this descriptor's own pkt_size should read */
+/* MEASURED (X400AXF 2026-11-06: wan/lan_frame_exact_length PASS on both fast paths, rx_stale_buffer 0):
+ * HEADER_A pkt_size counts the frame from +0x48, the CPU header ahead of it when cpu_flg is set, and no
+ * FCS; the descriptor length counts from +0x40 (pkt_size + 8), so no FCS either, headerless frames too. */
+enum ca_ni_rx_fmt { CA_NI_RX_FMT_HDRA, CA_NI_RX_FMT_HDRA_CPU, CA_NI_RX_FMT_BARE, CA_NI_RX_FMT_DESC };
+static const struct eth_rx_layout ca_ni_rx_layout[] = {
+	[CA_NI_RX_FMT_HDRA]	= { .prefix = CA_NI_RX_FRAME_OFF, .fcs = ETH_RX_FCS_NOT_IN_LEN },
+	[CA_NI_RX_FMT_HDRA_CPU]	= { .prefix = CA_NI_RX_FRAME_OFF, .head = CA_NI_RX_HDR_CPU_LEN,
+				    .fcs = ETH_RX_FCS_NOT_IN_LEN },
+	[CA_NI_RX_FMT_BARE]	= { .head = CA_NI_RX_DESC_HDR_LEN, .fcs = ETH_RX_FCS_NOT_IN_LEN },
+	[CA_NI_RX_FMT_DESC]	= { .prefix = CA_NI_RX_HDRA_OFF, .fcs = ETH_RX_FCS_NOT_IN_LEN },
 };
 
-enum ca_ni_chain_act {
-	CA_NI_CHAIN_OPEN,	/* SOP accepted, more segments expected */
-	CA_NI_CHAIN_APPEND,	/* continuation accepted, more expected */
-	CA_NI_CHAIN_DONE,	/* EOP accepted, the frame is complete */
-	/* ---- malformations; the caller drops the partial frame for each ---- */
-	CA_NI_CHAIN_ORPHAN,	/* continuation with no chain open on this voq */
-	CA_NI_CHAIN_BADTOTAL,	/* SOP pkt_size out of range, or no room in the window */
-	CA_NI_CHAIN_TOOLONG,	/* segment cap hit, or the segments overran total */
-	CA_NI_CHAIN_SHORT,	/* EOP with fewer bytes than pkt_size promised */
-};
-
-/* The chain state machine, as pure arithmetic: no skb, no ...
- * dev/MEASURED-cortina-ni-rx.c.md sec 24. */
-static enum ca_ni_chain_act
-ca_ni_chain_step(struct ca_ni_chain_state *st, bool sop, bool eop,
-		 u32 hdra_hi, u32 hdra_lo, u32 buf_end, u32 rest_off,
-		 struct ca_ni_chain_seg *out)
+/* A buffer's layout by its format, ending at its pool's usable window. */
+static inline struct eth_rx_layout ca_ni_rx_layout_of(u64 desc, u32 hdra_hi, u32 buf_max)
 {
-	u32 off, want, avail;
+	struct eth_rx_layout l = ca_ni_rx_layout[FIELD_GET(CA_NI_RX_DESC_SWID, desc) ? CA_NI_RX_FMT_BARE :
+						 hdra_hi & CA_NI_HDRA_W0_CPU_FLG ? CA_NI_RX_FMT_HDRA_CPU :
+						 CA_NI_RX_FMT_HDRA];
 
-	out->off = out->len = out->dlen_expect = 0;
+	l.buf = buf_max;
+	return l;
+}
 
-	if (sop) {
-		int total = FIELD_GET(CA_NI_HDRA_W1_PKT_SIZE, hdra_lo);
+/* Where a single-buffer frame sits; *stale: its two lengths disagree (a buffer reused under the
+ * descriptor). rx_chain off reads no EOP, so a SOP is judged whole: a chained frame overflows. PURE. */
+static inline enum eth_rx_verdict ca_ni_rx_frame_at(u64 desc, u32 hdra_hi, u32 hdra_lo, u32 buf_max,
+						    struct eth_rx_frame *fr, bool *stale)
+{
+	struct eth_rx_layout l = ca_ni_rx_layout_of(desc, hdra_hi, buf_max);
+	struct eth_rx_dlen dlen = eth_rx_dlen(desc, CA_NI_RX_DESC_LEN);
+	struct eth_rx_dlen pkt = eth_rx_dlen(hdra_lo, CA_NI_HDRA_W1_PKT_SIZE);
 
-		off = CA_NI_RX_FRAME_OFF;
-		if (hdra_hi & CA_NI_HDRA_W0_CPU_FLG) {
-			off += CA_NI_RX_HDR_CPU_LEN;
-			total -= CA_NI_RX_HDR_CPU_LEN;
-		}
-		if (total < (int)ETH_HLEN ||
-		    total > (int)CA_NI_RX_CHAIN_MAX_LEN || off >= buf_end)
-			return CA_NI_CHAIN_BADTOTAL;
-		st->total = total;
-		st->got = 0;
-		st->segs = 0;
-		st->open = true;
-	} else {
-		if (!st->open)
-			return CA_NI_CHAIN_ORPHAN;
-		off = rest_off;
-		if (off >= buf_end)
-			return CA_NI_CHAIN_BADTOTAL;
+	if (FIELD_GET(CA_NI_RX_DESC_SWID, desc)) {
+		*stale = false;		/* no second witness: none is invented */
+		return eth_rx_frame_geom(&l, dlen, true, fr);
 	}
-
-	if (++st->segs > CA_NI_RX_CHAIN_MAX_SEGS)
-		return CA_NI_CHAIN_TOOLONG;
-
-	avail = buf_end - off;
-	want = st->total - st->got;
-	out->off = off;
-	out->len = min(want, avail);
-	out->dlen_expect = (off - CA_NI_RX_HDRA_OFF) + out->len;
-	st->got += out->len;
-
-	if (eop) {
-		if (st->got != st->total)
-			return CA_NI_CHAIN_SHORT;
-		/* the frame is complete, so this voq holds no chain any more. ...
-		 * dev/MEASURED-cortina-ni-rx.c.md sec 25. */
-		st->open = false;
-		return CA_NI_CHAIN_DONE;
-	}
-	/* Not the last segment, so it must have FILLED its window: if ...
-	 * dev/MEASURED-cortina-ni-rx.c.md sec 26. */
-	if (out->len != avail)
-		return CA_NI_CHAIN_TOOLONG;
-	return sop ? CA_NI_CHAIN_OPEN : CA_NI_CHAIN_APPEND;
+	*stale = eth_rx_dlen_end(&l, pkt) != eth_rx_dlen_end(&ca_ni_rx_layout[CA_NI_RX_FMT_DESC], dlen);
+	return eth_rx_frame_geom(&l, pkt, true, fr);
 }
 
 /* free a held partial frame WITHOUT touching the accounting (the SOP path has
@@ -740,10 +708,10 @@ static noinline u32 cortina_ni_rx_chain_seg(struct cortina_ni *ni,
 	u32 lo = lower_32_bits(desc);
 	bool sop = !!(lo & CA_NI_RX_DESC_SOP);
 	bool eop = !!(lo & CA_NI_RX_DESC_EOP);
-	u32 dlen = FIELD_GET(CA_NI_RX_DESC_LEN, desc);
-	u32 hdra_hi = 0, hdra_lo = 0;
-	struct ca_ni_chain_seg seg;
-	enum ca_ni_chain_act act;
+	u32 hdra_hi = 0, hdra_lo = 0, end;
+	struct eth_rx_layout l;
+	struct eth_rx_frame seg;
+	enum eth_rx_chain_act act;
 	struct net_device *wan;
 	bool is_l3 = false;
 
@@ -773,38 +741,40 @@ static noinline u32 cortina_ni_rx_chain_seg(struct cortina_ni *ni,
 		ch->hdra_lo = hdra_lo;
 	}
 
-	act = ca_ni_chain_step(&ch->st, sop, eop, hdra_hi, hdra_lo, buf_end,
-			       rx->chain_rest_off, &seg);
+	l = ca_ni_rx_layout_of(desc, hdra_hi, buf_end);
+	act = eth_rx_chain_step(&l, &ch->st, sop, eop, eth_rx_dlen(hdra_lo, CA_NI_HDRA_W1_PKT_SIZE),
+				&rx->chain_geom, &seg);
 
 	switch (act) {
-	case CA_NI_CHAIN_OPEN:
-	case CA_NI_CHAIN_APPEND:
-	case CA_NI_CHAIN_DONE:
+	case ETH_RX_CHAIN_OPEN:
+	case ETH_RX_CHAIN_APPEND:
+	case ETH_RX_CHAIN_DONE:
 		break;
-	case CA_NI_CHAIN_ORPHAN:
+	case ETH_RX_CHAIN_ORPHAN:
 		rx->chain_orphan++;
 		ndev->stats.rx_errors++;
 		net_warn_ratelimited("%s: RX chain: continuation with no chain open on voq %u (desc %016llx)\n",
 				     netdev_name(ndev), voq, desc);
 		return rpa;
-	case CA_NI_CHAIN_BADTOTAL:
+	case ETH_RX_CHAIN_BADTOTAL:
 		rx->chain_badtotal++;
 		goto drop;
-	case CA_NI_CHAIN_TOOLONG:
+	case ETH_RX_CHAIN_TOOLONG:
 		rx->chain_toolong++;
 		goto drop;
-	case CA_NI_CHAIN_SHORT:
+	case ETH_RX_CHAIN_SHORT:
 		rx->chain_short++;
 		goto drop;
 	}
 
 	/* ★ The per-segment descriptor pkt_size is RECORDED, not ...
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 28. */
+	end = eth_rx_dlen_end(&ca_ni_rx_layout[CA_NI_RX_FMT_DESC], eth_rx_dlen(desc, CA_NI_RX_DESC_LEN));
 	if (ch->st.segs <= CA_NI_RX_CHAIN_MAX_SEGS) {
-		rx->chain_dlen_seen[ch->st.segs - 1] = dlen;
-		rx->chain_dlen_calc[ch->st.segs - 1] = seg.dlen_expect;
+		rx->chain_end_desc[ch->st.segs - 1] = end;
+		rx->chain_end_calc[ch->st.segs - 1] = seg.off + seg.len;
 	}
-	if (dlen != seg.dlen_expect)
+	if (end != seg.off + seg.len)
 		rx->chain_dlen_diff++;
 
 	if (sop) {
@@ -825,9 +795,9 @@ static noinline u32 cortina_ni_rx_chain_seg(struct cortina_ni *ni,
 		return rpa;
 	}
 
-	skb_put_data(ch->skb, buf + seg.off, seg.len);
+	eth_rx_seg_put(ch->skb, buf, &seg);
 
-	if (act != CA_NI_CHAIN_DONE)
+	if (act != ETH_RX_CHAIN_DONE)
 		return rpa;
 
 	/* complete frame: same delivery decision as the single-buffer path.
@@ -855,14 +825,14 @@ static noinline u32 cortina_ni_rx_chain_seg(struct cortina_ni *ni,
 				rx->wan_frames++;
 			wan->stats.rx_packets++;
 			wan->stats.rx_bytes += flen;
-			cortina_ni_rx_deliver(&rx->napi, skb, wan);
+			cortina_ni_rx_deliver(rx, skb, wan, true);
 			return rpa;
 		}
 		rx->frames++;
 		rx->bytes += flen;
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += flen;
-		cortina_ni_rx_deliver(&rx->napi, skb, ndev);
+		cortina_ni_rx_deliver(rx, skb, ndev, false);
 	}
 	return rpa;
 
@@ -892,13 +862,6 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 		.dq_bufsz	= CA_NI_RX_CPU_POOL0_BUFSZ,
 		.tailroom	= CA_NI_RX_BUF_TAILROOM,
 	};
-	static const struct ca_ni_rx_layout layout = {
-		.hdra_off	= CA_NI_RX_HDRA_OFF,
-		.frame_off	= CA_NI_RX_FRAME_OFF,
-		.hdr_cpu_len	= CA_NI_RX_HDR_CPU_LEN,
-		.desc_hdr_len	= CA_NI_RX_DESC_HDR_LEN,
-		.eth_hlen	= ETH_HLEN,
-	};
 	struct cortina_ni_rx *rx = ni->rx;
 	struct net_device *ndev = rx->netdev;
 	u32 pa = lower_32_bits(desc) & CA_NI_RX_DESC_PA;
@@ -907,9 +870,10 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 	u32 base = lower_32_bits(rx->cpu_dram_dma);
 	u32 hdra_hi = 0, hdra_lo = 0, buf_max;
 	u32 rpa;	/* the PA to hand back, or 0 if this buffer is not ours */
-	enum ca_ni_rx_geom_verdict verdict;
-	struct ca_ni_rx_geom fgeom;
+	struct eth_rx_frame fr = { 0 };
+	enum eth_rx_verdict verdict;
 	struct ca_ni_rx_buf bufloc;
+	bool stale;
 	enum ca_ni_rx_pool pool;
 	int pkt_size = 0;	/* header-A's RAW packet size, before any header */
 	struct sk_buff *skb;
@@ -963,19 +927,15 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 		rx->swid_frames++;
 	}
 
-	/* ★ WHERE THE FRAME IS AND WHETHER IT IS WELL FORMED - the core's
-	 * (ca_ni_rx_frame_geom): the header-A vs headerless offset, the CPU
-	 * header block, the runt/oversize split against the usable window, and
-	 * the staleness witness. */
-	verdict = ca_ni_rx_frame_geom(&layout, swid, dlen,
-				      !!(hdra_hi & CA_NI_HDRA_W0_CPU_FLG),
-				      pkt_size, buf_max, &fgeom);
-	off = fgeom.off;
-	len = fgeom.len;
+	/* ★ WHERE THE FRAME IS AND WHETHER IT IS WELL FORMED: the common geometry
+	 * over this die's measured layouts, and the staleness witness. */
+	verdict = ca_ni_rx_frame_at(desc, hdra_hi, hdra_lo, buf_max, &fr, &stale);
+	off = fr.off;
+	len = fr.len;
 
 	/* ★ Staleness witness, free: the descriptor's own pktlen and ...
 	 * dev/MEASURED-cortina-ni-rx.c.md sec 33. */
-	if (unlikely(fgeom.stale)) {
+	if (unlikely(stale)) {
 		rx->stale_buf++;
 		net_warn_ratelimited("%s: RX stale buffer: desc pktlen=%u vs HEADER_A.pkt_size=%d at pa=%08x (buffer reused before the copy)\n",
 				     netdev_name(ndev), dlen, pkt_size, pa);
@@ -993,11 +953,11 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 			       16, 1, buf + CA_NI_RX_HDRA_OFF, 96, false);
 	}
 
-	if (unlikely(verdict != CA_NI_RX_GEOM_OK)) {
+	if (unlikely(verdict != ETH_RX_OK)) {
 		rx->drop_len++;
 		/* ★ split, because the two causes mean opposite things and the
 		 * dev/MEASURED-cortina-ni-rx.c.md sec 166. */
-		if (verdict == CA_NI_RX_GEOM_RUNT)
+		if (verdict == ETH_RX_RUNT)
 			rx->drop_runt++;
 		else
 			rx->drop_oversize++;
@@ -1105,19 +1065,13 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 				rx->wan_frames++;
 			gpon_vlan_census_note(&cortina_vlan_census, GPON_VLAN_RX, gpon_vlan_frame_vid(buf + off, len));
 			cut = cortina_ni_rx_mcast_cut(buf + off, len, wan);
-			skb = napi_alloc_skb(&rx->napi, len - cut);
+			skb = eth_rx_frame_copy(&rx->napi, buf, &fr, cut);
 			if (unlikely(!skb)) {
 				rx->drop_nobuf++;
 				wan->stats.rx_dropped++;
 				return rpa;
 			}
-			if (cut) {
-				skb_put_data(skb, buf + off, 2 * ETH_ALEN);
-				skb_put_data(skb, buf + off + 2 * ETH_ALEN + cut, len - 2 * ETH_ALEN - cut);
-			} else {
-				skb_put_data(skb, buf + off, len);
-			}
-			cortina_ni_rx_deliver(&rx->napi, skb, wan);
+			cortina_ni_rx_deliver(rx, skb, wan, true);
 			wan->stats.rx_packets++;
 			wan->stats.rx_bytes += len;
 			return rpa;
@@ -1131,20 +1085,19 @@ static u32 cortina_ni_rx_frame(struct cortina_ni *ni, unsigned int voq, u64 desc
 		cortina_ni_lan_tx_learn(ni, buf + off + ETH_ALEN,
 					FIELD_GET(CA_NI_HDRA_W1_LSPID, hdra_lo));
 
-	skb = napi_alloc_skb(&rx->napi, len);
+	skb = eth_rx_frame_copy(&rx->napi, buf, &fr, 0);
 	if (unlikely(!skb)) {
 		rx->drop_nobuf++;
 		ndev->stats.rx_dropped++;
 		return rpa;
 	}
-	skb_put_data(skb, buf + off, len);
 	/* ★ TEMPORARY DIAGNOSTIC (rx_frag_tap) - revert with the params above.
 	 * Must run before eth_type_trans(), which pulls the Ethernet header off
 	 * the skb; skb->data still points at the copied frame here. */
 	if (unlikely(rx_frag_tap > 0))
 		cortina_ni_rx_frag_tap(ndev, buf, off, len, desc, pa, dlen,
 				       hdra_lo, skb->data);
-	cortina_ni_rx_deliver(&rx->napi, skb, ndev);
+	cortina_ni_rx_deliver(rx, skb, ndev, false);
 
 	rx->frames++;
 	rx->bytes += len;
@@ -5332,7 +5285,7 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 			if (rx->chain[i].st.open)
 				open++;
 		seq_printf(m, "chain: mode=%s rest_off=+0x%02x frames=%llu segs=%llu max_segs=%llu open_now=%u\n",
-			   rx_chain ? "on" : "OFF", rx->chain_rest_off,
+			   rx_chain ? "on" : "OFF", rx->chain_geom.cont,
 			   rx->chain_frames, rx->chain_segs,
 			   rx->chain_max_segs, open);
 		seq_printf(m, "chain-bad: abort=%llu reopen=%llu orphan=%llu badtotal=%llu toolong=%llu short=%llu swid=%llu (all want 0)\n",
@@ -5340,12 +5293,12 @@ int cortina_ni_rx_debug_show(struct seq_file *m, void *v)
 			   rx->chain_badtotal, rx->chain_toolong,
 			   rx->chain_short, rx->chain_swid);
 		if (rx->chain_frames) {
-			seq_printf(m, "chain-dlen: diff=%llu seen/calc", rx->chain_dlen_diff);
+			seq_printf(m, "chain-end: diff=%llu desc/calc", rx->chain_dlen_diff);
 			for (i = 0; i < CA_NI_RX_CHAIN_MAX_SEGS &&
-				    rx->chain_dlen_calc[i]; i++)
-				seq_printf(m, " %u:%u/%u", i,
-					   rx->chain_dlen_seen[i],
-					   rx->chain_dlen_calc[i]);
+				    rx->chain_end_calc[i]; i++)
+				seq_printf(m, " %u:+0x%x/+0x%x", i,
+					   rx->chain_end_desc[i],
+					   rx->chain_end_calc[i]);
 			seq_puts(m, " (observation, not a fault)\n");
 		}
 	}
@@ -5522,14 +5475,17 @@ int cortina_ni_rx_probe(struct cortina_ni *ni)
 	INIT_DELAYED_WORK(&rx->recovery_work, cortina_ni_rx_recovery_work);
 	/* where a chain continuation's payload starts.  Resolved once, at probe,
 	 * so the receive path reads a field instead of a module parameter. */
-	rx->chain_rest_off = CA_NI_RX_HDRA_OFF +
-			     (rx_chain_rest_hdra ? CA_NI_RX_HDR_CPU_LEN : 0);
+	rx->chain_geom = (struct eth_rx_chain_geom){
+		.cont = CA_NI_RX_HDRA_OFF + (rx_chain_rest_hdra ? CA_NI_RX_HDR_CPU_LEN : 0),
+		.max_len = CA_NI_RX_CHAIN_MAX_LEN,
+		.max_segs = CA_NI_RX_CHAIN_MAX_SEGS,
+	};
 	ni->rx = rx;
 	if (rx_chain)
 		dev_info(ni->dev,
 			 "RX: multi-buffer receive ON (chain payload window %u B/buffer, continuation at +0x%02x, max %u segs, max %u B)\n",
 			 CA_NI_RX_BUF_USABLE_END(CA_NI_RX_CPU_POOL0_BUFSZ) -
-			 CA_NI_RX_BUF_HEADROOM, rx->chain_rest_off,
+			 CA_NI_RX_BUF_HEADROOM, rx->chain_geom.cont,
 			 CA_NI_RX_CHAIN_MAX_SEGS, CA_NI_RX_CHAIN_MAX_LEN);
 
 	/* snapshot the GPHY calibration while it is in the U-Boot-proven

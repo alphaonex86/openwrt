@@ -70,7 +70,7 @@ config interface 'wan'
 # IPv6 on its OWN logical interface over the same device, so losing the v6 half
 # never costs the v4 service; the delegated prefix feeds br-lan via ip6assign.
 config interface 'wan6'
-	option device 'gpon0'
+	option device '@wan'
 	option proto 'dhcpv6'
 	option reqaddress 'try'
 	option reqprefix 'auto'

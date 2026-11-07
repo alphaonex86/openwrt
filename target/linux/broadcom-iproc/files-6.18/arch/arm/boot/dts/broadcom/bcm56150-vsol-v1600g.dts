@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * V-SOL V1600G GPON OLT: Broadcom Hurricane2 BCM56150 host, 512 MiB DDR2 at 0x60000000.
+ * Facts from its stock 1.9.7R: U-Boot "DRAM: 512 MiB", kernel "mem=496M", console = the UART at 0x18000300.
+ */
+/dts-v1/;
+
+#include "bcm-hr2.dtsi"
+
+/ {
+	compatible = "vsol,v1600g", "brcm,bcm56150", "brcm,hr2";
+	model = "V-SOL V1600G";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		bootargs = "earlycon";
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@60000000 {
+		device_type = "memory";
+		reg = <0x60000000 0x1f000000>;
+	};
+};
+
+&uart0 {
+	status = "okay";
+};

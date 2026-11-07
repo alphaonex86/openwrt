@@ -458,12 +458,13 @@ config ARM_SBSA_WATCHDOG
 
 config TWD_WDT
 	tristate "ARM Cortex-A9 private watchdog (TWD)"
-	depends on ARM && SMP && OF
+	depends on ARM && OF
 	select WATCHDOG_CORE
 	help
 	  The per-CPU timer-watchdog of the Cortex-A9 MPCore (PERIPHBASE +
 	  0x620), run in watchdog mode: CPU0's counter resets the SoC when it
-	  is not kicked in time. Used by the ZTE ZX279128 (ZXHN F680).
+	  is not kicked in time. Shared by every Cortex-A9 target (zte-zx,
+	  broadcom-iproc) through cortex-a9-common.
 
 	  To compile this driver as a module, choose M here: the module will
 	  be called twd_wdt.

@@ -307,6 +307,10 @@ struct omci_onu {
 	/* spy counters (dump/probe capability is first-class, project rule) */
 	u32	unhandled;		/* DS message types with no ONU action */
 	u32	dup_replay;		/* retransmissions served from the cache */
+	/* the clone fallback, omci_onu_set_profile(): the shell's memory */
+	const u8	*profile;
+	u32	profile_n;
+	u32	profile_hits;		/* Unknown-ME requests answered from it */
 	u32	rx_extended;		/* devid 0x0b frames seen (not served) */
 	u32	rx_bad_mic;		/* DS frames DISCARDED on an invalid MIC */
 	u32	rx_runt;		/* DS frames shorter than a 48-byte baseline PDU */

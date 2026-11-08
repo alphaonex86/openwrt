@@ -253,11 +253,41 @@ int omci_resp_fmt(const struct omci_onu *o, bool armed, u32 tx, u32 tx_fail,
 			 "ds_omci_rx     = %u (short=%u)\n"
 			 "omci_resp      = %s tx=%u fail=%u ds_crc ok=%u bad=%u"
 			 "  mds=%u store=%u avc=%u unhandled=%u dup_replay=%u ext=%u no_ack=%u selftest=%u\n"
-			 "omci_rx_bad_mic: %u (DS frames discarded on an invalid MIC)\n",
+			 "omci_rx_bad_mic: %u (DS frames discarded on an invalid MIC)\n"
+			 "omci_profile: %u records, %u answers (clone fallback)\n",
 			 o->rx_total, o->rx_runt, armed ? "armed" : "off", tx, tx_fail,
 			 o->mic_conv_ok, o->mic_conv_bad, o->mds, o->store_n,
 			 o->avc_count, o->unhandled, o->dup_replay, o->rx_extended,
-			 o->no_ack, o->selftest_sent, o->rx_bad_mic);
+			 o->no_ack, o->selftest_sent, o->rx_bad_mic,
+			 o->profile_n, o->profile_hits);
+}
+
+void omci_onu_set_profile(struct omci_onu *o, const u8 *rec, u32 n)
+{
+	o->profile = n ? rec : NULL;
+	o->profile_n = n;
+}
+
+/* Binary search of the request's bytes 2..39; the answer's go to @resp 2..39. */
+static bool omci_profile_answer(const struct omci_onu *o, const u8 *msg, u8 *resp)
+{
+	u32 low = 0, high = o->profile_n;
+
+	while (low < high) {
+		u32 mid = low + (high - low) / 2;
+		const u8 *r = o->profile + (size_t)mid * OMCI_PROFILE_REC;
+		int order = memcmp(msg + 2, r, 38);
+
+		if (!order) {
+			memcpy(resp + 2, r + 38, 38);
+			return true;
+		}
+		if (order < 0)
+			high = mid;
+		else
+			low = mid + 1;
+	}
+	return false;
 }
 
 int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
@@ -463,6 +493,13 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *msg, unsigned int len,
 		o->unhandled++;
 		break;
 	}
+
+	/* What the model does not know, a stock ONU answered (omci_onu_set_profile);
+	 * only the types whose byte 8 is a result code. */
+	if ((mt == OMCI_MT_GET || mt == OMCI_MT_SET || mt == OMCI_MT_CREATE ||
+	     mt == OMCI_MT_DELETE || mt == OMCI_MT_GET_NEXT) &&
+	    resp[8] == OMCI_RC_UNKNOWN_ME && omci_profile_answer(o, msg, resp))
+		o->profile_hits++;
 
 	/* Acceptance describes a committed request, independently of AR and
 	 * response delivery. The replay path above never reaches this point. */

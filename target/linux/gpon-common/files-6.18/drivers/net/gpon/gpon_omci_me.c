@@ -3053,6 +3053,8 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	u8 wan_mac[6];
 	bool wan_mac_set = o->wan_mac_set;
 	u8 cap[OMCI_UNI_MAX], type[OMCI_UNI_MAX];
+	const u8 *profile = o->profile;		/* the shell's, not the session's */
+	u32 profile_n = o->profile_n;
 
 	memcpy(cap, o->uni_g_mgmt_cap, sizeof(cap));
 	/* ★ THE TYPE IS CARRIED TOO.  It is the panel's, not the session's: an
@@ -3078,6 +3080,8 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->cap = capacity;
 	memcpy(o->wan_mac, wan_mac, sizeof(wan_mac));
 	o->wan_mac_set = wan_mac_set;
+	o->profile = profile;
+	o->profile_n = profile_n;
 	/* ⚠ UNCONDITIONALLY, INCLUDING WITH BOTH LISTS EMPTY.  Guarding this on
 	 * "something was declared" made a board that legally declares no UNI at
 	 * all come back with the default 0x0101 on both classes -- an instance

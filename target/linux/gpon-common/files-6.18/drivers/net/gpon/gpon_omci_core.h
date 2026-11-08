@@ -116,6 +116,14 @@ int omci_onu_input_ex(struct omci_onu *o, const u8 *req, unsigned int len,
  * dev/MEASURED-gpon_omci_core.h.md sec 1. */
 int omci_onu_input(struct omci_onu *o, const u8 *req, unsigned int len, u8 *resp);
 
+/* The clone fallback: a Get, Set, Create, Delete or Get-Next the ME model answers
+ * Unknown ME is answered as a stock ONU did, from a profile the sniffer recorded
+ * (FPGA-ONU common/sw/omci).  @rec: @n records of OMCI_PROFILE_REC bytes, request
+ * bytes 2..39 then the answer's, sorted by request (memcmp), owned by the shell
+ * for as long as it is set; n = 0 turns it off.  Survives omci_onu_reinit(). */
+#define OMCI_PROFILE_REC	76
+void omci_onu_set_profile(struct omci_onu *o, const u8 *rec, u32 n);
+
 /* The AAL5-BE MIC over bytes 0..43 as a VALUE, and the stamper into bytes
  * 44..47.  Exposed so a caller that must SHOW the computed MIC does not respell
  * the convention: there is exactly one spelling, here.  A host test modelling

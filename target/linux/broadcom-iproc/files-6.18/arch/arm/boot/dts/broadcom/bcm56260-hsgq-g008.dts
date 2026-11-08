@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * HSGQ G008 GPON OLT: Broadcom Saber2 (BCM56260, chip id 0xb260) host. It shares the HR2 iHost (A9, its PLL, GIC, timers,
+ * at 0x19000000) but not the HR2 peripherals, so only bcm-hr2.dtsi's iHost is kept.
+ * Facts from its stock: kernel "mem=512M"; console = its 8250 platform data (mapbase 0x18020000, irq 105,
+ * uartclk 100000000, regshift 2, UPIO_MEM32); U-Boot boots the uImage it reads from SPI-NOR 0x100000.
+ */
+/dts-v1/;
+
+#include "bcm-hr2.dtsi"
+
+/delete-node/ &uart0;
+/delete-node/ &uart1;
+/delete-node/ &amac0;
+/delete-node/ &nand_controller;
+/delete-node/ &gpiob;
+/delete-node/ &pwm;
+/delete-node/ &rng;
+/delete-node/ &qspi;
+/delete-node/ &ccbtimer0;
+/delete-node/ &ccbtimer1;
+/delete-node/ &i2c0;
+/delete-node/ &watchdog;
+/delete-node/ &i2c1;
+/delete-node/ &pflash;
+/delete-node/ &pcie0;
+/delete-node/ &pcie1;
+
+/ {
+	compatible = "hsgq,g008";
+	model = "HSGQ G008";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		bootargs = "earlycon";
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@60000000 {
+		device_type = "memory";
+		reg = <0x60000000 0x20000000>;
+	};
+};
+
+&{/axi@18000000} {
+	/delete-node/ dma@20000;
+
+	uart0: serial@20000 {
+		compatible = "ns16550a";
+		reg = <0x20000 0x100>;
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>;
+		clock-frequency = <100000000>;
+	};
+};

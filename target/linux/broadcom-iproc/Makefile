@@ -13,8 +13,9 @@ KERNEL_PATCHVER:=6.18
 
 define Target/Description
 	Build firmware images for GPON OLTs whose host is a Broadcom iProc
-	switch SoC (Hurricane2 BCM56150: V-SOL V1600G). Bring-up is
-	run-from-RAM: an initramfs uImage booted by the vendor U-Boot.
+	switch SoC (Hurricane2 BCM56150: V-SOL V1600G; Saber2 BCM56260:
+	HSGQ G008). Bring-up is run-from-RAM: an initramfs uImage booted by
+	the vendor U-Boot.
 endef
 
 include $(INCLUDE_DIR)/target.mk

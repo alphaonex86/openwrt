@@ -13,3 +13,16 @@ define Device/vsol_v1600g
   KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage none | check-size 7168k
 endef
 TARGET_DEVICES += vsol_v1600g
+
+# Its U-Boot reads 6 MiB from SPI-NOR 0x100000 to 0x63007fc0 and bootm's it (stock env bootcmd), ATAGs only.
+define Device/hsgq_g008
+  DEVICE_VENDOR := HSGQ
+  DEVICE_MODEL := G008
+  DEVICE_DTS := bcm56260-hsgq-g008
+  DEVICE_DTS_DIR := $(DTS_DIR)/broadcom
+  SOC := bcm56260
+  KERNEL_LOADADDR := 0x61008000
+  KERNEL := kernel-bin | append-dtb | uImage none | check-size 6144k
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage none | check-size 6144k
+endef
+TARGET_DEVICES += hsgq_g008

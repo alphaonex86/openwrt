@@ -2,6 +2,16 @@
 #
 # Copyright (C) 2006-2014 OpenWrt.org
 
+config ARM64_KERNEL_CROSS
+	string "Cross-compiler prefix of an arm64 kernel under this 32-bit ARM user space"
+	depends on arm
+	default ""
+	help
+	  Empty: the kernel is built for the user space's architecture by its
+	  compiler, as on any target. Set to a compiler prefix: the kernel and
+	  its modules are arm64, built by that compiler, and run the 32-bit user
+	  space through COMPAT (a SoC whose stock does so: ZTE ZX279221).
+
 config KERNEL_BUILD_USER
 	string "Custom Kernel Build User Name"
 	default "builder" if BUILDBOT

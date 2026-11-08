@@ -34,6 +34,9 @@ else
   ifneq (,$(findstring uml,$(BOARD)))
     KERNEL_CC?=$(HOSTCC)
     KERNEL_CROSS?=
+  else ifneq ($(call qstrip,$(CONFIG_ARM64_KERNEL_CROSS)),)
+    KERNEL_CROSS?=$(call qstrip,$(CONFIG_ARM64_KERNEL_CROSS))
+    KERNEL_CC?=$(KERNEL_CROSS)gcc
   else
     KERNEL_CC?=$(TARGET_CC)
     KERNEL_CROSS?=$(TARGET_CROSS)
@@ -80,6 +83,8 @@ endif
 
 ifneq (,$(findstring uml,$(BOARD)))
   LINUX_KARCH=um
+else ifneq ($(call qstrip,$(CONFIG_ARM64_KERNEL_CROSS)),)
+  LINUX_KARCH := arm64
 else ifneq (,$(findstring $(ARCH) , aarch64 aarch64_be ))
   LINUX_KARCH := arm64
 else ifneq (,$(findstring $(ARCH) , armeb ))
@@ -122,7 +127,7 @@ ifneq (,$(KERNEL_CC))
 endif
 
 KERNEL_NOSTDINC_FLAGS = \
-	-nostdinc $(if $(DUMP),, -isystem $(shell $(TARGET_CC) -print-file-name=include))
+	-nostdinc $(if $(DUMP),, -isystem $(shell $(if $(call qstrip,$(CONFIG_ARM64_KERNEL_CROSS)),$(KERNEL_CC),$(TARGET_CC)) -print-file-name=include))
 
 ifeq ($(call qstrip,$(CONFIG_EXTERNAL_KERNEL_TREE))$(call qstrip,$(CONFIG_KERNEL_GIT_CLONE_URI)),)
   KERNEL_MAKE_FLAGS += \

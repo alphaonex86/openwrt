@@ -387,7 +387,7 @@ else
 		$(if $(CONFIG_KERNEL_PROFILING),KEEP_SYMBOLS=1); \
     NM="$(TARGET_CROSS)nm" \
     STRIP="$(STRIP)" \
-    STRIP_KMOD="$(SCRIPT_DIR)/strip-kmod.sh" \
+    STRIP_KMOD="$(if $(KERNEL_CROSS),CROSS=$(KERNEL_CROSS) )$(SCRIPT_DIR)/strip-kmod.sh" \
     PATCHELF="$(STAGING_DIR_HOST)/bin/patchelf" \
     $(SCRIPT_DIR)/rstrip.sh
 endif

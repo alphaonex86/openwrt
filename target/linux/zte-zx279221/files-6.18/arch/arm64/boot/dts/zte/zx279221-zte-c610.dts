@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * ZTE ZXA10 C610 OLT main board (GMPA/UMOP): ZTE ZX279221, 4x Cortex-A53, 2 GiB DDR at 0x40000000.
+ * Facts from the stock board.dtb: PSCI by SMC, GICv3 (distributor 0x500000, redistributors 0x580000), the
+ * architected timer, the console UART at 0x7105000 (SPI 39, ZTE's PL011 layout) left at 115200 by U-Boot,
+ * the five SoC watchdogs (0x7007000..0x700b000, SPI 17..21) whose expiry the system controller at 0x7300004 routes
+ * to reset, each clocked from its LSP0 CRM register (0x700001c + 4n; wdt4 shares wdt2's, as stock).
+ */
+/dts-v1/;
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	compatible = "zte,c610", "zte,zx279221";
+	model = "ZTE ZXA10 C610";
+	interrupt-parent = <&gic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0x0 0x0>;
+			enable-method = "psci";
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0x0 0x1>;
+			enable-method = "psci";
+		};
+
+		cpu@2 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0x0 0x2>;
+			enable-method = "psci";
+		};
+
+		cpu@3 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0x0 0x3>;
+			enable-method = "psci";
+		};
+	};
+
+	psci {
+		compatible = "arm,psci-1.0", "arm,psci";
+		method = "smc";
+	};
+
+	gic: interrupt-controller@500000 {
+		compatible = "arm,gic-v3";
+		reg = <0x0 0x500000 0x0 0x10000>,
+		      <0x0 0x580000 0x0 0x80000>;
+		#interrupt-cells = <3>;
+		interrupt-controller;
+		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_LEVEL_LOW)>;
+	};
+
+	/* the UART's clock as U-Boot leaves it (divisor 13 + 36/64 at 115200) */
+	lsp1_25m: clock-25000000 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+
+	lsp0_25m: clock-lsp0-25000000 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x80000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* ZTE's PL011 layout; the periphid is ours, the stock tree's 0x1feffe names the ZX279128 layout too */
+		uart0: serial@7105000 {
+			compatible = "arm,pl011", "arm,primecell";
+			arm,primecell-periphid = <0x1feffd>;
+			reg = <0x0 0x7105000 0x0 0x1000>;
+			interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&lsp1_25m>, <&lsp1_25m>;
+			clock-names = "uartclk", "apb_pclk";
+			current-speed = <115200>;
+		};
+
+		wdt0_clk: clock-controller@700001c {
+			compatible = "zte,zx279221-lsp-clk";
+			reg = <0x0 0x700001c 0x0 0x4>;
+			clocks = <&lsp0_25m>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+		};
+
+		wdt1_clk: clock-controller@7000020 {
+			compatible = "zte,zx279221-lsp-clk";
+			reg = <0x0 0x7000020 0x0 0x4>;
+			clocks = <&lsp0_25m>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+		};
+
+		wdt2_clk: clock-controller@7000024 {
+			compatible = "zte,zx279221-lsp-clk";
+			reg = <0x0 0x7000024 0x0 0x4>;
+			clocks = <&lsp0_25m>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+		};
+
+		wdt3_clk: clock-controller@7000028 {
+			compatible = "zte,zx279221-lsp-clk";
+			reg = <0x0 0x7000028 0x0 0x4>;
+			clocks = <&lsp0_25m>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+		};
+
+		rstcfg: syscon@7300004 {
+			compatible = "zte,zx279221-rstcfg", "syscon";
+			reg = <0x0 0x7300004 0x0 0x4>;
+		};
+
+		wdt0: watchdog@7007000 {
+			compatible = "zte,zx279221-wdt";
+			reg = <0x0 0x7007000 0x0 0x1000>;
+			interrupts = <GIC_SPI 17 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&wdt0_clk 1>, <&wdt0_clk 0>;
+			clock-names = "wclk", "pclk";
+			resets = <&wdt0_clk 0>;
+			zte,wdt-reset-sysctrl = <&rstcfg 0x0 0x10200 0x10200>;
+			status = "okay";
+		};
+
+		wdt1: watchdog@7008000 {
+			compatible = "zte,zx279221-wdt";
+			reg = <0x0 0x7008000 0x0 0x1000>;
+			interrupts = <GIC_SPI 18 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&wdt1_clk 1>, <&wdt1_clk 0>;
+			clock-names = "wclk", "pclk";
+			resets = <&wdt1_clk 0>;
+			zte,wdt-reset-sysctrl = <&rstcfg 0x0 0x20200 0x20200>;
+			status = "disabled";
+		};
+
+		wdt2: watchdog@7009000 {
+			compatible = "zte,zx279221-wdt";
+			reg = <0x0 0x7009000 0x0 0x1000>;
+			interrupts = <GIC_SPI 19 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&wdt2_clk 1>, <&wdt2_clk 0>;
+			clock-names = "wclk", "pclk";
+			resets = <&wdt2_clk 0>;
+			zte,wdt-reset-sysctrl = <&rstcfg 0x0 0x40200 0x40200>;
+			status = "disabled";
+		};
+
+		wdt3: watchdog@700a000 {
+			compatible = "zte,zx279221-wdt";
+			reg = <0x0 0x700a000 0x0 0x1000>;
+			interrupts = <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&wdt3_clk 1>, <&wdt3_clk 0>;
+			clock-names = "wclk", "pclk";
+			resets = <&wdt3_clk 0>;
+			zte,wdt-reset-sysctrl = <&rstcfg 0x0 0x80200 0x80200>;
+			status = "disabled";
+		};
+
+		wdt4: watchdog@700b000 {
+			compatible = "zte,zx279221-wdt";
+			reg = <0x0 0x700b000 0x0 0x1000>;
+			interrupts = <GIC_SPI 21 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&wdt2_clk 1>, <&wdt2_clk 0>;
+			clock-names = "wclk", "pclk";
+			resets = <&wdt2_clk 0>;
+			zte,wdt-reset-sysctrl = <&rstcfg 0x0 0x100000 0x100000>;
+			status = "disabled";
+		};
+	};
+};

@@ -217,9 +217,9 @@ static struct vendor_data vendor_st = {
 };
 
 /*
- * ZTE ZX GPON SoCs (ZX279128): a PL011 at other offsets, with the receive and transmit line control split and
- * the modem status bits of the flag register moved; the values the unit's stock kernel uses. Matched through
- * the device tree's arm,primecell-periphid (Linux-reserved vendor 0xfe).
+ * ZTE SoCs: a PL011 at other offsets, with the modem status bits of the flag register moved; the values each
+ * unit's stock kernel uses. Matched through the device tree's arm,primecell-periphid (Linux-reserved vendor
+ * 0xfe). ZX279128 (F680): receive and transmit line control split.
  */
 static u16 pl011_zte_offsets[REG_ARRAY_SIZE] = {
 	[REG_DR] = 0x04,
@@ -249,6 +249,34 @@ static struct vendor_data vendor_zte = {
 	.fr_dsr			= BIT(3),
 	.fr_cts			= BIT(1),
 	.fr_ri			= BIT(0),
+	.get_fifosize		= get_fifosize_zte,
+};
+
+/* ZX279221 (C610): one line control, interrupt status at 0x44, 32-bit access only. */
+static u16 pl011_zx279221_offsets[REG_ARRAY_SIZE] = {
+	[REG_DR] = 0x04,
+	[REG_FR] = 0x14,
+	[REG_LCRH_RX] = 0x30,
+	[REG_LCRH_TX] = 0x30,
+	[REG_IBRD] = 0x24,
+	[REG_FBRD] = 0x28,
+	[REG_CR] = 0x34,
+	[REG_IFLS] = 0x38,
+	[REG_IMSC] = 0x40,
+	[REG_RIS] = 0x44,
+	[REG_MIS] = 0x48,
+	[REG_ICR] = 0x4c,
+	[REG_DMACR] = 0x50,
+};
+
+static struct vendor_data vendor_zx279221 = {
+	.reg_offset		= pl011_zx279221_offsets,
+	.ifls			= UART011_IFLS_RX4_8 | UART011_IFLS_TX4_8,
+	.fr_busy		= BIT(8) | BIT(9),
+	.fr_dsr			= BIT(3),
+	.fr_cts			= BIT(1),
+	.fr_ri			= BIT(0),
+	.access_32b		= true,
 	.get_fifosize		= get_fifosize_zte,
 };
 
@@ -3121,6 +3149,11 @@ static const struct amba_id pl011_ids[] = {
 		.id	= 0x001feffe,	/* revision 1, vendor 0xfe (Linux), part 0xffe */
 		.mask	= 0x00ffffff,
 		.data	= &vendor_zte,
+	},
+	{
+		.id	= 0x001feffd,	/* ours: the C610 stock tree reuses 0xffe for its other layout */
+		.mask	= 0x00ffffff,
+		.data	= &vendor_zx279221,
 	},
 	{ 0, 0 },
 };

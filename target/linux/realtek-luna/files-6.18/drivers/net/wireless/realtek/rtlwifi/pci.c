@@ -531,6 +531,17 @@ static void _rtl_pci_tx_chk_waitq(struct ieee80211_hw *hw)
 	}
 }
 
+/* rtl_lps_leave() queues a work item: not per received frame with no power save to leave. */
+static void _rtl_pci_lps_leave(struct ieee80211_hw *hw)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
+	if (rtl_psc(rtlpriv)->dot11_psmode == EACTIVE)
+		rtlpriv->enter_ps = false;
+	else
+		rtl_lps_leave(hw, false);
+}
+
 static void _rtl_pci_tx_isr(struct ieee80211_hw *hw, int prio)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -694,41 +705,6 @@ static int _rtl_pci_init_one_rxdesc(struct ieee80211_hw *hw, u8 *entry,
 	return 1;
 }
 
-/* inorder to receive 8K AMSDU we have set skb to
- * 9100bytes in init rx ring, but if this packet is
- * not a AMSDU, this large packet will be sent to
- * TCP/IP directly, this cause big packet ping fail
- * like: "ping -s 65507", so here we will realloc skb
- * based on the true size of packet, Mac80211
- * Probably will do it better, but does not yet.
- *
- * Some platform will fail when alloc skb sometimes.
- * in this condition, we will send the old skb to
- * mac80211 directly, this will not cause any other
- * issues, but only this packet will be lost by TCP/IP
- */
-static void _rtl_pci_rx_to_mac80211(struct ieee80211_hw *hw,
-				    struct sk_buff *skb,
-				    struct ieee80211_rx_status rx_status)
-{
-	if (unlikely(!rtl_action_proc(hw, skb, false))) {
-		dev_kfree_skb_any(skb);
-	} else {
-		struct sk_buff *uskb = NULL;
-
-		uskb = dev_alloc_skb(skb->len + 128);
-		if (likely(uskb)) {
-			memcpy(IEEE80211_SKB_RXCB(uskb), &rx_status,
-			       sizeof(rx_status));
-			skb_put_data(uskb, skb->data, skb->len);
-			dev_kfree_skb_any(skb);
-			ieee80211_rx(hw, uskb);
-		} else {
-			ieee80211_rx(hw, skb);
-		}
-	}
-}
-
 /*hsisr interrupt handler*/
 static void _rtl_pci_hs_interrupt(struct ieee80211_hw *hw)
 {
@@ -740,8 +716,10 @@ static void _rtl_pci_hs_interrupt(struct ieee80211_hw *hw)
 		       rtlpci->sys_irq_mask);
 }
 
-/* At most `budget` descriptors; -> how many were consumed. */
-static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
+/* At most `budget` descriptors; -> how many were consumed. What mac80211
+ * delivers is queued on `stack` for one netif_receive_skb_list() per pass. */
+static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
+				 struct list_head *stack)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
@@ -762,15 +740,15 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 	while (done < budget) {
 		struct ieee80211_hdr *hdr;
 		__le16 fc;
-		u16 len;
+		u32 len, off;
 		/*rx buffer descriptor */
 		struct rtl_rx_buffer_desc *buffer_desc = NULL;
 		/*if use new trx flow, it means wifi info */
 		struct rtl_rx_desc *pdesc = NULL;
-		/*rx pkt */
-		struct sk_buff *skb = rtlpci->rx_ring[rxring_idx].rx_buf[
+		struct sk_buff *buf = rtlpci->rx_ring[rxring_idx].rx_buf[
 				      rtlpci->rx_ring[rxring_idx].idx];
-		struct sk_buff *new_skb;
+		dma_addr_t dma = *((dma_addr_t *)buf->cb);
+		struct sk_buff *skb;
 
 		if (rtlpriv->use_new_trx_flow) {
 			if (rx_remained_cnt == 0)
@@ -781,7 +759,7 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 				return done;
 			buffer_desc = &rtlpci->rx_ring[rxring_idx].buffer_desc[
 				rtlpci->rx_ring[rxring_idx].idx];
-			pdesc = (struct rtl_rx_desc *)skb->data;
+			pdesc = (struct rtl_rx_desc *)buf->data;
 		} else {	/* rx descriptor */
 			pdesc = &rtlpci->rx_ring[rxring_idx].desc[
 				rtlpci->rx_ring[rxring_idx].idx];
@@ -793,20 +771,12 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 				return done;
 		}
 
-		/* Secure a mapped replacement before consuming the current buffer. */
-		new_skb = _rtl_pci_alloc_rx_skb(hw);
-		if (unlikely(!new_skb)) {
-			rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
-				"RX replacement unavailable; reusing buffer\n");
-			new_skb = skb;
-			goto new_trx_end;
-		}
-		dma_unmap_single(&rtlpci->pdev->dev, *((dma_addr_t *)skb->cb),
-				 rtlpci->rxbuffersize, DMA_FROM_DEVICE);
+		dma_sync_single_for_cpu(&rtlpci->pdev->dev, dma,
+					rtlpci->rxbuffersize, DMA_FROM_DEVICE);
 
 		memset(&rx_status, 0, sizeof(rx_status));
 		rtlpriv->cfg->ops->query_rx_desc(hw, &stats,
-						 &rx_status, (u8 *)pdesc, skb);
+						 &rx_status, (u8 *)pdesc, buf);
 
 		if (rtlpriv->use_new_trx_flow)
 			rtlpriv->cfg->ops->rx_check_dma_ok(hw,
@@ -815,22 +785,19 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 
 		len = rtlpriv->cfg->ops->get_desc(hw, (u8 *)pdesc, false,
 						  HW_DESC_RXPKT_LEN);
-
-		if (skb->end - skb->tail > len) {
-			skb_put(skb, len);
-			if (rtlpriv->use_new_trx_flow)
-				skb_reserve(skb, stats.rx_drvinfo_size +
-					    stats.rx_bufshift + 24);
-			else
-				skb_reserve(skb, stats.rx_drvinfo_size +
-					    stats.rx_bufshift);
-		} else {
+		off = stats.rx_drvinfo_size + stats.rx_bufshift +
+		      (rtlpriv->use_new_trx_flow ? 24 : 0);
+		/* The frame leaves as a copy of its own size: the ring buffer stays
+		 * mapped in its slot, no 4 KB buffer is allocated per frame. */
+		skb = off + len <= rtlpci->rxbuffersize ?
+		      dev_alloc_skb(len + 128) : NULL;
+		if (unlikely(!skb)) {
 			rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
-				"skb->end - skb->tail = %d, len is %d\n",
-				skb->end - skb->tail, len);
-			dev_kfree_skb_any(skb);
+				"RX frame %u+%u dropped: no memory or past the buffer\n",
+				off, len);
 			goto new_trx_end;
 		}
+		skb_put_data(skb, buf->data + off, len);
 		/* handle command packet here */
 		if (stats.packet_report_type == C2H_PACKET) {
 			rtl_c2hcmd_enqueue(hw, skb);
@@ -878,14 +845,20 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget)
 			    (ieee80211_is_beacon(fc) ||
 			     ieee80211_is_probe_resp(fc))) {
 				dev_kfree_skb_any(skb);
+			} else if (unlikely(!rtl_action_proc(hw, skb, false))) {
+				dev_kfree_skb_any(skb);
 			} else {
-				_rtl_pci_rx_to_mac80211(hw, skb, rx_status);
+				ieee80211_rx_list(hw, NULL, skb, stack);
 			}
 		} else {
 			/* drop packets with errors or those too short */
 			dev_kfree_skb_any(skb);
 		}
 new_trx_end:
+		/* only what was read can be stale in the cache when the slot refills */
+		dma_sync_single_for_device(&rtlpci->pdev->dev, dma,
+					   min_t(u32, off + len, rtlpci->rxbuffersize),
+					   DMA_FROM_DEVICE);
 		if (rtlpriv->use_new_trx_flow) {
 			rtlpci->rx_ring[hw_queue].next_rx_rp += 1;
 			rtlpci->rx_ring[hw_queue].next_rx_rp %=
@@ -896,10 +869,9 @@ new_trx_end:
 		if (((rtlpriv->link_info.num_rx_inperiod +
 		      rtlpriv->link_info.num_tx_inperiod) > 8) ||
 		      rtlpriv->link_info.num_rx_inperiod > 2)
-			rtl_lps_leave(hw, false);
-		skb = new_skb;
+			_rtl_pci_lps_leave(hw);
 		if (rtlpriv->use_new_trx_flow) {
-			_rtl_pci_prepare_rxdesc(hw, skb, (u8 *)buffer_desc,
+			_rtl_pci_prepare_rxdesc(hw, buf, (u8 *)buffer_desc,
 					       rxring_idx,
 					       rtlpci->rx_ring[rxring_idx].idx);
 			/* ★ THE SLOT IS HANDED BACK ONLY ONCE IT HOLDS ITS NEW, MAPPED
@@ -910,10 +882,11 @@ new_trx_end:
 			 * (Hal88XXRxDesc / UpdateRXBDHostIdx). The barrier orders the
 			 * descriptor write before the doorbell. */
 			wmb();
-			rtl_write_word(rtlpriv, 0x3B4,
-				       rtlpci->rx_ring[hw_queue].next_rx_rp);
+			/* no read-back: one more MMIO round trip per frame */
+			rtlpriv->io.write16(rtlpriv, 0x3B4,
+					    rtlpci->rx_ring[hw_queue].next_rx_rp);
 		} else {
-			_rtl_pci_prepare_rxdesc(hw, skb, (u8 *)pdesc,
+			_rtl_pci_prepare_rxdesc(hw, buf, (u8 *)pdesc,
 					       rxring_idx,
 					       rtlpci->rx_ring[rxring_idx].idx);
 			if (rtlpci->rx_ring[rxring_idx].idx ==
@@ -976,10 +949,16 @@ static void _rtl_pci_rx_tasklet(struct tasklet_struct *t)
 	struct rtl_pci *rtlpci = from_tasklet(rtlpci, t, rx_tasklet);
 	struct ieee80211_hw *hw = pci_get_drvdata(rtlpci->pdev);
 	struct sk_buff *skb;
+	LIST_HEAD(stack);
+	int done;
 
 	while ((skb = skb_dequeue(&rtlpci->rx_inject)))
 		ieee80211_rx(hw, skb);
-	if (_rtl_pci_rx_interrupt(hw, RTL_PCI_RX_BUDGET) >= RTL_PCI_RX_BUDGET) {
+	rcu_read_lock();
+	done = _rtl_pci_rx_interrupt(hw, RTL_PCI_RX_BUDGET, &stack);
+	rcu_read_unlock();
+	netif_receive_skb_list(&stack);
+	if (done >= RTL_PCI_RX_BUDGET) {
 		tasklet_schedule(t);
 		return;
 	}

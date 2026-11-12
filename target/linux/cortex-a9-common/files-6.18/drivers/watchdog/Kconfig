@@ -469,6 +469,18 @@ config TWD_WDT
 	  To compile this driver as a module, choose M here: the module will
 	  be called twd_wdt.
 
+config VSOL_V1600G_WDT
+	tristate "V-SOL V1600G board watchdog"
+	depends on GPIOLIB && (ARCH_BCM_IPROC || COMPILE_TEST)
+	select WATCHDOG_CORE
+	help
+	  The supervisor outside the SoC of the V-SOL V1600G OLT, fed by frames
+	  on two GPIO lines: it resets the board about 11 minutes after
+	  power-on unless fed. Its source lives in the broadcom-iproc target.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called vsol_v1600g_wdt.
+
 config ARMADA_37XX_WATCHDOG
 	tristate "Armada 37xx watchdog"
 	depends on ARCH_MVEBU || COMPILE_TEST

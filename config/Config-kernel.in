@@ -1013,6 +1013,14 @@ config KERNEL_LUNA_DEBUG
 	  done, [T] timer, [I] irqchip) plus the luna_eth bring-up aids
 	  (build-openwrt.py variant "boot-marks").
 
+config KERNEL_VSOL_V1600G_WDT
+	bool "V-SOL V1600G board watchdog"
+	depends on TARGET_broadcom_iproc
+	default n
+	help
+	  The V1600G board's layer turns it on: the supervisor outside the SoC
+	  that resets the board unless fed.
+
 config KERNEL_MEM_ALLOC_PROFILING
 	bool "Track kernel allocation sites in /proc/allocinfo"
 	select KERNEL_DEBUG_KERNEL

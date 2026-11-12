@@ -893,10 +893,11 @@ config KERNEL_EXTRA_FIRMWARE
 
 config KERNEL_PCI
 	bool "PCI in the kernel"
-	depends on TARGET_realtek_luna
+	depends on TARGET_realtek_luna && !TARGET_realtek_luna_virt
 	default y
 	help
-	  A board whose SoC has no PCIe port turns it off.
+	  A board whose SoC has no PCIe port turns it off. QEMU's Malta, the virt
+	  subtarget, puts every virtio device on PCI, so it keeps it.
 
 config KERNEL_BPF_SYSCALL
 	bool "eBPF system call (bpf())"

@@ -36,10 +36,10 @@ define Build/Prepare
 endef
 
 define Build/Compile
-	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra \
+	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra -I$(TOPDIR)/package/kernel/maple/src \
 		-o $(PKG_BUILD_DIR)/maplectl \
 		$(PKG_BUILD_DIR)/maplectl.c $(PKG_BUILD_DIR)/maple_lib.c
-	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra \
+	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra -I$(TOPDIR)/package/kernel/maple/src \
 		-o $(PKG_BUILD_DIR)/maple_snmp \
 		$(PKG_BUILD_DIR)/maple_snmp.c $(PKG_BUILD_DIR)/maple_lib.c
 endef

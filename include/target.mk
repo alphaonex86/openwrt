@@ -330,8 +330,11 @@ ifeq ($(DUMP),1)
     ifneq ($(CONFIG_VIRTIO),)
       FEATURES += virtio
     endif
+    # MIPS16 is a userland ISA: a mips32 (R1) package tree is shared with cores that lack it.
     ifneq ($(CONFIG_CPU_MIPS32_R2),)
-      FEATURES += mips16
+      ifneq ($(CPU_TYPE),mips32)
+        FEATURES += mips16
+      endif
     endif
     ifneq ($(CONFIG_CPU_V6),)
       FEATURES += arm_v6

@@ -8,7 +8,9 @@
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/init.h>
+#include <linux/io.h>
 #include <linux/jiffies.h>
+#include <linux/libfdt.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
@@ -16,6 +18,7 @@
 #include <linux/random.h>
 #include <linux/rtnetlink.h>
 #include <linux/seq_file.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
 
@@ -31,6 +34,11 @@ MODULE_PARM_DESC(wire, "the NIC whose far end is the virtual ODN");
 static char *sn = "XPON00000001";
 module_param(sn, charp, 0444);
 MODULE_PARM_DESC(sn, "this virtual unit's G.984.3 serial number, AAAAhhhhhhhh");
+static unsigned long panel_fdt;
+module_param(panel_fdt, ulong, 0444);
+MODULE_PARM_DESC(panel_fdt, "physical address of a flattened tree whose /omci-uni is the panel (0: the live tree)");
+
+#define PV_FDT_MAX	SZ_64K
 
 #define PV_TICK_MS	20
 
@@ -389,23 +397,92 @@ static const void *pv_of_prop(void *np, const char *name, int *len)
 	return of_get_property(np, name, len);
 }
 
-/* The board's own /omci-uni panel: a virtual X400AXF declares what the X400AXF declares. */
-static void pv_declare_panel(void)
+struct pv_fdt_node {
+	const void *blob;
+	int node;
+};
+
+static const void *pv_fdt_prop(void *ctx, const char *name, int *len)
 {
-	struct device_node *np = of_find_node_by_path("/omci-uni");
+	const struct pv_fdt_node *f = ctx;
+	const void *v = fdt_getprop(f->blob, f->node, name, len);
+
+	if (!v)
+		*len = -1;
+	return v;
+}
+
+static void pv_panel_log(const char *from, const struct omci_panel_decl *d)
+{
+	pr_info("ponvirt: /omci-uni from %s: %d Ethernet UNI(s), %u switch port(s)\n", from, d->unis,
+		pv->uni_port_n);
+	if (d->unis_why)
+		pr_err("ponvirt: /omci-uni REFUSED: %s\n", d->unis_why);
+	if (d->part)
+		pr_err("ponvirt: /omci-uni %s REFUSED: %s\n", d->part, d->part_why);
+}
+
+/* panel_fdt: QEMU placed a tree holding only /omci-uni above the kernel's RAM (a machine whose kernel reads
+ * no external tree). Any fault fails the probe: a unit without its board's panel is not that board. */
+static int pv_declare_panel_fdt(void)
+{
+	struct pv_fdt_node f;
+	struct omci_panel_decl d;
+	void *head;
+	u32 size;
+	int rc;
+
+	head = memremap(panel_fdt, sizeof(struct fdt_header), MEMREMAP_WB);
+	if (!head) {
+		pr_err("ponvirt: panel_fdt 0x%lx: not mappable\n", panel_fdt);
+		return -ENOMEM;
+	}
+	rc = fdt_magic(head) == FDT_MAGIC ? 0 : -EINVAL;
+	size = fdt_totalsize(head);
+	memunmap(head);
+	if (rc || size < sizeof(struct fdt_header) || size > PV_FDT_MAX) {
+		pr_err("ponvirt: panel_fdt 0x%lx: no FDT (magic %s, total size %u, at most %u)\n", panel_fdt,
+		       rc ? "wrong" : "ok", size, PV_FDT_MAX);
+		return -EINVAL;
+	}
+	f.blob = memremap(panel_fdt, size, MEMREMAP_WB);
+	if (!f.blob) {
+		pr_err("ponvirt: panel_fdt 0x%lx: %u bytes not mappable\n", panel_fdt, size);
+		return -ENOMEM;
+	}
+	rc = fdt_check_header(f.blob);
+	f.node = rc ? rc : fdt_path_offset(f.blob, "/omci-uni");
+	if (f.node < 0) {
+		pr_err("ponvirt: panel_fdt 0x%lx: %s: %s\n", panel_fdt, rc ? "bad header" : "no /omci-uni",
+		       fdt_strerror(f.node));
+		memunmap((void *)f.blob);
+		return -EINVAL;
+	}
+	omci_onu_declare_panel(pv->onu, pv_fdt_prop, &f, pv->uni_port, ARRAY_SIZE(pv->uni_port),
+			       &pv->uni_port_n, &d);
+	memunmap((void *)f.blob);
+	pv_panel_log("panel_fdt", &d);
+	return 0;
+}
+
+/* The board's own /omci-uni panel: a virtual X400AXF declares what the X400AXF declares. */
+static int pv_declare_panel(void)
+{
+	struct device_node *np;
 	struct omci_panel_decl d;
 
+	if (panel_fdt)
+		return pv_declare_panel_fdt();
+	np = of_find_node_by_path("/omci-uni");
 	if (!np) {
 		pr_warn("ponvirt: no /omci-uni in this device tree: the single-UNI default\n");
-		return;
+		return 0;
 	}
 	omci_onu_declare_panel(pv->onu, pv_of_prop, np, pv->uni_port, ARRAY_SIZE(pv->uni_port),
 			       &pv->uni_port_n, &d);
 	of_node_put(np);
-	if (d.unis_why)
-		pr_err("ponvirt: /omci-uni REFUSED: %s\n", d.unis_why);
-	if (d.part)
-		pr_err("ponvirt: /omci-uni %s REFUSED: %s\n", d.part, d.part_why);
+	pv_panel_log("the device tree", &d);
+	return 0;
 }
 
 static int pv_open_wire(void)
@@ -466,7 +543,9 @@ static int __init ponvirt_init(void)
 		return rc;
 	}
 	omci_onu_set_wan_mac(pv->onu, pv->wan->dev_addr);
-	pv_declare_panel();
+	rc = pv_declare_panel();
+	if (rc)
+		return rc;
 	missing = gpon_ploam_init(&pv->p, &pv_ops, &pv->cfg, pv, pv->sn);
 	if (missing) {
 		pr_err("ponvirt: the PLOAM core refused the shell: %s\n", missing);

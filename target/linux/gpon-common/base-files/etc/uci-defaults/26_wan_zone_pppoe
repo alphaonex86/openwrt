@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# The PPPoE netdev is in the wan zone before it exists: otherwise LAN to WAN is
+# rejected from its ifup until the firewall reload that follows it.
+. /lib/functions.sh
+
+PPPOE_DEV=pppoe-wan
+
+add_pppoe_dev() {
+	local name
+
+	config_get name "$1" name
+	[ "$name" = wan ] || return 0
+	uci -q del_list "firewall.$1.device=$PPPOE_DEV"
+	uci add_list "firewall.$1.device=$PPPOE_DEV" || {
+		logger -t wan-zone "Cannot list $PPPOE_DEV in the wan zone"
+		exit 1
+	}
+}
+
+config_load firewall
+config_foreach add_pppoe_dev zone
+if ! uci commit firewall; then
+	logger -t wan-zone 'Cannot save the wan zone'
+	exit 1
+fi
+
+exit 0

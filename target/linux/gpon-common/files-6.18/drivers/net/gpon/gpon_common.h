@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /* gpon_common.h -- THE CONTRACT between the HW-decoupled GPON ...
  * dev/MEASURED-gpon_common.h.md sec 10. */
 #ifndef GPON_COMMON_H

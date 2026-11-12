@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /*
  * ponvirt.c -- the PON MAC of a virtual ONU (QEMU): the boards' own gpon_* ONU core over an
  * Ethernet wire to the host's virtual ODN (dev/virt/vodn.c), at frame level (ponvirt_wire.h).

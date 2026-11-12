@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * Memory-to-memory DMA engine ("LDMA") of the RTL9607F (Cortina-Access ca77xx family), as a dmaengine
  * memcpy provider. The vendor firmware describes it (stock DT `cortina,adma`) and binds no driver.

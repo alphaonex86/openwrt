@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /*
  * Is a received Ethernet frame link control traffic: ARP, PPPoE discovery, PPP's own protocols
  * (LCP, authentication, IPCP), DHCP, DHCPv6, ICMPv6 neighbour/router discovery and MLD, IGMP?

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 #ifndef _LUNA_L2_ACCESS_H
 #define _LUNA_L2_ACCESS_H
 

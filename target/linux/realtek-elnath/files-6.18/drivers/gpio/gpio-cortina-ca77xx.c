@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Cortina-Access CA77xx peripheral GPIO controller. Found in ...
  * dev/MEASURED-gpio-cortina-ca77xx.c.md sec 1. */
 

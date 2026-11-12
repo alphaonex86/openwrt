@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
+/* TIER: FAMILY */
 /* Copyright(c) 2026  Realtek Corporation
  */
 

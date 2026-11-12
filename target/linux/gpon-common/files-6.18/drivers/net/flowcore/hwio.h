@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* hwio.h -- the register accessor, injected, so LOGIC stops ... -- dev/MEASURED-hwio.h.md sec 1. */
 #ifndef _HWIO_H
 #define _HWIO_H

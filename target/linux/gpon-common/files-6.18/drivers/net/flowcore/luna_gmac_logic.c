@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* See luna_gmac_logic.h. The two pack functions are MOVED ...
  * dev/MEASURED-luna_gmac_logic.c.md sec 10. */
 #include <linux/types.h>

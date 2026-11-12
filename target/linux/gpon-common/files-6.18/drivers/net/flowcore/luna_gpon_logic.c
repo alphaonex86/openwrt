@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* See luna_gpon_logic.h. */
 #include <linux/types.h>
 #include "gpon_ddm.h"	/* the one 0.1 uW -> centi-dBm conversion */

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* luna_gpon_logic.h -- the Luna GPON shell's hoisted pure ...
  * dev/MEASURED-luna_gpon_logic.h.md sec 1. */
 #ifndef _LUNA_GPON_LOGIC_H

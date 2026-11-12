@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* cortina_ni_rx_geom.h -- RX BUFFER GEOMETRY, lifted out of ...
  * dev/MEASURED-cortina_ni_rx_geom.h.md sec 1. */
 #ifndef _CORTINA_NI_RX_GEOM_H

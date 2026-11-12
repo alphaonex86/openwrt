@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: CHIP */
 /* Copyright(c) 2026  Realtek RTL8192FE clean-room contributors */
 /* RTL8192F (2T2R 802.11n PCIe) chip-init data tables. Every ...
  * dev/MEASURED-table.c.md sec 1. */

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: CHIP */
 /* RTL8192E HT explicit TX beamformer (the AP sounds an HT beamformee and steers toward it).
  * Off unless rtl8192ee.txbf=1. The pure parts below need only u8/u16/u32/bool, so the host
  * test (dev/rtl9607c-test/rtl8192ee_txbf_test.c) runs them as they ship. Register facts are

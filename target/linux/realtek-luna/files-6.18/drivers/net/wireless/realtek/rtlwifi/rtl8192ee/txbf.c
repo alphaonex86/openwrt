@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: CHIP */
 /* RTL8192E HT explicit TX beamformer: off by default; rtl8192ee.txbf=1 turns it on.
  *
  * A station is armed at association when its (re)association request's HT TxBF field says

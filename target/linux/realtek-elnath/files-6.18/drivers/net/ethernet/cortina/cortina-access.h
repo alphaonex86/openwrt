@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* ONE owner for this driver's indirect transaction -- NI ...
  * dev/MEASURED-cortina-access.h.md sec 1. */
 #ifndef _CORTINA_ACCESS_H

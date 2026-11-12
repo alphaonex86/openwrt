@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CHIP */
 /*
  * ZTE ZX279221 LSP peripheral clock register (one per block, e.g. each watchdog at LSP0 CRM 0x1c + 4n). Facts from
  * the unit's own kernel: bit 0 gates the bus clock, bit 1 the work clock, bit 4 releases the block's reset (0 holds

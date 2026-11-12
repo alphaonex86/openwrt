@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* FLOWBASED backend, included by the family NIC shell. */
 #if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)
 #include <linux/proc_fs.h>

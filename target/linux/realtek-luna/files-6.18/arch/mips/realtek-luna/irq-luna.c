@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * Realtek RTL960x "Luna" SoC interrupt controller (the "GISR" aggregator).
  *

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* eth_rx_geom.h -- where a received frame sits in its DMA buffer, decided ONCE for every chip.
  *
  * Field X111W 2026-11-06: each driver computed the frame from the descriptor length by hand, and one

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CHIP */
 /*
  * ZTE ZX279128 GPIO: one device tree node per bank of 16 lines, banks every 0x40 from 0x94404000.
  * Registers as the unit's own stock kernel drives them: direction (1 = output), line levels, and

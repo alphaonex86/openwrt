@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: CHIP */
 /* Width-exact reads of set_hw_reg/get_hw_reg values, shared by hw.c and the host test
  * (dev/rtl9607c-test/rtl8192fe_hwvar_be_test, run big-endian under qemu-mips).
  * These hosts are big-endian: a u32 read through a u16 pointer is its HIGH half. */

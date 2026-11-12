@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/* TIER: CHIP */
 /* Copyright(c) 2026  CatchChallenger project
  *
  * RTL8192XB PHY / RF / tx-power tables.

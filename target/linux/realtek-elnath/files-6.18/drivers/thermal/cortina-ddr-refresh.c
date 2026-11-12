@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * DDR refresh-rate derating of the RTL9607F, as a thermal cooling device.
  *

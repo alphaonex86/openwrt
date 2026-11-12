@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Minimal poll-mode MMIO I2C master for the Cortina-Access ...
  * dev/MEASURED-cortina-i2c.c.md sec 1. */
 

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * GPON-NI (PON port) management ops — port-level status, counters, and config.
  * Struct layouts recovered from trmux.ko DWARF (pahole):

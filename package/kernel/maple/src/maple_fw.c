@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * Firmware bring-up — open reimplementation of the vendor fld.ko BCM FLD layer.
  * See docs/decomp/fld.md + docs/decomp/bar0-register-map.md for the derivation.

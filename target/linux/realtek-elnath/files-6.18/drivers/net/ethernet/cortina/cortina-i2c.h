@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Minimal MMIO I2C master for the Cortina-Access ca77xx "per_i2c" controller
  * (Realtek RTL9607F "Elnath").  See cortina-i2c.c.

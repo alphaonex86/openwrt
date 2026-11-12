@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* cortina_ni_flowoffload_logic.h -- logic hoisted out of ...
  * dev/MEASURED-cortina_ni_flowoffload_logic.h.md sec 1. */
 #ifndef _CORTINA_NI_FLOWOFFLOAD_LOGIC_H

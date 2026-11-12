@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* Control ethertypes stamped CTL_RX_PRIO by the switch's ingress ACL, so a frame to gpon0's own
  * MAC (a lookup hit at data priority) still reaches the control RX ring under a flood. */
 #ifndef _LUNA_CTL_ACL_H

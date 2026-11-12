@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: CHIP */
 /* Copyright(c) 2026  rtl8192fe clean-room contributors */
 
 #ifndef __RTL92F_DEF_H__

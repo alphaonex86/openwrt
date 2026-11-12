@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* LAN loop detection shared by both Luna Ethernet shells. */
 #ifndef _LUNA_LOOP_H
 #define _LUNA_LOOP_H

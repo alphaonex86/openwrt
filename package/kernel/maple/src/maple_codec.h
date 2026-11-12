@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * BAL wire codec — pack/unpack the GPON ONU objects to/from the vendor's
  * field-by-field BIG-ENDIAN wire format (enums=1B, u16/u32/u64 BE, byte-arrays

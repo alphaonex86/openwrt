@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* gpon_ind_rmw.h -- write ONE entry of an indirect ... -- dev/MEASURED-gpon_ind_rmw.h.md sec 1. */
 #ifndef _GPON_IND_RMW_H
 #define _GPON_IND_RMW_H

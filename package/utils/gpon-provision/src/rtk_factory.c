@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: VENDOR */
 /*
  * rtk_factory - clean-room per-board identity reader for the RTL9602C ONU.
  *

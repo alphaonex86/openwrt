@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* cortina-l3fe.h - RTL9607F "Elnath" NE L3FE main-hash ...
  * dev/MEASURED-cortina-l3fe.h.md sec 9. */
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /* Cortina-Access peripheral watchdog (PER_WDT). Found on the ...
  * dev/MEASURED-cortina-wdt.c.md sec 1. */
 

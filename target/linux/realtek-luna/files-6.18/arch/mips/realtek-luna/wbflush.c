@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * The Luna SoCs post uncached stores in a bus write buffer; a descriptor or a
  * doorbell can still sit there when a PCIe device fetches from DRAM. An

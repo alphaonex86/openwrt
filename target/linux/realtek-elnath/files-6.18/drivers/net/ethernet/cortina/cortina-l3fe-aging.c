@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* cortina-l3fe-aging.c — Cortina CA8277C (RTL9607F "Elnath") ...
  * dev/MEASURED-cortina-l3fe-aging.c.md sec 1. */
 

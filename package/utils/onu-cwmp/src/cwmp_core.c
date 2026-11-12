@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /* The CWMP CPE core -- see cwmp_core.h. The wire format follows the CPE this unit stands in for, line by line:
  * one element per line, an empty value self-closed, Writable as 0/1, an answer carrying its request's ID. */
 #ifndef _GNU_SOURCE

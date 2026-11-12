@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* SFF-8472 A2h digital-diagnostic-monitoring (DDM) decode + ...
  * dev/MEASURED-cortina-gpon-ddm.h.md sec 1.
  * ★ THE DECODE MOVED TO THE CORE (gpon_ddm.h, 2026-09-16): SFF-8472 is a

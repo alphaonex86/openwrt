@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /*
  * Register facts for the Ethernet MAC and switch core on the Realtek Luna
  * family (RTL9602C, RTL9603CVD, and the siblings that follow).

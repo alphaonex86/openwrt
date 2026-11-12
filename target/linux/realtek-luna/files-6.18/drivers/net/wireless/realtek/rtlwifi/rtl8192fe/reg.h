@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: CHIP */
 /* Clean-room rtl8192fe register map for the Realtek RTL8192F PCIe 802.11n NIC. */
 
 #ifndef __RTL92F_REG_H__

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * CPU clock of the RTL9607F (Cortina-Access ca77xx family), so cpufreq-dt scales the Cortex-A55 pair.
  *

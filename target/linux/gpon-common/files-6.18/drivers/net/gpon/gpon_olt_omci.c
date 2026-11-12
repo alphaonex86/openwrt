@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /* gpon_olt_omci.c -- the OLT role of G.988 OMCI (see the header). */
 #include <linux/kernel.h>
 #include <linux/string.h>

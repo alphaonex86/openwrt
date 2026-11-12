@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 #ifndef _REALTEK_LUNA_H
 #define _REALTEK_LUNA_H
 

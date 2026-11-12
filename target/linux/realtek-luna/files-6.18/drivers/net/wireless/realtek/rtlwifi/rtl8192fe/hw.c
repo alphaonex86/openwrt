@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: CHIP */
 /* Clean-room rtl8192fe sub-driver for the Realtek RTL8192F (2T2R 802.11n). */
 
 #include "../wifi.h"

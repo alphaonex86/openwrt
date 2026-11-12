@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /* Realtek Luna (RTL960x) GPIO bank: 32 lines, line n = bit n of each register.
  *
  * A line reaches its pad only once its bit is set in the switch core's

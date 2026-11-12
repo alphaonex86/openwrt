@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CHIP */
 /* rtl9602c_l34_logic.h -- logic hoisted out of the ...
  * dev/MEASURED-rtl9602c_l34_logic.h.md sec 1. */
 #ifndef _RTL9602C_L34_LOGIC_H

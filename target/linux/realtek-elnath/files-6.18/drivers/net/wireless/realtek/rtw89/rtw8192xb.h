@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
+/* TIER: CHIP */
 /* Copyright(c) 2026  CatchChallenger project
  *
  * RTL8192XB: 2.4 GHz-only 2x2 802.11ax (Wi-Fi 6) PCIe chip, HW chip id 0x53.

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* luna_ponmac.h - board-agnostic bring-up of the Realtek ...
  * dev/MEASURED-luna_ponmac.h.md sec 1. */
 #ifndef _LUNA_PONMAC_H

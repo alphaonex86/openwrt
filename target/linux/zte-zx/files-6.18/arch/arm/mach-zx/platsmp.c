@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * ZX279128 secondary CPU boot. Out of reset CPU1 waits in the boot ROM until the start of IRAM holds a three-word
  * trampoline whose fourth word is a physical entry point, and a wake-up event; the stock kernel writes exactly that.

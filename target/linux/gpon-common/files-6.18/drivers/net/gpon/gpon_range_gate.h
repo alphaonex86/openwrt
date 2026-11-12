@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* MAY THIS ONU RANGE, AND WHAT MUST CHANGE IF NOT. The ...
  * dev/MEASURED-gpon_range_gate.h.md sec 1. */
 #ifndef _GPON_RANGE_GATE_H

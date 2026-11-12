@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: FAMILY */
 /* One crash-record format for every ONU: append-only, page-aligned, little-endian. Pure. */
 #ifndef ONU_CRASHLOG_CORE_H
 #define ONU_CRASHLOG_CORE_H

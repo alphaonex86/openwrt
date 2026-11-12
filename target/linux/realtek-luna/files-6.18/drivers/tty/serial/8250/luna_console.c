@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * Asynchronous kernel console for the Luna 8250 UART.
  *

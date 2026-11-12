@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * Cortex-A9 private watchdog (TWD, PERIPHBASE + 0x620) in watchdog mode: its counter resets the SoC at zero.
  * The registers are banked per CPU, so every access runs on CPU0, whose watchdog this driver owns. Started at

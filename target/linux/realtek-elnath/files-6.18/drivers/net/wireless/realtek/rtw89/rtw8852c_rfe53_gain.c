@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CHIP */
 /* RTW8852C, rfe_type 53, FEM KCT8531HE -- the external-front-end receive
  * gain program.
  *

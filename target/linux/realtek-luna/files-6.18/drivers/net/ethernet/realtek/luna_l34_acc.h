@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* Luna indirect table access: NAPT tables and FLOWBASED SRAM/interface tables. */
 #ifndef _LUNA_L34_ACC_H
 #define _LUNA_L34_ACC_H

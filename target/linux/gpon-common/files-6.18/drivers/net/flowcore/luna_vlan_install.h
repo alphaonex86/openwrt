@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* luna_vlan_install.h -- the LUNA family's install for the ...
  * dev/MEASURED-luna_vlan_install.h.md sec 1. */
 #ifndef _LUNA_VLAN_INSTALL_H

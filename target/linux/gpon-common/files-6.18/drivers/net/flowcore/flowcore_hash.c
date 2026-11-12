@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /*
  * Flow-key hashing primitives. See flowcore.h for why they are common and why
  * they carry no kernel dependency.

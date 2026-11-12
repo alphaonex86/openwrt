@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: CHIP */
 /* Copyright(c) 2026  Realtek RTL8192FE clean-room driver authors. */
 /* RF6052 radio bring-up and per-rate TX-power programming for ... -- dev/MEASURED-rf.c.md sec 1. */
 

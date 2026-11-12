@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /*
  * The G.984.3 ONU Serial Number codec. See gpon_sn.h for why it is here and
  * why it is written without a single library call.

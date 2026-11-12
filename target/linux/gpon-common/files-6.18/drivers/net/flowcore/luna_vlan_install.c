@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* luna_vlan_install.c -- the Luna family's gpon_vlan_ops. ...
  * dev/MEASURED-luna_vlan_install.c.md sec 1. */
 #include <linux/errno.h>

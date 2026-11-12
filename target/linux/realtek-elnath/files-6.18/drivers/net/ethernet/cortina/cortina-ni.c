@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Cortina-Access NI (network engine) Ethernet driver for the ...
  * dev/MEASURED-cortina-ni.c.md sec 1. */
 

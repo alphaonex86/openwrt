@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Userspace genetlink client for the open Maple "maple" family. Shared by
  * `maplectl` and `maple_snmp`. Defines the kernel fixed-width types as their

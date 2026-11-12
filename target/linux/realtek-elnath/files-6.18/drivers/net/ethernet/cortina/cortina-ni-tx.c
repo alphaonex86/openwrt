@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Cortina-Access NI Ethernet driver for the Realtek RTL9607F ...
  * dev/MEASURED-cortina-ni-tx.c.md sec 1. */
 

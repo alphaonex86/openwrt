@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * Record layout, little-endian: magic[8] seq[4] boot_seq[4] uptime_s[4] kind[1] 0[1] len[2]
  * crc32[4] 0xff[4], then len text bytes; a record fills whole pages, its tail stays erased.

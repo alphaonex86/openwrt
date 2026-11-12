@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* gpon_gtc_ploam.h -- the GTC downstream-PLOAM message ...
  * dev/MEASURED-gpon_gtc_ploam.h.md sec 1. */
 #ifndef _GPON_GTC_PLOAM_H

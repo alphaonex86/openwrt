@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /* RTL8290B BOSA conversions (see luna_gpon_logic.h), built only for a board
  * whose layer declares CONFIG_GPON_OPTIC_RTL8290B. */
 #include <linux/types.h>

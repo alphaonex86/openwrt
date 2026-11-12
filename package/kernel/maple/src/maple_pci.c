@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * Open Maple GPON MAC driver — PCIe glue + interrupt layer.
  *

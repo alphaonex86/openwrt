@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* RLX page-level cache hooks: the D-cache is physically indexed (a store through one
  * page colour reads back through the other: ONU-test-case/cache_coherency.c), so only
  * executable mappings keep the whole-cache blast and a kernel-written page is written

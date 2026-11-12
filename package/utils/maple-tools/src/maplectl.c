@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* maplectl — CLI for the open Maple GPON driver. Uses maple_lib (genetlink). */
 #define _GNU_SOURCE
 #include <stdio.h>

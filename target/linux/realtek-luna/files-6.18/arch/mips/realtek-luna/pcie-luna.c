@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /* Realtek "Luna" RTL960x PCIe host controller driver. ONE ...
  * dev/MEASURED-pcie-luna.c.md sec 1. */
 

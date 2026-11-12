@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * luna_loop.c -- LAN loop detection for both Luna Ethernet shells, on by default
  * like stock (operator 2026-11-02).

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * BAL messaging — build/send a bcmolt_msg request, match the reply by corr_tag.
  * See maple_bal.h + docs/decomp/bal-msg-format.md.

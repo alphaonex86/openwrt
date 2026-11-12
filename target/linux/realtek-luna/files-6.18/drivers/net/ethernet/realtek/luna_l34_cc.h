@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /*
  * luna_l34_cc.h - the FLOWBASED dies' flow-cache COMMAND BLOCK, at family tier
  *

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /* MD5 (RFC 1321), for HTTP Digest authentication only. */
 #include <stdint.h>
 #include <stdio.h>

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /*
  * gpon_edge -- read the router edge out of the live kernel.  See gpon_edge.h
  * for why this is core code and why it is pulled rather than pushed.

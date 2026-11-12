@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * BAL messaging layer — open reimplementation of bcmolt_msg + bcmtrmux_msg_pack.
  * See docs/decomp/bal-msg-format.md for the wire format.

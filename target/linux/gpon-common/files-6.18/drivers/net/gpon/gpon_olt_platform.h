@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /*
  * gpon_olt_platform.h -- what every OLT hardware port must provide: the PON
  * MAC, the upstream grant map (DBA), GEM <-> uplink forwarding in hardware, a

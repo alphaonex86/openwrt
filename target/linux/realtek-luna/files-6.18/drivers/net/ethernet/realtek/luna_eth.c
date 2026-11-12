@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * Realtek Luna (MIPS interAptiv) GMAC0 + on-chip switch -- eth0.
  *

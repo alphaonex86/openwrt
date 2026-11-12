@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CHIP */
 /*
  * RTL9602C "Luna" hardware L3/L4 forwarding + NAPT engine.
  *

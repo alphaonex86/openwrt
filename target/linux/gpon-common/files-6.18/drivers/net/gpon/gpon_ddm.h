@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* gpon_ddm.h -- optical diagnostic (DDM) unit conversion, ...
  * dev/MEASURED-gpon_ddm.h.md sec 1. */
 #ifndef _GPON_DDM_H

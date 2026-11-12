@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* gpon_sn.h -- the ITU-T G.984.3 ONU Serial Number, decoded ...
  * dev/MEASURED-gpon_sn.h.md sec 1. */
 #ifndef _GPON_SN_H

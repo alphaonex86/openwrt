@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* PCIe root-complex host driver for Cortina-Access "Venus" ...
  * dev/MEASURED-pcie-cortina.c.md sec 1. */
 

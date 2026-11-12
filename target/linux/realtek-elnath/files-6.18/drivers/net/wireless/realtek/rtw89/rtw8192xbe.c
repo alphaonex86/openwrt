@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/* TIER: CHIP */
 /* Copyright(c) 2026  CatchChallenger project
  *
  * PCIe bus glue for the RTL8192XB (PCI [10ec:0192]).  The 8192XB uses the

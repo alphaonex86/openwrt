@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CHIP */
 /* RTL9602C routed IPv4 multicast in the switch: WAN -> the wired LAN ports.
  *
  * ipmr's routes (the standard fib notifier) say which groups the router forwards

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /*
  * Cortina NE-window L3FE registers that MORE THAN ONE source file needs.
  *

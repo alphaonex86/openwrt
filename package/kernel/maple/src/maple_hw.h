@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * BAR0/BAR2 hardware definitions for the Broadcom Maple BCM68620 GPON MAC.
  * Pure register/protocol #defines live in maple_regs.h (shared with the oracle

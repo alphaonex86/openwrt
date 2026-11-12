@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /*
  * pcsample: where the CPUs spend their time, kernel modules included.
  * Samples the cpu-clock software event on every online CPU for N seconds

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: CHIP */
 /* Copyright(c) 2026  Herman Brule */
 
 #ifndef __RTL92FE_LED_H__

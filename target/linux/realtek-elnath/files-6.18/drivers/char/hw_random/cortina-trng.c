@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * True random number generator of the RTL9607F (Cortina-Access ca77xx family), as a hwrng.
  *

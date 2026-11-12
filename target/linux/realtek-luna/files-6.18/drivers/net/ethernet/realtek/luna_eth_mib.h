@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* Shared switch ethtool: statistics and per-port link modes; attach before
  * registering the netdev. */
 #ifndef _LUNA_ETH_MIB_H

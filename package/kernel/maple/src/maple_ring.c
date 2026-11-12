@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * PCIe DMA ring transport — open reimplementation of bcmtr_pcie.c.
  * See maple_ring.h + docs/decomp/trmux.md for the decoded protocol.

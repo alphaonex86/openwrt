@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * Serial driver for the Cortina-Access "Elnath" (CA77xx) SoC UART.
  *

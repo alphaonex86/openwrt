@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * Realtek "Luna" GPON ONU (RTL960xC, RLX/Taroko core) — early boot / PROM.
  *

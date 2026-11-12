@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /* onu-cwmp: a TR-069 CPE answering from a data model file, on the management interface alone (SO_BINDTODEVICE:
  * the internet's routes are never involved). One session at a time; HTTP as the CPE it stands in for. */
 #include <arpa/inet.h>

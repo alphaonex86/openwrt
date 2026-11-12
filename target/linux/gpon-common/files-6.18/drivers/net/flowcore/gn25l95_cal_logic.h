@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* GN25L95 per-unit calibration: the ORDERED OPERATIONS, as ...
  * dev/MEASURED-gn25l95_cal_logic.h.md sec 1. */
 #ifndef _GN25L95_CAL_LOGIC_H

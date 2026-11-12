@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Per-device state shared by the PCI glue, firmware loader and ring transport.
  */

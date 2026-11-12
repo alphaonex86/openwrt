@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * maple_snmp — NET-SNMP `pass_persist` agent exposing per-ONU management data
  * over SNMP. Dependency-free (links maple_lib genetlink client).

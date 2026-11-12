@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /*
  * gpon_omci_trace -- see gpon_omci_trace.h.  G.988 byte math, nothing else.
  */

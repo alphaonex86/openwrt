@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* AP-mode initial gain and EDCCA as the vendor's phydm runs them, shared by
  * rtl8192fe (X111W, G24W) and rtl8192ee (V2801RGW). Mainline's dm.c carries a
  * STATION's recipe: rx_gain_max = rssi_min + 10, and EDCCA armed at L2H 0x03 /

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * GPON-NI (PON port) management ops. Thin BAL-call wrapper; the wire
  * pack/unpack lives in maple_codec.h. See docs/onu-management-data-contract.md.

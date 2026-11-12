@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* The Luna GPON<->NIC contract: what luna_gpon.c and ...
  * dev/MEASURED-luna_gpon_nic.h.md sec 1. */
 #ifndef _LUNA_GPON_NIC_H

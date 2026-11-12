@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * SPI-NOR flash behind the Luna (RTL960x) flash controller.
  *

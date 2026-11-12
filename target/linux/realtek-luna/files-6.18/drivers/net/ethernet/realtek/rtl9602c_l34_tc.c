@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CHIP */
 /* RTL9602C L34 -> the COMMON TC hardware-offload lifecycle. ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 1. */
 

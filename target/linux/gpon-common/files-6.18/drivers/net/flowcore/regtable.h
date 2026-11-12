@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /*
  * regtable.h -- the OTHER half of a one-hour port: offsets as DATA.
  *

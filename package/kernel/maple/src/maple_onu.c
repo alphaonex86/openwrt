@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * GPON ONU management ops. The wire pack/unpack lives in maple_codec.h (shared
  * with the oracle test); this file is the thin BAL-call wrapper. See

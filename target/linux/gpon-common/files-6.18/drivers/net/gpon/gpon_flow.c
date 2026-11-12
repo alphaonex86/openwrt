@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /*
  * gpon_flow -- see gpon_flow.h for why this is core and why it is NOT in the
  * strict, host-buildable subset.

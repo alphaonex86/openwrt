@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /*
  * Single-producer single-consumer byte ring of the asynchronous console.
  * Pure C with no kernel API, so the x86 ladder tests the shipped code.

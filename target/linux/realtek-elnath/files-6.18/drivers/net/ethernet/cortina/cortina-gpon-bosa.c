@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Semtech GN25L95 BOSA (burst-mode laser driver + APD/TIA) ...
  * dev/MEASURED-cortina-gpon-bosa.c.md sec 1. */
 

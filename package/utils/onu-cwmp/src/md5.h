@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 #ifndef CWMP_MD5_H
 #define CWMP_MD5_H
 

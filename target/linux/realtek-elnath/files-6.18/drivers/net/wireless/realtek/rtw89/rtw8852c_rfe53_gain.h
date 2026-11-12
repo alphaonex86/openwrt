@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CHIP */
 /* RTW8852C, rfe_type 53 with an external front-end module: the receive-gain
  * program the vendor's own firmware loads for this part.
  *

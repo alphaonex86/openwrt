@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* luna_gmac_logic.h -- pure logic of the Luna FAMILY GMAC ...
  * dev/MEASURED-luna_gmac_logic.h.md sec 1. */
 #ifndef _LUNA_GMAC_LOGIC_H

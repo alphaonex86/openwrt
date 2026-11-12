@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /* The CWMP (TR-069) CPE core: a data model read from a file, the SOAP the CPE sends, the ACS requests it
  * answers. Pure: no socket, no clock, no file but the model's -- host-testable. */
 #ifndef CWMP_CORE_H

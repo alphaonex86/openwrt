@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* cortina_gpon_logic.h -- logic hoisted out of cortina-gpon.c
  * dev/MEASURED-cortina_gpon_logic.h.md sec 1. */
 #ifndef _CORTINA_GPON_LOGIC_H

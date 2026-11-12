@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: CHIP */
 /* Clean-room mac80211 PCIe driver for the Realtek RTL8192F.
  *
  * ★★ WHY THIS DRIVER EXISTS AT ALL, MEASURED 2026-09-17 AND NOT ASSUMED. The

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CHIP */
 /* l34_decode.h -- the PURE half of the RTL9602C flow-offload ...
  * dev/MEASURED-rtl9602c_l34_decode.h.md sec 1. */
 #ifndef L34_DECODE_H

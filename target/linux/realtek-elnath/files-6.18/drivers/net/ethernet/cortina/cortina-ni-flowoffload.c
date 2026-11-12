@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* cortina-ni-flowoffload.c - nf_flow_table HW offload glue ...
  * dev/MEASURED-cortina-ni-flowoffload.c.md sec 1. */
 

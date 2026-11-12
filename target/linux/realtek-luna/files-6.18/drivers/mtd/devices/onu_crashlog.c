@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /*
  * Crash records on the reserved "crashlog" partition, read back after any reset:
  * a boot record per boot, a clean record per orderly reboot, the kernel log tail on

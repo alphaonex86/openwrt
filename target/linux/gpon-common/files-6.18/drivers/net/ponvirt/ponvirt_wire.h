@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /*
  * ponvirt_wire.h -- the virtual ODN's wire, shared by the guest (ponvirt.c) and the host hub
  * (dev/virt/vodn.c): one Ethernet frame of PONVIRT_ETHERTYPE per PON event, byte 0 its kind,

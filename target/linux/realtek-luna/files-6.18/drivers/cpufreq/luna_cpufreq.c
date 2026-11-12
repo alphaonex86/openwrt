@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * CPU frequency for the Realtek RTL9602C, RTL9601D and RTL9603CVD: the OC0 clock
  * management unit divides the OCP (CPU) clock by 2^n. Only that divider moves. The

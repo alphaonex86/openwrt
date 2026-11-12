@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /* gpon_flow_offload -- the TC hardware-offload lifecycle, ...
  * dev/MEASURED-gpon_flow_offload.c.md sec 1. */
 #include <linux/errno.h>

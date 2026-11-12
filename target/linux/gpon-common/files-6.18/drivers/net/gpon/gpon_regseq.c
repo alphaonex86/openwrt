@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /*
  * gpon_regseq -- the interpreter.  See gpon_regseq.h for why it is core.
  */

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* Luna switch ethtool: per-port statistics and link modes; no polling in the
  * datapath. */
 

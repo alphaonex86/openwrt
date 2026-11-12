@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: CHIP */
 /* Copyright(c) 2026  Realtek RTL8192FE clean-room driver authors */
 
 #ifndef __RTL92F_PWRSEQ_H__

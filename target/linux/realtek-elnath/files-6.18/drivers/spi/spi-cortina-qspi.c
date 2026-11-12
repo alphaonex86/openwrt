@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Cortina-Access QSPI flash controller ("cortina,ca-qspi") — ...
  * dev/MEASURED-spi-cortina-qspi.c.md sec 1. */
 

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /* gpon_unsup.h — REPORT ANYTHING THE FIRMWARE DID NOT ... -- dev/MEASURED-gpon_unsup.h.md sec 1. */
 #ifndef GPON_UNSUP_H
 #define GPON_UNSUP_H

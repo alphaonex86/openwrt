@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* Every WAN frame's VID, both directions: luna_gpon.c renders the census as /proc/gpon_vlan. */
 #ifndef _LUNA_WAN_VLAN_H
 #define _LUNA_WAN_VLAN_H

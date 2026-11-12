@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: BOARD */
 /*
  * caregt - Cortina Access register read / write / poll-trace via /dev/mem.
  *

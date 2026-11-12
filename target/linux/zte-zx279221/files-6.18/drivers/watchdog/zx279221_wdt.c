@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CHIP */
 /*
  * ZTE ZX279221 SoC watchdog (ZXA10 C610 OLT main board). Facts from the unit's own kernel and device tree: a
  * 16-bit down-counter of the work clock (asked for 32768 Hz, as stock) through an 8-bit divider; a write lands only with the key

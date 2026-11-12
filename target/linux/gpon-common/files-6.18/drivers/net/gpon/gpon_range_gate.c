@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 #include <linux/errno.h>
 #include "gpon_range_gate.h"
 

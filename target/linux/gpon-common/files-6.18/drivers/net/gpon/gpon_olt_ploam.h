@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /*
  * gpon_olt_ploam.h -- the OLT role of G.984.3 activation for every ONU of one
  * PON: serial-number acquisition, ONU-ID assignment, ranging, password check

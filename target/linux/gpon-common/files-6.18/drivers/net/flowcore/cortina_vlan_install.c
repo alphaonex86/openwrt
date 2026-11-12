@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* cortina_vlan_install.c -- the Cortina family's gpon_vlan_ops
  * dev/MEASURED-cortina_vlan_install.c.md sec 1. */
 #include <linux/errno.h>

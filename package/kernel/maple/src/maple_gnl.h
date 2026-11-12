@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Userspace ABI for the open Maple driver — a genetlink family "maple" exposing
  * the ONU management ops (get-cfg = listing fields, get-stat = bandwidth,

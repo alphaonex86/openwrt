@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: CORE */
 /*
  * gpon_olt_omci.h -- the OLT role of G.988 OMCI: one engine per ONU that
  * resets, identifies, uploads and provisions the ONU's MIB for one bridged

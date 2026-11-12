@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* TIER: FAMILY */
 /*
  * RTL9602C GPON/SWCORE register offsets -- the PER-SoC half of the driver.
  *

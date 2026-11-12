@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Single source of truth for register/protocol constants — pure numbers, no
  * kernel deps, so both the driver (maple_hw.h/maple_onu.h) and the userspace

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: CHIP */
 /* Clean-room RTL8192F PCIe 802.11n driver: firmware download + H2C/C2H. */
 
 #include "../wifi.h"

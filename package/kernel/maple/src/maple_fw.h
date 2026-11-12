@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Firmware bring-up stub — open reimplementation of the vendor fld.ko BCM FLD
  * layer (see docs/decomp/fld.md). Pushes the Maple bootloader + application

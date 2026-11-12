@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /* gpon_olt_platform.c -- the OLT hardware contract, checked (see the header). */
 #include <linux/errno.h>
 #include <linux/kernel.h>

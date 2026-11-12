@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CHIP */
 /* See rtl9602c_l34_logic.h. Moved verbatim; no line was rewritten.
  */
 #include <linux/types.h>

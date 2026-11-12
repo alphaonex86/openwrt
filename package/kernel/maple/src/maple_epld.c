@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /*
  * maple-epld — board EPLD control via I2C (open replacement for the EPLD
  * parts of vendor i2c_devs.ko). Loads early, releases the Maple GPON MAC

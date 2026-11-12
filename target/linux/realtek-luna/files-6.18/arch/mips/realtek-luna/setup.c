@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /*
  * "Luna" GPON ONU (RTL960xC, RLX/Taroko core) — platform setup.
  *

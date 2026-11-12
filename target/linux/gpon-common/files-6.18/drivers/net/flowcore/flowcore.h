@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* flowcore.h -- the hardware-decoupled half of L3/L4 FLOW ...
  * dev/MEASURED-flowcore.h.md sec 1. */
 #ifndef _FLOWCORE_H

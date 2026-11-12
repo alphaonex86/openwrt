@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: FAMILY */
 /* cortina_vlan_install.h -- the CORTINA family's install for ...
  * dev/MEASURED-cortina_vlan_install.h.md sec 1. */
 #ifndef _CORTINA_VLAN_INSTALL_H

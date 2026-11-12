@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Semtech GN25L95 BOSA boot initialization (RTL9607F "Elnath").
  * See cortina-gpon-bosa.c.

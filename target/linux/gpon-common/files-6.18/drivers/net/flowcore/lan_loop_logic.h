@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /*
  * lan_loop_logic.h -- LAN loop detection, the pure half: the CPU probe a switch
  * shell sends out of each LAN port, the verdict on a frame that comes back, the

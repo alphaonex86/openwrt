@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* GPON PON-SerDes analog/CMU/PLL profile for RTL9607F Elnath. ...
  * dev/MEASURED-cortina-gpon-serdes.h.md sec 2. */
 struct cg_serdes_row { u16 off; u32 val; u16 delay_us; };

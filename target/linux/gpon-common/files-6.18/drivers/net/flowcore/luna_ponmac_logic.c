@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: FAMILY */
 /* See luna_ponmac_logic.h. Moved verbatim; no line was rewritten.
  */
 #include <linux/types.h>

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /* UX3320 per-unit calibration as ordered ops for the gn25l95_cal_apply()
  * executor. Its order and tables were read from the RTL9607C stock loader;
  * this unit's own 1024-byte file holds the values. */

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* TIER: FAMILY */
 /* Genetlink client for the open Maple "maple" family. Shared by maplectl/maple_snmp. */
 #define _GNU_SOURCE
 #include <errno.h>

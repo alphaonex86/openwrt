@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: CORE */
 /*
  * gpon-capture: the OMCI and PLOAM capture rings from the first record of every boot, before any
  * follower can log in. Each new record is appended to <dir>/<ring>.olt1 (RAM, capped: the start is

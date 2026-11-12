@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /*
  * Cortina-Access NI (network engine) register map for the Realtek
  * RTL9607F "Elnath" GPON SoC.

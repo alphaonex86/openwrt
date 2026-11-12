@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /* gpon_ddm.c -- optical diagnostic (DDM) unit conversion. ONE ...
  * dev/MEASURED-gpon_ddm.c.md sec 1. */
 

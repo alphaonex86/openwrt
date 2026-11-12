@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/* TIER: CORE */
 /* The netdev station-address ladder, in the core so it exists ...
  * dev/MEASURED-gpon_hwaddr.h.md sec 1. */
 #ifndef _GPON_HWADDR_H

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* TIER: CORE */
 /* GN25L95 per-unit calibration, expressed as an ordered ...
  * dev/MEASURED-gn25l95_cal_logic.c.md sec 1. */
 #include <linux/errno.h>

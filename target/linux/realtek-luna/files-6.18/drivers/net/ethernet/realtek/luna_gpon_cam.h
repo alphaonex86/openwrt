@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* TIER: FAMILY */
 /* The Luna GTC indirect CAM engines luna_cam_xact() serializes, one pending state each. */
 #ifndef LUNA_GPON_CAM_H
 #define LUNA_GPON_CAM_H

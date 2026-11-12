@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* TIER: FAMILY */
 /* Realtek "Luna" SoC watchdog timer (RTL960x family). The ...
  * dev/MEASURED-luna_wdt.c.md sec 1. */
 

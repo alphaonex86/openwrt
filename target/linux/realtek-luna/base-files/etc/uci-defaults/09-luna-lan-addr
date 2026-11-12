@@ -105,6 +105,11 @@ unknown,rtl9607c-unknown)
 	uci -q commit network
 	logger -t luna-lan-addr "board_name=$board -> lan 192.168.1.14"
 	;;
+mti,malta)
+	# A virtual unit (QEMU Malta, dev/virt/virt_onu.py): its LAN is QEMU's own user network, never the lab's,
+	# so it keeps the virt subtarget's shipped 192.168.1.11 that virt_onu forwards ssh to.
+	logger -t luna-lan-addr "board_name=$board -> lan as shipped (a virtual unit's own network)"
+	;;
 "")
 	# THREE STATES: we could not ask which board this is. Change NOTHING --
 	# guessing here is how the wrong address gets applied to the wrong board,

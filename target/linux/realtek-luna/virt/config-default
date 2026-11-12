@@ -24,10 +24,15 @@ CONFIG_VIRTIO_PCI_LEGACY=y
 CONFIG_VIRTIO_NET=y
 CONFIG_NET_FAILOVER=y
 CONFIG_FAILOVER=y
+# The milestone reads ponvirt off the console: info level there, as on the elnath unit.
+CONFIG_CONSOLE_LOGLEVEL_DEFAULT=7
 CONFIG_PON_VIRT=y
+# The board userland reads its thread pointer with the RLX-only mflxc0; the 24Kc traps it.
+CONFIG_MIPS_LXC0_TP_EMULATE=y
 # CONFIG_LUNA_WDT is not set
 # CONFIG_MTD_LUNA_NOR is not set
-# CONFIG_VIRTIO_BLK is not set
+# The board squashfs is the root, read from virtio-blk as from its flash; the overlay is tmpfs.
+CONFIG_VIRTIO_BLK=y
 # CONFIG_VIRTIO_DEBUG is not set
 # One CPU, as the RLX boards: no MT SMP on a 24Kc.
 # CONFIG_MIPS_MT_SMP is not set

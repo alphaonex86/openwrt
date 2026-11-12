@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# A virtual unit per board: QEMU Malta boots the ELF kernel (initramfs inside); the small DTB holds only the
-# board's /omci-uni, loaded above the kernel's RAM and read by ponvirt.panel_fdt.
+# A virtual unit per board: QEMU Malta boots the ELF kernel with the board's squashfs on virtio-blk; the small
+# DTB holds only the board's /omci-uni, loaded above the kernel's RAM and read by ponvirt.panel_fdt.
 
 define Device/virt-luna
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
@@ -8,8 +8,11 @@ define Device/virt-luna
   KERNEL_INITRAMFS_NAME := vmlinux-initramfs.elf
   KERNEL := kernel-bin
   KERNEL_INITRAMFS := kernel-bin
-  IMAGES := dtb
+  IMAGES := dtb kernel rootfs
   IMAGE/dtb := append-dtb
+  IMAGE/kernel := append-kernel
+  # a zero tail where fstools looks for rootfs_data: it finds no filesystem there and mounts a tmpfs overlay
+  IMAGE/rootfs := append-rootfs | pad-to 64k | pad-extra 64k
 endef
 
 define Device/virt_x111w

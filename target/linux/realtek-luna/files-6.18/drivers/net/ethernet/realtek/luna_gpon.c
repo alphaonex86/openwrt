@@ -6754,7 +6754,7 @@ static struct {
 	struct omci_data_binding binding;
 	u16 head, count;
 	u8 seed;
-	u32 queued, overflow, closed, accepted, resets, tx_errors, tx_sent;
+	u32 queued, overflow, closed, accepted, resets, tx_errors, tx_sent, oversize;
 } luna_omci;
 /* the provisioned OMCI identity, under luna_omci_lock (see onu_omci_id) */
 static struct omci_identity luna_omci_id;
@@ -7175,9 +7175,12 @@ int luna_omci_enqueue(void *cookie, const u8 *msg, unsigned int len)
 		rc = -ENOSPC;
 	} else {
 		f = &luna_omci.queue[(luna_omci.head + luna_omci.count) % LUNA_OMCI_QUEUE_LEN];
+		/* len is the bytes HELD: every reader of msg takes it as its bound */
 		memset(f->msg, 0, sizeof(f->msg));
-		memcpy(f->msg, msg, min_t(unsigned int, len, sizeof(f->msg)));
-		f->len = len;
+		f->len = min_t(unsigned int, len, sizeof(f->msg));
+		memcpy(f->msg, msg, f->len);
+		if (len > sizeof(f->msg))
+			luna_omci.oversize++;
 		luna_omci.rx_ns[f - luna_omci.queue] = ktime_get_ns();
 		luna_omci.count++;
 		luna_omci.queued++;
@@ -8474,7 +8477,7 @@ static void luna_omci_seq_show(struct seq_file *s)
 {
 	char resp[320] = "", far[96];
 	unsigned long flags;
-	u32 queued, count, overflow, closed, accepted, resets, tx_errors;
+	u32 queued, count, overflow, closed, accepted, resets, tx_errors, oversize;
 
 	spin_lock_irqsave(&luna_omci_lock, flags);
 	if (luna_omci.onu) {
@@ -8487,14 +8490,15 @@ static void luna_omci_seq_show(struct seq_file *s)
 	count = luna_omci.count;
 	overflow = luna_omci.overflow;
 	closed = luna_omci.closed;
+	oversize = luna_omci.oversize;
 	accepted = luna_omci.accepted;
 	resets = luna_omci.resets;
 	tx_errors = READ_ONCE(luna_omci.tx_errors);
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	seq_puts(s, resp);
 	seq_puts(s, far);
-	seq_printf(s, "omci_queue: queued=%u pending=%u overflow=%u closed=%u accepted=%u resets=%u tx_errors=%u\n",
-		   queued, count, overflow, closed, accepted, resets, tx_errors);
+	seq_printf(s, "omci_queue: queued=%u pending=%u overflow=%u closed=%u accepted=%u resets=%u tx_errors=%u oversize=%u\n",
+		   queued, count, overflow, closed, accepted, resets, tx_errors, oversize);
 	luna_vlan_service_show(s);
 	seq_printf(s, "data_owner: admitted=%u installed=%u alloc_bound=%u alloc=%u gem=%u qid=%u error=%d\n",
 		   luna_gpon_data_ready(), READ_ONCE(luna_data.armed.installed),

@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/* The X100DG's virtual unit: QEMU Malta boots its kernel's own tree, ponvirt reads this panel through panel_fdt. */
+
+/dts-v1/;
+
+/ {
+	model = "HSGQ X100DG (virtual, QEMU Malta)";
+	compatible = "hsgq,x100dg-virt";
+
+	#include "rtl9601d_x100dg-omci-uni.dtsi"
+};

@@ -1,0 +1,35 @@
+# The virtual unit: LAN on the first virtio NIC, the PON wire (ponvirt.wire=eth1) on the second, gpon0 its WAN.
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option ula_prefix 'auto'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.1.11'
+	option netmask '255.255.255.0'
+	option ip6assign '60'
+	list ip6class 'local'
+
+config interface 'wan'
+	option device 'gpon0'
+	option proto 'dhcp'
+	option keepalive '6 20'
+	option persist '1'
+	option holdoff '5'
+
+config interface 'wan6'
+	option device '@wan'
+	option proto 'dhcpv6'
+	option reqaddress 'try'
+	option reqprefix 'auto'

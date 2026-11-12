@@ -7,7 +7,7 @@ BOARD:=realtek-luna
 BOARDNAME:=Realtek Luna GPON ONU
 DEVICE_TYPE:=basic
 FEATURES:=ramdisk squashfs gpio
-SUBTARGETS:=taroko interaptiv
+SUBTARGETS:=taroko interaptiv virt
 
 KERNEL_PATCHVER:=6.18
 

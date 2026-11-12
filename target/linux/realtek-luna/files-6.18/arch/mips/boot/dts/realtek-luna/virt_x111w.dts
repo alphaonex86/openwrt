@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/* The X111W's virtual unit: QEMU Malta boots its kernel's own tree, ponvirt reads this panel through panel_fdt. */
+
+/dts-v1/;
+
+/ {
+	model = "HSGQ X111W (virtual, QEMU Malta)";
+	compatible = "hsgq,x111w-virt";
+
+	#include "rtl9602c_x111w-omci-uni.dtsi"
+};

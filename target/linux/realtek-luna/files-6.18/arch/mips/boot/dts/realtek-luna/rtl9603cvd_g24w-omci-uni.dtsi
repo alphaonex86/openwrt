@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/* The G24W's OMCI panel, a node of the root: its board tree and its virtual unit include it where it sits, so both declare one panel. */
+	/*
+	 * The UNI panel this board presents over OMCI, MEASURED from its own
+	 * stock firmware (omcicli mib get 11/264, 2026-09-13).
+	 *
+	 * ME 11 (PPTP Ethernet UNI) and ME 264 (UNI-G) are SEPARATE lists and
+	 * neither is derivable from the other.  This board has SIX UNI-Gs against
+	 * four Ethernet UNIs, and numbers its fourth Ethernet UNI 0x0401 -- a
+	 * low byte it shares with the first, 0x0101.  Its PhysicalPortId runs
+	 * 0,1,2,3 over those four, the OPPOSITE order to the X400AXF's.
+	 *
+	 * The ids are full 16-bit OMCI instance numbers, not port indices.
+	 */
+	omci-uni {
+		ethernet-uni-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0401>;
+		/* The SWITCH PORT each of those instances is, from this board's OWN inverse 0x31c00 and forward 0x31b30, round-tripping
+		 * against its captured gInfo, and agreeing with its own PhysicalPortId.
+		 * ⚠ NEVER COMPUTED: the two Luna boards and the Cortina one run
+		 * their port order in OPPOSITE directions, and one numbers its
+		 * fourth UNI 0x0401, so no arithmetic on an instance id is
+		 * right on more than one board. */
+		ethernet-uni-ports = /bits/ 8 <0 1 2 3>;
+		/* G.988 plug-in type per instance, from this board's own stock:
+		 * 0x0101..0x0103 are FE ports (24) and 0x0401 the GE one (47). */
+		ethernet-uni-types = /bits/ 8 <24 24 24 47>;
+		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0401 0x0601 0x0801>;
+		uni-g-management-capability = /bits/ 8 <1 1 1 1 0 1>;
+		/* What else the OLT counts, from this board's own stock MIB
+		 * (stock_gpon_oracle 2026-10-01, omci_panel.py). */
+		circuit-packs = /bits/ 16 <
+			0x0101  24 3  24  0  0
+			0x0104  47 1   8  0  0
+			0x0106  48 1   8  0  0
+			0x0108  40 1   0  0  0
+			0x0180 248 1 127 16 16>;
+		ip-host-instances = /bits/ 16 <0x0000 0x0001 0x0002 0x0003 0x0004 0x0005>;
+		ip-host-wan-mac = /bits/ 8 <1 1 1 1 1 1>;
+		onu-capacity = /bits/ 16 <16 127 16 127>;
+		downstream-queue-ports = /bits/ 16 <0x0401 0x0101 0x0102 0x0103 0x0601>;
+		/* Stock's CTC ONU capability, OnuType 1 = HGU (omcicli mib get 65529,
+		 * 2026-10-06): without it the HSGQ OLT keeps the type it last saw. */
+		extra-me-instances = /bits/ 16 <83 0  133 0  340 0x0601  350 0  65294 0  65457 0  65529 0>;
+	};

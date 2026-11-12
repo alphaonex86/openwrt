@@ -1789,6 +1789,14 @@ config CPU_LOONGSON3_CPUCFG_EMULATION
 
 	  If unsure, please say Y.
 
+config MIPS_LXC0_TP_EMULATE
+	bool "Emulate the RLX LXC0 thread-pointer read on a Malta virtual unit"
+	depends on MIPS_MALTA
+	help
+	  A userland built for the RLX core reads its thread pointer with
+	  mflxc0 $3,$8, which a MIPS32 core traps as Coprocessor Unusable.
+	  Emulate that one word and log every other user-mode SIGILL.
+
 config CPU_MIPS32_3_5_FEATURES
 	bool "MIPS32 Release 3.5 Features"
 	depends on SYS_HAS_CPU_MIPS32_R3_5

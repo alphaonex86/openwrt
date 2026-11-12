@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# A virtual unit per board: QEMU Malta boots the ELF kernel with the board's squashfs on virtio-blk; the small
-# DTB holds only the board's /omci-uni, loaded above the kernel's RAM and read by ponvirt.panel_fdt.
+# A virtual unit per board: QEMU Malta boots the ELF kernel with the board's squashfs mapped by phram; the small
+# DTB holds only the board's /omci-uni. Both are loaded above the kernel's RAM.
 
 define Device/virt-luna
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna

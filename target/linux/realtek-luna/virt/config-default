@@ -31,8 +31,9 @@ CONFIG_PON_VIRT=y
 CONFIG_MIPS_LXC0_TP_EMULATE=y
 # CONFIG_LUNA_WDT is not set
 # CONFIG_MTD_LUNA_NOR is not set
-# The board squashfs is the root, read from virtio-blk as from its flash; the overlay is tmpfs.
-CONFIG_VIRTIO_BLK=y
+# The board squashfs is the root, mapped by phram from RAM outside the board's mem= ranges; the overlay is tmpfs.
+CONFIG_MTD_PHRAM=y
+# CONFIG_VIRTIO_BLK is not set
 # CONFIG_VIRTIO_DEBUG is not set
 # One CPU, as the RLX boards: no MT SMP on a 24Kc.
 # CONFIG_MIPS_MT_SMP is not set

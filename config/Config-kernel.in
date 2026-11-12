@@ -981,11 +981,12 @@ config KERNEL_MTD_LUNA_NOR_WRITE
 
 config KERNEL_MTD_PHRAM
 	bool "phram: a RAM region as an MTD"
-	depends on TARGET_realtek_luna
+	depends on TARGET_realtek_luna && !TARGET_realtek_luna_virt
 	default n
 	help
 	  A board whose RAM boot maps its squashfs root through phram (its
-	  RAM_ROOTFS declaration) turns it on.
+	  RAM_ROOTFS declaration) turns it on. The virt subtarget always has it:
+	  its root is the board's squashfs mapped the same way.
 
 config KERNEL_LUNA_SPI_NAND
 	bool "Luna SPI-NAND flash and UBI"

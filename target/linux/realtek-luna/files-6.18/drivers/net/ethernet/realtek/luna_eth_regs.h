@@ -46,7 +46,7 @@
 #include <linux/etherdevice.h>	/* ETH_ALEN, ether_addr_equal */
 #include <linux/delay.h>	/* udelay */
 #include <linux/dma-mapping.h>	/* dma_map_single, DMA_FROM_DEVICE */
-#include <linux/netdevice.h>	/* netdev_alloc_skb */
+#include <linux/netdevice.h>	/* dev_alloc_page */
 #include <linux/skbuff.h>	/* struct sk_buff, dev_kfree_skb_any */
 #include <linux/io.h>		/* ioread32 / iowrite32 */
 #include <linux/kernel.h>	/* sscanf */
@@ -825,10 +825,24 @@ static inline struct sk_buff *luna_rx_alloc(struct net_device *ndev,
 					    unsigned int buf_size,
 					    dma_addr_t *da)
 {
-	struct sk_buff *skb = netdev_alloc_skb(ndev, buf_size);
+	struct page *page;
+	struct sk_buff *skb;
 
-	if (!skb)
+	/* ONE PAGE PER BUFFER, never a slice of the shared page-frag cache: a
+	 * slot lives until its ring wraps, and one slice pins its 32 KiB chunk. */
+	BUILD_BUG_ON(NET_SKB_PAD + RX_BUF_SIZE > SKB_WITH_OVERHEAD(PAGE_SIZE));
+	if (WARN_ON_ONCE(buf_size > RX_BUF_SIZE))
 		return NULL;
+	page = dev_alloc_page();
+	if (!page)
+		return NULL;
+	skb = build_skb(page_address(page), PAGE_SIZE);
+	if (!skb) {
+		__free_page(page);
+		return NULL;
+	}
+	skb_reserve(skb, NET_SKB_PAD);
+	skb->dev = ndev;
 	*da = dma_map_single(dev, skb->data, buf_size, DMA_FROM_DEVICE);
 	if (dma_mapping_error(dev, *da)) {
 		dev_kfree_skb_any(skb);

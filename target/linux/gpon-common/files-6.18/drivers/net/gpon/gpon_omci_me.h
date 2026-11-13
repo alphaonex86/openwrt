@@ -101,9 +101,10 @@ struct omci_mib_row {
 
 /* Overridable for the same reason as OMCI_STORE_MAX above.  Stock uploads a
  * priority queue in TWO rows, so the X400AXF's 40 DS + 240 US queues alone
- * take 560, beside its 30 T-CONTs and schedulers; 6 octets a row. */
+ * take 560, beside its 30 T-CONTs and schedulers; with its two radios' WiFi
+ * MEs its upload is 779 rows. 6 octets a row. */
 #ifndef OMCI_MIB_ROWS_MAX
-#define OMCI_MIB_ROWS_MAX 768
+#define OMCI_MIB_ROWS_MAX 1024
 #endif
 
 /* The auto-instantiated T-CONT range: the default count, and the most a board

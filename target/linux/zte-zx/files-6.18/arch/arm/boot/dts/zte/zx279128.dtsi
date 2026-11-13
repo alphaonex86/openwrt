@@ -169,7 +169,7 @@
 		ethernet@92000000 {
 			compatible = "zte,zx279128-eth";
 			reg = <0x92000000 0x400000>, <0x9a101000 0x20>;
-			interrupts = <0 80 4>;
+			interrupts = <0 80 4>, <0 30 4>;
 		};
 	};
 };

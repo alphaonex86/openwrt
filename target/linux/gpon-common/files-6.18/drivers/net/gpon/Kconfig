@@ -181,6 +181,13 @@ config GPON_REGSEQ
 	  The register-sequence interpreter (gpon_regseq.c), selected by each
 	  family whose bring-up is written as a table.
 
+config GPON_SOFT_WAN
+	bool
+	depends on GPON_CORE
+	help
+	  gpon0 for a shell whose data GEM port reaches the CPU as whole frames
+	  (gpon_soft_wan.c), selected by each driver that calls it.
+
 config GPON_EDGE
 	bool
 	depends on GPON_CORE

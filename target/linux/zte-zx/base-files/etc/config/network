@@ -24,3 +24,13 @@ config interface 'lan'
 	option netmask '255.255.255.0'
 	option ip6assign '60'
 	list ip6class 'local'
+
+config interface 'wan'
+	option device 'gpon0'
+	option proto 'dhcp'
+
+config interface 'wan6'
+	option device '@wan'
+	option proto 'dhcpv6'
+	option reqaddress 'try'
+	option reqprefix 'auto'

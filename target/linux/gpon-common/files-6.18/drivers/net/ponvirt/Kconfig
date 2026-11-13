@@ -4,6 +4,7 @@ config PON_VIRT
 	bool "Virtual PON MAC (QEMU): the GPON ONU core over an Ethernet wire"
 	depends on NET && VIRTIO_NET
 	select GPON_CORE
+	select GPON_SOFT_WAN
 	select CRC32
 	help
 	  The PON MAC of a virtual ONU: the same gpon_* PLOAM, OMCI and GEM

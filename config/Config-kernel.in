@@ -932,7 +932,7 @@ config KERNEL_JFFS2_LZMA
 
 config KERNEL_GPON_OLT_DIAG_RECORDS
 	int "Records per GPON far-end capture ring"
-	depends on TARGET_realtek_luna || TARGET_realtek_elnath
+	depends on TARGET_realtek_luna || TARGET_realtek_elnath || TARGET_zte_zx
 	range 16 4096
 	default 256
 	help
@@ -941,19 +941,19 @@ config KERNEL_GPON_OLT_DIAG_RECORDS
 
 config KERNEL_GPON_OPTIC_RTL8290B
 	bool "RTL8290B BOSA support"
-	depends on TARGET_realtek_luna || TARGET_realtek_elnath
+	depends on TARGET_realtek_luna || TARGET_realtek_elnath || TARGET_zte_zx
 	default n
 	help
 	  A board's layer turns on the optic parts it carries.
 
 config KERNEL_GPON_OPTIC_GN25L95
 	bool "GN25L95 BOSA calibration"
-	depends on TARGET_realtek_luna || TARGET_realtek_elnath
+	depends on TARGET_realtek_luna || TARGET_realtek_elnath || TARGET_zte_zx
 	default n
 
 config KERNEL_GPON_OPTIC_UX3320
 	bool "UX3320 BOSA calibration"
-	depends on TARGET_realtek_luna || TARGET_realtek_elnath
+	depends on TARGET_realtek_luna || TARGET_realtek_elnath || TARGET_zte_zx
 	default n
 
 config KERNEL_SLUB_TINY

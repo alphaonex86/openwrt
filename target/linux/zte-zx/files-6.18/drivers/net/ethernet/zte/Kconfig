@@ -5,6 +5,9 @@ config ZX279128_ETH
 	depends on OF
 	select PHYLIB
 	select MDIO_BUS
+	select GPON_CORE
+	select GPON_SOFT_WAN
+	select CRC32
 	help
 	  The four LAN ports of the ZTE ZX279128 SoC (ZXHN F680): its switch MACs and internal PHYs, reached
-	  through its packet processor.
+	  through its packet processor, and its GPON MAC on the common gpon_* ONU core.

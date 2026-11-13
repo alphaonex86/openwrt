@@ -11,7 +11,8 @@
  * Where the PP writes next in a ring survives every reset this driver can pulse (U-Boot's TFTP leaves it mid-ring)
  * and no register tells it: the driver zeroes each descriptor it takes and finds the position in the ring itself.
  * Transmit: the driver takes a BMU buffer, copies the frame in and queues a descriptor on transmit ring 1; the PP
- * returns the buffer to the BMU once sent. Transmit ring 0 is the PON's and stays unused here.
+ * returns the buffer to the BMU once sent. Ring 1 of each direction is the PON's (zx279128_gpon.c): what receive
+ * ring 1 holds goes to it, and what it sends leaves on transmit ring 0.
  */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -27,6 +28,8 @@
 #include <linux/platform_device.h>
 
 #include "zx279128_eth_logic.h"
+#include "zx279128_gpon.h"
+#include "zx279128_gpon_desc.h"
 
 #define DRV "zx279128-eth"
 #define PHY_FIRST 0x0a		/* port p's internal PHY sits at MDIO 0x0a + p */
@@ -74,10 +77,12 @@
 #define PP_DMA_BYTEORDER	0x000f0000
 #define PP_DMA_IRQ		0x164004
 #define PP_TX_SIZES		0x16403c
-#define PP_TX_RING0		0x164050
-#define PP_TX_RING1		0x164060
-#define PP_TX_KICK1		0x164064
-#define PP_TX_DONE1		0x164068	/* bits 15-0: sent since the last read */
+#define PP_TX_RING(r)		(0x164050 + 0x10 * (r))	/* ring 0 to the PON, ring 1 to the switch */
+#define PP_TX_KICK(r)		(0x164054 + 0x10 * (r))
+#define PP_TX_DONE(r)		(0x164058 + 0x10 * (r))	/* bits 15-0: sent since the last read */
+#define TX_PON			0
+#define TX_LAN			1
+#define RX_PON			1
 #define PP_RX_COUNT(q)		(0x164100 + 4 * (q))	/* ring 1 bits 31-16, ring 0 bits 15-0 */
 #define BMU_CTRL		0x168000
 #define BMU_CFG0		0x168004
@@ -139,7 +144,8 @@ struct zx_eth {
 	struct napi_struct napi;
 	struct net_device *napi_dev;
 	struct zx_port *port[ZX_ETH_PORTS];
-	spinlock_t tx_lock;	/* transmit ring 1 and the BMU allocator */
+	struct zx_pon *pon;
+	spinlock_t tx_lock;	/* both transmit rings and the BMU allocator */
 	u8 *pool;		/* normal pool, then jumbo pool */
 	dma_addr_t pool_dma;
 	__be16 *lists;		/* normal free list, then jumbo */
@@ -149,10 +155,9 @@ struct zx_eth {
 	u32 *tx_area;		/* ring 0, then ring 1 */
 	dma_addr_t tx_dma;
 	unsigned int rx_next[2][RX_QUEUES];
-	unsigned int tx_next, tx_inflight;
-	int open_count;
+	struct eth_tx_ring tx[2];
 	struct eth_rx_len rx_len;
-	u64 rx_not_lan, rx_bad_buffer, rx_bad_frame, rx_nomem, rx_unwritten, rx_resync;
+	u64 rx_pon, rx_not_lan, rx_bad_buffer, rx_bad_frame, rx_nomem, rx_unwritten, rx_resync;
 	u64 bmu_alloc_fail, bmu_free_fail, release_fail;
 };
 
@@ -282,8 +287,8 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, PP_DMA_CTRL, rd(e, PP_DMA_CTRL) | PP_DMA_BYTEORDER);
 	for (i = 0; i < ARRAY_SIZE(dma_irq); i++)
 		wr(e, dma_irq[i][0], dma_irq[i][1]);
-	wr(e, PP_TX_RING0, e->tx_dma);
-	wr(e, PP_TX_RING1, e->tx_dma + TX_RING_BYTES);
+	wr(e, PP_TX_RING(TX_PON), e->tx_dma);
+	wr(e, PP_TX_RING(TX_LAN), e->tx_dma + TX_RING_BYTES);
 	wr(e, PP_TX_SIZES, 0x00200020);
 	wr(e, PP_CLS_CTRL, 0x0000309a);
 	wr(e, PP_CLS_CTRL2, 0);
@@ -398,18 +403,20 @@ static bool rx_release(struct zx_eth *e, unsigned int ring, unsigned int q, unsi
 	return true;
 }
 
-static void rx_one(struct zx_eth *e, u32 *desc)
+static void rx_one(struct zx_eth *e, unsigned int r, u32 *desc)
 {
 	u32 w[ZX_RX_DESC_WORDS];
 	struct net_device *ndev;
 	struct sk_buff *skb;
+	enum zx_rx_verdict verdict;
 	struct zx_rx rx;
 	int i;
 
 	for (i = 0; i < ZX_RX_DESC_WORDS; i++)
 		w[i] = le32_to_cpu(READ_ONCE(desc[i]));
 	memset(desc, 0, RX_DESC_SIZE);
-	switch (zx279128_rx_parse(w, &zx279128_rx_layout, NORMAL_BUFS, JUMBO_BUFS, &rx)) {
+	verdict = zx279128_rx_parse(w, &zx279128_rx_layout, NORMAL_BUFS, JUMBO_BUFS, r == RX_PON, &rx);
+	switch (verdict) {
 	case ZX_RX_UNWRITTEN:
 		e->rx_unwritten++;
 		return;
@@ -417,6 +424,11 @@ static void rx_one(struct zx_eth *e, u32 *desc)
 		e->rx_bad_buffer++;
 		dev_warn_ratelimited(e->dev, "receive descriptor names buffer %u outside its pool\n", rx.buf);
 		return;
+	case ZX_RX_OMCI:
+	case ZX_RX_GEM:
+		e->rx_pon++;
+		zx_pon_rx(e->pon, verdict == ZX_RX_OMCI, rx.gem, buffer(e, rx.buf, rx.jumbo) + rx.fr.off, rx.fr.len);
+		goto free;
 	case ZX_RX_NOT_LAN:
 		e->rx_not_lan++;
 		goto free;
@@ -463,7 +475,7 @@ static void rx_ring(struct zx_eth *e, unsigned int r, unsigned int q, unsigned i
 			*next = start;
 	}
 	for (i = 0; i < n; i++) {
-		rx_one(e, ring + *next * ZX_RX_DESC_WORDS);
+		rx_one(e, r, ring + *next * ZX_RX_DESC_WORDS);
 		*next = (*next + 1) % RX_SLOTS;
 	}
 	if (!rx_release(e, r, q, n))
@@ -502,14 +514,49 @@ static irqreturn_t zx_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/* --- transmit */
+/* --- transmit, tx_lock held: a free slot of ring r and a buffer, then the descriptor built around it */
+static bool zx_tx_begin(struct zx_eth *e, unsigned int r, u32 *buf)
+{
+	if (eth_tx_ring_ask(&e->tx[r], TX_SLOTS))
+		eth_tx_ring_sent(&e->tx[r], rd(e, PP_TX_DONE(r)) & 0xffff);
+	return eth_tx_ring_room(&e->tx[r], TX_SLOTS) && bmu_alloc(e, buf);
+}
+
+static void zx_tx_commit(struct zx_eth *e, unsigned int r, const u32 d[ZX_TX_DESC_WORDS])
+{
+	u32 *slot = e->tx_area + (r * TX_RING_BYTES + eth_tx_ring_take(&e->tx[r], TX_SLOTS) * TX_DESC_SIZE) / 4;
+	int i;
+
+	for (i = 0; i < ZX_TX_DESC_WORDS; i++)
+		WRITE_ONCE(slot[i], cpu_to_le32(d[i]));
+	wmb();	/* descriptor and buffer before the kick */
+	wr(e, PP_TX_KICK(r), 1);
+}
+
+int zx_eth_pon_tx(struct zx_eth *e, const u8 *data, unsigned int len, u16 gem, unsigned int tcont, bool omci)
+{
+	u32 d[ZX_TX_DESC_WORDS], buf;
+	int ret = 0;
+
+	spin_lock_bh(&e->tx_lock);
+	if (!zx_tx_begin(e, TX_PON, &buf)) {
+		ret = -EBUSY;
+	} else if (!zx279128_pon_tx_desc(d, buf, BUF_OFFSET, len, BUF_SIZE, gem, tcont, omci)) {
+		bmu_free(e, buf, false);
+		ret = -EINVAL;
+	} else {
+		memcpy(buffer(e, buf, false) + BUF_OFFSET, data, len);
+		zx_tx_commit(e, TX_PON, d);
+	}
+	spin_unlock_bh(&e->tx_lock);
+	return ret;
+}
+
 static netdev_tx_t zx_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
 	struct zx_port *port = netdev_priv(ndev);
 	struct zx_eth *e = port->eth;
 	u32 d[ZX_TX_DESC_WORDS], buf, len;
-	u32 *slot;
-	int i;
 
 	if (skb_put_padto(skb, ETH_ZLEN)) {
 		ndev->stats.tx_dropped++;
@@ -517,9 +564,7 @@ static netdev_tx_t zx_xmit(struct sk_buff *skb, struct net_device *ndev)
 	}
 	len = skb->len;
 	spin_lock(&e->tx_lock);
-	if (e->tx_inflight >= TX_SLOTS / 2)
-		e->tx_inflight -= min(e->tx_inflight, rd(e, PP_TX_DONE1) & 0xffff);
-	if (e->tx_inflight >= TX_SLOTS - 1 || !bmu_alloc(e, &buf)) {
+	if (!zx_tx_begin(e, TX_LAN, &buf)) {
 		spin_unlock(&e->tx_lock);
 		ndev->stats.tx_dropped++;
 		dev_kfree_skb_any(skb);
@@ -533,13 +578,7 @@ static netdev_tx_t zx_xmit(struct sk_buff *skb, struct net_device *ndev)
 		return NETDEV_TX_OK;
 	}
 	skb_copy_bits(skb, 0, buffer(e, buf, false) + BUF_OFFSET, len);
-	slot = e->tx_area + (TX_RING_BYTES + e->tx_next * TX_DESC_SIZE) / 4;
-	for (i = 0; i < ZX_TX_DESC_WORDS; i++)
-		WRITE_ONCE(slot[i], cpu_to_le32(d[i]));
-	e->tx_next = (e->tx_next + 1) % TX_SLOTS;
-	e->tx_inflight++;
-	wmb();	/* descriptor and buffer before the kick */
-	wr(e, PP_TX_KICK1, 1);
+	zx_tx_commit(e, TX_LAN, d);
 	spin_unlock(&e->tx_lock);
 	ndev->stats.tx_packets++;
 	ndev->stats.tx_bytes += len;
@@ -553,10 +592,6 @@ static int zx_open(struct net_device *ndev)
 
 	port->last_link = port->last_speed = port->last_duplex = -1;
 	phy_start(port->phy);
-	if (port->eth->open_count++ == 0) {
-		napi_enable(&port->eth->napi);
-		wr(port->eth, PP_INT_MASK, rd(port->eth, PP_INT_MASK) & ~PP_INT_RX);
-	}
 	netif_start_queue(ndev);
 	return 0;
 }
@@ -568,10 +603,6 @@ static int zx_stop(struct net_device *ndev)
 	netif_stop_queue(ndev);
 	phy_stop(port->phy);
 	wr(port->eth, MAC(port->index) + MAC_CTRL, 0);
-	if (--port->eth->open_count == 0) {
-		wr(port->eth, PP_INT_MASK, rd(port->eth, PP_INT_MASK) | 7);
-		napi_disable(&port->eth->napi);
-	}
 	return 0;
 }
 
@@ -581,7 +612,7 @@ static const struct {
 	size_t off;
 } zx_stats[] = {
 #define ZX_STAT(n) { #n, offsetof(struct zx_eth, n) }
-	ZX_STAT(rx_not_lan), ZX_STAT(rx_bad_buffer), ZX_STAT(rx_bad_frame), ZX_STAT(rx_nomem),
+	ZX_STAT(rx_pon), ZX_STAT(rx_not_lan), ZX_STAT(rx_bad_buffer), ZX_STAT(rx_bad_frame), ZX_STAT(rx_nomem),
 	ZX_STAT(rx_unwritten), ZX_STAT(rx_resync),
 	ZX_STAT(bmu_alloc_fail), ZX_STAT(bmu_free_fail), ZX_STAT(release_fail),
 	{ "rx_len_long_lan", offsetof(struct zx_eth, rx_len.long_lan) },
@@ -689,7 +720,7 @@ static int zx_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct zx_eth *e;
-	int irq, ret, i;
+	int irq, pon_irq, ret, i;
 
 	e = devm_kzalloc(dev, sizeof(*e), GFP_KERNEL);
 	if (!e)
@@ -705,6 +736,9 @@ static int zx_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	pon_irq = platform_get_irq(pdev, 1);
+	if (pon_irq < 0)
+		return pon_irq;
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret)
 		return dev_err_probe(dev, ret, "no 32-bit DMA\n");
@@ -748,15 +782,23 @@ static int zx_probe(struct platform_device *pdev)
 	}
 	for (i = 0; i < ZX_ETH_PORTS && !ret; i++)
 		ret = zx_port_probe(e, i);
+	if (!ret) {
+		e->pon = zx_pon_probe(dev, e->base, pon_irq, e);
+		ret = PTR_ERR_OR_ZERO(e->pon);
+	}
 	if (ret) {
+		e->pon = NULL;
 		zx_remove_ports(e);
 		netif_napi_del(&e->napi);
 		free_netdev(e->napi_dev);
 		return ret;
 	}
+	/* the PON's ring is received whether or not a LAN port is open */
+	napi_enable(&e->napi);
+	wr(e, PP_INT_MASK, rd(e, PP_INT_MASK) & ~PP_INT_RX);
 	platform_set_drvdata(pdev, e);
-	dev_info(dev, "%d buffers of %d bytes, receive queues 0-%d rings 0-1, transmit ring 1\n", NORMAL_BUFS, BUF_SIZE,
-		 RX_QUEUES - 1);
+	dev_info(dev, "%d buffers of %d bytes, receive queues 0-%d rings 0-1, transmit rings 0-1\n", NORMAL_BUFS,
+		 BUF_SIZE, RX_QUEUES - 1);
 	return 0;
 }
 
@@ -765,8 +807,10 @@ static void zx_remove(struct platform_device *pdev)
 	struct zx_eth *e = platform_get_drvdata(pdev);
 	int i;
 
-	zx_remove_ports(e);
 	wr(e, PP_INT_MASK, ~0u);
+	napi_disable(&e->napi);
+	zx_pon_remove(e->pon);
+	zx_remove_ports(e);
 	wr(e, G_INT_MASK, rd(e, G_INT_MASK) | G_INT_PP);
 	netif_napi_del(&e->napi);
 	free_netdev(e->napi_dev);
@@ -788,5 +832,5 @@ static struct platform_driver zx_driver = {
 };
 module_platform_driver(zx_driver);
 
-MODULE_DESCRIPTION("ZTE ZX279128 Ethernet");
+MODULE_DESCRIPTION("ZTE ZX279128 Ethernet and GPON");
 MODULE_LICENSE("GPL");

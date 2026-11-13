@@ -7,7 +7,6 @@
  * popped downstream here, as the ONU's VLAN row does on silicon. No optics, no burst timing.
  */
 #include <linux/etherdevice.h>
-#include <linux/if_vlan.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/jiffies.h>
@@ -27,6 +26,7 @@
 #include "gpon_omci_core.h"
 #include "gpon_omci_me.h"
 #include "gpon_sn.h"
+#include "gpon_soft_wan.h"
 #include "ponvirt_wire.h"
 
 static char *wire = "eth1";
@@ -44,7 +44,8 @@ MODULE_PARM_DESC(panel_fdt, "physical address of a flattened tree whose /omci-un
 #define PV_TICK_MS	20
 
 struct ponvirt {
-	struct net_device *wire, *wan;
+	struct net_device *wire;
+	struct gpon_soft_wan wan;
 	struct packet_type pt;
 	spinlock_t lock;		/* the core is single-threaded: every call holds this */
 	struct timer_list tick;
@@ -56,13 +57,8 @@ struct ponvirt {
 	u8 offer[GPON_PLOAM_US_LEN];
 	bool has_offer, omcc;
 	u16 omcc_gem;
-	struct omci_vlan_service svc;
-	bool svc_up;
 	u8 uni_port[8], uni_port_n;
-	struct omci_meter meter;
-	u32 us_pir, us_burst, us_tokens;	/* ME 280 upstream, bytes/s and bytes */
-	unsigned long us_stamp;
-	u64 omci_rx, omci_tx, gem_rx, gem_tx, gem_drop;
+	u64 omci_rx, omci_tx, wire_drop;
 };
 
 static struct ponvirt *pv;
@@ -80,7 +76,7 @@ static void pv_emit(u8 kind, const u8 *a, unsigned int len, const u8 *b, unsigne
 	u8 *d;
 
 	if (!skb) {
-		pv->gem_drop++;
+		pv->wire_drop++;
 		return;
 	}
 	skb_reserve(skb, LL_RESERVED_SPACE(pv->wire) + ETH_HLEN);
@@ -183,128 +179,20 @@ static const struct gpon_ploam_ops pv_ops = {
 	.omci_report_oper_up = pv_report_oper_up, .unsupported = pv_unsupported,
 };
 
-/* ---- the WAN data path ---------------------------------------------------------------- */
+/* ---- the WAN data path: gpon_soft_wan.c's, one frame of it upstream --------------------- */
 
-static int pv_meter_set(void *sh, u16 gem, enum omci_meter_dir dir, const struct gpon_gem_td *td)
+static int pv_wan_tx(void *sh, const struct omci_vlan_service *svc, const u8 *frame, unsigned int len)
 {
-	(void)sh;
-	if (dir != OMCI_METER_US)
-		return td ? -EOPNOTSUPP : 0;
-	if (gem != pv->svc.gem_port)
-		return td ? -ENOENT : 0;
-	pv->us_pir = td ? td->pir : 0;
-	pv->us_burst = max_t(u32, td && td->pbs ? td->pbs : pv->us_pir / 50, ETH_FRAME_LEN + VLAN_HLEN);
+	u8 hdr[4];
+
+	pv_put16(hdr, svc->alloc_id);
+	pv_put16(hdr + 2, svc->gem_port);
+	spin_lock_bh(&pv->lock);
+	pv_emit(PV_US_GEM, hdr, sizeof(hdr), frame, len);
+	spin_unlock_bh(&pv->lock);
+	pv_flush();
 	return 0;
 }
-
-static const struct omci_meter_ops pv_meter_ops = { .rate_set = pv_meter_set };
-
-/* The upstream PIR as a token bucket refilled by elapsed time: @len taken, or the frame dropped. */
-static bool pv_meter_admit(unsigned int len)
-{
-	unsigned long now = jiffies;
-	u64 fill;
-
-	if (!pv->us_pir)
-		return true;
-	fill = div_u64((u64)pv->us_pir * jiffies_to_usecs(now - pv->us_stamp), USEC_PER_SEC);
-	pv->us_stamp = now;
-	pv->us_tokens = min_t(u64, pv->us_tokens + fill, pv->us_burst);
-	if (pv->us_tokens < len)
-		return false;
-	pv->us_tokens -= len;
-	return true;
-}
-
-/* The WAN service the OLT provisioned, re-read every tick: carrier follows it. */
-static void pv_service(void)
-{
-	struct omci_vlan_service s;
-	bool up = pv->p.state == GPON_O5_OPERATION && pv->omcc &&
-		  omci_vlan_services(pv->onu, pv->omcc_gem, GPON_MCAST_GEM_PORT, &s, 1) == 1 &&
-		  s.alloc_known;
-
-	if (up && (!pv->svc_up || s.vid != pv->svc.vid || s.gem_port != pv->svc.gem_port ||
-		   s.alloc_id != pv->svc.alloc_id)) {
-		pv->svc = s;
-		pr_info("ponvirt: WAN service VLAN %u on GEM %u alloc %u\n", s.vid, s.gem_port,
-			s.alloc_id);
-	}
-	omci_meters_apply(&pv->meter, &s, up ? 1 : 0);
-	if (up != pv->svc_up) {
-		pv->svc_up = up;
-		if (up)
-			netif_carrier_on(pv->wan);
-		else
-			netif_carrier_off(pv->wan);
-	}
-}
-
-static void pv_ds_gem(u16 gem, const u8 *f, unsigned int len)
-{
-	bool tagged = len >= VLAN_ETH_HLEN && pv_get16(f + 12) == ETH_P_8021Q;
-	unsigned int cut = pv->svc.vid && tagged && (pv_get16(f + 14) & VLAN_VID_MASK) == pv->svc.vid
-			   ? VLAN_HLEN : 0;
-	struct sk_buff *skb;
-
-	if (!pv->svc_up || gem != pv->svc.gem_port || len < ETH_HLEN || (pv->svc.vid && !cut)) {
-		pv->gem_drop++;
-		return;
-	}
-	skb = netdev_alloc_skb(pv->wan, len - cut + NET_IP_ALIGN);
-	if (!skb) {
-		pv->gem_drop++;
-		return;
-	}
-	skb_reserve(skb, NET_IP_ALIGN);
-	skb_put_data(skb, f, 12);
-	skb_put_data(skb, f + 12 + cut, len - 12 - cut);
-	skb->protocol = eth_type_trans(skb, pv->wan);
-	pv->gem_rx++;
-	pv->wan->stats.rx_packets++;
-	pv->wan->stats.rx_bytes += skb->len;
-	netif_rx(skb);
-}
-
-static netdev_tx_t pv_wan_xmit(struct sk_buff *skb, struct net_device *dev)
-{
-	u8 hdr[4 + ETH_ALEN * 2 + VLAN_HLEN];
-
-	if (skb_linearize(skb) || skb->len < ETH_HLEN)
-		goto drop;
-	spin_lock_bh(&pv->lock);
-	if (!pv->svc_up || !pv_meter_admit(skb->len)) {
-		spin_unlock_bh(&pv->lock);
-		goto drop;
-	}
-	pv_put16(hdr, pv->svc.alloc_id);
-	pv_put16(hdr + 2, pv->svc.gem_port);
-	if (pv->svc.vid) {
-		memcpy(hdr + 4, skb->data, ETH_ALEN * 2);
-		pv_put16(hdr + 16, ETH_P_8021Q);
-		pv_put16(hdr + 18, pv->svc.vid);
-		pv_emit(PV_US_GEM, hdr, sizeof(hdr), skb->data + ETH_ALEN * 2, skb->len - ETH_ALEN * 2);
-	} else {
-		pv_emit(PV_US_GEM, hdr, 4, skb->data, skb->len);
-	}
-	pv->gem_tx++;
-	dev->stats.tx_packets++;
-	dev->stats.tx_bytes += skb->len;
-	spin_unlock_bh(&pv->lock);
-	consume_skb(skb);
-	pv_flush();
-	return NETDEV_TX_OK;
-drop:
-	dev->stats.tx_dropped++;
-	kfree_skb(skb);
-	return NETDEV_TX_OK;
-}
-
-static const struct net_device_ops pv_wan_ops = {
-	.ndo_start_xmit = pv_wan_xmit,
-	.ndo_set_mac_address = eth_mac_addr,
-	.ndo_validate_addr = eth_validate_addr,
-};
 
 /* ---- downstream: one wire frame is one PON event -------------------------------------- */
 
@@ -343,7 +231,7 @@ static void pv_ds(const u8 *d, unsigned int n, u32 now)
 		break;
 	case PV_DS_GEM:
 		if (n > PV_GEM_HDR)
-			pv_ds_gem(pv_get16(d + 1), d + PV_GEM_HDR, n - PV_GEM_HDR);
+			gpon_soft_wan_rx(&pv->wan, pv_get16(d + 1), d + PV_GEM_HDR, n - PV_GEM_HDR);
 		break;
 	}
 }
@@ -372,7 +260,7 @@ static void pv_tick(struct timer_list *t)
 	gpon_ploam_tick(&pv->p);
 	gpon_ploam_poll_provision(&pv->p, now);
 	gpon_ploam_poll_keepalive(&pv->p, now);
-	pv_service();
+	gpon_soft_wan_poll(&pv->wan, pv->onu, pv->p.state == GPON_O5_OPERATION && pv->omcc, pv->omcc_gem);
 	spin_unlock_bh(&pv->lock);
 	pv_flush();
 	mod_timer(&pv->tick, jiffies + msecs_to_jiffies(PV_TICK_MS));
@@ -382,12 +270,16 @@ static void pv_tick(struct timer_list *t)
 static int pv_show(struct seq_file *m, void *v)
 {
 	spin_lock_bh(&pv->lock);
+	const struct gpon_soft_wan *w = &pv->wan;
+	const struct net_device_stats *st = &w->dev->stats;
+
 	seq_printf(m, "state O%d onu_id %u omcc %s gem %u service %s vid %u gem %u alloc %u "
-		   "omci rx %llu tx %llu gem rx %llu tx %llu drop %llu meter %u/%u/%u pir %u\n",
+		   "omci rx %llu tx %llu gem rx %lu tx %lu drop %llu meter %u/%u/%u pir %u\n",
 		   pv->p.state, pv->p.onu_id, pv->omcc ? "up" : "down", pv->omcc_gem,
-		   pv->svc_up ? "up" : "down", pv->svc.vid, pv->svc.gem_port, pv->svc.alloc_id,
-		   pv->omci_rx, pv->omci_tx, pv->gem_rx, pv->gem_tx, pv->gem_drop,
-		   pv->meter.applied, pv->meter.owed, pv->meter.failed, pv->us_pir);
+		   w->up ? "up" : "down", w->svc.vid, w->svc.gem_port, w->svc.alloc_id,
+		   pv->omci_rx, pv->omci_tx, st->rx_packets, st->tx_packets,
+		   st->rx_dropped + st->tx_dropped + pv->wire_drop,
+		   w->meter.applied, w->meter.owed, w->meter.failed, w->us_pir);
 	spin_unlock_bh(&pv->lock);
 	return 0;
 }
@@ -525,25 +417,14 @@ static int __init ponvirt_init(void)
 	rc = pv_open_wire();
 	if (rc)
 		return rc;
-	pv->wan = alloc_etherdev(0);
-	if (!pv->wan)
-		return -ENOMEM;
-	strscpy(pv->wan->name, "gpon0", IFNAMSIZ);
-	pv->wan->netdev_ops = &pv_wan_ops;
-	eth_hw_addr_random(pv->wan);
-	netif_carrier_off(pv->wan);
-	rc = register_netdev(pv->wan);
+	omci_onu_init(pv->onu, pv->sn, get_random_u8());
+	pv->wan.lock = &pv->lock;
+	pv->wan.tx = pv_wan_tx;
+	rc = gpon_soft_wan_init(&pv->wan, pv->onu, NULL);
 	if (rc) {
 		pr_err("ponvirt: gpon0 not registered (%d)\n", rc);
 		return rc;
 	}
-	omci_onu_init(pv->onu, pv->sn, get_random_u8());
-	rc = omci_meter_init(&pv->meter, &pv_meter_ops, pv);
-	if (rc) {
-		pr_err("ponvirt: the OMCI core refused the meter table (%d)\n", rc);
-		return rc;
-	}
-	omci_onu_set_wan_mac(pv->onu, pv->wan->dev_addr);
 	rc = pv_declare_panel();
 	if (rc)
 		return rc;

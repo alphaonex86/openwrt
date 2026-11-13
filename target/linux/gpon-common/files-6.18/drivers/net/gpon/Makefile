@@ -325,3 +325,7 @@ obj-$(CONFIG_GPON_FLOW_DIAG) += gpon_flow_diag.o
 # out of the LIVE kernel, once for every family.  Built only for a driver that
 # calls it (CONFIG_GPON_EDGE): this tree ships to parts with <= 64 MB of RAM.
 obj-$(CONFIG_GPON_EDGE) += gpon_edge.o
+
+# gpon_soft_wan.o -- gpon0 over a data GEM port the CPU sees as frames (the virtual MAC, a MAC before its
+# accelerator is ported). Linux's netdev API on purpose, so not in the strict subset.
+obj-$(CONFIG_GPON_SOFT_WAN) += gpon_soft_wan.o

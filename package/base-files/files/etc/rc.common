@@ -1,6 +1,9 @@
 #!/bin/sh
 # Copyright (C) 2006-2012 OpenWrt.org
 
+# procd asks "running" after every service start and ignores the answer: only a script with its own hook has work there.
+[ "$2" = running ] && [ "$PPID" = 1 ] && ! grep -q 'running()' "$1" && exit 0
+
 . $IPKG_INSTROOT/lib/functions.sh
 . $IPKG_INSTROOT/lib/functions/service.sh
 

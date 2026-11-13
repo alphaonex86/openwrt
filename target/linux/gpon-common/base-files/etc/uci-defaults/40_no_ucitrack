@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Each service reloads on its own config trigger; this init only repeats them, at seconds of a small CPU per boot.
+[ -x /etc/init.d/ucitrack ] || exit 0
+if ! /etc/init.d/ucitrack disable; then
+	logger -t ucitrack 'Cannot disable the init'
+	exit 1
+fi

@@ -6,10 +6,10 @@
  * Facts (ONU-F680.md): the unit's U-Boot network driver and the stock kernel's pp/switch drivers, run in the
  * board's VM and read back on the unit.
  *
- * Receive: the PP fills queue q ring 0 (16-byte descriptors) with frames from the ports, taking buffers from its
- * buffer manager (BMU); the driver copies each frame out, frees the buffer and hands the descriptors back.
+ * Receive: the PP fills rings 0 and 1 of queue q (16-byte descriptors) with frames, taking buffers from its buffer
+ * manager (BMU); the driver copies each frame out, frees the buffer and hands the descriptors back, both rings as stock.
  * Transmit: the driver takes a BMU buffer, copies the frame in and queues a descriptor on transmit ring 1; the PP
- * returns the buffer to the BMU once sent. Ring 0 of either direction is the PON's and stays unused here.
+ * returns the buffer to the BMU once sent. Transmit ring 0 is the PON's and stays unused here.
  */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -48,8 +48,9 @@
 #define PP_POOL_JUMBO		0x144024
 #define PP_BUFSZ_NORMAL		0x144028
 #define PP_BUFSZ_JUMBO		0x14402c
-#define PP_INT_STATUS		0x144040	/* bit r: receive ring r holds descriptors */
+#define PP_INT_STATUS		0x144040	/* bits 1-0: receive work; the line pulses when one rises */
 #define PP_INT_MASK		0x144044	/* 1 = masked */
+#define PP_INT_RX		0x3
 #define PP_INT_CFG		0x144048
 #define PP_CLS_SEL		0x14c014
 #define PP_CLS_W1C		0x14c01c
@@ -67,6 +68,7 @@
 #define PP_Q_ENABLE		0x15406c
 #define PP_DMA_CTRL		0x164000
 #define PP_DMA_BYTEORDER	0x000f0000
+#define PP_DMA_IRQ		0x164004
 #define PP_TX_SIZES		0x16403c
 #define PP_TX_RING0		0x164050
 #define PP_TX_RING1		0x164060
@@ -142,7 +144,7 @@ struct zx_eth {
 	dma_addr_t rx_dma;
 	u32 *tx_area;		/* ring 0, then ring 1 */
 	dma_addr_t tx_dma;
-	unsigned int rx_next[RX_QUEUES];
+	unsigned int rx_next[2][RX_QUEUES];
 	unsigned int tx_next, tx_inflight;
 	int open_count;
 	struct eth_rx_len rx_len;
@@ -249,6 +251,8 @@ static void reset_pulse(struct zx_eth *e, u32 mask)
 static int zx_hw_init(struct zx_eth *e)
 {
 	static const u32 q_cfg[3][2] = { { 0x000000, 0x400 }, { 0x800000, 0x200080 }, { 0x1000000, 0xc00 } };
+	static const u32 dma_irq[][2] = { { 0x164028, 1 }, { 0x16402c, 1 }, { 0x164030, 100000 }, { 0x164034, 0x80 },
+					  { PP_DMA_IRQ, 0x7f }, { 0x164020, 0x40 }, { 0x164024, 0x40 } };
 	u32 v;
 	int i, q;
 
@@ -271,6 +275,8 @@ static int zx_hw_init(struct zx_eth *e)
 	}
 	wr(e, PP_Q_ENABLE, 1);
 	wr(e, PP_DMA_CTRL, rd(e, PP_DMA_CTRL) | PP_DMA_BYTEORDER);
+	for (i = 0; i < ARRAY_SIZE(dma_irq); i++)
+		wr(e, dma_irq[i][0], dma_irq[i][1]);
 	wr(e, PP_TX_RING0, e->tx_dma);
 	wr(e, PP_TX_RING1, e->tx_dma + TX_RING_BYTES);
 	wr(e, PP_TX_SIZES, 0x00200020);
@@ -327,7 +333,7 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, G_PP_AUX + 4, 0xf);
 	udelay(1000);
 	wr(e, G_ENABLE, rd(e, G_ENABLE) | G_ENABLE_PP);
-	wr(e, PP_INT_MASK, ~1u);	/* receive ring 0 only */
+	wr(e, PP_INT_MASK, ~0u);
 	return 0;
 }
 
@@ -373,7 +379,7 @@ static void zx_adjust_link(struct net_device *ndev)
 }
 
 /* --- receive */
-static bool rx_release(struct zx_eth *e, unsigned int q, unsigned int n)
+static bool rx_release(struct zx_eth *e, unsigned int ring, unsigned int q, unsigned int n)
 {
 	u32 v;
 
@@ -381,7 +387,7 @@ static bool rx_release(struct zx_eth *e, unsigned int q, unsigned int n)
 		e->release_fail++;
 		return false;
 	}
-	wr(e, PP_RX_RELEASE, n << 4 | 8 | q);
+	wr(e, PP_RX_RELEASE, ring << 14 | n << 4 | 8 | q);
 	wr(e, PP_RX_RELEASE_GO, 1);
 	return true;
 }
@@ -433,22 +439,31 @@ free:
 static int zx_poll(struct napi_struct *napi, int budget)
 {
 	struct zx_eth *e = container_of(napi, struct zx_eth, napi);
-	int done = 0, q;
+	int done = 0, q, r;
 
 	for (q = RX_QUEUES - 1; q >= 0 && done < budget; q--) {
-		unsigned int n = min_t(unsigned int, rd(e, PP_RX_COUNT(q)) & 0xffff, budget - done), i;
-		u32 *ring = e->rx_area + q * RX_RING_BYTES / 4;
+		u32 count = rd(e, PP_RX_COUNT(q));
 
-		for (i = 0; i < n; i++) {
-			rx_one(e, ring + e->rx_next[q] * RX_DESC_SIZE / 4);
-			e->rx_next[q] = (e->rx_next[q] + 1) % RX_SLOTS;
+		for (r = 1; r >= 0 && done < budget; r--) {
+			unsigned int n = min_t(unsigned int, r ? count >> 16 : count & 0xffff, budget - done), i;
+			u32 *ring = e->rx_area + (r * RX_QUEUES + q) * RX_RING_BYTES / 4;
+
+			for (i = 0; i < n; i++) {
+				rx_one(e, ring + e->rx_next[r][q] * RX_DESC_SIZE / 4);
+				e->rx_next[r][q] = (e->rx_next[r][q] + 1) % RX_SLOTS;
+			}
+			if (n && !rx_release(e, r, q, n))
+				dev_err_ratelimited(e->dev, "queue %d ring %d: %u descriptors not handed back\n", q, r, n);
+			done += n;
 		}
-		if (n && !rx_release(e, q, n))
-			dev_err_ratelimited(e->dev, "queue %d: %u descriptors not handed back\n", q, n);
-		done += n;
 	}
-	if (done < budget && napi_complete_done(napi, done))
-		wr(e, PP_INT_MASK, ~1u);
+	/* a pulse is lost while masked: what arrived since the last count is drained here, not by the next frame */
+	if (done < budget && napi_complete_done(napi, done)) {
+		wr(e, PP_INT_MASK, rd(e, PP_INT_MASK) & ~PP_INT_RX);
+		for (q = 0; q < RX_QUEUES; q++)
+			if (rd(e, PP_RX_COUNT(q)) && napi_schedule(napi))
+				break;
+	}
 	return done;
 }
 
@@ -456,9 +471,9 @@ static irqreturn_t zx_irq(int irq, void *data)
 {
 	struct zx_eth *e = data;
 
-	if (!(rd(e, PP_INT_STATUS) & ~rd(e, PP_INT_MASK) & 1))
+	if (!(rd(e, PP_INT_STATUS) & ~rd(e, PP_INT_MASK) & PP_INT_RX))
 		return IRQ_NONE;
-	wr(e, PP_INT_MASK, ~0u);
+	wr(e, PP_INT_MASK, rd(e, PP_INT_MASK) | 7);
 	napi_schedule(&e->napi);
 	return IRQ_HANDLED;
 }
@@ -514,8 +529,13 @@ static int zx_open(struct net_device *ndev)
 
 	port->last_link = port->last_speed = port->last_duplex = -1;
 	phy_start(port->phy);
-	if (port->eth->open_count++ == 0)
+	if (port->eth->open_count++ == 0) {
 		napi_enable(&port->eth->napi);
+		wr(port->eth, PP_INT_MASK, rd(port->eth, PP_INT_MASK) & ~PP_INT_RX);
+		local_bh_disable();
+		napi_schedule(&port->eth->napi);
+		local_bh_enable();
+	}
 	netif_start_queue(ndev);
 	return 0;
 }
@@ -527,8 +547,10 @@ static int zx_stop(struct net_device *ndev)
 	netif_stop_queue(ndev);
 	phy_stop(port->phy);
 	wr(port->eth, MAC(port->index) + MAC_CTRL, 0);
-	if (--port->eth->open_count == 0)
+	if (--port->eth->open_count == 0) {
+		wr(port->eth, PP_INT_MASK, rd(port->eth, PP_INT_MASK) | 7);
 		napi_disable(&port->eth->napi);
+	}
 	return 0;
 }
 
@@ -711,7 +733,7 @@ static int zx_probe(struct platform_device *pdev)
 		return ret;
 	}
 	platform_set_drvdata(pdev, e);
-	dev_info(dev, "%d buffers of %d bytes, receive queues 0-%d ring 0, transmit ring 1\n", NORMAL_BUFS, BUF_SIZE,
+	dev_info(dev, "%d buffers of %d bytes, receive queues 0-%d rings 0-1, transmit ring 1\n", NORMAL_BUFS, BUF_SIZE,
 		 RX_QUEUES - 1);
 	return 0;
 }

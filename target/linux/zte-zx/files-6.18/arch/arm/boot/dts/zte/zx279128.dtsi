@@ -164,5 +164,12 @@
 			clock-names = "uartclk", "apb_pclk";
 			status = "disabled";
 		};
+
+		/* The packet processor, the switch with its four port MACs and the MDIO master; receive interrupt SPI 80. */
+		ethernet@92000000 {
+			compatible = "zte,zx279128-eth";
+			reg = <0x92000000 0x400000>, <0x9a101000 0x20>;
+			interrupts = <0 80 4>;
+		};
 	};
 };

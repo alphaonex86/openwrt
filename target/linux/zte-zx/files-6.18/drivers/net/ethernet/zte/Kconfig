@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config ZX279128_ETH
+	tristate "ZTE ZX279128 Ethernet"
+	depends on ARCH_ZX || COMPILE_TEST
+	depends on OF
+	select PHYLIB
+	select MDIO_BUS
+	help
+	  The four LAN ports of the ZTE ZX279128 SoC (ZXHN F680): its switch MACs and internal PHYs, reached
+	  through its packet processor.

@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# A zone lists the netdevs of its networks before they exist. The firewall starts before
+# the network: without it LAN input, and LAN to WAN, are rejected from each ifup until the
+# reload that follows it.
+. /lib/functions.sh
+
+PPPOE_DEV=pppoe-wan
+
+list_device() {
+	uci -q del_list "firewall.$1.device=$2"
+	uci add_list "firewall.$1.device=$2" || {
+		logger -t zone-devices "Cannot list $2 in a zone"
+		exit 1
+	}
+}
+
+zone_devices() {
+	local name networks net dev
+
+	config_get name "$1" name
+	config_get networks "$1" network
+	for net in $networks; do
+		dev=$(uci -q get "network.$net.device")
+		case "$dev" in
+		'' | @*) ;;
+		*) list_device "$1" "$dev" ;;
+		esac
+	done
+	[ "$name" = wan ] && list_device "$1" "$PPPOE_DEV"
+	return 0
+}
+
+config_load firewall
+config_foreach zone_devices zone
+if ! uci commit firewall; then
+	logger -t zone-devices 'Cannot save the zone devices'
+	exit 1
+fi
+
+exit 0

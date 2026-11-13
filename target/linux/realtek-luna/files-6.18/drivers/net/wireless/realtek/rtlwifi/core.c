@@ -247,6 +247,13 @@ err_free:
 	dev_kfree_skb_any(skb);
 }
 
+/* Per-MPDU overhead outweighs a small frame: small ones share one MPDU, a full-size one never. */
+static bool rtl_op_can_aggregate_in_amsdu(struct ieee80211_hw *hw,
+					  struct sk_buff *head, struct sk_buff *skb)
+{
+	return head->len + skb->len <= 600;
+}
+
 static int rtl_op_add_interface(struct ieee80211_hw *hw,
 		struct ieee80211_vif *vif)
 {
@@ -2057,6 +2064,7 @@ const struct ieee80211_ops rtl_ops = {
 	.stop = rtl_op_stop,
 	.tx = rtl_op_tx,
 	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
+	.can_aggregate_in_amsdu = rtl_op_can_aggregate_in_amsdu,
 	.add_interface = rtl_op_add_interface,
 	.remove_interface = rtl_op_remove_interface,
 	.change_interface = rtl_op_change_interface,

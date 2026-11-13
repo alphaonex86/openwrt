@@ -375,6 +375,7 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			o->boh_delim[0] = d[4];
 			o->boh_delim[1] = d[5];
 			o->boh_delim[2] = d[6];
+			o->boh_power    = d[7] & 3;
 			ev(o, GPON_PLOAM_EV_BOH, 0,
 			   apply_boh(o, false));	/* folds in any prior 0x14 t3pre */
 			o->pre_eqd = pre_eqd;

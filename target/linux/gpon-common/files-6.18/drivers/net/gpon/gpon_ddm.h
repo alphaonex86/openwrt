@@ -152,4 +152,9 @@ static inline const char *gpon_ddm_status_str(u8 status)
 	}
 }
 
+/* The /proc lines every family prints for one sample, each level beside the raw word it came from; an
+ * unusable sample is one line saying why. GPON_DDM_A2H_FMT_LEN holds the longest. -> the length written. */
+#define GPON_DDM_A2H_FMT_LEN	320
+int gpon_ddm_a2h_fmt(const struct gpon_ddm_a2h *d, char *out, size_t sz);
+
 #endif /* _GPON_DDM_H */

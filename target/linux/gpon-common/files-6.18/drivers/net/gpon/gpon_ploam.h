@@ -351,6 +351,7 @@ struct gpon_ploam {
 	u8 boh_t3;			/* Type-3 bytes in force, as apply_boh() last decided */
 	u8 boh_t3pre;			/* Ext_Burst_Length d[0] = pre-ranged Type-3 len */
 	u8 boh_t3ranged;		/* Ext_Burst_Length d[1] = ranged Type-3 len     */
+	u8 boh_power;			/* Upstream_Overhead d[7] bits 1-0 = default ONU power level */
 	u32 pre_eqd;			/* Upstream_Overhead pre-assigned EqD, bits      */
 	u32 eqd;			/* the EqD last written, bits (Ranging_Adjustment base) */
 	u32 popup_until_tick;		/* a ridden-through LOS makes POPUP valid until here */

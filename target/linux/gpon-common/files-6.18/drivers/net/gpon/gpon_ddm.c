@@ -3,6 +3,8 @@
 /* gpon_ddm.c -- optical diagnostic (DDM) unit conversion. ONE ...
  * dev/MEASURED-gpon_ddm.c.md sec 1. */
 
+#include <linux/kernel.h>
+
 #include "gpon_ddm.h"
 
 /* log10 of the mantissa, in milli-decades, sampled every 1/16 ...
@@ -52,4 +54,30 @@ s16 gpon_ddm_cdbm_to_anig(s32 cdbm)
 	if (level < -32768)
 		return -32768;
 	return (s16)level;
+}
+
+static int gpon_ddm_fmt_cdbm(char *out, size_t sz, u16 uw10)
+{
+	return uw10 ? scnprintf(out, sz, "%d", gpon_ddm_uw10_to_cdbm(uw10)) : scnprintf(out, sz, "-inf");
+}
+
+int gpon_ddm_a2h_fmt(const struct gpon_ddm_a2h *d, char *out, size_t sz)
+{
+	unsigned int i;
+	int pos;
+
+	if (d->status != GPON_DDM_OK)
+		return scnprintf(out, sz, "optic_ddm      = %s\n", gpon_ddm_status_str(d->status));
+	pos = scnprintf(out, sz, "optic_ddm      = live (SFF-8472 A2h 0x%02x-0x%02x)\n", GPON_DDM_A2H_BASE,
+			GPON_DDM_A2H_BASE + GPON_DDM_A2H_LEN - 1);
+	pos += scnprintf(out + pos, sz - pos, "optic_rx_raw: 0x%04x optic_rx_cdbm: ", d->rx_pwr);
+	pos += gpon_ddm_fmt_cdbm(out + pos, sz - pos, d->rx_pwr);
+	pos += scnprintf(out + pos, sz - pos, " optic_tx_raw: 0x%04x\noptic_env:   temp_dc=%d bias_ua=%u tx_cdbm=",
+			 d->tx_pwr, gpon_ddm_temp_dc(d->temp), gpon_ddm_bias_ua(d->bias));
+	pos += gpon_ddm_fmt_cdbm(out + pos, sz - pos, d->tx_pwr);
+	pos += scnprintf(out + pos, sz - pos, " vcc_mv=%u\noptic_ddm_raw: %02x..%02x =", gpon_ddm_vcc_mv(d->vcc),
+			 GPON_DDM_A2H_BASE, GPON_DDM_A2H_BASE + GPON_DDM_A2H_LEN - 1);
+	for (i = 0; i < GPON_DDM_A2H_LEN; i++)
+		pos += scnprintf(out + pos, sz - pos, " %02x", d->raw[i]);
+	return pos + scnprintf(out + pos, sz - pos, "\n");
 }

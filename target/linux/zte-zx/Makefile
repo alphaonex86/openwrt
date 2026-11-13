@@ -21,6 +21,8 @@ include $(INCLUDE_DIR)/target.mk
 
 ifeq ($(TARGET_BUILD),1)
 FILES_DIR += "$(TOPDIR)/target/linux/cortex-a9-common/files-$(KERNEL_PATCHVER)"
+# The shared Ethernet layer (flowcore/eth_rx_geom.h): not GPON, so its own overlay (why: realtek-luna/Makefile).
+FILES_DIR += "$(TOPDIR)/target/linux/eth-common/files-$(KERNEL_PATCHVER)"
 # kernel-defaults.mk froze the copy command inside target.mk: re-expand it (why: realtek-luna/Makefile).
 Kernel/Patch := $(Kernel/Patch/Default)
 endif

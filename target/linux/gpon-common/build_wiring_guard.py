@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""build_wiring_guard.py -- offline proof that the SHARED GPON files- tree is
-actually wired into BOTH OpenWrt targets, and wired the only way that works.
+"""build_wiring_guard.py -- offline proof that the SHARED files- trees (the GPON
+core, gpon-common; the Ethernet layer, eth-common) are actually wired into
+every target that uses them, and wired the only way that works.
 
 WHAT THIS IS
   A no-device, no-build guard over the build wiring of the common GPON layer:
@@ -40,11 +41,21 @@ SHARED = "target/linux/gpon-common"
 SHARED_FILES = SHARED + "/files-" + VER
 GPON_DIR = SHARED_FILES + "/drivers/net/gpon"
 TARGETS = ("realtek-luna", "realtek-elnath")
+# Every shared overlay -> the targets that pull it.  eth-common is Ethernet, not
+# GPON: a target with an Ethernet driver of ours pulls it without being a GPON target.
+OVERLAYS = {SHARED: TARGETS, "target/linux/eth-common": TARGETS + ("zte-zx",)}
+REEXPAND = "Kernel/Patch := $(Kernel/Patch/Default)"
 
-# The one line that makes the shared tree reachable.  `+=` and nothing else:
-# include/kernel.mk:44 sets FILES_DIR with `?=`.
-FILES_DIR_RE = re.compile(
-    r'^FILES_DIR\s*\+=\s*"\$\(TOPDIR\)/target/linux/gpon-common/files-\$\(KERNEL_PATCHVER\)"\s*$')
+
+def files_dir_re(overlay):
+    """The one line that makes @overlay reachable.  `+=` and nothing else:
+    include/kernel.mk:44 sets FILES_DIR with `?=`."""
+    return re.compile(r'^FILES_DIR\s*\+=\s*"\$\(TOPDIR\)/%s/files-\$\(KERNEL_PATCHVER\)"\s*$'
+                      % re.escape(overlay))
+
+
+def overlays_of(target):
+    return [o for o, ts in OVERLAYS.items() if target in ts]
 
 
 HUNK_FILE = re.compile(r'^\+\+\+\s+(?:[ab]|linux-[\d.]+)/(\S+)', re.M)
@@ -87,32 +98,40 @@ class Guard:
 
     # -- W1 ---------------------------------------------------------------
     def w1_files_dir_line(self):
-        """Each target appends the shared tree, AFTER the target.mk include.
+        """Each target appends each shared tree it uses, AFTER the target.mk
+        include and BEFORE the Kernel/Patch re-expansion.
 
         Placed before the include, kernel.mk's `?=` never fires and the
         target's OWN files-<ver> disappears -- the whole vendor driver with it.
+        Placed after the re-expansion (or with none), the copy command was
+        frozen without it and the `+=` is inert (realtek-luna/Makefile).
         """
-        for t in TARGETS:
+        targets = sorted({t for ts in OVERLAYS.values() for t in ts})
+        for t in targets:
             rel = "target/linux/%s/Makefile" % t
             txt = self.read(rel)
             if not self.check(txt is not None, "W1.exists", rel + " missing"):
                 continue
             lines = txt.splitlines()
-            idx = [i for i, l in enumerate(lines) if FILES_DIR_RE.match(l)]
-            if not self.check(len(idx) == 1, "W1.append/" + t,
-                              "expected exactly 1 `FILES_DIR +=` shared-tree line, got %d"
-                              % len(idx)):
-                continue
             inc = [i for i, l in enumerate(lines)
                    if l.strip() == "include $(INCLUDE_DIR)/target.mk"]
             bt = [i for i, l in enumerate(lines)
                   if "call BuildTarget" in l]
-            self.check(len(inc) == 1 and len(bt) == 1, "W1.anchors/" + t,
-                       "need one target.mk include and one BuildTarget")
-            if len(inc) == 1 and len(bt) == 1:
-                self.check(inc[0] < idx[0] < bt[0], "W1.order/" + t,
-                           "FILES_DIR line at %d must sit between include (%d) and "
-                           "BuildTarget (%d)" % (idx[0] + 1, inc[0] + 1, bt[0] + 1))
+            rx = [i for i, l in enumerate(lines) if l.strip() == REEXPAND]
+            anchored = self.check(len(inc) == 1 and len(bt) == 1, "W1.anchors/" + t,
+                                  "need one target.mk include and one BuildTarget")
+            for o in overlays_of(t):
+                idx = [i for i, l in enumerate(lines) if files_dir_re(o).match(l)]
+                if not self.check(len(idx) == 1, "W1.append/" + t,
+                                  "expected exactly 1 `FILES_DIR +=` %s line, got %d"
+                                  % (o, len(idx))):
+                    continue
+                if anchored:
+                    self.check(inc[0] < idx[0] < bt[0], "W1.order/" + t,
+                               "%s FILES_DIR line at %d must sit between include (%d) and "
+                               "BuildTarget (%d)" % (o, idx[0] + 1, inc[0] + 1, bt[0] + 1))
+                self.check(any(idx[0] < i for i in rx), "W1.reexpand/" + t,
+                           "no `%s` after the %s FILES_DIR line: the += is inert" % (REEXPAND, o))
             self.check(not re.search(r'^FILES_DIR\s*:?=[^+]', txt, re.M),
                        "W1.noclobber/" + t,
                        "a plain FILES_DIR assignment would defeat kernel.mk's `?=`")
@@ -133,12 +152,19 @@ class Guard:
                     out.add(os.path.relpath(os.path.join(dirpath, fn), b))
             return out
 
-        shared = rels(SHARED_FILES)
-        self.check(bool(shared), "W2.nonempty", "shared tree has no files")
-        for t in TARGETS:
-            clash = sorted(shared & rels("target/linux/%s/files-%s" % (t, VER)))
-            self.check(not clash, "W2.disjoint/" + t,
-                       "path in BOTH trees (later $(CP) silently wins): " + ", ".join(clash))
+        trees = {o: rels("%s/files-%s" % (o, VER)) for o in OVERLAYS}
+        for o, ts in OVERLAYS.items():
+            self.check(bool(trees[o]), "W2.nonempty", o + " has no files")
+            for t in ts:
+                clash = sorted(trees[o] & rels("target/linux/%s/files-%s" % (t, VER)))
+                self.check(not clash, "W2.disjoint/" + t,
+                           "path in %s AND %s (later $(CP) silently wins): %s" % (o, t, ", ".join(clash)))
+        names = sorted(OVERLAYS)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                clash = sorted(trees[a] & trees[b])
+                self.check(not clash, "W2.disjoint/overlays",
+                           "path in %s AND %s: %s" % (a, b, ", ".join(clash)))
 
     # -- W3 ---------------------------------------------------------------
     def w3_o2(self):
@@ -214,7 +240,8 @@ class Guard:
                  for k in ("backport", "pending", "hack")]
         for t in TARGETS:
             provided = {}
-            for base in [SHARED_FILES, "target/linux/%s/files-%s" % (t, VER)]:
+            for base in ["%s/files-%s" % (o, VER) for o in overlays_of(t)] + \
+                    ["target/linux/%s/files-%s" % (t, VER)]:
                 b = self.p(base)
                 for dirpath, _, filenames in os.walk(b, followlinks=False):
                     for fn in filenames:
@@ -259,11 +286,12 @@ class Guard:
         for `call BuildTarget`.  gpon-common is a files- tree, not a target, and
         must stay invisible to target enumeration.
         """
-        for depth, sub in ((1, SHARED), (2, SHARED_FILES),
-                           (3, SHARED_FILES + "/drivers")):
-            p = self.p(sub, "Makefile")
-            self.check(not os.path.exists(p), "W6.depth%d" % depth,
-                       "%s is at scan.mk depth<=3" % os.path.join(sub, "Makefile"))
+        for o in OVERLAYS:
+            for depth, sub in ((1, o), (2, o + "/files-" + VER),
+                               (3, o + "/files-" + VER + "/drivers")):
+                p = self.p(sub, "Makefile")
+                self.check(not os.path.exists(p), "W6.depth%d" % depth,
+                           "%s is at scan.mk depth<=3" % os.path.join(sub, "Makefile"))
 
     # -- W7 ---------------------------------------------------------------
     def w7_no_symlinks(self):
@@ -275,12 +303,12 @@ class Guard:
         whose relative path cannot resolve inside build_dir.  And the toplevel
         scan uses `find -L`, which would follow it off the tree.
         """
-        b = self.p(SHARED)
         bad = []
-        for dirpath, dirnames, filenames in os.walk(b, followlinks=False):
-            for n in list(dirnames) + list(filenames):
-                if os.path.islink(os.path.join(dirpath, n)):
-                    bad.append(os.path.relpath(os.path.join(dirpath, n), b))
+        for o in OVERLAYS:
+            for dirpath, dirnames, filenames in os.walk(self.p(o), followlinks=False):
+                for n in list(dirnames) + list(filenames):
+                    if os.path.islink(os.path.join(dirpath, n)):
+                        bad.append(os.path.relpath(os.path.join(dirpath, n), self.root))
         self.check(not bad, "W7.symlink", "symlink in shared tree: " + ", ".join(sorted(bad)))
 
     # -- W8 ---------------------------------------------------------------
@@ -425,6 +453,13 @@ MUTATIONS = [
          "include $(INCLUDE_DIR)/target.mk",
          'FILES_DIR += "$(TOPDIR)/target/linux/gpon-common/files-$(KERNEL_PATCHVER)"\n'
          "include $(INCLUDE_DIR)/target.mk", 1)),
+    ("W1.append", "target/linux/zte-zx/Makefile",
+     lambda s: re.sub(r'^FILES_DIR \+=.*eth-common.*$', '', s, flags=re.M)),
+    ("W1.reexpand", "target/linux/zte-zx/Makefile",
+     lambda s: s.replace(REEXPAND, "")),
+    # the same header in two overlays: the later $(CP) silently wins.
+    ("W2.disjoint", SHARED_FILES + "/drivers/net/flowcore/flowcore.h",
+     lambda s: s, "target/linux/eth-common/files-%s/drivers/net/flowcore/flowcore.h" % VER),
     ("W3.o2", SHARED_FILES + "/drivers/net/gpon/Makefile",
      lambda s: re.sub(r'^ccflags-y \+= -O2$', '', s, flags=re.M)),
     # the "silently dead source" arm: drop one pending declaration and the file
@@ -456,12 +491,12 @@ MUTATIONS = [
 
 def self_check(root):
     """Copy only what the guard reads, mutate one thing, require a FAIL."""
-    subtrees = [SHARED, "include", "target/linux/realtek-luna",
-                "target/linux/realtek-elnath"] + \
+    subtrees = list(OVERLAYS) + ["include", "target/linux/realtek-luna",
+                                 "target/linux/realtek-elnath", "target/linux/zte-zx"] + \
                ["target/linux/generic/%s-%s" % (k, VER)
                 for k in ("backport", "pending", "hack")]
     rc = 0
-    for name, rel, mutate in MUTATIONS:
+    for name, rel, mutate, *copy_to in MUTATIONS:
         tmp = tempfile.mkdtemp(prefix="gpon-wiring-")
         try:
             for s in subtrees:
@@ -473,10 +508,13 @@ def self_check(root):
             with open(p, "r", encoding="utf-8") as f:
                 before = f.read()
             after = mutate(before)
-            if before == after:
+            if before == after and not copy_to:
                 print("  %-14s MUTATION IS A NO-OP -- the guard is untested" % name)
                 rc = 1
                 continue
+            if copy_to:     # a mutation that ADDS a file: @rel's bytes at that path
+                p = os.path.join(tmp, copy_to[0])
+                os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
                 f.write(after)
             fails = Guard(tmp).run()

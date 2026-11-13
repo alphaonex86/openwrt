@@ -44,6 +44,8 @@ include $(INCLUDE_DIR)/target.mk
 # copy -- the kernel would silently build a stale core.
 ifeq ($(TARGET_BUILD),1)
 FILES_DIR += "$(TOPDIR)/target/linux/gpon-common/files-$(KERNEL_PATCHVER)"
+# The shared Ethernet layer (flowcore/eth_rx_geom.h): not GPON, so its own overlay (why: realtek-luna/Makefile).
+FILES_DIR += "$(TOPDIR)/target/linux/eth-common/files-$(KERNEL_PATCHVER)"
 # ★★ AND THE COPY COMMAND MUST BE RE-EXPANDED, OR THE `+=` ABOVE IS INERT.
 # MEASURED 2026-08-05, and it failed in the reassuring direction: with the `+=`
 # alone, `make val.FILES_DIR` and `val.kernel_files` BOTH printed the shared

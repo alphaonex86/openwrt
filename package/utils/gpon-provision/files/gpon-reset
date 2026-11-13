@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The factory reset the OLT asked over OMCI (ME 65408 ResetDefault), performed as the ISP's own ONU
+# performs it (operator, 2026-11-13): the configuration back to its defaults, then a reboot; once per Set.
+# Usage: gpon-reset [reset-file]; exit 1 when the reset could not be performed.
+n=$(sed -n 's/^reset_default: \([0-9]*\)$/\1/p' "${1:-/proc/gpon_reset}" 2> /dev/null)
+done=/tmp/gpon-reset.done
+[ -n "$n" ] && [ "$n" != "$(cat "$done" 2> /dev/null)" ] || exit 0
+echo "$n" > "$done" || { logger -t gpon-reset "$done could not be written: the OLT's factory reset is not performed"; exit 1; }
+if ! grep -q ' /overlay ' /proc/mounts; then
+	logger -t gpon-reset "the OLT asked a factory reset over OMCI and this unit runs without a saved configuration: nothing to reset"
+	exit 0
+fi
+logger -t gpon-reset "the OLT asked a factory reset over OMCI (ME 65408): resetting and rebooting"
+factoryreset -y || { logger -t gpon-reset "the factory reset failed: not rebooting"; exit 1; }
+reboot || { logger -t gpon-reset "the reboot after the factory reset failed"; exit 1; }

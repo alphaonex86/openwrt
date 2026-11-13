@@ -7933,17 +7933,19 @@ static int gpon_vlan_proc_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-static int gpon_acs_proc_show(struct seq_file *s, void *v)
+/* One root-only file of what the OLT provisioned: s->private is its omci_user_texts[] entry. */
+static int gpon_user_text_show(struct seq_file *s, void *v)
 {
+	const struct omci_user_text *t = s->private;
 	static DEFINE_MUTEX(show_lock);
-	static char out[512];
+	static char out[OMCI_USER_TEXT_MAX];
 	unsigned long flags;
 
 	mutex_lock(&show_lock);
 	out[0] = 0;
 	spin_lock_irqsave(&luna_omci_lock, flags);
 	if (luna_omci.onu)
-		omci_acs_fmt(luna_omci.onu, out, sizeof(out));
+		t->fmt(luna_omci.onu, out, sizeof(out));
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 	seq_puts(s, out);
 	mutex_unlock(&show_lock);
@@ -10030,6 +10032,7 @@ static int __init rtl9602c_gpon_init(void)
 {
 	u32 ver, rst, test;
 	const char *missing;
+	unsigned int i;
 	int ret;
 
 	/* The op table is checked BEFORE any hardware is touched. C ...
@@ -10450,7 +10453,10 @@ skip_bosa_init:
 		pr_err("luna-gpon: the OMCI core refused the meter table, ME 280 is not applied\n");
 	proc_create_single("gpon", 0444, NULL, gpon_proc_show);
 	proc_create_single("gpon_vlan", 0444, NULL, gpon_vlan_proc_show);
-	proc_create_single("gpon_acs", 0400, NULL, gpon_acs_proc_show);
+	for (i = 0; i < OMCI_USER_TEXTS; i++)
+		if (!proc_create_single_data(omci_user_texts[i].name, 0400, NULL, gpon_user_text_show,
+					     (void *)&omci_user_texts[i]))
+			pr_err("luna-gpon: /proc/%s could not be created\n", omci_user_texts[i].name);
 	proc_create_single("gpon_log", 0444, NULL, luna_log_show);
 	proc_create_single("gpon_timing", 0444, NULL, luna_timing_show);
 	luna_mon_register();
@@ -10622,6 +10628,8 @@ fail_maps:
 
 static void __exit rtl9602c_gpon_exit(void)
 {
+	unsigned int i;
+
 	/* Before any unmap: a class device outliving its register window is a
 	 * write through a stale ioremap the moment someone echoes to it. */
 	gpon_led_sysfs_exit();
@@ -10650,7 +10658,8 @@ static void __exit rtl9602c_gpon_exit(void)
 	proc_remove(luna_health_proc);
 	luna_health_proc = NULL;
 	remove_proc_entry("gpon_vlan", NULL);
-	remove_proc_entry("gpon_acs", NULL);
+	for (i = 0; i < OMCI_USER_TEXTS; i++)
+		remove_proc_entry(omci_user_texts[i].name, NULL);
 	remove_proc_entry("gpon", NULL);
 	remove_proc_entry("gpon_log", NULL);
 	remove_proc_entry("gpon_timing", NULL);

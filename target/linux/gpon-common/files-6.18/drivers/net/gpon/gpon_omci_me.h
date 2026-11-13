@@ -277,6 +277,7 @@ struct omci_onu {
 	u16	rows_dropped;
 	u16	tcont_alloc[OMCI_TCONT_MAX];
 	u32	tcont_alloc_written;	/* accepted attr-1 Set, not a boot default */
+	u32	reset_default_req;	/* factory resets the OLT asked; survives MIB-Reset */
 	struct omci_capacity	cap;	/* survives omci_onu_reinit() */
 	/* ⚠ THE ADAPTIVE MDS WALK's state.  It lived in the Luna shell and was
 	 * DELETED by the 2026-08-27 responder deduplication (836b76be01) --
@@ -417,6 +418,18 @@ bool omci_farend_alloc_by_omci(const struct omci_onu *o);
 const char *omci_farend_name(const struct omci_onu *o);
 int omci_farend_fmt(const struct omci_onu *o, char *out, size_t sz);
 int omci_acs_fmt(struct omci_onu *o, char *out, size_t sz);
+int omci_wifi_fmt(struct omci_onu *o, char *out, size_t sz);
+int omci_reset_fmt(struct omci_onu *o, char *out, size_t sz);
+int omci_ppp_fmt(struct omci_onu *o, char *out, size_t sz);
+
+/* A root-only file of what the OLT provisioned for user space (/proc/<name>): it may hold a secret. */
+struct omci_user_text {
+	const char *name;
+	int (*fmt)(struct omci_onu *o, char *out, size_t sz);
+};
+#define OMCI_USER_TEXTS 4
+#define OMCI_USER_TEXT_MAX 4096		/* > the longest a formatter writes: 12 SSIDs, ~2.2 KB */
+extern const struct omci_user_text omci_user_texts[OMCI_USER_TEXTS];
 
 /* The field named @name provisioned from text. -> the field, or OMCI_ID_FIELDS
  * when the name is unknown or the value refused.  @id NULL only validates. */

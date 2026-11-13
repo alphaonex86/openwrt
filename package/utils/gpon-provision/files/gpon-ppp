@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The PPPoE account the OLT provisioned over OMCI (ME 65417, one per IP host) applied to the WAN of that IP
+# host (operator, 2026-11-13): IP host 0 is network.wan, IP host n network.wan<n>. A user name makes a WAN of
+# another protocol PPPoE (operator, 2026-11-13: the OLT's account switches the WAN). Only what the OLT wrote is
+# touched; a value is data, never a command.
+# Usage: gpon-ppp [ppp-file]; exit 1 when the network config could not be written.
+# read once: a /proc file has no size, and one snapshot keeps every line of one MIB state
+text=$(cat "${1:-/proc/gpon_ppp}" 2> /dev/null)
+[ -n "$text" ] || exit 0
+get() { printf '%s\n' "$text" | sed -n "s/^ppp_$1_$2: //p"; }
+put() { uci -q set "network.$1.$2=$3" || { logger -t gpon-ppp "network.$1.$2 could not be written"; exit 1; }; }
+once() { [ "$2" = "$(cat "/tmp/gpon-ppp.$1" 2> /dev/null)" ] || { logger -t gpon-ppp "$2"; echo "$2" > "/tmp/gpon-ppp.$1"; }; }
+
+refused=$(printf '%s\n' "$text" | sed -n 's/^ppp_refused: //p')
+[ -n "$refused" ] && once refused "a value the OLT provisioned was refused: $refused"
+for i in $(printf '%s\n' "$text" | sed -n 's/^ppp_\([0-9]*\)_.*/\1/p' | sort -un); do
+	iface=wan
+	[ "$i" = 0 ] || iface=wan$i
+	proto=$(uci -q get "network.$iface.proto")
+	if [ -z "$proto" ]; then
+		once "iface$i" "the OLT provisioned a PPPoE account for IP host $i and network.$iface does not exist: not applied"
+		continue
+	fi
+	changed=0
+	if [ "$proto" != pppoe ]; then
+		# a user name is what makes the WAN PPPoE; a password alone is no account
+		[ -n "$(get "$i" username)" ] || continue
+		put "$iface" proto pppoe
+		changed=1
+	fi
+	for opt in username password; do
+		v=$(get "$i" "$opt")
+		[ -n "$v" ] && [ "$(uci -q get "network.$iface.$opt")" != "$v" ] || continue
+		put "$iface" "$opt" "$v"
+		changed=1
+	done
+	[ "$changed" = 1 ] || continue
+	uci -q commit network || { logger -t gpon-ppp "the network config could not be committed"; exit 1; }
+	logger -t gpon-ppp "PPPoE account from the OLT over OMCI applied to $iface"
+	ifup "$iface" || { logger -t gpon-ppp "$iface could not be restarted"; exit 1; }
+done

@@ -1,14 +1,15 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Every minute: a WAN VLAN not as the OLT provisioned it goes to syslog once (gpon-vlan-check), and
-# the ACS the OLT provisioned to onu-cwmp (gpon-acs).
+# what the OLT provisioned over OMCI: the ACS to onu-cwmp (gpon-acs), the WiFi to the wireless config
+# (gpon-wifi), a PPPoE account to its WAN (gpon-ppp), a factory reset (gpon-reset).
 
 START=99
 USE_PROCD=1
 
 start_service() {
 	procd_open_instance
-	procd_set_param command /bin/sh -c 'while sleep 60; do /usr/sbin/gpon-vlan-check --log > /dev/null; /usr/sbin/gpon-acs; done'
+	procd_set_param command /bin/sh -c 'while sleep 60; do /usr/sbin/gpon-vlan-check --log > /dev/null; /usr/sbin/gpon-acs; /usr/sbin/gpon-wifi; /usr/sbin/gpon-ppp; /usr/sbin/gpon-reset; done'
 	procd_set_param respawn
 	procd_close_instance
 }

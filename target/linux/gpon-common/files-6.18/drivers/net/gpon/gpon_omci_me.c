@@ -288,6 +288,8 @@ struct omci_attr {
  * its own ME plugins (OMCI-simulate/me_attr_table.py) and identical on four
  * Luna stocks; the field X111W's upload shows exactly that set. */
 #define OMCI_ACCESS_HIDDEN		16
+/* Held for the shell, served as zeros: a secret the OLT wrote is never read back. */
+#define OMCI_ACCESS_SECRET		32
 
 #define AT(cls, n, sz, s, arg)	{ (cls), (arg), (n), (sz), (s), 0 }
 #define A_ST(cls, n, sz, off, acc) \
@@ -310,6 +312,7 @@ struct omci_attr {
 				   offsetof(struct omci_identity, zeros))
 #define A_SN(cls, n)		AT(cls, n, 8, OMCI_SRC_SN, 0)
 #define A_POOL(cls, n, sz, def) { (cls), (def), (n), (sz), OMCI_SRC_POOL, 3 }
+#define A_SECRET(cls, n, sz)	{ (cls), 0, (n), (sz), OMCI_SRC_POOL, 3 | OMCI_ACCESS_SECRET }
 #define A_MDS(cls, n)		AT(cls, n, 1, OMCI_SRC_MDS, 0)
 #define A_D(cls, n, sz, dyn)	AT(cls, n, sz, OMCI_SRC_DYN, dyn)
 #define A_NO_ATTRS(cls)		AT(cls, 0, 0, OMCI_SRC_CONST, 0)
@@ -1074,7 +1077,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_POOL(65417, 2, 25, 0),		/* #2  User name */
 	A_POOL(65417, 3, 25, 0),		/* #3   */
 	A_POOL(65417, 4, 25, 0),		/* #4   */
-	A_POOL(65417, 5, 25, 0),		/* #5  Password */
+	A_SECRET(65417, 5, 25),			/* #5  Password */
 	A_POOL(65417, 6, 25, 0),		/* #6   */
 	A_POOL(65417, 7, 25, 0),		/* #7   */
 	A_POOL(65417, 8, 1, 0),		/* #8   */
@@ -1479,15 +1482,15 @@ static bool omci_attr_read(struct omci_onu *o, u16 cls, u16 inst, u8 attr, u8 *v
 }
 
 /* A shell reads these lines: a value with a byte outside 0x20..0x7e is refused, never printed. */
-static int omci_acs_line(char *out, size_t sz, const char *name, const u8 *s)
+static int omci_shell_line(char *out, size_t sz, const char *what, const char *name, const u8 *s)
 {
 	const u8 *c;
 
 	for (c = s; *c; c++)
 		if (*c < 0x20 || *c > 0x7e)
-			return scnprintf(out, sz, "acs_refused: %s byte 0x%02x at %u\n", name, *c,
+			return scnprintf(out, sz, "%s_refused: %s byte 0x%02x at %u\n", what, name, *c,
 					 (unsigned int)(c - s));
-	return scnprintf(out, sz, "acs_%s: %s\n", name, s);
+	return scnprintf(out, sz, "%s_%s: %s\n", what, name, s);
 }
 
 /* The ACS the OLT provisioned (G.988 ME 340 -> 137 -> 148 + 157) for the CWMP client.  It holds
@@ -1517,18 +1520,148 @@ int omci_acs_fmt(struct omci_onu *o, char *out, size_t sz)
 			omci_attr_read(o, OMCI_ME_LARGE_STRING, addr, 2 + i, s + i * OMCI_POOL_SIZE,
 				       OMCI_POOL_SIZE);
 		s[parts * OMCI_POOL_SIZE] = 0;
-		pos += omci_acs_line(out + pos, sz - pos, "url", s);
+		pos += omci_shell_line(out + pos, sz - pos, "acs", "url", s);
 	}
 	if (!omci_store_find(o, OMCI_ME_AUTH_SECURITY, sec))
 		return pos;
 	omci_attr_read(o, OMCI_ME_AUTH_SECURITY, sec, 2, s, OMCI_POOL_SIZE);
 	omci_attr_read(o, OMCI_ME_AUTH_SECURITY, sec, 5, s + OMCI_POOL_SIZE, OMCI_POOL_SIZE);
 	s[2 * OMCI_POOL_SIZE] = 0;
-	pos += omci_acs_line(out + pos, sz - pos, "username", s);
+	pos += omci_shell_line(out + pos, sz - pos, "acs", "username", s);
 	omci_attr_read(o, OMCI_ME_AUTH_SECURITY, sec, 3, s, OMCI_POOL_SIZE);
 	s[OMCI_POOL_SIZE] = 0;
-	return pos + omci_acs_line(out + pos, sz - pos, "password", s);
+	return pos + omci_shell_line(out + pos, sz - pos, "acs", "password", s);
 }
+
+#ifdef CONFIG_OLT_HSGQ
+enum omci_wifi_kind { OMCI_WIFI_TEXT, OMCI_WIFI_FLAG, OMCI_WIFI_SECURITY };
+#define OMCI_WIFI_TEXT_LEN 24	/* an SSID or a key, as these MEs hold it */
+
+/* One setting of an SSID: its attribute in the per-SSID MEs, and ME 252's for the main SSID of the
+ * 2.4 GHz then the 5 GHz band (0: ME 252 has none). */
+static const struct omci_wifi_field {
+	const char	*name;
+	u16		cls;
+	u8		attr;
+	u8		profile[2];
+	u8		kind;
+} omci_wifi_fields[] = {
+	{ "ssid", OMCI_ME_WLAN_COMMON, 3, { 4, 8 }, OMCI_WIFI_TEXT },
+	{ "key", OMCI_ME_WLAN_SECURITY, 2, { 5, 9 }, OMCI_WIFI_TEXT },
+	{ "security", OMCI_ME_WLAN_SECURITY, 1, { 3, 7 }, OMCI_WIFI_SECURITY },
+	{ "enable", OMCI_ME_WLAN_COMMON, 11, { 2, 6 }, OMCI_WIFI_FLAG },
+	{ "hidden", OMCI_ME_WLAN_COMMON, 10, { 0, 0 }, OMCI_WIFI_FLAG },
+	{ "isolate", OMCI_ME_WLAN_COMMON, 9, { 0, 0 }, OMCI_WIFI_FLAG },
+	{ "radio", OMCI_ME_WLAN_COMMON, 12, { 0, 0 }, OMCI_WIFI_FLAG },
+};
+
+/* The security codes of ME 65386 #1, and the other numbering ME 252 #3/#7 uses for the same modes. */
+static const char *const omci_wifi_security[2][7] = {
+	{ "open", "wep", "wpa", "wpa2", "wpa-wpa2", "wep", "wep" },
+	{ "open", "wep", "wpa", NULL, "wpa2", NULL, "wpa-wpa2" },
+};
+
+static int omci_wifi_line(char *out, size_t sz, u16 ssid, const struct omci_wifi_field *f,
+			  const u8 *v, bool profile)
+{
+	char name[16];
+	u8 text[OMCI_WIFI_TEXT_LEN + 1];
+	const char *mode;
+
+	scnprintf(name, sizeof(name), "%u_%s", ssid, f->name);
+	switch (f->kind) {
+	case OMCI_WIFI_TEXT:
+		memcpy(text, v, OMCI_WIFI_TEXT_LEN);
+		text[OMCI_WIFI_TEXT_LEN] = 0;
+		return text[0] ? omci_shell_line(out, sz, "wifi", name, text) : 0;
+	case OMCI_WIFI_SECURITY:
+		mode = v[0] < 7 ? omci_wifi_security[profile][v[0]] : NULL;
+		if (!mode)
+			return scnprintf(out, sz, "wifi_refused: %s code %u\n", name, v[0]);
+		return scnprintf(out, sz, "wifi_%s: %s\n", name, mode);
+	default:
+		return scnprintf(out, sz, "wifi_%s: %u\n", name, v[0] ? 1 : 0);
+	}
+}
+
+/* What the OLT provisioned for each SSID (ME 65385 and 65386, else ME 252 for a band's main SSID), for
+ * the shell that applies it: only what it wrote.  It holds the keys: only a root-only file may show it. */
+int omci_wifi_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	u16 ssid, n = (u16)(OMCI_WIFI_SSIDS * o->cap.wifi_radios);
+	const struct omci_wifi_field *f;
+	int pos = 0;
+
+	for (ssid = 0; ssid < n; ssid++)
+		for (f = omci_wifi_fields; f < omci_wifi_fields + ARRAY_SIZE(omci_wifi_fields); f++) {
+			const struct omci_pool_attr *p = omci_pool_find(o, f->cls, ssid, f->attr);
+			u16 band = ssid / OMCI_WIFI_SSIDS;
+			bool profile = false;
+
+			if (!p && !(ssid % OMCI_WIFI_SSIDS) && band < 2 && f->profile[band]) {
+				p = omci_pool_find(o, OMCI_ME_WLAN_PROFILE, 0, f->profile[band]);
+				profile = true;
+			}
+			if (p)
+				pos += omci_wifi_line(out + pos, sz - pos, ssid, f, p->v, profile);
+		}
+	return pos;
+}
+#else
+int omci_wifi_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_OLT_HUAWEI
+/* The factory resets the OLT asked (ME 65408 ResetDefault), for the shell that performs them. */
+int omci_reset_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	return o->reset_default_req ? scnprintf(out, sz, "reset_default: %u\n", o->reset_default_req) : 0;
+}
+
+/* The PPPoE account the OLT wrote per IP host (ME 65417 #2, #5), for the shell that applies it to
+ * that IP host's WAN.  It holds the password: only a root-only file may show it. */
+int omci_ppp_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	static const struct { u8 attr; const char *name; } fields[] = { { 2, "username" }, { 5, "password" } };
+	u8 text[OMCI_POOL_SIZE + 1] = { 0 }, k, f;	/* text[OMCI_POOL_SIZE] stays the end */
+	char name[24];
+	int pos = 0;
+
+	for (k = 0; k < o->ip_host_n; k++)
+		for (f = 0; f < ARRAY_SIZE(fields); f++) {
+			const struct omci_pool_attr *p = omci_pool_find(o, OMCI_ME_EXT_IP_HOST, o->ip_host[k],
+									 fields[f].attr);
+
+			if (!p || !p->v[0])
+				continue;
+			memcpy(text, p->v, OMCI_POOL_SIZE);
+			scnprintf(name, sizeof(name), "%u_%s", o->ip_host[k], fields[f].name);
+			pos += omci_shell_line(out + pos, sz - pos, "ppp", name, text);
+		}
+	return pos;
+}
+#else
+int omci_reset_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	return 0;
+}
+
+int omci_ppp_fmt(struct omci_onu *o, char *out, size_t sz)
+{
+	return 0;
+}
+#endif
+
+/* What the OLT provisioned for user space, one root-only file each; the shells create them. */
+const struct omci_user_text omci_user_texts[OMCI_USER_TEXTS] = {
+	{ "gpon_acs", omci_acs_fmt },
+	{ "gpon_wifi", omci_wifi_fmt },
+	{ "gpon_reset", omci_reset_fmt },
+	{ "gpon_ppp", omci_ppp_fmt },
+};
 
 static bool omci_farend_known(const u8 *val, unsigned int len)
 {
@@ -1772,9 +1905,8 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		memcpy(e->body + a->v, v, a->size);
 	else if (a->src == OMCI_SRC_POOL) {
 		memcpy(omci_pool_slot(o, a, inst)->v, v, a->size);
-		/* stock acts on these and ours only serves them back: COUNTED */
-		if ((a->class_id == OMCI_ME_LOOP_DETECT && a->attr == 4) ||
-		    a->class_id == OMCI_ME_EXT_ONU_G || a->class_id == OMCI_ME_EXT_IP_HOST)
+		/* stock acts on it and ours only serves it back: COUNTED */
+		if (a->class_id == OMCI_ME_LOOP_DETECT && a->attr == 4)
 			o->vlan.attr_owed++;
 	}
 	else if (a->src == OMCI_SRC_OLT_G) {
@@ -1897,6 +2029,11 @@ u8 omci_me_set(struct omci_onu *o, u16 class_id, u16 inst, u16 mask,
 	}
 	if (class_id == OMCI_ME_ANI_G)
 		omci_anig_alarms_refresh(o);
+#ifdef CONFIG_OLT_HUAWEI
+	/* stock resets to factory on ResetDefault Set alone, whatever its value */
+	if (class_id == OMCI_ME_EXT_ONU_G && mask == OMCI_ATTR_BIT(1))
+		o->reset_default_req++;
+#endif
 	return OMCI_RC_OK;
 }
 
@@ -2045,7 +2182,7 @@ static const u8 *omci_attr_bytes(struct omci_onu *o,
 	case OMCI_SRC_POOL: {
 		const struct omci_pool_attr *p = omci_pool_find(o, a->class_id, inst, a->attr);
 
-		if (p)
+		if (p && !(a->access & OMCI_ACCESS_SECRET))
 			return p->v;
 		if (a->size > 4)
 			return o->id.zeros;
@@ -3203,6 +3340,7 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	u8 cap[OMCI_UNI_MAX], type[OMCI_UNI_MAX];
 	const u8 *profile = o->profile;		/* the shell's, not the session's */
 	u32 profile_n = o->profile_n;
+	u32 resets = o->reset_default_req;
 
 	memcpy(cap, o->uni_g_mgmt_cap, sizeof(cap));
 	/* ★ THE TYPE IS CARRIED TOO.  It is the panel's, not the session's: an
@@ -3230,6 +3368,7 @@ void omci_onu_reinit(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->wan_mac_set = wan_mac_set;
 	o->profile = profile;
 	o->profile_n = profile_n;
+	o->reset_default_req = resets;
 	/* ⚠ UNCONDITIONALLY, INCLUDING WITH BOTH LISTS EMPTY.  Guarding this on
 	 * "something was declared" made a board that legally declares no UNI at
 	 * all come back with the default 0x0101 on both classes -- an instance

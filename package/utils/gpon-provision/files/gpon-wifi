@@ -1,0 +1,91 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The WiFi the OLT provisioned over OMCI (ME 252, 65385, 65386) applied to the wireless config, as the
+# ISP's own ONU applies it: SSIDs 0..3 belong to the 2.4 GHz radio, 4..7 to the 5 GHz one, the first of
+# each being its main SSID. Only what the OLT wrote is touched; a value is data, never a command; an
+# open or WEP network the OLT asks is applied as stock applies it (operator, 2026-11-13).
+# Usage: gpon-wifi [wifi-file]; exit 1 when the wireless config could not be written.
+# read once: a /proc file has no size, and one snapshot keeps every line of one MIB state
+text=$(cat "${1:-/proc/gpon_wifi}" 2> /dev/null)
+[ -n "$text" ] || exit 0
+SSIDS=4
+get() { printf '%s\n' "$text" | sed -n "s/^wifi_$1_$2: //p"; }
+once() { [ "$2" = "$(cat "/tmp/gpon-wifi.$1" 2> /dev/null)" ] || { logger -t gpon-wifi "$2"; echo "$2" > "/tmp/gpon-wifi.$1"; }; }
+changed=0
+# want <section> <option> <value>: written only when it differs
+want() {
+	[ "$(uci -q get "wireless.$1.$2")" = "$3" ] && return 0
+	uci -q set "wireless.$1.$2=$3" || { logger -t gpon-wifi "wireless.$1.$2 could not be written"; exit 1; }
+	changed=1
+}
+
+# hostapd's WEP key: 5 or 13 characters, or 10 or 26 hex digits (netifd hex-encodes anything else)
+wep_key() {
+	case ${#1} in
+	5 | 13) case $1 in s:*) return 1 ;; esac ;;
+	10 | 26) case $1 in *[!0-9a-fA-F]*) return 1 ;; esac ;;
+	*) return 1 ;;
+	esac
+}
+
+refused=$(printf '%s\n' "$text" | sed -n 's/^wifi_refused: //p')
+[ -n "$refused" ] && once refused "a value the OLT provisioned was refused: $refused"
+devices=$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')
+radios=$(for band in 2g 5g; do for dev in $devices; do [ "$(uci -q get "wireless.$dev.band")" = "$band" ] && echo "$dev"; done; done)
+
+for i in $(printf '%s\n' "$text" | sed -n 's/^wifi_\([0-9]*\)_.*/\1/p' | sort -un); do
+	dev=$(echo "$radios" | sed -n "$((i / SSIDS + 1))p")
+	[ -n "$dev" ] || { once "radio$i" "the OLT provisioned SSID $i and this unit has no radio for it"; continue; }
+	if [ $((i % SSIDS)) = 0 ]; then
+		iface=$(uci -q show wireless | tr -d "'" | sed -n "s/^wireless\.\([^.=]*\)\.device=$dev$/\1/p" | grep -v '^omci_' | sed -n 1p)
+		[ -n "$iface" ] || { once "iface$i" "the OLT provisioned SSID $i and radio $dev has no main SSID"; continue; }
+	else
+		iface=omci_$i
+	fi
+	ssid=$(get "$i" ssid)
+	enable=$(get "$i" enable)
+	if ! uci -q get "wireless.$iface" > /dev/null; then
+		# an extra SSID exists once the OLT names and enables it
+		[ -n "$ssid" ] && [ "$enable" = 1 ] || continue
+		uci -q set "wireless.$iface=wifi-iface" && uci -q set "wireless.$iface.device=$dev" &&
+			uci -q set "wireless.$iface.mode=ap" && uci -q set "wireless.$iface.network=lan" ||
+			{ logger -t gpon-wifi "SSID $i could not be created"; exit 1; }
+		changed=1
+	fi
+	[ -n "$ssid" ] && want "$iface" ssid "$ssid"
+	[ -n "$enable" ] && want "$iface" disabled "$((1 - enable))"
+	hidden=$(get "$i" hidden)
+	[ -n "$hidden" ] && want "$iface" hidden "$hidden"
+	isolate=$(get "$i" isolate)
+	[ -n "$isolate" ] && want "$iface" isolate "$isolate"
+	radio=$(get "$i" radio)
+	[ $((i % SSIDS)) = 0 ] && [ -n "$radio" ] && want "$dev" disabled "$((1 - radio))"
+	key=$(get "$i" key)
+	case "$(get "$i" security)" in
+	open) want "$iface" encryption none; continue ;;
+	wpa | wpa2) crypt=psk2 ;;
+	wpa-wpa2) crypt=psk-mixed ;;
+	wep)
+		hostapd -vwep 2> /dev/null || { once "wep$i" "the OLT asked WEP on SSID $i and this image's hostapd has none: not applied"; continue; }
+		if wep_key "$key"; then
+			want "$iface" encryption wep
+			want "$iface" key "$key"
+		else
+			once "key$i" "the OLT's key for SSID $i is no WEP key (5 or 13 characters, 10 or 26 hex digits): security not applied"
+		fi
+		continue ;;
+	*) crypt=$(uci -q get "wireless.$iface.encryption"); [ "$crypt" = none ] && crypt= ;;
+	esac
+	[ -n "$crypt" ] || continue
+	[ -n "$key" ] || key=$(uci -q get "wireless.$iface.key")
+	if [ ${#key} -lt 8 ] || [ ${#key} -gt 63 ]; then
+		once "key$i" "the OLT's key for SSID $i is ${#key} characters, WPA takes 8 to 63: security not applied"
+		continue
+	fi
+	want "$iface" encryption "$crypt"
+	want "$iface" key "$key"
+done
+[ "$changed" = 1 ] || exit 0
+uci -q commit wireless || { logger -t gpon-wifi "the wireless config could not be committed"; exit 1; }
+logger -t gpon-wifi "WiFi from the OLT over OMCI applied"
+wifi reload || { logger -t gpon-wifi "the wireless reload failed"; exit 1; }

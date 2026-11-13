@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* TIER: CHIP — the hardware shell for exactly ONE part: ...
+/* TIER: FAMILY -- the Cortina GPON MAC shell: registers, DMA, IRQ, PON-MAC ...
  * dev/MEASURED-cortina-gpon.c.md sec 1. */
 
 #include <linux/module.h>
@@ -460,7 +460,7 @@ struct cortina_gpon {
 	struct proc_dir_entry *health_proc;
 	int optical_init_error;
 	struct proc_dir_entry *vlan_proc;	/* the WAN VLAN census */
-	struct proc_dir_entry *acs_proc;	/* the OLT's ACS, root-only */
+	struct proc_dir_entry *user_text_proc[OMCI_USER_TEXTS];	/* what the OLT provisioned, root-only */
 #ifdef CONFIG_GPON_OLT_DIAG
 	struct proc_dir_entry *oltcap_proc;	/* the far-end capture dump */
 	struct proc_dir_entry *prov_proc;	/* the provisioning ledger */
@@ -2490,11 +2490,13 @@ static int cg_vlan_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-static int cg_acs_show(struct seq_file *s, void *v)
+/* One root-only file of what the OLT provisioned: s->private is its omci_user_texts[] entry. */
+static int cg_user_text_show(struct seq_file *s, void *v)
 {
+	const struct omci_user_text *t = s->private;
 	struct cortina_gpon *cg = READ_ONCE(cg_singleton);
 	static DEFINE_MUTEX(show_lock);
-	static char out[512];
+	static char out[OMCI_USER_TEXT_MAX];
 
 	if (!cg)
 		return 0;
@@ -2502,7 +2504,7 @@ static int cg_acs_show(struct seq_file *s, void *v)
 	out[0] = 0;
 	spin_lock_bh(&cg->omci_lock);
 	if (cg->omci)
-		omci_acs_fmt(cg->omci, out, sizeof(out));
+		t->fmt(cg->omci, out, sizeof(out));
 	spin_unlock_bh(&cg->omci_lock);
 	seq_puts(s, out);
 	mutex_unlock(&show_lock);
@@ -3618,6 +3620,7 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct cortina_gpon *cg;
+	unsigned int k;
 	char vendor[5];
 	u32 onu;
 
@@ -3758,7 +3761,12 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 	cg->unknown_proc = proc_create_single("gpon_unknown", 0444, NULL, cg_unknown_show);
 #endif
 	cg->vlan_proc = proc_create_single("gpon_vlan", 0444, NULL, cg_vlan_show);
-	cg->acs_proc = proc_create_single("gpon_acs", 0400, NULL, cg_acs_show);
+	for (k = 0; k < OMCI_USER_TEXTS; k++) {
+		cg->user_text_proc[k] = proc_create_single_data(omci_user_texts[k].name, 0400, NULL,
+								cg_user_text_show, (void *)&omci_user_texts[k]);
+		if (!cg->user_text_proc[k])
+			dev_err(dev, "/proc/%s could not be created\n", omci_user_texts[k].name);
+	}
 	platform_set_drvdata(pdev, cg);
 	dev_info(dev, "cortina-gpon phase-0 probe complete (/proc/gpon)\n");
 	return 0;
@@ -3767,6 +3775,7 @@ static int cortina_gpon_probe(struct platform_device *pdev)
 static void cortina_gpon_remove(struct platform_device *pdev)
 {
 	struct cortina_gpon *cg = platform_get_drvdata(pdev);
+	unsigned int i;
 
 	/* ★★★ ADMISSIONS CLOSE FIRST, IN ORDER, AND ONLY THEN IS ...
 	 * dev/MEASURED-cortina-gpon.c.md sec 121. */
@@ -3785,9 +3794,9 @@ static void cortina_gpon_remove(struct platform_device *pdev)
 		proc_remove(cg->vlan_proc);
 		cg->vlan_proc = NULL;
 	}
-	if (cg->acs_proc) {
-		proc_remove(cg->acs_proc);
-		cg->acs_proc = NULL;
+	for (i = 0; i < OMCI_USER_TEXTS; i++) {
+		proc_remove(cg->user_text_proc[i]);
+		cg->user_text_proc[i] = NULL;
 	}
 #ifdef CONFIG_GPON_OLT_DIAG
 	if (cg->prov_proc) {

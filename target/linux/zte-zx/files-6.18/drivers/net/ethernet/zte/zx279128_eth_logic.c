@@ -23,6 +23,8 @@ enum zx_rx_verdict zx279128_rx_parse(const u32 w[ZX_RX_DESC_WORDS], const struct
 	rx->buf = w[2] & ZX_RXD_BUF_MASK;
 	rx->port = 0;
 	rx->geom = ETH_RX_UNMEASURED;
+	if (eth_rx_desc_unwritten(w, ZX_RX_DESC_WORDS))
+		return ZX_RX_UNWRITTEN;
 	if (rx->buf >= (rx->jumbo ? jumbo_bufs : normal_bufs))
 		return ZX_RX_BAD_BUFFER;
 	if ((w[1] & ZX_RXD_OMCI) || src < 1 || src > ZX_ETH_PORTS)

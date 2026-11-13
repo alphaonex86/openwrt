@@ -13,6 +13,7 @@
 
 #include <linux/types.h>
 #include "eth_rx_geom.h"
+#include "eth_rx_ring.h"
 
 #define ZX_ETH_PORTS		4
 #define ZX_RX_DESC_WORDS	4
@@ -34,6 +35,7 @@ enum zx_rx_verdict {
 	ZX_RX_NOT_LAN,		/* OMCI, or no Ethernet source port */
 	ZX_RX_BAD_BUFFER,	/* a buffer index outside its pool */
 	ZX_RX_BAD_FRAME,	/* the length, judged by eth_rx_geom.h (rx->geom says how) */
+	ZX_RX_UNWRITTEN,	/* all zero: the hardware wrote nothing here, it names NO buffer */
 };
 
 struct zx_rx {

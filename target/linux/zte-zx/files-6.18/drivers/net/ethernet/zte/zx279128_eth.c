@@ -8,6 +8,8 @@
  *
  * Receive: the PP fills rings 0 and 1 of queue q (16-byte descriptors) with frames, taking buffers from its buffer
  * manager (BMU); the driver copies each frame out, frees the buffer and hands the descriptors back, both rings as stock.
+ * Where the PP writes next in a ring survives every reset this driver can pulse (U-Boot's TFTP leaves it mid-ring)
+ * and no register tells it: the driver zeroes each descriptor it takes and finds the position in the ring itself.
  * Transmit: the driver takes a BMU buffer, copies the frame in and queues a descriptor on transmit ring 1; the PP
  * returns the buffer to the BMU once sent. Transmit ring 0 is the PON's and stays unused here.
  */
@@ -36,6 +38,8 @@
 #define G_ENABLE		0x00000c
 #define G_ENABLE_PP		BIT(17)
 #define G_PP_AUX		0x040018	/* U-Boot: 0, then 0x1c = 0xf */
+#define G_INT_MASK		0x040044	/* the chip's interrupt sources, 1 = masked (0x1ff after reset) */
+#define G_INT_PP		BIT(2)
 
 /* Packet processor. */
 #define PP_CFG0			0x140004
@@ -48,7 +52,7 @@
 #define PP_POOL_JUMBO		0x144024
 #define PP_BUFSZ_NORMAL		0x144028
 #define PP_BUFSZ_JUMBO		0x14402c
-#define PP_INT_STATUS		0x144040	/* bits 1-0: receive work; the line pulses when one rises */
+#define PP_INT_STATUS		0x144040	/* bits 1-0: receive work pending; the line is status & ~mask */
 #define PP_INT_MASK		0x144044	/* 1 = masked */
 #define PP_INT_RX		0x3
 #define PP_INT_CFG		0x144048
@@ -148,7 +152,8 @@ struct zx_eth {
 	unsigned int tx_next, tx_inflight;
 	int open_count;
 	struct eth_rx_len rx_len;
-	u64 rx_not_lan, rx_bad_buffer, rx_bad_frame, rx_nomem, bmu_alloc_fail, bmu_free_fail, release_fail;
+	u64 rx_not_lan, rx_bad_buffer, rx_bad_frame, rx_nomem, rx_unwritten, rx_resync;
+	u64 bmu_alloc_fail, bmu_free_fail, release_fail;
 };
 
 static u32 rd(struct zx_eth *e, u32 off)
@@ -334,6 +339,7 @@ static int zx_hw_init(struct zx_eth *e)
 	udelay(1000);
 	wr(e, G_ENABLE, rd(e, G_ENABLE) | G_ENABLE_PP);
 	wr(e, PP_INT_MASK, ~0u);
+	wr(e, G_INT_MASK, rd(e, G_INT_MASK) & ~G_INT_PP);
 	return 0;
 }
 
@@ -392,7 +398,7 @@ static bool rx_release(struct zx_eth *e, unsigned int ring, unsigned int q, unsi
 	return true;
 }
 
-static void rx_one(struct zx_eth *e, const u32 *desc)
+static void rx_one(struct zx_eth *e, u32 *desc)
 {
 	u32 w[ZX_RX_DESC_WORDS];
 	struct net_device *ndev;
@@ -402,7 +408,11 @@ static void rx_one(struct zx_eth *e, const u32 *desc)
 
 	for (i = 0; i < ZX_RX_DESC_WORDS; i++)
 		w[i] = le32_to_cpu(READ_ONCE(desc[i]));
+	memset(desc, 0, RX_DESC_SIZE);
 	switch (zx279128_rx_parse(w, &zx279128_rx_layout, NORMAL_BUFS, JUMBO_BUFS, &rx)) {
+	case ZX_RX_UNWRITTEN:
+		e->rx_unwritten++;
+		return;
 	case ZX_RX_BAD_BUFFER:
 		e->rx_bad_buffer++;
 		dev_warn_ratelimited(e->dev, "receive descriptor names buffer %u outside its pool\n", rx.buf);
@@ -436,6 +446,30 @@ free:
 	bmu_free(e, rx.buf, rx.jumbo);
 }
 
+/* The n frames the PP counts in ring r of queue q. An unwritten descriptor where one is counted means the
+ * position is not the PP's: it is found again in the ring. */
+static void rx_ring(struct zx_eth *e, unsigned int r, unsigned int q, unsigned int n)
+{
+	u32 *ring = e->rx_area + (r * RX_QUEUES + q) * RX_RING_BYTES / 4;
+	unsigned int *next = &e->rx_next[r][q], i;
+
+	if (eth_rx_desc_unwritten(ring + *next * ZX_RX_DESC_WORDS, ZX_RX_DESC_WORDS)) {
+		int start = eth_rx_ring_run_start(ring, RX_SLOTS, ZX_RX_DESC_WORDS);
+
+		e->rx_resync++;
+		dev_warn_ratelimited(e->dev, "queue %u ring %u: slot %u unwritten, the pending frames start at %d\n", q, r,
+				     *next, start);
+		if (start >= 0)
+			*next = start;
+	}
+	for (i = 0; i < n; i++) {
+		rx_one(e, ring + *next * ZX_RX_DESC_WORDS);
+		*next = (*next + 1) % RX_SLOTS;
+	}
+	if (!rx_release(e, r, q, n))
+		dev_err_ratelimited(e->dev, "queue %u ring %u: %u descriptors not handed back\n", q, r, n);
+}
+
 static int zx_poll(struct napi_struct *napi, int budget)
 {
 	struct zx_eth *e = container_of(napi, struct zx_eth, napi);
@@ -445,25 +479,15 @@ static int zx_poll(struct napi_struct *napi, int budget)
 		u32 count = rd(e, PP_RX_COUNT(q));
 
 		for (r = 1; r >= 0 && done < budget; r--) {
-			unsigned int n = min_t(unsigned int, r ? count >> 16 : count & 0xffff, budget - done), i;
-			u32 *ring = e->rx_area + (r * RX_QUEUES + q) * RX_RING_BYTES / 4;
+			unsigned int n = min_t(unsigned int, r ? count >> 16 : count & 0xffff, budget - done);
 
-			for (i = 0; i < n; i++) {
-				rx_one(e, ring + e->rx_next[r][q] * RX_DESC_SIZE / 4);
-				e->rx_next[r][q] = (e->rx_next[r][q] + 1) % RX_SLOTS;
-			}
-			if (n && !rx_release(e, r, q, n))
-				dev_err_ratelimited(e->dev, "queue %d ring %d: %u descriptors not handed back\n", q, r, n);
+			if (n)
+				rx_ring(e, r, q, n);
 			done += n;
 		}
 	}
-	/* a pulse is lost while masked: what arrived since the last count is drained here, not by the next frame */
-	if (done < budget && napi_complete_done(napi, done)) {
+	if (done < budget && napi_complete_done(napi, done))
 		wr(e, PP_INT_MASK, rd(e, PP_INT_MASK) & ~PP_INT_RX);
-		for (q = 0; q < RX_QUEUES; q++)
-			if (rd(e, PP_RX_COUNT(q)) && napi_schedule(napi))
-				break;
-	}
 	return done;
 }
 
@@ -532,9 +556,6 @@ static int zx_open(struct net_device *ndev)
 	if (port->eth->open_count++ == 0) {
 		napi_enable(&port->eth->napi);
 		wr(port->eth, PP_INT_MASK, rd(port->eth, PP_INT_MASK) & ~PP_INT_RX);
-		local_bh_disable();
-		napi_schedule(&port->eth->napi);
-		local_bh_enable();
 	}
 	netif_start_queue(ndev);
 	return 0;
@@ -561,6 +582,7 @@ static const struct {
 } zx_stats[] = {
 #define ZX_STAT(n) { #n, offsetof(struct zx_eth, n) }
 	ZX_STAT(rx_not_lan), ZX_STAT(rx_bad_buffer), ZX_STAT(rx_bad_frame), ZX_STAT(rx_nomem),
+	ZX_STAT(rx_unwritten), ZX_STAT(rx_resync),
 	ZX_STAT(bmu_alloc_fail), ZX_STAT(bmu_free_fail), ZX_STAT(release_fail),
 	{ "rx_len_long_lan", offsetof(struct zx_eth, rx_len.long_lan) },
 	{ "rx_len_short_lan", offsetof(struct zx_eth, rx_len.short_lan) },
@@ -745,6 +767,7 @@ static void zx_remove(struct platform_device *pdev)
 
 	zx_remove_ports(e);
 	wr(e, PP_INT_MASK, ~0u);
+	wr(e, G_INT_MASK, rd(e, G_INT_MASK) | G_INT_PP);
 	netif_napi_del(&e->napi);
 	free_netdev(e->napi_dev);
 	for (i = 0; i < ZX_ETH_PORTS; i++)

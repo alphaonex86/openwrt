@@ -254,6 +254,40 @@ static bool rtl_op_can_aggregate_in_amsdu(struct ieee80211_hw *hw,
 	return head->len + skb->len <= 600;
 }
 
+/* Drained after the RX batch that filled them: its small frames are then still queued to share an MPDU. */
+void rtl_tx_tasklet(struct tasklet_struct *t)
+{
+	struct rtl_priv *rtlpriv = from_tasklet(rtlpriv, t, works.tx_tasklet);
+	struct ieee80211_hw *hw = rtlpriv->hw;
+	unsigned long acs = xchg(&rtlpriv->works.tx_wake_acs, 0);
+	struct ieee80211_txq *txq;
+	struct sk_buff *skb;
+	unsigned int ac;
+
+	rcu_read_lock();
+	for_each_set_bit(ac, &acs, IEEE80211_NUM_ACS) {
+		ieee80211_txq_schedule_start(hw, ac);
+		while ((txq = ieee80211_next_txq(hw, ac))) {
+			struct ieee80211_tx_control control = { .sta = txq->sta };
+
+			while ((skb = ieee80211_tx_dequeue(hw, txq)))
+				rtl_op_tx(hw, &control, skb);
+			ieee80211_return_txq(hw, txq, false);
+		}
+		ieee80211_txq_schedule_end(hw, ac);
+	}
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(rtl_tx_tasklet);
+
+static void rtl_op_wake_tx_queue(struct ieee80211_hw *hw, struct ieee80211_txq *txq)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
+	set_bit(txq->ac, &rtlpriv->works.tx_wake_acs);
+	tasklet_schedule(&rtlpriv->works.tx_tasklet);
+}
+
 static int rtl_op_add_interface(struct ieee80211_hw *hw,
 		struct ieee80211_vif *vif)
 {
@@ -2063,7 +2097,7 @@ const struct ieee80211_ops rtl_ops = {
 	.start = rtl_op_start,
 	.stop = rtl_op_stop,
 	.tx = rtl_op_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
+	.wake_tx_queue = rtl_op_wake_tx_queue,
 	.can_aggregate_in_amsdu = rtl_op_can_aggregate_in_amsdu,
 	.add_interface = rtl_op_add_interface,
 	.remove_interface = rtl_op_remove_interface,

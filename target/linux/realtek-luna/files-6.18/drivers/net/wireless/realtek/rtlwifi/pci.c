@@ -1276,6 +1276,7 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
 	tasklet_setup(&rtlpci->rx_tasklet, _rtl_pci_rx_tasklet);
 	skb_queue_head_init(&rtlpci->rx_inject);
 	tasklet_setup(&rtlpriv->works.irq_tasklet, _rtl_pci_irq_tasklet);
+	tasklet_setup(&rtlpriv->works.tx_tasklet, rtl_tx_tasklet);
 	tasklet_setup(&rtlpriv->works.irq_prepare_bcn_tasklet,
 		     _rtl_pci_prepare_bcn_tasklet);
 	INIT_WORK(&rtlpriv->works.lps_change_work,
@@ -1980,6 +1981,7 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
 	tasklet_kill(&rtlpci->rx_tasklet);
 	skb_queue_purge(&rtlpci->rx_inject);
 	tasklet_kill(&rtlpriv->works.irq_tasklet);
+	tasklet_kill(&rtlpriv->works.tx_tasklet);
 	cancel_work_sync(&rtlpriv->works.lps_change_work);
 }
 
@@ -2071,6 +2073,7 @@ static void rtl_pci_stop(struct ieee80211_hw *hw)
 	rtlpci->driver_is_goingto_unload = true;
 	rtlpriv->cfg->ops->disable_interrupt(hw);
 	tasklet_kill(&rtlpci->rx_tasklet);
+	tasklet_kill(&rtlpriv->works.tx_tasklet);
 	_rtl_pci_rx_unmask(hw);
 	cancel_work_sync(&rtlpriv->works.lps_change_work);
 

@@ -2410,6 +2410,8 @@ struct rtl_works {
 	/*task */
 	struct tasklet_struct irq_tasklet;
 	struct tasklet_struct irq_prepare_bcn_tasklet;
+	struct tasklet_struct tx_tasklet;
+	unsigned long tx_wake_acs;
 
 	/*work queue */
 	struct workqueue_struct *rtl_wq;

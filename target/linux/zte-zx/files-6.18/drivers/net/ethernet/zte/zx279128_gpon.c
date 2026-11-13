@@ -5,13 +5,16 @@
  * answers serial-number and ranging grants itself, from the state, ONU-ID and serial number it is given. OMCI and
  * the WAN's frames go through the packet processor's PON rings, which zx279128_eth.c owns; the WAN is the common
  * gpon0 (gpon_soft_wan.c) on the GEM port and T-CONT the common data plan arms. Facts: ONU-F680.md.
- * Not here yet: the analog bring-up (clock, SERDES, trims), the packet processor's own forwarding and the laser
- * supply (GPIO 72, hogged off in the device tree). Without a serial number the MAC's transmitter stays forced off; the number comes by the
- * `sn` parameter, on the command line or written later (/sys/module/zx279128_eth/parameters/sn).
+ * The optics: the laser supply (`laser-enable-gpios`, GPIO 72) follows the MAC's transmitter; the module's SFF-8472
+ * diagnostics (`optics`, an I2C client) are sampled by gpon_optics_i2c.c, for /proc/gpon and ANI-G.
+ * Not here yet: the analog bring-up (clock, SERDES, trims) and the packet processor's own forwarding. Without a
+ * serial number the transmitter stays off; the number comes by the `sn` parameter, on the command line or written
+ * later (/sys/module/zx279128_eth/parameters/sn).
  */
 #include <linux/device.h>
 #include <linux/etherdevice.h>
 #include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -19,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_net.h>
+#include <linux/platform_device.h>
 #include <linux/proc_fs.h>
 #include <linux/random.h>
 #include <linux/seq_file.h>
@@ -32,6 +36,7 @@
 #include "gpon_hwaddr.h"
 #include "gpon_ploam.h"
 #include "gpon_omci_core.h"
+#include "gpon_optics_i2c.h"
 #include "gpon_omci_me.h"
 #include "gpon_sn.h"
 #include "gpon_soft_wan.h"
@@ -83,11 +88,12 @@
 #define MAC_US_GO		0x0d8048	/* write 1 to send; reads non-zero while busy */
 #define MAC_US_PLOAM		0x0d804c
 #define MAC_US_REPEAT		0x0d8058	/* bits 17-16 the repeat count, bits 5-0 = 3 as stock */
-#define MAC_PREAMBLE		0x0d80d4	/* bytes: Type 1 << 18 | Type 2 << 10 | Type 3 */
+#define MAC_PREAMBLE		0x0d80d4	/* bits: Type 1 << 18 | Type 2 << 10 | Type 3 (10 bits) */
 #define MAC_PREAMBLE_PTN	0x0d80d8
 #define MAC_DELIM_SIZE		0x0d80dc
 #define MAC_DELIM		0x0d80e0
 #define MAC_BOH_LATCH		0x0d80e4
+#define MAC_POWER_LEVEL		0x0d8064	/* bits 1-0 */
 #define US_AES_SWITCH		0x100020
 #define US_AES_KEY		0x100038
 #define US_PLI_MAX		0x100414
@@ -97,6 +103,7 @@
 #define ZX_US_FIFO		8
 #define ZX_PLOAM_BURST		16
 #define ZX_PON_MAC_INDEX	4	/* after the LAN ports' 0-3 */
+#define PINMUX_PON_BIT		BIT(17)	/* in the pinmux word (0x9420000c): cleared at start, as stock */
 
 struct zx_reg {
 	u32 off, mask, val;
@@ -134,6 +141,9 @@ struct zx_pon {
 	u16 omcc_gem;
 	struct gpon_soft_wan wan;
 	struct gpon_data_armed armed;	/* the WAN's GEM port and Alloc-ID in the MAC */
+	struct gpio_desc *laser;	/* the optics' laser supply, NULL when the board has no line */
+	void __iomem *pinmux;		/* the node's third register range */
+	struct gpon_optics_i2c optics;
 	u8 us_fifo[ZX_US_FIFO][GPON_PLOAM_US_LEN];
 	unsigned int us_head, us_count;
 	u32 o5_lost;
@@ -170,6 +180,7 @@ static void zx_tx_enable(struct zx_pon *pon, bool on)
 	zx_regs(pon, zx_tx_on, ARRAY_SIZE(zx_tx_on), on);
 	if (!on)
 		fld(pon, MAC_LASER, BIT(1), BIT(1));
+	gpiod_set_value(pon->laser, on);
 }
 
 /* --- upstream PLOAM: one message at a time in the MAC, the rest wait here */
@@ -212,7 +223,11 @@ static void zx_boh_write(void *sh, u32 cfg_word, const u8 *oh, u8 size)
 	const struct gpon_ploam *p = &pon->p;
 
 	wr(pon, MAC_PREAMBLE_PTN, p->boh_ptn);
-	wr(pon, MAC_PREAMBLE, p->boh_t1 << 18 | p->boh_t2 << 10 | p->boh_t3);
+	wr(pon, MAC_PREAMBLE, min_t(u32, p->boh_t1, 31) * 8 << 18 | min_t(u32, p->boh_t2, 31) * 8 << 10 |
+	   min_t(u32, p->boh_t3, 127) * 8);
+	/* level 3 is reserved: stock keeps the level it had */
+	if (p->boh_power != 3)
+		fld(pon, MAC_POWER_LEVEL, 3, p->boh_power);
 	wr(pon, MAC_DELIM, p->boh_delim[0] << 16 | p->boh_delim[1] << 8 | p->boh_delim[2]);
 	wr(pon, MAC_DELIM_SIZE, 3);
 	wr(pon, MAC_BOH_LATCH, 1);
@@ -513,6 +528,16 @@ static irqreturn_t zx_pon_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/* --- the optics: the common sampler reads the module; the tick answers an ANI-G test from its last sample */
+static void zx_optic_selftest(struct zx_pon *pon)
+{
+	u8 msg[OMCI_LEN];
+
+	if (pon->omcc && pon->optics.reading.have && omci_onu_selftest_pending(pon->onu) &&
+	    omci_onu_selftest_result(pon->onu, &pon->optics.reading, msg) == OMCI_LEN)
+		zx_omci_send(pon, msg);
+}
+
 static void zx_pon_tick(struct timer_list *t)
 {
 	struct zx_pon *pon = timer_container_of(pon, t, tick);
@@ -527,6 +552,7 @@ static void zx_pon_tick(struct timer_list *t)
 	gpon_ploam_poll_keepalive(&pon->p, now);
 	gpon_ploam_poll_rei(&pon->p, now);
 	zx_data_sync(pon);
+	zx_optic_selftest(pon);
 	zx_us_drain(pon);
 	spin_unlock(&pon->lock);
 	mod_timer(&pon->tick, jiffies + msecs_to_jiffies(ZX_TICK_MS));
@@ -538,8 +564,8 @@ static int zx_health_show(struct seq_file *m, void *v)
 	struct zx_pon *pon = zx_pon;
 
 	spin_lock_bh(&pon->lock);
-	seq_printf(m, "onu_state: %u\nlos: %d\noptics_backend: none\no5_lost: %u\n", pon->p.state,
-		   !!(rd(pon, MAC_RX_STATUS) & MAC_RX_LOS), pon->o5_lost);
+	seq_printf(m, "onu_state: %u\nlos: %d\noptics_backend: %s\no5_lost: %u\n", pon->p.state,
+		   !!(rd(pon, MAC_RX_STATUS) & MAC_RX_LOS), gpon_optics_i2c_name(&pon->optics), pon->o5_lost);
 	spin_unlock_bh(&pon->lock);
 	return 0;
 }
@@ -547,12 +573,13 @@ static int zx_health_show(struct seq_file *m, void *v)
 static int zx_gpon_show(struct seq_file *m, void *v)
 {
 	struct zx_pon *pon = zx_pon;
-	char far[96];
+	char far[96], optic[GPON_DDM_A2H_FMT_LEN];
 	u32 rx;
 
 	spin_lock_bh(&pon->lock);
 	rx = rd(pon, MAC_RX_STATUS);
 	omci_farend_fmt(pon->onu, far, sizeof(far));
+	gpon_optics_i2c_fmt(&pon->optics, optic, sizeof(optic));
 	seq_printf(m, "onu_state:   O%u\nonu_id:      %u\nfiber:       los=%d lof=%d\n", pon->p.state, pon->p.onu_id,
 		   !!(rx & MAC_RX_LOS), !!(rx & MAC_RX_LOF));
 	seq_printf(m, "omcc:        %s gem=%u\n", pon->omcc ? "up" : "down", pon->omcc_gem);
@@ -563,6 +590,7 @@ static int zx_gpon_show(struct seq_file *m, void *v)
 		   pon->armed.installed ? "armed" : "off", pon->armed.gem, pon->armed.alloc,
 		   pon->wan.up ? "up" : "down", pon->wan.svc.vid, pon->rx_foreign);
 	seq_puts(m, far);
+	seq_puts(m, optic);
 	spin_unlock_bh(&pon->lock);
 	return 0;
 }
@@ -584,6 +612,7 @@ static int zx_mac_start(struct zx_pon *pon)
 		dev_err(pon->dev, "the MAC's RAM init never completed (0x%08x)\n", v);
 		return -ETIMEDOUT;
 	}
+	writel(readl(pon->pinmux) & ~PINMUX_PON_BIT, pon->pinmux);
 	zx_regs(pon, zx_mac_init, ARRAY_SIZE(zx_mac_init), true);
 	for (i = 0; i < MAC_GEM_PORTS; i++)
 		wr(pon, MAC_GEM(i), 0);
@@ -654,6 +683,13 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 	pon->base = base;
 	pon->irq = irq;
 	pon->eth = eth;
+	/* off until the MAC's transmitter is enabled: zx_mac_identity() */
+	pon->laser = devm_gpiod_get_optional(dev, "laser-enable", GPIOD_OUT_LOW);
+	if (IS_ERR(pon->laser))
+		return ERR_PTR(dev_err_probe(dev, PTR_ERR(pon->laser), "laser-enable GPIO\n"));
+	pon->pinmux = devm_platform_ioremap_resource(to_platform_device(dev), 2);
+	if (IS_ERR(pon->pinmux))
+		return ERR_CAST(pon->pinmux);
 	spin_lock_init(&pon->lock);
 	mutex_lock(&zx_pon_mutex);
 	memcpy(pon->sn, zx_sn, sizeof(pon->sn));
@@ -695,6 +731,7 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 	timer_setup(&pon->tick, zx_pon_tick, 0);
 	mod_timer(&pon->tick, jiffies + msecs_to_jiffies(ZX_TICK_MS));
 	fld(pon, TOP_INT_MASK, TOP_INT_GPON, 0);
+	gpon_optics_i2c_start(&pon->optics, dev, &pon->lock, pon->onu);
 	return pon;
 }
 
@@ -709,6 +746,7 @@ void zx_pon_remove(struct zx_pon *pon)
 	wr(pon, MAC_INT_MASK, ~0u);
 	free_irq(pon->irq, pon);
 	timer_delete_sync(&pon->tick);
+	gpon_optics_i2c_stop(&pon->optics);
 	zx_tx_enable(pon, false);
 	fld(pon, MAC_RX_CFG, 3, 0);
 	fld(pon, MAC_OMCC, 1, 0);

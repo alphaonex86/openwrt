@@ -329,3 +329,4 @@ obj-$(CONFIG_GPON_EDGE) += gpon_edge.o
 # gpon_soft_wan.o -- gpon0 over a data GEM port the CPU sees as frames (the virtual MAC, a MAC before its
 # accelerator is ported). Linux's netdev API on purpose, so not in the strict subset.
 obj-$(CONFIG_GPON_SOFT_WAN) += gpon_soft_wan.o
+obj-$(CONFIG_GPON_OPTICS_I2C) += gpon_optics_i2c.o

@@ -22,16 +22,21 @@
 	};
 };
 
-/*
- * The optics' TX switch: GPIO 72, the stock board table's optical-TX entry, which the stock firmware
- * drives LOW to transmit and HIGH to stop. This image has no GPON stack to key the laser, so it holds
- * the transmitter off from the GPIO probe on: an unkeyed laser is not an idle one on a shared splitter.
- */
-&gpio4 {
-	pon-tx-off-hog {
-		gpio-hog;
-		gpios = <8 0>;
-		output-high;
-		line-name = "pon-tx-off";
+/* The GN25L95 BOSA: its SFF-8472 pages at 0x50/0x51, configured from its own memory (stock never writes it). */
+&i2c0 {
+	status = "okay";
+
+	optics: bosa@51 {
+		compatible = "semtech,gn25l95";
+		reg = <0x51>;
 	};
+};
+
+/*
+ * GPIO 72 is the BOSA's TX_DISABLE (A2h 0x6e bit 7 follows it): low transmits, as stock's board table drives it.
+ * The stock U-Boot holds it high; the GPON driver keeps it high until its transmitter is enabled.
+ */
+&eth {
+	laser-enable-gpios = <&gpio4 8 1>;
+	optics = <&optics>;
 };

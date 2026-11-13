@@ -192,6 +192,14 @@ config GPON_SOFT_WAN
 	  gpon0 for a shell whose data GEM port reaches the CPU as whole frames
 	  (gpon_soft_wan.c), selected by each driver that calls it.
 
+config GPON_OPTICS_I2C
+	bool
+	depends on GPON_CORE && I2C
+	help
+	  An SFF-8472 module's A2h page on a Linux I2C client, sampled for
+	  /proc/gpon and ANI-G (gpon_optics_i2c.c), selected by each driver
+	  that calls it.
+
 config GPON_EDGE
 	bool
 	depends on GPON_CORE

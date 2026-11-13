@@ -3,11 +3,14 @@ config ZX279128_ETH
 	tristate "ZTE ZX279128 Ethernet"
 	depends on ARCH_ZX || COMPILE_TEST
 	depends on OF
+	depends on I2C
 	select PHYLIB
 	select MDIO_BUS
 	select GPON_CORE
 	select GPON_SOFT_WAN
+	select GPON_OPTICS_I2C
 	select CRC32
 	help
 	  The four LAN ports of the ZTE ZX279128 SoC (ZXHN F680): its switch MACs and internal PHYs, reached
-	  through its packet processor, and its GPON MAC on the common gpon_* ONU core.
+	  through its packet processor, and its GPON MAC on the common gpon_* ONU core, with its optics
+	  (laser supply GPIO, SFF-8472 diagnostics over I2C).

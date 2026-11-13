@@ -26,22 +26,38 @@
 		reg = <0x60000000 0x1f000000>;
 	};
 
-	/* ChipcommonA GPIO: the stock kernel's lines 4-15 */
+	/* ChipcommonA GPIO: the stock kernel's lines 4-15; its interrupt is ChipcommonA's, shared with the UARTs */
 	cca_gpio: gpio@18000060 {
 		compatible = "brcm,iproc-gpio-cca";
-		reg = <0x18000060 0x50>;
+		reg = <0x18000060 0x50>, <0x18000000 0x50>;
 		gpio-controller;
 		#gpio-cells = <2>;
 		ngpios = <12>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
-	/* the switch core's CMICd GPIO, the stock kernel's lines 0-3: ChipcommonA's in/out/enable layout, no IRQ */
+	/* the switch core's CMICd GPIO, the stock kernel's lines 0-3: input, output and output-enable words, no IRQ */
 	cmic_gpio: gpio@48002000 {
-		compatible = "brcm,iproc-gpio-cca";
-		reg = <0x48002000 0x10>;
+		compatible = "brcm,bcm6345-gpio";
+		reg = <0x48002000 4>, <0x48002004 4>, <0x48002008 4>;
+		reg-names = "dat", "set", "dirout";
 		gpio-controller;
 		#gpio-cells = <2>;
-		ngpios = <4>;
+	};
+
+	/* ChipcommonB MII management, external pins: the management RJ45's PHY at address 3 (ID 0x001cc816, RTL8201F) */
+	mdio@18032000 {
+		compatible = "brcm,iproc-mdio";
+		reg = <0x18032000 0x8>;
+		brcm,external-bus;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		mgmt_phy: ethernet-phy@3 {
+			reg = <3>;
+		};
 	};
 
 	/* resets the board about 11 min after power-on unless fed (stock: userWtd through vs_gpio_cfg lines 3 and 4) */
@@ -50,6 +66,13 @@
 		clock-gpios = <&cmic_gpio 3 GPIO_ACTIVE_HIGH>;
 		data-gpios = <&cca_gpio 0 GPIO_ACTIVE_HIGH>;
 	};
+};
+
+/* the management RJ45 (U-Boot's GMAC0) */
+&amac0 {
+	phy-handle = <&mgmt_phy>;
+	phy-mode = "mii";
+	status = "okay";
 };
 
 /* the UART runs on the 100 MHz APB clock: the unit's U-Boot divisor is 54 at 115200 */

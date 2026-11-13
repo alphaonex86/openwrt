@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+vsol,v1600g)
+	# the management RJ45 at the stock firmware's default management address
+	ucidef_set_interface "lan" device "eth0" protocol "static" ipaddr "192.168.8.200"
+	;;
+esac
+
+board_config_flush
+
+exit 0

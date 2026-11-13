@@ -539,7 +539,9 @@ static const struct map MAP[] = {
 static int mtd_path_by_name(const char *name, char *out, size_t n);
 
 /*
- * Read a whole partition into partbuf. -> bytes read, or -1.
+ * Read a whole partition into partbuf. -> bytes read, -1 when this unit has no
+ * such partition, or -2 when it could not be read: "no value" and "read failed"
+ * are two answers, and only the second is worth asking again.
  *
  * ⚠ A SHORT READ IS NOT A SHORT PARTITION. The three copies this replaces
  *   stopped on any read() <= 0 and went on with whatever they had, so an I/O
@@ -557,13 +559,16 @@ static ssize_t part_read(const char *part, char *devpath, size_t dplen)
 
 	if (part[0] == '/')
 		snprintf(devpath, dplen, "%s", part);
-	else if (mtd_path_by_name(part, devpath, dplen) < 0) {
-		fprintf(stderr, "rtk_factory: partition '%s' not in /proc/mtd\n", part);
-		return -1;
+	else if ((r = mtd_path_by_name(part, devpath, dplen)) < 0) {
+		if (r == -1)
+			fprintf(stderr, "rtk_factory: partition '%s' not in /proc/mtd\n", part);
+		else
+			perror("/proc/mtd");
+		return r;
 	}
 
 	fd = open(devpath, O_RDONLY);
-	if (fd < 0) { perror(devpath); return -1; }
+	if (fd < 0) { perror(devpath); return -2; }
 	for (;;) {
 		r = got < (ssize_t)sizeof partbuf ?
 			read(fd, partbuf + got, sizeof partbuf - got) :
@@ -576,17 +581,17 @@ static ssize_t part_read(const char *part, char *devpath, size_t dplen)
 			perror(devpath);
 			if (close(fd))
 				perror(devpath);
-			return -1;
+			return -2;
 		}
 		if (got == (ssize_t)sizeof partbuf) {
 			fprintf(stderr, "rtk_factory: %s exceeds the partition buffer - refusing a partial image\n", devpath);
 			if (close(fd))
 				perror(devpath);
-			return -1;
+			return -2;
 		}
 		got += r;
 	}
-	if (close(fd)) { perror(devpath); return -1; }
+	if (close(fd)) { perror(devpath); return -2; }
 	return got;
 }
 
@@ -834,7 +839,7 @@ static int mtd_path_by_name(const char *name, char *out, size_t n)
 	char line[256], nm[128];
 	int idx, found = -1;
 	if (!f)
-		return -1;
+		return errno == ENOENT ? -1 : -2;	/* no MTD at all: no partition */
 	if (fgets(line, sizeof line, f)) {                 /* header */
 		while (fgets(line, sizeof line, f))
 			if (sscanf(line, "mtd%d: %*x %*x \"%127[^\"]\"", &idx, nm) == 2 &&
@@ -877,7 +882,7 @@ static int do_all(const char *part)
 
 	got = part_read(part, path, sizeof path);
 	if (got < 0)
-		return 1;
+		return got == -1 ? 1 : 3;
 	(void)jffs2_root_ino(partbuf, (uint32_t)got, "", &is_jffs2);
 	fam = jffs2_family(partbuf, (uint32_t)got);
 	if (!fam && is_jffs2) {
@@ -962,7 +967,7 @@ int main(int argc, char **argv)
 
 	got = part_read(part, path, sizeof path);
 	if (got < 0)
-		return 1;
+		return got == -1 ? 1 : 3;
 
 	/* ★★ A JFFS2 FAILURE AND A DIFFERENT FORMAT ARE NOT THE SAME ANSWER. They
 	 * used to share one `if (!val)`, so a CRC rejection, a truncated node and a

@@ -7,8 +7,23 @@
 # partition, else the flasher's boot parameter) -- never eth0, which without a
 # pin holds the driver's random.
 . /lib/functions/onu-identity.sh
+
+# A factory partition that stays unreadable is no answer: a new name and key would
+# re-key the unit at every such boot. WiFi stays off and this script stays pending
+# until a boot reads it.
+unreadable() {
+	logger -t onu-wifi "factory partition unreadable ($1): WiFi off until a boot reads it"
+	for IF in default_radio0 default_radio1; do
+		uci -q get wireless.$IF >/dev/null && uci -q set wireless.$IF.disabled='1'
+	done
+	uci -q commit wireless
+	exit 1
+}
+
 unit_mac && MAC=$UNIT_MAC || MAC=""
-SN=$(/usr/sbin/rtk_factory -p config sn 2>/dev/null)
+[ -z "$UNIT_MAC_UNREAD" ] || unreadable mac
+factory_get sn || [ $? = 1 ] || unreadable sn
+SN=$FACTORY_VALUE
 
 # A MAC every unit carries is no identity -- none, the family placeholders, a
 # group address. Such a unit gets a locally administered one from what else is
@@ -24,8 +39,10 @@ unit_mac_valid "$MAC" || {
 # octets> and a random per-unit key. ONE name and key on every band; never logged.
 SUFFIX=$(echo "$MAC" | awk -F: '{ printf "%s%s%s", toupper($4), toupper($5), toupper($6) }')
 pick() {
-	S=$(/usr/sbin/rtk_factory -p config "$1" 2>/dev/null)
-	P=$(/usr/sbin/rtk_factory -p config "$2" 2>/dev/null)
+	factory_get "$1" || [ $? = 1 ] || unreadable "$1"
+	S=$FACTORY_VALUE
+	factory_get "$2" || [ $? = 1 ] || unreadable "$2"
+	P=$FACTORY_VALUE
 	case "$S$P" in *\'*) return 1 ;; esac
 	[ -n "$S" ] && [ "${#P}" -ge 8 ] && SSID=$S && PSK=$P
 }
@@ -61,6 +78,7 @@ commit wireless
 EOF
 for IF in default_radio0 default_radio1; do
 	uci -q get wireless.$IF >/dev/null || continue
+	uci -q delete wireless.$IF.disabled	# set by a boot that could not read the partition
 	uci -q batch <<EOF
 set wireless.$IF.ssid='$SSID'
 set wireless.$IF.encryption='psk2'

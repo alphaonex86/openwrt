@@ -53,13 +53,30 @@ unit_volume() {
 	return 1
 }
 
+# One field of this unit's factory config partition into FACTORY_VALUE. Returns 0
+# with it, 1 when the unit has none, 3 when the partition stayed unreadable: "no
+# value" and "read failed" are two answers, so a failed read is asked again.
+factory_get() {
+	local try=1 rc
+	while :; do
+		FACTORY_VALUE=$(${ONU_RTK_FACTORY:-/usr/sbin/rtk_factory} -p config "$1" 2>/dev/null)
+		rc=$?
+		case "$rc" in 0|1) return "$rc" ;; esac
+		[ "$try" -lt "${ONU_FACTORY_TRIES:-5}" ] || return 3
+		try=$((try + 1))
+		sleep 1
+	done
+}
+
 # This unit's MAC in the operator's order (2026-10-01): its factory config
 # partition, else a boot parameter a flasher pinned, else its identity volume,
 # else none -- nothing is invented, and never eth0's current address (without a
-# pin, the driver's random). Sets UNIT_MAC and UNIT_MAC_SRC; returns 1 when no
-# source has one.
+# pin, the driver's random). Sets UNIT_MAC and UNIT_MAC_SRC, and UNIT_MAC_UNREAD
+# when the partition could not be read; returns 1 when no source has one.
 unit_mac() {
-	UNIT_MAC=$(${ONU_RTK_FACTORY:-/usr/sbin/rtk_factory} -p config mac 2>/dev/null | tr 'A-F' 'a-f')
+	UNIT_MAC_UNREAD=
+	factory_get mac || [ $? = 1 ] || UNIT_MAC_UNREAD=1
+	UNIT_MAC=$(echo "$FACTORY_VALUE" | tr 'A-F' 'a-f')
 	UNIT_MAC_SRC="this unit's factory config partition"
 	unit_mac_valid "$UNIT_MAC" && return 0
 	UNIT_MAC=$(cmdline_mac)

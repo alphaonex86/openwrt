@@ -33,6 +33,7 @@
 		 * stock's order. */
 		ethernet-uni-types = /bits/ 8 <47 47 47 47>;
 		circuit-packs;
+		wifi-radios = /bits/ 8 <2>;
 		ip-host-instances = /bits/ 16 <0x0000 0x0001 0x0002>;
 		ip-host-wan-mac = /bits/ 8 <0 0 0>;
 		onu-capacity = /bits/ 16 <30 248 30 248>;

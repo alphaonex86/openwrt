@@ -200,10 +200,14 @@ enum omci_attr_src {
 enum omci_text {
 	OMCI_TEXT_SPACES,	/* an equipment ID nobody set: 20 spaces */
 	OMCI_TEXT_ZERO_DIGIT,	/* a version or address nobody set: "0" */
+	OMCI_TEXT_NONE,		/* 26 zero octets */
 	/* the vendor MEs' own defaults, as stock's plugins and upload hold them */
 	OMCI_TEXT_TWO,		/* ME 65363 #2 configuration version */
 	OMCI_TEXT_HW_CAP,	/* ME 65427 #2 capability declaration */
 	OMCI_TEXT_P2Q_CAP,	/* ME 350 #14 */
+	OMCI_TEXT_HW_COUNTRY,	/* ME 65408 #9 */
+	OMCI_TEXT_HW_STARS,	/* ME 65408 #10 */
+	OMCI_TEXT_HW_EEAA,	/* ME 65408 #12 */
 	OMCI_TEXT_CTC_OP,	/* ME 65529 #1 operation ID */
 	OMCI_TEXT_CUC_OP,	/* ME 65457 #1 operator ID */
 };
@@ -214,6 +218,9 @@ static const u8 omci_text[][26] = {
 	[OMCI_TEXT_TWO]		= "2",
 	[OMCI_TEXT_HW_CAP]	= "RSQQQSQSQSSSSQQS",
 	[OMCI_TEXT_P2Q_CAP]	= "\x01\x08",
+	[OMCI_TEXT_HW_COUNTRY]	= "CHINA",
+	[OMCI_TEXT_HW_STARS]	= "****************",
+	[OMCI_TEXT_HW_EEAA]	= "EeAa",
 	[OMCI_TEXT_CTC_OP]	= "CTC",
 	[OMCI_TEXT_CUC_OP]	= "CUC",
 };
@@ -880,6 +887,7 @@ static const struct omci_attr omci_attrs[] = {
 	A_POOL(253, 3, 1, 0),			/* #3  ARC interval */
 	A_POOL(253, 4, 1, 0),			/* #4  Ethernet loop detect config */
 
+
 	/* ==== VENDOR MEs a board declares (extra-me-instances): each one OLT's, under its
 	 * CONFIG_OLT_<X> with its origin, never one nobody can place (olt_vendor_me_guard.py).  Widths are
 	 * its own plugins' (OMCI-simulate/me_attr_table.py on M225-260618; ME
@@ -914,6 +922,18 @@ static const struct omci_attr omci_attrs[] = {
 	A_CW(251, 5, 1, 0),			/* #5  HTTPS */
 	A_CW(251, 6, 2, 0),			/* #6  HTTPS port */
 	A_CW(251, 7, 1, 0),			/* #7  ICMP */
+	/* ---- ME 252 WiFi profile of the first SSID of each band; origin: HSGQ by name
+	 * (its ONUs' stock plugins).  It holds what the OLT wrote ---- */
+	A_POOL(252, 1, 1, 0),		/* #1  WLAN type */
+	A_POOL(252, 2, 1, 0),		/* #2  2.4 GHz admin */
+	A_POOL(252, 3, 1, 0),		/* #3  2.4 GHz encryption */
+	A_POOL(252, 4, 24, 0),		/* #4  2.4 GHz SSID */
+	A_POOL(252, 5, 24, 0),		/* #5  2.4 GHz key */
+	A_POOL(252, 6, 1, 0),		/* #6  5 GHz admin */
+	A_POOL(252, 7, 1, 0),		/* #7  5 GHz encryption */
+	A_POOL(252, 8, 24, 0),		/* #8  5 GHz SSID */
+	A_POOL(252, 9, 24, 0),		/* #9  5 GHz key */
+	A_POOL(252, 10, 1, 0),		/* #10  Commit */
 #endif
 #ifdef CONFIG_OLT_HUAWEI
 	/* ---- ME 350 (mib_Me350, HW_EXTEND_ONT_ABILITY); origin: Huawei by name ---- */
@@ -933,6 +953,23 @@ static const struct omci_attr omci_attrs[] = {
 	A_TXT(350, 14, 4, OMCI_TEXT_P2Q_CAP),	/* #14 P2Q capability */
 	A_ZERO(350, 15, 6),			/* #15 P2Q map */
 	A_TXT(350, 16, 4, OMCI_TEXT_SPACES),	/* #16 four spaces */
+#endif
+#ifdef CONFIG_OLT_HUAWEI
+	/* ---- ME 373 extended ONT ability 2 (mib_HWExtendOnt2Ability); origin: Huawei by name.
+	 * Values as the X111W and X400AXF stocks upload them ---- */
+	A_C(373, 1, 1, 0x1),
+	A_C(373, 2, 1, 0x1),
+	A_C(373, 3, 1, 0x0),
+	A_C(373, 4, 1, 0x0),
+	A_C(373, 5, 1, 0x1),
+	A_C(373, 6, 1, 0x1),
+	A_C(373, 7, 1, 0x1),
+	A_C(373, 8, 1, 0x1),
+	A_C(373, 9, 2, 0xff80),
+	A_C(373, 10, 2, 0x8000),
+	A_C(373, 11, 2, 0xe000),
+	A_C(373, 12, 2, 0xc000),
+	A_C(373, 13, 1, 0x1),
 #endif
 #ifdef CONFIG_OLT_ZTE
 	/* ---- ME 65294 SNTP (mib_MeZteSntp); origin: ZTE by name ---- */
@@ -986,6 +1023,61 @@ static const struct omci_attr omci_attrs[] = {
 	A_C(65363, 12, 4, 0),			/* #12 Special ability */
 	A_ZERO(65363, 13, 24),			/* #13 Version info: stock's own build */
 	A_C(65363, 14, 2, 0),			/* #14 Telnet */
+#endif
+#ifdef CONFIG_OLT_HSGQ
+	/* ---- ME 65385, 65386 WiFi radio and security of each SSID, four per declared radio, the
+	 * 2.4 GHz radio first; origin: HSGQ by name (its ONUs' stock plugins).  They hold what the
+	 * OLT wrote ---- */
+	A_POOL(65385, 1, 1, 0),		/* #1  Mode */
+	A_POOL(65385, 2, 1, 0),		/* #2  Channel */
+	A_POOL(65385, 3, 24, 0),		/* #3  SSID */
+	A_POOL(65385, 4, 1, 0),		/* #4  Bandwidth */
+	A_POOL(65385, 5, 1, 0),		/* #5  Rate */
+	A_POOL(65385, 6, 2, 0),		/* #6  Guard interval */
+	A_POOL(65385, 7, 2, 0),		/* #7  Beacon interval */
+	A_POOL(65385, 8, 2, 0),		/* #8  DTIM interval */
+	A_POOL(65385, 9, 1, 0),		/* #9  AP isolation */
+	A_POOL(65385, 10, 1, 0),		/* #10  Hidden SSID */
+	A_POOL(65385, 11, 1, 0),		/* #11  SSID enable */
+	A_POOL(65385, 12, 1, 0),		/* #12  Radio enable */
+	A_POOL(65386, 1, 1, 0),		/* #1  Security mode */
+	A_POOL(65386, 2, 24, 0),		/* #2  Shared key */
+	A_POOL(65386, 3, 1, 0),		/* #3  WEP authentication */
+	A_POOL(65386, 4, 1, 0),		/* #4  WEP key bits */
+	A_POOL(65386, 5, 1, 0),		/* #5  WEP key index */
+	A_TXT(65386, 6, 26, OMCI_TEXT_NONE),	/* #6  WEP key 1: never held */
+	A_TXT(65386, 7, 26, OMCI_TEXT_NONE),	/* #7  WEP key 2: never held */
+	A_TXT(65386, 8, 26, OMCI_TEXT_NONE),	/* #8  WEP key 3: never held */
+	A_TXT(65386, 9, 26, OMCI_TEXT_NONE),	/* #9  WEP key 4: never held */
+	A_POOL(65386, 10, 1, 0),		/* #10 WPA cipher */
+#endif
+#ifdef CONFIG_OLT_HUAWEI
+	/* ---- ME 65408 extended ONU-G; origin: Huawei by name (the stock plugins' own log tag) ---- */
+	A_POOL(65408, 1, 1, 0),		/* #1  Reset default */
+	A_POOL(65408, 2, 1, 1),
+	A_POOL(65408, 3, 1, 0),		/* #3  a reading of the unit, stock's differs per unit */
+	A_POOL(65408, 4, 1, 3),
+	A_POOL(65408, 5, 2, 0),		/* #5  a reading of the unit */
+	A_POOL(65408, 6, 4, 0),
+	A_POOL(65408, 7, 16, 0),	/* #7  a reading of the unit */
+	A_POOL(65408, 8, 1, 0),
+	A_TXT(65408, 9, 24, OMCI_TEXT_HW_COUNTRY),
+	A_TXT(65408, 10, 16, OMCI_TEXT_HW_STARS),
+	A_POOL(65408, 11, 1, 0),
+	A_TXT(65408, 12, 25, OMCI_TEXT_HW_EEAA),
+	A_POOL(65408, 13, 1, 0),
+	A_POOL(65408, 14, 1, 0),
+	A_POOL(65408, 15, 4, 0x13),
+	A_POOL(65408, 16, 4, 0),
+	/* ---- ME 65417 PPP configuration data, one per IP host; origin: Huawei by name ---- */
+	A_POOL(65417, 1, 1, 0),		/* #1  Enable */
+	A_POOL(65417, 2, 25, 0),		/* #2  User name */
+	A_POOL(65417, 3, 25, 0),		/* #3   */
+	A_POOL(65417, 4, 25, 0),		/* #4   */
+	A_POOL(65417, 5, 25, 0),		/* #5  Password */
+	A_POOL(65417, 6, 25, 0),		/* #6   */
+	A_POOL(65417, 7, 25, 0),		/* #7   */
+	A_POOL(65417, 8, 1, 0),		/* #8   */
 #endif
 #ifdef CONFIG_OLT_HUAWEI
 	/* ---- ME 65427 capability (mib_HwProprietaryCapabilityDeclare); origin: Huawei by name ---- */
@@ -1233,6 +1325,11 @@ bool omci_me_mutable(u16 class_id)
 	case OMCI_ME_AUTH_SECURITY:
 	case OMCI_ME_LARGE_STRING:
 	case OMCI_ME_LOOP_DETECT:
+	case OMCI_ME_WLAN_PROFILE:
+	case OMCI_ME_WLAN_COMMON:
+	case OMCI_ME_WLAN_SECURITY:
+	case OMCI_ME_EXT_ONU_G:
+	case OMCI_ME_EXT_IP_HOST:
 #ifdef CONFIG_OLT_ZTE
 	case 65305:
 	case 65319:
@@ -1675,8 +1772,9 @@ static void omci_set_apply_one(struct omci_onu *o, const struct omci_attr *a,
 		memcpy(e->body + a->v, v, a->size);
 	else if (a->src == OMCI_SRC_POOL) {
 		memcpy(omci_pool_slot(o, a, inst)->v, v, a->size);
-		/* stock switches its loop detection on ME 253 #4; ours serves it back: COUNTED */
-		if (a->class_id == OMCI_ME_LOOP_DETECT && a->attr == 4)
+		/* stock acts on these and ours only serves them back: COUNTED */
+		if ((a->class_id == OMCI_ME_LOOP_DETECT && a->attr == 4) ||
+		    a->class_id == OMCI_ME_EXT_ONU_G || a->class_id == OMCI_ME_EXT_IP_HOST)
 			o->vlan.attr_owed++;
 	}
 	else if (a->src == OMCI_SRC_OLT_G) {
@@ -2202,6 +2300,8 @@ enum omci_mi {
 	OMCI_MI_QUEUE,		/* 8 per downstream port from 0, then 8 per
 				 * T-CONT from 0x8000 when the board declares
 				 * its capacity */
+	OMCI_MI_WIFI,		/* one when the board declares a radio */
+	OMCI_MI_WIFI_SSID,	/* four per declared radio, from 0 */
 	OMCI_MI_EXTRA,		/* the board's further single MEs, any class */
 	OMCI_MI_FAREND,		/* the far end's MEs a board does not carry */
 };
@@ -2224,6 +2324,9 @@ static const struct {
 	{ OMCI_ME_PPTP_POTS_UNI, 0, OMCI_MI_POTS },
 	{ OMCI_ME_OLT_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_IP_HOST, 0, OMCI_MI_IP_HOST },
+#ifdef CONFIG_OLT_HSGQ
+	{ OMCI_ME_WLAN_PROFILE, 0, OMCI_MI_WIFI },
+#endif
 	{ OMCI_ME_LOOP_DETECT, 0, OMCI_MI_PPTP },
 	{ OMCI_ME_ONU_G, 0, OMCI_MI_ONE },
 	{ OMCI_ME_ONU2_G, 0, OMCI_MI_ONE },
@@ -2233,6 +2336,17 @@ static const struct {
 	{ OMCI_ME_PRIORITY_QUEUE, 0, OMCI_MI_QUEUE },
 	{ OMCI_ME_TRAFFIC_SCHED, 0, OMCI_MI_SCHED },
 	{ OMCI_ME_VEIP, OMCI_VEIP_INST, OMCI_MI_ONE },
+#ifdef CONFIG_OLT_HUAWEI
+	{ OMCI_ME_ONT2_ABILITY, 0, OMCI_MI_ONE },
+#endif
+#ifdef CONFIG_OLT_HSGQ
+	{ OMCI_ME_WLAN_COMMON, 0, OMCI_MI_WIFI_SSID },
+	{ OMCI_ME_WLAN_SECURITY, 0, OMCI_MI_WIFI_SSID },
+#endif
+#ifdef CONFIG_OLT_HUAWEI
+	{ OMCI_ME_EXT_ONU_G, 0, OMCI_MI_ONE },
+	{ OMCI_ME_EXT_IP_HOST, 0, OMCI_MI_IP_HOST },
+#endif
 	{ 0, 0, OMCI_MI_EXTRA },
 	{ 0, 0, OMCI_MI_FAREND },
 };
@@ -2256,6 +2370,10 @@ static u16 omci_mi_count(const struct omci_onu *o, u8 from)
 		return o->cap.sched_n;
 	case OMCI_MI_QUEUE:
 		return (u16)(8 * o->cap.dsq_n + (o->cap.usq ? omci_usq_total(o) : 0));
+	case OMCI_MI_WIFI:
+		return o->cap.wifi_radios ? 1 : 0;
+	case OMCI_MI_WIFI_SSID:
+		return (u16)(OMCI_WIFI_SSIDS * o->cap.wifi_radios);
 	case OMCI_MI_EXTRA:
 		return o->extra_me_n;
 	case OMCI_MI_FAREND:
@@ -2285,6 +2403,8 @@ static u16 omci_mi_inst(const struct omci_onu *o, u8 from, u16 inst, u16 i)
 		return (u16)(0x8000 + i);
 	case OMCI_MI_QUEUE:
 		return i < ds_q ? i : (u16)(0x8000 + i - ds_q);
+	case OMCI_MI_WIFI_SSID:
+		return i;
 	case OMCI_MI_EXTRA:
 		return o->extra_me[i][1];
 	case OMCI_MI_FAREND:
@@ -2902,6 +3022,32 @@ enum omci_uni_decl omci_onu_declare_usq_be(struct omci_onu *o, const void *per,
 	return OMCI_UNI_DECL_OK;
 }
 
+enum omci_uni_decl omci_onu_declare_wifi_be(struct omci_onu *o, const void *radios,
+					    int len, const char **why)
+{
+	const u8 *n = radios;
+	u8 was = o->cap.wifi_radios;
+
+	if (len < 0) {
+		*why = "no WiFi radio";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!n || len != 1 || !n[0] || n[0] > OMCI_WIFI_RADIOS_MAX) {
+		*why = "the radio count is not one byte the model can hold";
+		return OMCI_UNI_DECL_BAD;
+	}
+	o->cap.wifi_radios = n[0];
+	omci_build_mib(o);
+	if (o->rows_dropped) {
+		o->cap.wifi_radios = was;
+		omci_build_mib(o);
+		*why = "more MIB rows than the table holds";
+		return OMCI_UNI_DECL_BAD;
+	}
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why)
 {
@@ -2934,6 +3080,8 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 	a = prop(ctx, "ctc-onu-capability", &alen);
 	OMCI_DECLARED(omci_onu_declare_ctc_be(o, a, alen, &reason),
 		      "ctc-onu-capability");
+	a = prop(ctx, "wifi-radios", &alen);
+	OMCI_DECLARED(omci_onu_declare_wifi_be(o, a, alen, &reason), "wifi-radios");
 	a = prop(ctx, "extra-me-instances", &alen);
 	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
 		      "extra-me-instances");

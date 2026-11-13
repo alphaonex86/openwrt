@@ -123,7 +123,10 @@ config OLT_HSGQ
 	  the HSGQ stock ONUs hold it -- the class is known, no instance exists
 	  until the OLT creates one, so a Get of instance 0 is answered 0x05.
 	  Nothing it carries opens a WAN service. Also ME 65352 (ONU support),
-	  which the HSGQ G008 Gets. Off, both are unknown vendor classes again.
+	  which the HSGQ G008 Gets, and the WiFi provisioning MEs 252, 65385
+	  and 65386 its stock ONUs hold per declared radio: they keep what the
+	  OLT writes and never upload the unit's own SSID or key. Off, all are
+	  unknown vendor classes again.
 
 config OLT_CTC
 	bool "Serve CTC-extension OLTs"
@@ -140,9 +143,10 @@ config OLT_HUAWEI
 	depends on GPON_CORE
 	default y
 	help
-	  Huawei's vendor MEs 350 (extended ONT ability) and 65427 (proprietary
-	  capability), placed by their stock plugin names; no Huawei OLT has
-	  been captured yet.
+	  Huawei's vendor MEs 350 and 373 (extended ONT ability), 65408
+	  (extended ONU-G), 65417 (PPP configuration, one per IP host) and
+	  65427 (proprietary capability), placed by their stock plugin names;
+	  no Huawei OLT has been captured yet.
 
 config OLT_FIBERHOME
 	bool "Serve FiberHome OLTs"

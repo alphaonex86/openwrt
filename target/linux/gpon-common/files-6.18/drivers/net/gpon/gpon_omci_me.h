@@ -70,7 +70,7 @@
 /* An attribute held by value outside the dense store: too long for it (ME 148/157 strings) or of an
  * autonomous instance (ME 340, ZTE ME 65319). Only an attribute an OLT wrote takes a slot. */
 #ifndef OMCI_POOL_MAX
-#define OMCI_POOL_MAX 32
+#define OMCI_POOL_MAX 64
 #endif
 #define OMCI_POOL_SIZE 25
 
@@ -127,7 +127,11 @@ struct omci_capacity {
 	bool	usq;
 	u8	usq_per[OMCI_TCONT_MAX];	/* upstream queues per T-CONT, 0 = 8 */
 	u8	ctc[4];			/* ME 65529 #2..#5 */
+	u8	wifi_radios;
 };
+
+#define OMCI_WIFI_RADIOS_MAX 3
+#define OMCI_WIFI_SSIDS 4	/* per radio, as stock holds them */
 
 /* The one VEIP every board's model carries. */
 #define OMCI_VEIP_INST 0x0601
@@ -509,7 +513,13 @@ extern const char *const omci_id_names[OMCI_ID_FIELDS];
 					 * which both our shells hardcode to
 					 * GPON_MCAST_GEM_PORT today */
 #define OMCI_ME_HSGQ_WAN_ACL	251	/* HSGQ vendor ME: WAN management ACL */
+#define OMCI_ME_WLAN_PROFILE	252	/* mib_WlanCfgProfile */
 #define OMCI_ME_LOOP_DETECT	253	/* mib_LoopDetect: every Realtek stock uploads it */
+#define OMCI_ME_ONT2_ABILITY	373	/* mib_HWExtendOnt2Ability */
+#define OMCI_ME_WLAN_COMMON	65385	/* mib_WlanCommonCfg */
+#define OMCI_ME_WLAN_SECURITY	65386	/* mib_WlanSecurityCfg */
+#define OMCI_ME_EXT_ONU_G	65408	/* mib_ExtendedOnuG */
+#define OMCI_ME_EXT_IP_HOST	65417	/* mib_ExtendedIpHostCfgData */
 #define OMCI_ME_CTC_LOID_AUTH	65530	/* 0xFFFA — CTC extension the OLT audits */
 #define OMCI_ME_CTC_EXT_MOP	65531	/* 0xFFFB — CTC extended multicast operations profile */
 
@@ -617,6 +627,12 @@ enum omci_uni_decl omci_onu_declare_usq_be(struct omci_onu *o, const void *per,
 enum omci_uni_decl omci_onu_declare_ctc_be(struct omci_onu *o, const void *be,
 					   int len, const char **why);
 
+/* Declare how many WiFi radios the board carries, one byte in 1..OMCI_WIFI_RADIOS_MAX.
+ * Absent (len < 0), the board has none and holds no WiFi ME.  Refused, nothing
+ * changed, on any other length or count, or rows that do not fit. */
+enum omci_uni_decl omci_onu_declare_wifi_be(struct omci_onu *o, const void *radios,
+					    int len, const char **why);
+
 /* Declare the board's ME 53 PPTP POTS UNI instances (big-endian 16-bit list).
  * Refused, nothing changed, on an empty, oversized, zero or duplicate list. */
 enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
@@ -646,8 +662,8 @@ typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
 
 /* Declare everything of the board's equipment beside its UNIs: circuit-packs,
  * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity,
- * downstream-queue-ports, upstream-queues-per-tcont, ctc-onu-capability and
- * extra-me-instances.  Each is applied on its own; -> the first property
+ * downstream-queue-ports, upstream-queues-per-tcont, ctc-onu-capability, wifi-radios
+ * and extra-me-instances.  Each is applied on its own; -> the first property
  * refused (its reason in @why), or NULL when none was. */
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why);

@@ -346,6 +346,9 @@ struct gpon_ploam {
 	u8 boh_ptn;			/* Upstream_Overhead d[3]   = Type-3 pattern    */
 	u8 boh_delim[3];		/* Upstream_Overhead d[4..6]                    */
 	u8 boh_t12;			/* Upstream_Overhead (d[1] + d[2]) / 8 = Type-1+2 bytes */
+	u8 boh_t1;			/* Upstream_Overhead d[1] / 8 = Type-1 bytes */
+	u8 boh_t2;			/* Upstream_Overhead d[2] / 8 = Type-2 bytes */
+	u8 boh_t3;			/* Type-3 bytes in force, as apply_boh() last decided */
 	u8 boh_t3pre;			/* Ext_Burst_Length d[0] = pre-ranged Type-3 len */
 	u8 boh_t3ranged;		/* Ext_Burst_Length d[1] = ranged Type-3 len     */
 	u32 pre_eqd;			/* Upstream_Overhead pre-assigned EqD, bits      */

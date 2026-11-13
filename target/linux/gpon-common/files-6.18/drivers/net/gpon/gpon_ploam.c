@@ -162,6 +162,10 @@ static u32 apply_boh(struct gpon_ploam *o, bool ranged)
 	if (guard > 32)
 		guard = 32;
 	rep = guard / 8;			/* boh_repeat = whole guard bytes */
+	/* for a MAC that takes the sizes, not the bytes: without Extended_Burst_Length, what is left of
+	 * G.984.3's 96-bit overhead */
+	o->boh_t3 = t3 ? t3 : rep + o->boh_t12 + 3 < GPON_PLOAM_BOH_LEN ?
+		    GPON_PLOAM_BOH_LEN - 3 - rep - o->boh_t12 : 0;
 
 	/* ★ FOLLOW-UP P4, DISCHARGED 2026-09-02. This read boh_len = ...
 	 * dev/MEASURED-gpon_ploam.c.md sec 8. */
@@ -365,6 +369,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 
 			o->boh_guard    = d[0];
 			o->boh_t12      = (u8)(((unsigned int)d[1] + d[2]) / 8);
+			o->boh_t1       = d[1] / 8;
+			o->boh_t2       = d[2] / 8;
 			o->boh_ptn      = d[3];
 			o->boh_delim[0] = d[4];
 			o->boh_delim[1] = d[5];

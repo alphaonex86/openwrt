@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The seed the last boot left is credited and replaced: nothing then waits for the kernel's own entropy.
+do_seedrng() {
+	/usr/sbin/seedrng -d /etc/seedrng > /dev/kmsg 2>&1 || echo "seedrng: the saved seed was not used" > /dev/kmsg
+}
+
+boot_hook_add preinit_main do_seedrng

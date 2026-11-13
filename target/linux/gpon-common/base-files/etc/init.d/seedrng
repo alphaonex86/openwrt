@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-or-later
+# A boot that started without a creditable seed (the first one, a power cut mid-save) leaves one for the next.
+
+START=99
+
+boot() {
+	[ -f /etc/seedrng/seed.credit ] || /usr/sbin/seedrng -d /etc/seedrng > /dev/null || logger -t seedrng "no seed could be saved"
+}

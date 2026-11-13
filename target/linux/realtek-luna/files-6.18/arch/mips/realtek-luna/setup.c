@@ -22,6 +22,7 @@
 #include <linux/of_clk.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
+#include <linux/string.h>
 
 #include <asm/addrspace.h>
 #include <asm/bootinfo.h>
@@ -250,9 +251,26 @@ static void luna_mt_init_secondary(void)
 }
 #endif
 
+/* A root served from RAM keeps its settings in RAM: the flash rootfs is left unsplit, so the
+ * flashed image's rootfs_data is not there for the overlay to land on. */
+static void __init luna_ram_root_leaves_flash(void)
+{
+	struct device_node *np;
+	struct property *flag;
+
+	if (!strstr(boot_command_line, "phram.phram=rootfs"))
+		return;
+	for_each_node_with_property(np, "linux,rootfs") {
+		flag = of_find_property(np, "linux,rootfs", NULL);
+		if (flag && of_remove_property(np, flag))
+			pr_err("luna: %pOF keeps linux,rootfs: a RAM root will mount the flash settings\n", np);
+	}
+}
+
 void __init device_tree_init(void)
 {
 	unflatten_and_copy_device_tree();
+	luna_ram_root_leaves_flash();
 
 	mips_cm_probe();
 	mips_cpc_probe();

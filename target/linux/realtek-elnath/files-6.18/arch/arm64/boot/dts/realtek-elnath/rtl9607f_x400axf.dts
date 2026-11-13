@@ -26,7 +26,7 @@
 		 * it with `run b2`, whose root=31:11 our kernel ignores (CONFIG_CMDLINE_FORCE: ubiblock on ubi_r1;
 		 * mainline makes no mtdblock of a gluebi volume); bank 0 keeps the stock,
 		 * and stays what a plain power-up boots. */
-		bootargs = "earlycon console=ttyS0,115200 rootfstype=squashfs ubi.mtd=ubi_device";
+		bootargs = "console=ttyS0,115200 rootfstype=squashfs ubi.mtd=ubi_device";
 	};
 
 

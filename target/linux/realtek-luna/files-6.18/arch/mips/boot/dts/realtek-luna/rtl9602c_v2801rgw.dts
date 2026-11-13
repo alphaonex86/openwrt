@@ -16,7 +16,7 @@
 		/* The family's line plus this module's reference crystal: the
 		 * RTL8192EE here runs on 25 MHz (stock: "clock 25MHz",
 		 * AFE_CTRL2 = 0x05), mainline assumes 40 MHz. */
-		bootargs = "console=ttyS0,115200 earlycon ignore_loglevel rtl8192ee.xtal_khz=25000";
+		bootargs = "console=ttyS0,115200 rtl8192ee.xtal_khz=25000";
 	};
 
 	memory@0 {

@@ -218,6 +218,15 @@ config GPON_OLT_ROLE
 	  target; an ONU build carries none of it.  Until one exists,
 	  dev/rtl9607c-test compiles and fuzzes it on x86.
 
+config GPON_OLT_MAC
+	bool
+	depends on GPON_CORE
+	select GPON_OLT_ROLE
+	help
+	  The shell every OLT PON MAC driver shares (gpon_olt_mac.c): the
+	  tick, the lock, one OLT port per PON link, /proc/<driver>.  The
+	  chip driver keeps its registers and bring-up.
+
 config ZX279200
 	bool "ZX279200 GPON OLT PON MAC (PCIe)"
 	depends on PCI

@@ -299,6 +299,8 @@ obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_omci.o
 obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_platform.o
 # One PON port's glue every OLT PON MAC shares: activation, an OMCI engine per ONU, authorization.
 obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_port.o
+# The shell every OLT PON MAC driver shares: tick, lock, a port per link, /proc.
+obj-$(CONFIG_GPON_OLT_MAC) += gpon_olt_mac.o
 # The ZX279200 OLT PON MAC (its source: target/linux/broadcom-iproc).
 obj-$(CONFIG_ZX279200) += zx279200.o
 

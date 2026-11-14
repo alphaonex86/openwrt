@@ -187,6 +187,23 @@ bool gpon_olt_port_online(const struct gpon_olt_port *port, unsigned int slot)
 	return slot < port->n_eng && port->eng[slot].online;
 }
 
+int gpon_olt_port_show(const struct gpon_olt_port *port, unsigned int slot, char *buf, size_t size)
+{
+	const struct gpon_olt_link_rec *r;
+	const struct gpon_olt_omci *e;
+	char sn[GPON_SN_TEXT_SIZE];
+
+	if (slot >= port->n_eng || !port->pon.onu[slot].used)
+		return 0;
+	r = &port->pon.onu[slot];
+	e = &port->eng[slot];
+	gpon_sn_format(r->sn, sn);
+	return scnprintf(buf, size, "onu %u sn %s link %s phase %s online %d gem %u alloc %u omci tx %u rx %u fail %s\n",
+			 gpon_olt_onu_id(slot), sn, gpon_olt_link_name(r->state), gpon_olt_phase_name(e->phase),
+			 e->online, e->prof.gem_port, e->prof.alloc_id, e->tx, e->rx,
+			 e->fail.why ? gpon_olt_why_name(e->fail.why) : "-");
+}
+
 int gpon_olt_port_slot_of_gem(const struct gpon_olt_port *port, u16 gem_port)
 {
 	unsigned int i;

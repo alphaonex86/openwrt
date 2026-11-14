@@ -51,6 +51,9 @@ void gpon_olt_port_tick(struct gpon_olt_port *port, u32 now_ms);
 /* -> the slot whose data GEM port is @gem_port and whose ONU is in service, or -1. */
 int gpon_olt_port_slot_of_gem(const struct gpon_olt_port *port, u16 gem_port);
 bool gpon_olt_port_online(const struct gpon_olt_port *port, unsigned int slot);
+/* -> the length of @slot's line in an OLT PON MAC's ONU table (one format for every MAC, newline included),
+ * 0 for a slot never heard; the line is cut to @size. */
+int gpon_olt_port_show(const struct gpon_olt_port *port, unsigned int slot, char *buf, size_t size);
 
 static inline u16 gpon_olt_port_gem(const struct gpon_olt_port *port, unsigned int slot)
 {

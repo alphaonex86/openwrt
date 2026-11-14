@@ -53,6 +53,9 @@ struct gpon_regseq_io {
 
 int gpon_regseq_run(const struct gpon_regseq_io *io,
 		    const struct gpon_regseq_op *seq, unsigned int n);
+/* The same on a table whose addresses are relative to @base (one block of several alike). */
+int gpon_regseq_run_at(const struct gpon_regseq_io *io, u32 base,
+		       const struct gpon_regseq_op *seq, unsigned int n);
 
 void gpon_regseq_fld(const struct gpon_regseq_io *io, u32 addr,
 		     u8 msb, u8 lsb, u32 val);

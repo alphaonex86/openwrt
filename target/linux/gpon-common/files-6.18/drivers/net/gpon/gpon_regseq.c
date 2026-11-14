@@ -58,3 +58,21 @@ int gpon_regseq_run(const struct gpon_regseq_io *io,
 	}
 	return 0;
 }
+
+int gpon_regseq_run_at(const struct gpon_regseq_io *io, u32 base,
+		       const struct gpon_regseq_op *seq, unsigned int n)
+{
+	struct gpon_regseq_op op;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < n; i++) {
+		op = seq[i];
+		if (op.opc != GPON_REGSEQ_DLY)
+			op.addr += base;
+		ret = gpon_regseq_run(io, &op, 1);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}

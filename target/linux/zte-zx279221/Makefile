@@ -6,7 +6,7 @@ ARCH:=arm
 BOARD:=zte-zx279221
 BOARDNAME:=ZTE ZX279221 GPON OLT main board
 DEVICE_TYPE:=basic
-FEATURES:=ramdisk
+FEATURES:=ramdisk olt
 SUBTARGETS:=cortexa53
 
 KERNEL_PATCHVER:=6.18

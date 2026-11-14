@@ -947,7 +947,7 @@ config KERNEL_VIRTIO_NET
 
 config KERNEL_PON_VIRT_OLT
 	bool "Virtual OLT PON MAC on virtio-mmio (an OLT image's VM variant)"
-	depends on TARGET_zte_zx279221
+	depends on OLT_SUPPORT
 	select KERNEL_VIRTIO_MMIO
 	select KERNEL_VIRTIO_NET
 	default n

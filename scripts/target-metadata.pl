@@ -30,6 +30,7 @@ sub target_config_features(@) {
 		/^mips16$/ and $ret .= "\tselect HAS_MIPS16\n";
 		/^nand$/ and $ret .= "\tselect NAND_SUPPORT\n";
 		/^nommu$/ and $ret .= "\tselect NOMMU\n";
+		/^olt$/ and $ret .= "\tselect OLT_SUPPORT\n";
 		/^pci$/ and $ret .= "\tselect PCI_SUPPORT\n";
 		/^pcie$/ and $ret .= "\tselect PCIE_SUPPORT\n";
 		/^pcmcia$/ and $ret .= "\tselect PCMCIA_SUPPORT\n";

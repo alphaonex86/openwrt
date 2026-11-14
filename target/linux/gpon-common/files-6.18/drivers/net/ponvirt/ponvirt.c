@@ -58,6 +58,7 @@ struct ponvirt {
 	bool has_offer, omcc;
 	u16 omcc_gem;
 	u8 uni_port[8], uni_port_n;
+	u32 heard_ms, tick_ms, light_ms;	/* last downstream frame, last tick, last PV_US_LIGHT */
 	u64 omci_rx, omci_tx, wire_drop;
 };
 
@@ -244,7 +245,8 @@ static int pv_rx(struct sk_buff *skb, struct net_device *dev, struct packet_type
 		return NET_RX_DROP;
 	if (dev == pv->wire && !skb_linearize(skb) && skb->len >= 1) {
 		spin_lock_bh(&pv->lock);
-		pv_ds(skb->data, skb->len, pv_now());
+		pv->heard_ms = pv_now();
+		pv_ds(skb->data, skb->len, pv->heard_ms);
 		spin_unlock_bh(&pv->lock);
 		pv_flush();
 	}
@@ -252,12 +254,26 @@ static int pv_rx(struct sk_buff *skb, struct net_device *dev, struct packet_type
 	return NET_RX_SUCCESS;
 }
 
+/* A ranged ONU (O4, O5) bursts upstream: the OLT sees its light every PV_LIGHT_MS. */
+static void pv_light(u32 now)
+{
+	if (pv->p.state < GPON_O4_RANGING || pv->p.state > GPON_O5_OPERATION || pv->p.onu_id == 0xff ||
+	    now - pv->light_ms < PV_LIGHT_MS)
+		return;
+	pv->light_ms = now;
+	pv_emit(PV_US_LIGHT, &pv->p.onu_id, 1, NULL, 0);
+}
+
 static void pv_tick(struct timer_list *t)
 {
 	u32 now = pv_now();
+	bool los;
 
 	spin_lock_bh(&pv->lock);
 	gpon_ploam_tick(&pv->p);
+	los = pv_ds_los(now, &pv->heard_ms, &pv->tick_ms);
+	gpon_ploam_poll_los(&pv->p, los, los, now);
+	pv_light(now);
 	gpon_ploam_poll_provision(&pv->p, now);
 	gpon_ploam_poll_keepalive(&pv->p, now);
 	gpon_soft_wan_poll(&pv->wan, pv->onu, pv->p.state == GPON_O5_OPERATION && pv->omcc, pv->omcc_gem);
@@ -428,6 +444,7 @@ static int __init ponvirt_init(void)
 	rc = pv_declare_panel();
 	if (rc)
 		return rc;
+	pv->cfg.los_rerange_ticks = 1;	/* pv_ds_los already waited PV_LOS_MS */
 	missing = gpon_ploam_init(&pv->p, &pv_ops, &pv->cfg, pv, pv->sn);
 	if (missing) {
 		pr_err("ponvirt: the PLOAM core refused the shell: %s\n", missing);

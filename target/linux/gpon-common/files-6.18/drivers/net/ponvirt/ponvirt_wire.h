@@ -27,8 +27,21 @@ enum ponvirt_kind {
 
 #define PV_LIGHT_MS	100	/* an ONU from O4 on is lit: its bursts reach the OLT this often */
 #define PV_LOSI_MS	1000	/* an OLT declares LOSi for an ONU silent this long (ten missed bursts) */
+#define PV_LOS_MS	1000	/* an ONU declares LOS on a downstream silent this long (the OLT broadcasts every 100 ms) */
 
 #define PV_GEM_HDR	3	/* kind + GEM Port-ID */
 #define PV_US_GEM_HDR	5	/* kind + Alloc-ID + GEM Port-ID */
+
+/*
+ * An ONU's downstream LOS: nothing heard for PV_LOS_MS. A tick later than half that means the guest itself
+ * stalled (an emulator under load), not the fibre: the silence is then counted again from that tick.
+ */
+static inline bool pv_ds_los(uint32_t now, uint32_t *heard_ms, uint32_t *tick_ms)
+{
+	if (now - *tick_ms > PV_LOS_MS / 2)
+		*heard_ms = now;
+	*tick_ms = now;
+	return now - *heard_ms > PV_LOS_MS;
+}
 
 #endif

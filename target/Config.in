@@ -113,6 +113,9 @@ config EMMC_SUPPORT
 config NAND_SUPPORT
 	bool
 
+config OLT_SUPPORT
+	bool
+
 config LEGACY_SDCARD_SUPPORT
 	bool
 

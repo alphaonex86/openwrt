@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config ZX279221_IDM_ETH
+	tristate "ZTE ZX279221 management Ethernet"
+	depends on ARM64 || COMPILE_TEST
+	depends on OF
+	help
+	  The management port of the ZTE ZX279221 SoC (ZXA10 C610 OLT main board): the CPU port of its
+	  switch, which the boot loader configures.

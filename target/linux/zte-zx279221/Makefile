@@ -21,6 +21,14 @@ endef
 
 include $(INCLUDE_DIR)/target.mk
 
+# The common trees: the GPON core's OLT role and its virtual PON MAC (the VM variant) come from gpon-common.
+ifeq ($(TARGET_BUILD),1)
+FILES_DIR += "$(TOPDIR)/target/linux/eth-common/files-$(KERNEL_PATCHVER)"
+FILES_DIR += "$(TOPDIR)/target/linux/gpon-common/files-$(KERNEL_PATCHVER)"
+# kernel-defaults.mk froze the copy command inside target.mk: re-expand it (why: realtek-luna/Makefile).
+Kernel/Patch := $(Kernel/Patch/Default)
+endif
+
 DEFAULT_PACKAGES := $(filter-out urngd,$(DEFAULT_PACKAGES))
 
 $(eval $(call BuildTarget))

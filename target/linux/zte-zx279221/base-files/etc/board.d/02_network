@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+zte,c610)
+	# the MGMT RJ45 (the switch CPU port)
+	ucidef_set_interface "lan" device "eth0" protocol "static" ipaddr "192.168.23.200"
+	;;
+esac
+
+board_config_flush
+
+exit 0

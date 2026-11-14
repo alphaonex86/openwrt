@@ -1,0 +1,50 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# An OLT forwards layer 2 between its PON ports and its uplinks: one bridge, no address on it. An uplink is every
+# other Ethernet port but the management one, a DSA conduit and a virtual PON MAC's wire.
+
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+mgmt=""
+if json_select network && json_select lan; then
+	json_get_var mgmt device
+	json_get_values lan_ports ports
+	mgmt="$mgmt $lan_ports"
+	json_select ..
+	json_select ..
+fi
+wire=""
+[ -r /sys/module/ponvirt_olt/parameters/wire ] && read -r wire < /sys/module/ponvirt_olt/parameters/wire
+
+pons=""
+uplinks=""
+for dev in /sys/class/net/*; do
+	name=${dev##*/}
+	case "$name" in
+	pon*) pons="$pons $name"; continue ;;
+	esac
+	[ -e "$dev/device" ] && [ ! -e "$dev/dsa/tagging" ] && [ "$name" != "$wire" ] || continue
+	case " $mgmt " in
+	*" $name "*) ;;
+	*) uplinks="$uplinks $name" ;;
+	esac
+done
+
+if [ -n "$pons" ]; then
+	json_select_object network
+	json_select_object olt
+	json_select_array ports
+	for port in $pons $uplinks; do
+		json_add_string "" "$port"
+	done
+	json_close_array
+	json_add_string protocol none
+	json_select ..
+	json_select ..
+fi
+
+board_config_flush
+
+exit 0

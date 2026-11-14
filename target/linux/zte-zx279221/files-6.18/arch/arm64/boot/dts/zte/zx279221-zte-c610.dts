@@ -8,6 +8,9 @@
  */
 /dts-v1/;
 
+/* U-Boot's management rings and buffers, as stock: its port keeps receiving there until the driver stops it */
+/memreserve/ 0x80000000 0x201000;
+
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 
 / {
@@ -19,6 +22,7 @@
 
 	aliases {
 		serial0 = &uart0;
+		ethernet0 = &mgmt;
 	};
 
 	chosen {
@@ -98,6 +102,20 @@
 		reg = <0x0 0x40000000 0x0 0x80000000>;
 	};
 
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* the window the stock kernel keeps for this port's rings and buffers (its /memreserve/ 0x90000000);
+		 * that the port can reach nothing else is INFERRED: neither the unit nor the VM has refused an address */
+		mgmt_dma: mgmt-dma@90000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x90000000 0x0 0x400000>;
+			no-map;
+		};
+	};
+
 	soc {
 		compatible = "simple-bus";
 		#address-cells = <2>;
@@ -145,6 +163,14 @@
 			clocks = <&lsp0_25m>;
 			#clock-cells = <1>;
 			#reset-cells = <1>;
+		};
+
+		/* the switch's CPU port, behind it the MGMT RJ45; U-Boot configures the switch and its PHY */
+		mgmt: ethernet@2e44800 {
+			compatible = "zte,zx279221-idm";
+			reg = <0x0 0x2e44800 0x0 0x400>;
+			interrupts = <GIC_SPI 10 IRQ_TYPE_LEVEL_HIGH>;
+			memory-region = <&mgmt_dma>;
 		};
 
 		rstcfg: syscon@7300004 {

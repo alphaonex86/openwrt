@@ -23,7 +23,6 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
-#include <linux/of_net.h>
 #include <linux/platform_device.h>
 #include <linux/proc_fs.h>
 #include <linux/random.h>
@@ -680,11 +679,11 @@ static const struct kernel_param_ops zx_sn_ops = { .set = zx_sn_set, .get = zx_s
 module_param_cb(sn, &zx_sn_ops, NULL, 0644);
 MODULE_PARM_DESC(sn, "G.984.3 serial number, AAAAhhhhhhhh; without one the unit never answers the OLT");
 
-struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, struct zx_eth *eth)
+struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, struct zx_eth *eth,
+			    const u8 *board_mac)
 {
-	u8 dt_mac[ETH_ALEN], mac[ETH_ALEN];
+	u8 mac[ETH_ALEN];
 	const char *missing;
-	bool has_mac;
 	struct zx_pon *pon;
 	int ret;
 
@@ -722,10 +721,8 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 	pon->wan.lock = &pon->lock;
 	pon->wan.sh = pon;
 	pon->wan.tx = zx_wan_tx;
-	has_mac = !of_get_mac_address(dev->of_node, dt_mac);
-	if (has_mac)
-		gpon_hwaddr_derive(mac, dt_mac, ZX_PON_MAC_INDEX);
-	ret = missing ? -EINVAL : gpon_soft_wan_init(&pon->wan, pon->onu, has_mac ? mac : NULL);
+	gpon_hwaddr_derive(mac, board_mac, ZX_PON_MAC_INDEX);
+	ret = missing ? -EINVAL : gpon_soft_wan_init(&pon->wan, pon->onu, mac);
 	if (!ret)
 		ret = zx_mac_start(pon);
 	if (!ret) {

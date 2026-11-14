@@ -27,11 +27,19 @@
 #include <linux/phy.h>
 #include <linux/platform_device.h>
 
+#include "gpon_hwaddr.h"
 #include "zx279128_eth_logic.h"
 #include "zx279128_gpon.h"
 #include "zx279128_gpon_desc.h"
 
 #define DRV "zx279128-eth"
+
+/* The bootarg rung, spelled `zx279128_eth.mac=<addr>` (this composite module's name). The address is per unit:
+ * never in a DTS. Stock keeps it in its tagparam JFFS2 file, out of the kernel's reach. */
+static char *mac_param;
+module_param_named(mac, mac_param, charp, 0444);
+MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = base + p, the PON = base + 4. "
+		 "Empty = DT/nvmem, then a random locally-administered one");
 #define PHY_FIRST 0x0a		/* port p's internal PHY sits at MDIO 0x0a + p */
 
 /* Global (offsets from 0x92000000): block resets, active low. */
@@ -145,6 +153,7 @@ struct zx_eth {
 	struct net_device *napi_dev;
 	struct zx_port *port[ZX_ETH_PORTS];
 	struct zx_pon *pon;
+	u8 mac[ETH_ALEN];	/* the unit's base address */
 	spinlock_t tx_lock;	/* both transmit rings and the BMU allocator */
 	u8 *pool;		/* normal pool, then jumbo pool */
 	dma_addr_t pool_dma;
@@ -668,7 +677,6 @@ static int zx_port_probe(struct zx_eth *e, unsigned int index)
 	struct phy_device *phy = mdiobus_get_phy(e->bus, PHY_FIRST + index);
 	struct net_device *ndev;
 	struct zx_port *port;
-	u8 mac[ETH_ALEN];
 	int ret;
 
 	ndev = devm_alloc_etherdev(e->dev, sizeof(*port));
@@ -683,10 +691,7 @@ static int zx_port_probe(struct zx_eth *e, unsigned int index)
 	ndev->netdev_ops = &zx_netdev_ops;
 	ndev->ethtool_ops = &zx_ethtool_ops;
 	ndev->max_mtu = BUF_SIZE - BUF_OFFSET - ETH_HLEN - ETH_FCS_LEN;
-	if (of_get_mac_address(e->dev->of_node, mac))
-		eth_hw_addr_random(ndev);
-	else
-		eth_hw_addr_gen(ndev, mac, index);
+	eth_hw_addr_gen(ndev, e->mac, index);
 	ret = phy ? phy_connect_direct(ndev, phy, zx_adjust_link, PHY_INTERFACE_MODE_INTERNAL) : -ENODEV;
 	if (ret) {
 		dev_err(e->dev, "port %u: no PHY at MDIO %#x: %d\n", index, PHY_FIRST + index, ret);
@@ -714,6 +719,18 @@ static void zx_remove_ports(struct zx_eth *e)
 		phy_disconnect(e->port[i]->phy);
 		e->port[i] = NULL;
 	}
+}
+
+static void zx_board_mac(struct zx_eth *e)
+{
+	u8 dt[ETH_ALEN];
+	bool have_dt = !of_get_mac_address(e->dev->of_node, dt);
+	enum gpon_hwaddr_src src = gpon_hwaddr_resolve(mac_param, have_dt ? dt : NULL, NULL, e->mac);
+
+	if (src == GPON_HWADDR_RANDOM)
+		dev_warn(e->dev, "no MAC in a boot parameter or DT: using %s %pM\n", gpon_hwaddr_src_name(src), e->mac);
+	else
+		dev_info(e->dev, "MAC %pM from %s\n", e->mac, gpon_hwaddr_src_name(src));
 }
 
 static int zx_probe(struct platform_device *pdev)
@@ -780,10 +797,11 @@ static int zx_probe(struct platform_device *pdev)
 		free_netdev(e->napi_dev);
 		return dev_err_probe(dev, ret, "IRQ %d\n", irq);
 	}
+	zx_board_mac(e);
 	for (i = 0; i < ZX_ETH_PORTS && !ret; i++)
 		ret = zx_port_probe(e, i);
 	if (!ret) {
-		e->pon = zx_pon_probe(dev, e->base, pon_irq, e);
+		e->pon = zx_pon_probe(dev, e->base, pon_irq, e, e->mac);
 		ret = PTR_ERR_OR_ZERO(e->pon);
 	}
 	if (ret) {

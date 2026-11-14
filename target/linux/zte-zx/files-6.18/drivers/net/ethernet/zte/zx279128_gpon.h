@@ -10,8 +10,9 @@ struct device;
 struct zx_eth;
 struct zx_pon;
 
-/* base maps 0x92000000; irq is the PON's line. -> the shell, or an ERR_PTR. */
-struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, struct zx_eth *eth);
+/* base maps 0x92000000; irq is the PON's line; board_mac is the unit's base address. -> the shell, or an ERR_PTR. */
+struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, struct zx_eth *eth,
+			    const u8 *board_mac);
 void zx_pon_remove(struct zx_pon *pon);
 /* What the packet processor's PON ring delivered on GEM port `gem`: an OMCI message, or a frame (softirq). */
 void zx_pon_rx(struct zx_pon *pon, bool omci, u16 gem, const u8 *data, unsigned int len);

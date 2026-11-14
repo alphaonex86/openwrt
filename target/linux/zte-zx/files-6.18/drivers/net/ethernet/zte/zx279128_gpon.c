@@ -15,12 +15,14 @@
 #include <linux/etherdevice.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
 #include <linux/proc_fs.h>
@@ -144,6 +146,8 @@ struct zx_pon {
 	struct gpio_desc *laser;	/* the optics' laser supply, NULL when the board has no line */
 	void __iomem *pinmux;		/* the node's third register range */
 	struct gpon_optics_i2c optics;
+	struct device_node *optics_np;		/* the node's `optics` module, NULL without one */
+	struct i2c_client *optics_client;	/* once its bus has probed; set once, by the sampler's worker */
 	u8 us_fifo[ZX_US_FIFO][GPON_PLOAM_US_LEN];
 	unsigned int us_head, us_count;
 	u32 o5_lost;
@@ -528,7 +532,17 @@ static irqreturn_t zx_pon_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/* --- the optics: the common sampler reads the module; the tick answers an ANI-G test from its last sample */
+/* --- the optics: the common sampler decodes what this reads; the tick answers an ANI-G test from its last sample */
+static int zx_optics_read(void *sh, u8 *raw, unsigned int len)
+{
+	struct zx_pon *pon = sh;
+
+	if (!pon->optics_client)
+		WRITE_ONCE(pon->optics_client, of_find_i2c_device_by_node(pon->optics_np));
+	return pon->optics_client ? i2c_smbus_read_i2c_block_data(pon->optics_client, GPON_DDM_A2H_BASE, len, raw) :
+				    -EPROBE_DEFER;
+}
+
 static void zx_optic_selftest(struct zx_pon *pon)
 {
 	u8 msg[OMCI_LEN];
@@ -562,10 +576,11 @@ static void zx_pon_tick(struct timer_list *t)
 static int zx_health_show(struct seq_file *m, void *v)
 {
 	struct zx_pon *pon = zx_pon;
+	struct i2c_client *client = READ_ONCE(pon->optics_client);
 
 	spin_lock_bh(&pon->lock);
 	seq_printf(m, "onu_state: %u\nlos: %d\noptics_backend: %s\no5_lost: %u\n", pon->p.state,
-		   !!(rd(pon, MAC_RX_STATUS) & MAC_RX_LOS), gpon_optics_i2c_name(&pon->optics), pon->o5_lost);
+		   !!(rd(pon, MAC_RX_STATUS) & MAC_RX_LOS), client ? client->name : "none", pon->o5_lost);
 	spin_unlock_bh(&pon->lock);
 	return 0;
 }
@@ -731,7 +746,8 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 	timer_setup(&pon->tick, zx_pon_tick, 0);
 	mod_timer(&pon->tick, jiffies + msecs_to_jiffies(ZX_TICK_MS));
 	fld(pon, TOP_INT_MASK, TOP_INT_GPON, 0);
-	gpon_optics_i2c_start(&pon->optics, dev, &pon->lock, pon->onu);
+	pon->optics_np = of_parse_phandle(dev->of_node, "optics", 0);
+	gpon_optics_i2c_start(&pon->optics, dev, &pon->lock, pon->onu, pon->optics_np ? zx_optics_read : NULL, pon);
 	return pon;
 }
 
@@ -747,6 +763,9 @@ void zx_pon_remove(struct zx_pon *pon)
 	free_irq(pon->irq, pon);
 	timer_delete_sync(&pon->tick);
 	gpon_optics_i2c_stop(&pon->optics);
+	if (pon->optics_client)
+		put_device(&pon->optics_client->dev);
+	of_node_put(pon->optics_np);
 	zx_tx_enable(pon, false);
 	fld(pon, MAC_RX_CFG, 3, 0);
 	fld(pon, MAC_OMCC, 1, 0);

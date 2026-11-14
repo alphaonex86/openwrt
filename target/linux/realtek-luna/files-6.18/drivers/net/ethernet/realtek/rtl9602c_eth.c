@@ -3,6 +3,7 @@
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/eth_netdev_contract.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/dma-mapping.h>
@@ -2974,7 +2975,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	WRITE_ONCE(g_ep, ep);
-	ret = devm_register_netdev(dev, ndev);
+	ret = eth_devm_register_netdev(dev, ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+							ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch);
 	if (ret)
 		return ret;
 
@@ -3004,7 +3006,9 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			eth_hw_addr_set(wan, wmac);
 			luna_omci_set_wan_mac(wmac);
 			netif_carrier_off(wan);
-			if (devm_register_netdev(dev, wan) == 0)
+			if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_link_ksettings |
+								     ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+								     ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch) == 0)
 				ep->wan_ndev = wan;
 			else
 				dev_warn(dev, "gpon0 (WAN) register failed; WAN datapath disabled\n");

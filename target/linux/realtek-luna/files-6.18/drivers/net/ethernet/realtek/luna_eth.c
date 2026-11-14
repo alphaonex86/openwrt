@@ -48,6 +48,7 @@
 #include <linux/io.h>
 #include <linux/mii.h>
 #include <linux/module.h>
+#include <linux/eth_netdev_contract.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
@@ -2687,7 +2688,9 @@ static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
 	eth_hw_addr_set(wan, wmac);
 	luna_omci_set_wan_mac(wmac);
 	netif_carrier_off(wan);
-	if (devm_register_netdev(dev, wan)) {
+	if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_link_ksettings |
+						     ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+						     ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch)) {
 		dev_warn(dev, "gpon0 (WAN) register failed; no WAN datapath\n");
 		return;
 	}
@@ -2849,7 +2852,8 @@ static int luna_eth_probe(struct platform_device *pdev)
 		ndev->hw_features |= NETIF_F_HW_TC;
 		ndev->features |= NETIF_F_HW_TC;
 	}
-	ret = devm_register_netdev(dev, ndev);
+	ret = eth_devm_register_netdev(dev, ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+							ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch);
 	if (ret)
 		return ret;
 	luna_eth_wan_register(ep, dev);

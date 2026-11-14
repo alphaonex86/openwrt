@@ -21,6 +21,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
+#include <linux/eth_netdev_contract.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
@@ -698,7 +699,8 @@ static int zx_port_probe(struct zx_eth *e, unsigned int index)
 		return ret;
 	}
 	port->phy = phy;
-	ret = register_netdev(ndev);
+	ret = eth_register_netdev(ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+					      ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch);
 	if (ret) {
 		dev_err(e->dev, "port %u: register_netdev: %d\n", index, ret);
 		phy_disconnect(port->phy);

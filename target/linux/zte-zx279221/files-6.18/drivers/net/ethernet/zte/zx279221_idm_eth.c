@@ -17,6 +17,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/eth_netdev_contract.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
@@ -354,7 +355,9 @@ static int idm_probe(struct platform_device *pdev)
 	ret = devm_request_irq(dev, irq, idm_irq, 0, DRV, p);
 	if (ret)
 		return dev_err_probe(dev, ret, "IRQ %d\n", irq);
-	ret = devm_register_netdev(dev, ndev);
+	ret = eth_devm_register_netdev(dev, ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_link_ksettings |
+							ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+							ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch);
 	if (ret)
 		return dev_err_probe(dev, ret, "register_netdev\n");
 	netdev_info(ndev, "%pM, %u + %u slots, rings %pad, buffers %pad\n", ndev->dev_addr, SLOTS, SLOTS,

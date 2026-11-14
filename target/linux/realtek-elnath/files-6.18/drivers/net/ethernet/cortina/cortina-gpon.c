@@ -8,6 +8,7 @@
 #include <linux/crc32.h>
 #include <linux/ctype.h>
 #include <linux/delay.h>
+#include <linux/eth_netdev_contract.h>
 #include <linux/etherdevice.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
@@ -3133,7 +3134,9 @@ static void cg_wan_create(struct cortina_gpon *cg)
 	eth_hw_addr_set(ndev, mac);
 	SET_NETDEV_DEV(ndev, cg->dev);
 	netif_carrier_off(ndev);
-	if (register_netdev(ndev)) {
+	if (eth_register_netdev(ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_link_ksettings |
+					    ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+					    ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch)) {
 		dev_warn(cg->dev, "gpon0 register failed - no WAN netdev\n");
 		free_netdev(ndev);
 		return;

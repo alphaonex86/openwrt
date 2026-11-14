@@ -13,6 +13,7 @@
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/eth_netdev_contract.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
@@ -1352,7 +1353,8 @@ int cortina_ni_tx_publish(struct cortina_ni *ni)
 	struct net_device *ndev = ni->tx->netdev;
 	int ret;
 
-	ret = register_netdev(ndev);
+	ret = eth_register_netdev(ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
+					      ETH_NO_get_ringparam | ETH_NO_rx_watch);
 	if (ret)
 		return dev_err_probe(ni->dev, ret, "register_netdev failed\n");
 

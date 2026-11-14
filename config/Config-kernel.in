@@ -939,6 +939,22 @@ config KERNEL_GPON_OLT_DIAG_RECORDS
 	  CONFIG_GPON_OLT_DIAG_RECORDS: 256 by default, 1024 for a field build
 	  (build-openwrt.py variant "field"), 64 B per record per ring.
 
+config KERNEL_VIRTIO_MMIO
+	bool
+
+config KERNEL_VIRTIO_NET
+	bool
+
+config KERNEL_PON_VIRT_OLT
+	bool "Virtual OLT PON MAC on virtio-mmio (an OLT image's VM variant)"
+	depends on TARGET_zte_zx279221
+	select KERNEL_VIRTIO_MMIO
+	select KERNEL_VIRTIO_NET
+	default n
+	help
+	  CONFIG_PON_VIRT_OLT: our GPON OLT core over the VM's virtio wire to
+	  the host splitter (build-openwrt.py variant "olt-vm"); no board has it.
+
 config KERNEL_GPON_OPTIC_RTL8290B
 	bool "RTL8290B BOSA support"
 	depends on TARGET_realtek_luna || TARGET_realtek_elnath || TARGET_zte_zx

@@ -11,3 +11,16 @@ config PON_VIRT
 	  core as the boards, carried at frame level over a NIC whose far end
 	  is the host's virtual ODN (dev/virt/vodn). The WAN is gpon0. Only
 	  for the realtek-*/virt subtargets; no board has this wire.
+
+config PON_VIRT_OLT
+	bool "Virtual OLT PON MAC (an OLT board's VM): the GPON OLT core over an Ethernet wire"
+	depends on VIRTIO_MMIO && VIRTIO_NET
+	select GPON_CORE
+	select GPON_OLT_ROLE
+	select CRC32
+	help
+	  The PON MAC of an OLT board's own VM: the gpon_* OLT port core
+	  (activation, OMCI provisioning, zero-touch authorization) over a NIC
+	  whose far end is the host's splitter (dev/virt/vodn --olt-vm); the
+	  data path is pon0, bridged to the uplink. Only for an OLT image's
+	  VM variant; no board has this wire.

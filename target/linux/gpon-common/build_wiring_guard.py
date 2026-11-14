@@ -58,6 +58,22 @@ def overlays_of(target):
     return [o for o, ts in OVERLAYS.items() if target in ts]
 
 
+def pulled_overlays(root):
+    """-> {target: [shared overlay]} for every target Makefile that names one: the closed census W1 checks, so a
+    target that starts pulling a shared tree is checked the day it does, listed in OVERLAYS or not."""
+    found, base = {}, os.path.join(root, "target", "linux")
+    for t in sorted(os.listdir(base)):
+        try:
+            with open(os.path.join(base, t, "Makefile"), encoding="utf-8", errors="replace") as f:
+                txt = f.read()
+        except OSError:
+            continue
+        named = [o for o in OVERLAYS if "/%s/files-" % o in txt]
+        if named:
+            found[t] = named
+    return found
+
+
 HUNK_FILE = re.compile(r'^\+\+\+\s+(?:[ab]|linux-[\d.]+)/(\S+)', re.M)
 
 
@@ -106,7 +122,8 @@ class Guard:
         Placed after the re-expansion (or with none), the copy command was
         frozen without it and the `+=` is inert (realtek-luna/Makefile).
         """
-        targets = sorted({t for ts in OVERLAYS.values() for t in ts})
+        pulled = pulled_overlays(self.root)
+        targets = sorted({t for ts in OVERLAYS.values() for t in ts} | set(pulled))
         for t in targets:
             rel = "target/linux/%s/Makefile" % t
             txt = self.read(rel)
@@ -120,7 +137,7 @@ class Guard:
             rx = [i for i, l in enumerate(lines) if l.strip() == REEXPAND]
             anchored = self.check(len(inc) == 1 and len(bt) == 1, "W1.anchors/" + t,
                                   "need one target.mk include and one BuildTarget")
-            for o in overlays_of(t):
+            for o in sorted(set(overlays_of(t)) | set(pulled.get(t, ()))):
                 idx = [i for i, l in enumerate(lines) if files_dir_re(o).match(l)]
                 if not self.check(len(idx) == 1, "W1.append/" + t,
                                   "expected exactly 1 `FILES_DIR +=` %s line, got %d"
@@ -480,14 +497,14 @@ MUTATIONS = [
      lambda s: s, "target/linux/eth-common/files-%s/drivers/net/flowcore/flowcore.h" % VER),
     ("W3.o2", SHARED_FILES + "/drivers/net/gpon/Makefile",
      lambda s: re.sub(r'^ccflags-y \+= -O2$', '', s, flags=re.M)),
-    # the "silently dead source" arm: drop one pending declaration and the file
-    # it names becomes a .c nothing accounts for.
+    # the "silently dead source" arm: drop one built object and its .c is one
+    # nothing accounts for.
     ("W4.src_never_built", SHARED_FILES + "/drivers/net/gpon/Makefile",
-     lambda s: re.sub(r'^# gpon-pending: gpon_ploam\.o.*(?:\n#   .*)*$', '', s, flags=re.M)),
+     lambda s: re.sub(r'^obj-\$\(CONFIG_GPON_OLT_ROLE\) \+= gpon_olt_platform\.o$', '', s, flags=re.M)),
     # the "reason is a placeholder" arm.
     ("W4.pending_reason", SHARED_FILES + "/drivers/net/gpon/Makefile",
-     lambda s: re.sub(r'^(# gpon-pending: gpon_ploam\.o --).*(?:\n#   .*)*$',
-                      r'\1 later', s, flags=re.M)),
+     lambda s: re.sub(r'^obj-\$\(CONFIG_GPON_OLT_ROLE\) \+= gpon_olt_platform\.o$',
+                      '# gpon-pending: gpon_olt_platform.o -- later', s, flags=re.M)),
     ("W5.prepatch", "target/linux/realtek-luna/files-%s/arch/mips/Kconfig" % VER,
      lambda s: s.replace("config BOOT_RAW\n\tbool\n\n", "", 1)),
     ("W8.kconfig", SHARED_FILES + "/drivers/net/Kconfig",

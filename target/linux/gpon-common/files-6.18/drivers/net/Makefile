@@ -89,6 +89,7 @@ obj-$(CONFIG_FDDI) += fddi/
 # --- end GPON common layer ----------------------------------------------
 obj-$(CONFIG_GPON_CORE) += gpon/
 obj-$(CONFIG_PON_VIRT) += ponvirt/
+obj-$(CONFIG_PON_VIRT_OLT) += ponvirt/
 obj-$(CONFIG_HIPPI) += hippi/
 obj-$(CONFIG_HAMRADIO) += hamradio/
 obj-$(CONFIG_QCOM_IPA) += ipa/

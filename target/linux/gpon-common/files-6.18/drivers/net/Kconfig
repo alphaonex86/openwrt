@@ -549,7 +549,7 @@ source "drivers/net/fddi/Kconfig"
 # --- end GPON common layer ----------------------------------------------
 source "drivers/net/gpon/Kconfig"
 
-# The virtual unit's PON MAC (realtek-*/virt only).
+# The virtual unit's PON MAC (realtek-*/virt only), and an OLT VM's.
 source "drivers/net/ponvirt/Kconfig"
 
 source "drivers/net/hippi/Kconfig"

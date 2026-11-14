@@ -221,6 +221,7 @@ config GPON_OLT_ROLE
 config ZX279200
 	bool "ZX279200 GPON OLT PON MAC (PCIe)"
 	depends on PCI
+	depends on ARCH_BCM_IPROC
 	select GPON_CORE
 	select GPON_REGSEQ
 	help

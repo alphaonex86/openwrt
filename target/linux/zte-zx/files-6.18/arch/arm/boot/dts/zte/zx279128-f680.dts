@@ -20,6 +20,63 @@
 		device_type = "memory";
 		reg = <0x40000000 0x8000000>;
 	};
+
+	/*
+	 * The panel lamps on SoC GPIO, all active low: stock's board table (board id 20, read from the eight strap pins
+	 * 59-64/20/21) sets every lamp output high at init but POWER, and its LED commands index that same table.
+	 * LAN1-4 (GPIO 49-52) stay muxed to the switch, which drives them; PON/LOS colours are the stock behaviour.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led-power {
+			label = "f680:green:power";
+			gpios = <&gpio1 3 1>;
+			default-state = "on";
+		};
+
+		led-pon {
+			label = "f680:green:pon";
+			gpios = <&gpio3 0 1>;
+			default-state = "off";
+		};
+
+		led-los {
+			label = "f680:red:los";
+			gpios = <&gpio2 15 1>;
+			default-state = "off";
+		};
+
+		led-net {
+			label = "f680:green:net";
+			gpios = <&gpio3 8 1>;
+			default-state = "off";
+		};
+
+		led-wlan {
+			label = "f680:green:wlan";
+			gpios = <&gpio1 2 1>;
+			default-state = "off";
+		};
+
+		led-wps {
+			label = "f680:green:wps";
+			gpios = <&gpio3 5 1>;
+			default-state = "off";
+		};
+
+		led-usb {
+			label = "f680:green:usb";
+			gpios = <&gpio3 10 1>;
+			default-state = "off";
+		};
+
+		led-fxs1 {
+			label = "f680:green:fxs1";
+			gpios = <&gpio3 6 1>;
+			default-state = "off";
+		};
+	};
 };
 
 /* The GN25L95 BOSA: its SFF-8472 pages at 0x50/0x51, configured from its own memory (stock never writes it). */

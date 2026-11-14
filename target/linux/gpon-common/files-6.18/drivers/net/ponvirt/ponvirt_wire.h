@@ -22,7 +22,11 @@ enum ponvirt_kind {
 	PV_US_OMCI,		/* GEM Port-ID (2) + 48 octets */
 	PV_DS_GEM,		/* GEM Port-ID (2) + an Ethernet frame */
 	PV_US_GEM,		/* Alloc-ID (2) + GEM Port-ID (2) + an Ethernet frame */
+	PV_US_LIGHT,		/* ONU-ID: a ranged ONU's upstream bursts, every PV_LIGHT_MS */
 };
+
+#define PV_LIGHT_MS	100	/* an ONU from O4 on is lit: its bursts reach the OLT this often */
+#define PV_LOSI_MS	1000	/* an OLT declares LOSi for an ONU silent this long (ten missed bursts) */
 
 #define PV_GEM_HDR	3	/* kind + GEM Port-ID */
 #define PV_US_GEM_HDR	5	/* kind + Alloc-ID + GEM Port-ID */

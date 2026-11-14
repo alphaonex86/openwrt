@@ -46,6 +46,7 @@ struct pvo {
 	struct gpon_olt_port port;
 	struct gpon_olt_omci *eng;
 	struct { u8 mac[ETH_ALEN]; u8 slot; bool used; } mac[PVO_MACS];
+	u32 lit_ms[GPON_OLT_PON_ONUS];	/* per slot, when its light was last seen; 0 = never (LOSi unarmed) */
 	u64 us_frames, ds_frames, wire_drop;
 };
 
@@ -266,6 +267,10 @@ static void pvo_us(const u8 *d, unsigned int n, u32 now)
 	case PV_US_GEM:
 		pvo_up_gem(d, n);
 		break;
+	case PV_US_LIGHT:
+		if (n >= 2 && d[1] >= 1 && d[1] <= GPON_OLT_PON_ONUS)
+			pvo->lit_ms[d[1] - 1] = now ? now : 1;
+		break;
 	}
 }
 
@@ -287,9 +292,22 @@ static rx_handler_result_t pvo_rx(struct sk_buff **pskb)
 	return RX_HANDLER_CONSUMED;
 }
 
+/* LOSi, as an OLT's PON MAC raises it: an ONU once lit and now silent past PV_LOSI_MS. Under the lock. */
+static void pvo_losi(u32 now)
+{
+	unsigned int i;
+
+	for (i = 0; i < GPON_OLT_PON_ONUS; i++)
+		if (pvo->lit_ms[i] && now - pvo->lit_ms[i] > PV_LOSI_MS) {
+			pvo->lit_ms[i] = 0;
+			gpon_olt_pon_los(&pvo->port.pon, gpon_olt_onu_id(i), now);
+		}
+}
+
 static void pvo_tick(struct timer_list *t)
 {
 	spin_lock_bh(&pvo->lock);
+	pvo_losi(pvo_now());
 	gpon_olt_port_tick(&pvo->port, pvo_now());
 	spin_unlock_bh(&pvo->lock);
 	pvo_flush();

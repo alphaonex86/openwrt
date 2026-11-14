@@ -30,6 +30,10 @@ CONFIG_PON_VIRT=y
 # The board userland reads its thread pointer with the RLX-only mflxc0; the 24Kc traps it.
 CONFIG_MIPS_LXC0_TP_EMULATE=y
 # CONFIG_LUNA_WDT is not set
+# Malta's own tree resets through its FPGA's syscon-reboot node: without it a panic halts the unit for good.
+CONFIG_POWER_RESET=y
+CONFIG_POWER_RESET_SYSCON=y
+CONFIG_MFD_SYSCON=y
 # CONFIG_MTD_LUNA_NOR is not set
 # The board squashfs is the root, mapped by phram from RAM outside the board's mem= ranges; the overlay is tmpfs.
 CONFIG_MTD_PHRAM=y

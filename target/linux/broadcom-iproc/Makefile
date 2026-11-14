@@ -22,6 +22,8 @@ include $(INCLUDE_DIR)/target.mk
 
 ifeq ($(TARGET_BUILD),1)
 FILES_DIR += "$(TOPDIR)/target/linux/cortex-a9-common/files-$(KERNEL_PATCHVER)"
+# The GPON core (gpon_regseq, the OLT role) the ZX279200 PON MAC driver builds on.
+FILES_DIR += "$(TOPDIR)/target/linux/gpon-common/files-$(KERNEL_PATCHVER)"
 # kernel-defaults.mk froze the copy command inside target.mk: re-expand it (why: realtek-luna/Makefile).
 Kernel/Patch := $(Kernel/Patch/Default)
 endif

@@ -1029,6 +1029,14 @@ config KERNEL_LUNA_DEBUG
 	  done, [T] timer, [I] irqchip) plus the luna_eth bring-up aids
 	  (build-openwrt.py variant "boot-marks").
 
+config KERNEL_ZX279200
+	bool "ZX279200 GPON OLT PON MAC (PCIe)"
+	depends on TARGET_broadcom_iproc
+	default n
+	help
+	  The V-SOL V1600G board's layer turns it on: the 8-port PON MAC behind
+	  the host's PCIe.
+
 config KERNEL_VSOL_V1600G_WDT
 	bool "V-SOL V1600G board watchdog"
 	depends on TARGET_broadcom_iproc

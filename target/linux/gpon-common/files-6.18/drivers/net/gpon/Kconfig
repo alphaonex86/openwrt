@@ -218,6 +218,15 @@ config GPON_OLT_ROLE
 	  target; an ONU build carries none of it.  Until one exists,
 	  dev/rtl9607c-test compiles and fuzzes it on x86.
 
+config ZX279200
+	bool "ZX279200 GPON OLT PON MAC (PCIe)"
+	depends on PCI
+	select GPON_CORE
+	select GPON_REGSEQ
+	help
+	  The 8-port GPON OLT PON MAC of the V-SOL V1600G, on PCIe (its source
+	  lives in target/linux/broadcom-iproc, the one host it has).
+
 config GPON_FLOW_DIAG
 	bool "GPON accelerator diagnostics (why a flow was NOT offloaded)"
 	depends on GPON_FLOW_OFFLOAD

@@ -693,6 +693,17 @@ static int rtl9602c_wan_vids_admit(struct rtl9602c_eth *ep)
 	return 0;
 }
 
+/* Unknown IPv4 multicast from the fibre is wanted by a multicast router alone (its first frame makes the
+ * route); with none the switch drops it, as stock does, instead of handing every frame to the CPU. */
+static void rtl9602c_pon_mc_policy(struct rtl9602c_eth *ep)
+{
+	void __iomem *w = ep->sw + sw_packed_off(ep->swm->unkn_ip4_mc, ep->swm->pon_port, SW_DA_ACT_BITS);
+	const struct rtl9602c_ipmc *m = &ep->l34.ipmc;
+	u32 act = !READ_ONCE(m->watching) || READ_ONCE(m->n_vif) ? LUT_MISS_FLOOD : LUT_MISS_DROP;
+
+	iowrite32(sw_packed_ins(ioread32(w), ep->swm->pon_port, SW_DA_ACT_BITS, act), w);
+}
+
 static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 {
 	if (!ep->sw)
@@ -728,6 +739,7 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 		  ep->sw + ep->swm->unkn_mc_flood);
 	iowrite32((ioread32(ep->sw + ep->swm->unkn_uc_flood) | ep->swm->port_mask) & ~BIT(ep->swm->pon_port),
 		  ep->sw + ep->swm->unkn_uc_flood);
+	rtl9602c_pon_mc_policy(ep);
 	/* Unknown-unicast that misses the L2 lookup (the host's ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 36. */
 	iowrite32(0, ep->sw + ep->swm->lut_unkn_uc_da);	/* all ports FORWARD */

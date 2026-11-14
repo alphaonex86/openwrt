@@ -1688,7 +1688,6 @@ static int eth_alloc_rings(struct luna_eth *ep)
 }
 
 /* ---- switch open-L2 bring-up (ordered; see file header) ------------------- */
-#define LUT_MISS_TRAP	2	/* LUT_UNKN_UC_DA / UNKN_*_MC action: trap to the CPU */
 #define LUT_BC_TRAP	1	/* LUT_BC_BEHAVE action: trap to the CPU */
 
 static void sw_port_act(struct luna_eth *ep, u32 base, unsigned int port, u32 act)

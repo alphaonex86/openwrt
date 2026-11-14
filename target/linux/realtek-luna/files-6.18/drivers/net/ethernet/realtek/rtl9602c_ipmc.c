@@ -69,6 +69,7 @@ static int rtl9602c_ipmc_fib_event(struct notifier_block *nb, unsigned long even
 	switch (event) {
 	case FIB_EVENT_VIF_ADD:
 	case FIB_EVENT_VIF_DEL:
+		m->n_vif += event == FIB_EVENT_VIF_ADD ? 1 : -1;
 		if (vif->tb_id == RT_TABLE_DEFAULT && vif->vif_index < IPMC_VIFS)
 			m->vif_ifindex[vif->vif_index] =
 				event == FIB_EVENT_VIF_ADD ? vif->dev->ifindex : 0;
@@ -360,6 +361,7 @@ static void rtl9602c_ipmc_sync(struct work_struct *work)
 	unsigned int n_sg, n_want = 0;
 	int ret;
 
+	rtl9602c_pon_mc_policy(ep);
 	n_sg = ipmc_snapshot(ep, m);
 	if (n_sg) {
 		n_want = l34_ipmc_wanted(m->snap, n_sg, m->vif_kind, m->keep_cpu, m->n_keep,
@@ -389,6 +391,8 @@ static void rtl9602c_ipmc_stop(void *data)
 	unregister_fib_notifier(&init_net, &m->fib_nb);
 	unregister_switchdev_blocking_notifier(&m->mdb_nb);
 	cancel_delayed_work_sync(&m->sync);
+	WRITE_ONCE(m->watching, false);
+	rtl9602c_pon_mc_policy(ep);
 	mutex_lock(&ep->l34.lock);
 	ipmc_apply(ep, m, 0);
 	mutex_unlock(&ep->l34.lock);
@@ -410,9 +414,13 @@ static int rtl9602c_ipmc_start(struct rtl9602c_eth *ep)
 		return ret;
 	m->fib_nb.notifier_call = rtl9602c_ipmc_fib_event;
 	ret = register_fib_notifier(&init_net, &m->fib_nb, NULL, NULL);
-	if (ret)
+	if (ret) {
 		unregister_switchdev_blocking_notifier(&m->mdb_nb);
-	return ret;
+		return ret;
+	}
+	WRITE_ONCE(m->watching, true);
+	rtl9602c_pon_mc_policy(ep);
+	return 0;
 }
 #else
 static void rtl9602c_ipmc_stop(void *data)

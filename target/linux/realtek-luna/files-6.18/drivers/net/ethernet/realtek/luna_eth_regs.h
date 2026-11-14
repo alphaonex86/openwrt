@@ -299,6 +299,10 @@ static inline u32 luna_gphy_mii_ocp(unsigned int reg)
  * per 32-bit word. Own k0_kernel descriptors @0xca1360 (0x1c008) and
  * @0xca1378 (0x1c00c, a SEPARATE register) both state stride 2 bits. */
 #define SW_DA_ACT_BITS		2u
+/* LUT_UNKN_UC_DA / UNKN_*_MC action of an ingress port, each settled by effect (X111W 2026-11-14) */
+#define LUT_MISS_FLOOD		0	/* to the flood mask */
+#define LUT_MISS_DROP		1
+#define LUT_MISS_TRAP		2	/* to the CPU alone */
 
 #define SW_PACKED_PER_WORD(bits)	(32u / (bits))
 

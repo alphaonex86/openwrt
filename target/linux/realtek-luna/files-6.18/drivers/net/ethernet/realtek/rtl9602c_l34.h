@@ -212,6 +212,8 @@ struct rtl9602c_ipmc {
 	struct delayed_work	sync;
 	spinlock_t		lock;		/* the notifier copies below */
 	int			vif_ifindex[IPMC_VIFS];
+	unsigned int		n_vif;		/* every multicast routing interface, any table */
+	bool			watching;	/* n_vif is followed: its 0 means no multicast router */
 	struct ipmc_sg		sg[IPMC_GROUPS];
 	unsigned int		n_sg;
 	bool			lost;		/* an (S,G) did not fit: route nothing */

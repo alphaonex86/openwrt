@@ -55,7 +55,7 @@ define Device/lanly_g24w
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
-  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  IMAGE/sysupgrade.bin := append-rootfs | pad-rootfs | check-size | sysupgrade-tar rootfs=$$$$@ | append-metadata
   #
   # ★★★ THE PACKAGE SET IS DECLARED HERE, NOT IN A .config (2026-08-27).
   #

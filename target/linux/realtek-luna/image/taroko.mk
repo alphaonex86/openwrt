@@ -22,7 +22,7 @@ define Device/hsgq_x111w
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
-  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  IMAGE/sysupgrade.bin := append-rootfs | pad-rootfs | check-size | sysupgrade-tar rootfs=$$$$@ | append-metadata
   # luci-app-gpon builds (validated) but its luci-base dep needs cgi-io from the
   # 'packages' feed; add "luci-app-gpon luci" here once that feed is installed.
   # Router stack so the ONU actually routes/NATs LAN<->WAN and serves DHCP:
@@ -60,7 +60,7 @@ define Device/vsol_v2801rgw
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
-  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  IMAGE/sysupgrade.bin := append-rootfs | pad-rootfs | check-size | sysupgrade-tar rootfs=$$$$@ | append-metadata
   # The same router stack as the X111W (see its profile for the why of each package).
   DEVICE_PACKAGES := gpon-provision luci-app-gpon luci-base luci-mod-admin-full luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file \
 	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls
@@ -81,7 +81,7 @@ define Device/hsgq_x100dg
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | check-size
-  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  IMAGE/sysupgrade.bin := append-rootfs | pad-rootfs | check-size | sysupgrade-tar rootfs=$$$$@ | append-metadata
   # gpon-provision: its SN, MAC and RTL8290B laser cal come from its own config partition.
   DEVICE_PACKAGES := -iw gpon-provision
 endef

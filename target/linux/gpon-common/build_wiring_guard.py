@@ -421,12 +421,30 @@ class Guard:
                               ", ".join(sorted(headers)),
                               os.path.relpath(mk, self.root)))
 
+    def w11_upgrade_image_keeps_config(self):
+        """`mtd -j` appends the saved configuration only where the image stream carries the jffs2
+        end-of-filesystem marker: without pad-rootfs it writes nothing and says nothing."""
+        writer = re.compile(r'\bmtd\b[^\n]*-j\b')
+        recipe = re.compile(r'^\s*IMAGE/sysupgrade\.bin\s*:=([^\n]*\bsysupgrade-tar\b[^\n]*)$', re.M)
+        for t in sorted({t for ts in OVERLAYS.values() for t in ts}):
+            body = self.read("target/linux/%s/base-files/lib/upgrade/platform.sh" % t)
+            if not writer.search(body or ""):
+                continue
+            mks = self.p("target/linux/%s/image" % t)
+            for mk in sorted(os.listdir(mks)) if os.path.isdir(mks) else ():
+                for line in recipe.findall(self.read("target/linux/%s/image/%s" % (t, mk)) or ""):
+                    self.check("pad-rootfs" in line.split("sysupgrade-tar")[0], "W11.padrootfs/" + t,
+                               "%s builds a sysupgrade tar whose root has no pad-rootfs, and %s's "
+                               "platform.sh keeps the configuration with `mtd -j`: nothing is kept"
+                               % (mk, t))
+
     def run(self):
         for fn in (self.w1_files_dir_line, self.w2_trees_disjoint, self.w3_o2,
                    self.w4_objects_accounted, self.w5_overlay_is_the_prepatch_base,
                    self.w6_no_scanned_makefile, self.w7_no_symlinks,
                    self.w8_parent_wiring, self.w9_someone_selects,
-                   self.w10_shared_header_include_path):
+                   self.w10_shared_header_include_path,
+                   self.w11_upgrade_image_keeps_config):
             fn()
         return self.fails
 
@@ -479,6 +497,9 @@ MUTATIONS = [
     ("W9.select", "target/linux/realtek-elnath/files-%s/drivers/net/ethernet/"
                   "cortina/Kconfig" % VER,
      lambda s: re.sub(r'^\tselect GPON_CORE.*$', '', s, flags=re.M)),
+    ("W11.padrootfs", "target/linux/realtek-luna/image/taroko.mk",
+     lambda s: s.replace("append-rootfs | pad-rootfs | check-size | sysupgrade-tar rootfs=$$$$@",
+                         "sysupgrade-tar", 1)),
     # W10: drop the include path from a directory that DOES include a shared
     # header.  Without the guard this is silent here and fails deep inside a
     # target build, naming the header and not the reason.

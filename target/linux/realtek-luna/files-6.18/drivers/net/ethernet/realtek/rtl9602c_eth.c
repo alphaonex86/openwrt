@@ -1675,6 +1675,8 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 	if (eth_ring_watch_rx(&luna_ring_watch, ep->ndev, rtl9602c_eth_rx_waiting(ep), ep->dbg_filled))
 		napi_schedule(&ep->napi);
+	if (ep->wan_ndev)
+		luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets);
 	/* While a park is pending, tighten the cadence so the 60ms escalation
 	 * ladder is not quantised by the 100ms backstop interval. */
 	mod_timer(&ep->poll_timer, jiffies +

@@ -53,6 +53,7 @@ static const struct luna_mib_field luna_mib_rx[] = {
 
 /* ── STAT_PORT_TX_MIB, base 0x32000 on every Luna die ...
  * dev/MEASURED-luna_eth_mib.c.md sec 3. */
+#define LUNA_MIB_TX_OCTETS	0x28	/* its low word is the fibre port's progress witness, below */
 static const struct luna_mib_field luna_mib_tx[] = {
 	{ "tx_multicast_ethstat", 0x00 },	/* etherStatsMulticastPkts	*/
 	{ "tx_broadcast_ethstat", 0x04 },	/* etherStatsBroadcastPkts	*/
@@ -64,7 +65,7 @@ static const struct luna_mib_field luna_mib_tx[] = {
 	{ "tx_256_to_511_frames", 0x1c },
 	{ "tx_512_to_1023_frames", 0x20 },
 	{ "tx_1024_to_1518_frames", 0x24 },
-	{ "tx_octets",		0x28, true },	/* ifOutOctets, 64-bit pair	*/
+	{ "tx_octets",		LUNA_MIB_TX_OCTETS, true },	/* ifOutOctets, 64-bit pair */
 	{ "tx_single_collision", 0x30 },	/* dot3StatsSingleCollisionFrames */
 	{ "tx_multi_collision",	0x34 },		/* dot3StatsMultipleCollisionFrames */
 	{ "tx_deferred",	0x38 },		/* dot3StatsDeferredTransmissions */
@@ -113,6 +114,23 @@ static const char *const luna_rx_len_names[] = {
 struct eth_ring_watch luna_ring_watch = ETH_RING_WATCH_INIT(luna_ring_watch);
 EXPORT_SYMBOL_GPL(luna_ring_watch);
 
+/* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it. */
+static struct eth_egress_watch luna_pon_egress;
+
+void luna_mib_pon_egress_sample(struct net_device *wan, u32 offered)
+{
+	struct luna_mib_state *s = &luna_mib;
+	u32 sent;
+
+	if (!s->sw)
+		return;
+	sent = ioread32(s->sw + SW_STAT_PORT_TX_MIB + s->map->pon_port * SW_STAT_PORT_MIB_STRIDE + LUNA_MIB_TX_OCTETS);
+	eth_egress_watch_act(wan, &luna_pon_egress,
+			     eth_egress_watch_sample(&luna_pon_egress, offered, sent, jiffies64_to_msecs(get_jiffies_64())),
+			     "fibre");
+}
+EXPORT_SYMBOL_GPL(luna_mib_pon_egress_sample);
+
 static bool luna_mib_has_rx(const struct luna_mib_state *s)
 {
 	return s->map && s->map->rx_mib && s->map->n_mib_ports;
@@ -131,7 +149,7 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 
 /* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map;
  * then the received-frame length witnesses and the ring watch. */
-#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS)
+#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 1)
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
@@ -179,6 +197,7 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 	for (i = 0; i < ARRAY_SIZE(luna_rx_len_names); i++)
 		ethtool_puts(&data, luna_rx_len_names[i]);
 	eth_ring_watch_strings(&data);
+	ethtool_puts(&data, "pon_egress_stalls");
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)
@@ -206,6 +225,7 @@ static void luna_mib_get_stats(struct net_device *ndev,
 	*data++ = luna_rx_len.long_wan;
 	*data++ = luna_rx_len.short_wan;
 	data = eth_ring_watch_stats(&luna_ring_watch, data);
+	*data++ = READ_ONCE(luna_pon_egress.stalls);
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)

@@ -4,7 +4,7 @@
  * ponvirt_wire.h -- the virtual ODN's wire, shared by the guest (ponvirt.c) and the host hub
  * (dev/virt/vodn.c): one Ethernet frame of PONVIRT_ETHERTYPE per PON event, byte 0 its kind,
  * multi-octet fields big-endian. Downstream is broadcast to every ONU, as on a fibre; each
- * ONU keeps what its ONU-ID or its GEM ports select. Frame level only: no optics, no BWmap.
+ * ONU keeps what its ONU-ID or its GEM ports select. Frame level only: no optics; the BWmap is one PV_GRANT.
  */
 #ifndef PONVIRT_WIRE_H
 #define PONVIRT_WIRE_H
@@ -23,6 +23,7 @@ enum ponvirt_kind {
 	PV_DS_GEM,		/* GEM Port-ID (2) + an Ethernet frame */
 	PV_US_GEM,		/* Alloc-ID (2) + GEM Port-ID (2) + an Ethernet frame */
 	PV_US_LIGHT,		/* ONU-ID: a ranged ONU's upstream bursts, every PV_LIGHT_MS */
+	PV_GRANT,		/* ONU-ID: the OLT still grants this ranged ONU, every GPON_OLT_GRANT_MS */
 };
 
 #define PV_LIGHT_MS	100	/* an ONU from O4 on is lit: its bursts reach the OLT this often */

@@ -170,6 +170,13 @@ void gpon_olt_port_tick(struct gpon_olt_port *port, u32 now_ms)
 	unsigned int i;
 
 	gpon_olt_pon_tick(&port->pon, now_ms);
+	if (port->ops->grant && now_ms - port->grant_ms >= GPON_OLT_GRANT_MS) {
+		port->grant_ms = now_ms;
+		for (i = 0; i < GPON_OLT_PON_ONUS; i++)
+			if (port->pon.onu[i].used && port->pon.onu[i].state >= GPON_OLT_LINK_PASSWORD &&
+			    port->pon.onu[i].state <= GPON_OLT_LINK_UP)
+				port->ops->grant(port->sh, gpon_olt_onu_id(i));
+	}
 	for (i = 0; i < port->n_eng; i++) {
 		const struct gpon_olt_omci *e = &port->eng[i];
 

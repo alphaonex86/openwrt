@@ -16,10 +16,14 @@
 #include "gpon_olt_omci.h"
 #include "gpon_olt_ploam.h"
 
+#define GPON_OLT_GRANT_MS	100
+
 struct gpon_olt_port_ops {
 	void (*ds_ploam)(void *sh, const u8 msg[GPON_OLT_PLOAM_DS_LEN]);
 	void (*sn_grant)(void *sh);
 	void (*ranging_grant)(void *sh, u8 onu_id);
+	/* optional: one BWmap grant to a ranged ONU the link still holds, each GPON_OLT_GRANT_MS */
+	void (*grant)(void *sh, u8 onu_id);
 	int (*ds_omci)(void *sh, u16 gem_port, const u8 *pdu, unsigned int len);
 	/* optional: a link change or an OMCI phase change, for the shell's log */
 	void (*event)(void *sh, u8 onu_id, const char *what, const char *detail);
@@ -35,6 +39,7 @@ struct gpon_olt_port {
 	struct gpon_olt_profile tmpl;	/* the service every ONU gets; its alloc_id and gem_port are the bases */
 	bool zero_touch;		/* authorize every serial heard (the operator's production flow) */
 	u8 phase_seen[GPON_OLT_PON_ONUS];
+	u32 grant_ms;
 };
 
 /* -> NULL, or the op or argument it refuses. */

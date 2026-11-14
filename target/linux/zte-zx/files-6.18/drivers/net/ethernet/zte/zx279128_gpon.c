@@ -80,6 +80,7 @@
 #define MAC_EQD			0x0d4014	/* bits 15-0 bytes, 20-16 frames, 23-21 bits */
 #define MAC_START_CHECK		0x0d4018
 #define MAC_PRE_EQD		0x0d4024	/* the pre-assigned delay, bytes */
+#define MAC_RX_ALLOC_WR		0x0d4118	/* BWmap allocations to this ONU the MAC took (SN grants too), free-running */
 #define MAC_TCONT0		0x0d407c	/* bit 12 enabled, bits 11-0 the Alloc-ID */
 #define MAC_TCONT_PAIR(n)	(0x0d4080 + 4 * (((n) - 1) / 2))	/* odd n low half, even n high half */
 #define MAC_TCONTS		32
@@ -103,6 +104,7 @@
 #define ZX_TICK_MS		10
 #define ZX_US_FIFO		8
 #define ZX_PLOAM_BURST		16
+#define ZX_GRANT_POLL_TICKS	100
 #define ZX_PON_MAC_INDEX	4	/* after the LAN ports' 0-3 */
 #define PINMUX_PON_BIT		BIT(17)	/* in the pinmux word (0x9420000c): cleared at start, as stock */
 
@@ -150,6 +152,7 @@ struct zx_pon {
 	u8 us_fifo[ZX_US_FIFO][GPON_PLOAM_US_LEN];
 	unsigned int us_head, us_count;
 	u32 o5_lost;
+	u32 grants_seen;		/* MAC_RX_ALLOC_WR at the last grant poll */
 	u64 ploam_rx, ploam_tx, ploam_tx_dropped, omci_rx, omci_tx, omci_tx_fail, rx_foreign;
 };
 
@@ -564,6 +567,12 @@ static void zx_pon_tick(struct timer_list *t)
 	gpon_ploam_poll_los(&pon->p, rx & MAC_RX_LOS, rx & MAC_RX_LOF, now);
 	gpon_ploam_poll_keepalive(&pon->p, now);
 	gpon_ploam_poll_rei(&pon->p, now);
+	if (!(pon->p.ticks % ZX_GRANT_POLL_TICKS)) {
+		u32 grants = rd(pon, MAC_RX_ALLOC_WR);
+
+		gpon_ploam_poll_grants(&pon->p, grants - pon->grants_seen, now);
+		pon->grants_seen = grants;
+	}
 	zx_data_sync(pon);
 	zx_optic_selftest(pon);
 	zx_us_drain(pon);
@@ -710,6 +719,7 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 	if (!gpon_sn_is_set(pon->sn))
 		dev_warn(dev, "no serial number yet: the PON transmitter stays off and the OLT is not answered\n");
 	pon->cfg.los_rerange_ticks = 30;
+	pon->cfg.o5_ungranted_ticks = 1000;
 	pon->cfg.o4_ranging_timeout_ticks = GPON_DWELL_TO1_TICKS;
 	pon->cfg.omcc_tcont = 0;
 	pon->cfg.data_tcont = 1;

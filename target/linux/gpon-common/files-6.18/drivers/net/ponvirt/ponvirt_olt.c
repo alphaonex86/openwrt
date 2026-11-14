@@ -121,6 +121,11 @@ static void pvo_ranging_grant(void *sh, u8 onu_id)
 	pvo_emit(PV_RANGING_GRANT, &onu_id, 1, NULL, 0);
 }
 
+static void pvo_grant(void *sh, u8 onu_id)
+{
+	pvo_emit(PV_GRANT, &onu_id, 1, NULL, 0);
+}
+
 static int pvo_ds_omci(void *sh, u16 gem_port, const u8 *pdu, unsigned int len)
 {
 	u8 gem[2];
@@ -142,7 +147,7 @@ static void pvo_unsupported(void *sh, const char *kind, int cls, u32 val, const 
 }
 
 static const struct gpon_olt_port_ops pvo_ops = {
-	.ds_ploam = pvo_ds_ploam, .sn_grant = pvo_sn_grant, .ranging_grant = pvo_ranging_grant,
+	.ds_ploam = pvo_ds_ploam, .sn_grant = pvo_sn_grant, .ranging_grant = pvo_ranging_grant, .grant = pvo_grant,
 	.ds_omci = pvo_ds_omci, .event = pvo_event, .unsupported = pvo_unsupported,
 };
 

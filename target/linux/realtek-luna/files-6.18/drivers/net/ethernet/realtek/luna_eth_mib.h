@@ -9,6 +9,7 @@
 #include <linux/printk.h>
 #include <linux/types.h>
 
+#include "eth_queue_watch.h"
 #include "eth_rx_geom.h"
 
 struct luna_sw_map;
@@ -35,5 +36,8 @@ static inline void luna_rx_len_note(const u8 *frame, u32 len, bool wan)
 {
 	eth_rx_len_check(&luna_rx_len, "luna", frame, len, wan);
 }
+
+/* The family's ring watch (eth_queue_watch.h): both drivers sample it, ethtool -S shows it. */
+extern struct eth_ring_watch luna_ring_watch;
 
 #endif /* _LUNA_ETH_MIB_H */

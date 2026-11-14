@@ -938,6 +938,7 @@ static void rtl9602c_eth_omci_reclaim(struct rtl9602c_eth *ep)
 /* Forward decl: the shared-ring-0 OMCI path reclaims the LAN ring (defined with
  * the rest of the LAN datapath further down). */
 static void rtl9602c_eth_tx_reclaim(struct rtl9602c_eth *ep);
+static void rtl9602c_eth_tx_rekick(struct rtl9602c_eth *ep);
 
 /* Stock per-packet TX-fetch GO (observed in the stock ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 53. */
@@ -1200,6 +1201,27 @@ static int rtl9602c_eth_wan_stop(struct net_device *ndev)
 	return 0;
 }
 
+/* The kernel's TX watchdog on eth0 and gpon0, which share ring 0; gpon0 drops on a full ring rather than stop its
+ * queue, so in practice eth0 is the one it fires on. */
+static void rtl9602c_eth_ring_timeout(struct rtl9602c_eth *ep, struct net_device *ndev)
+{
+	unsigned long flags;
+
+	netdev_err(ndev, "tx timeout: ring head %u dirty %u, omci head %u dirty %u\n",
+		   ep->tx_head, ep->tx_dirty, ep->otx_head, ep->otx_dirty);
+	eth_ring_watch_tx(&luna_ring_watch, ndev);
+	spin_lock_irqsave(&ep->tx_lock, flags);
+	rtl9602c_eth_tx_reclaim(ep);
+	rtl9602c_eth_omci_reclaim(ep);
+	rtl9602c_eth_tx_rekick(ep);
+	spin_unlock_irqrestore(&ep->tx_lock, flags);
+}
+
+static void rtl9602c_eth_wan_tx_timeout(struct net_device *ndev, unsigned int txqueue)
+{
+	rtl9602c_eth_ring_timeout(*(struct rtl9602c_eth **)netdev_priv(ndev), ndev);
+}
+
 static const struct net_device_ops rtl9602c_eth_wan_ops = {
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	.ndo_setup_tc		= rtl9602c_l34_setup_tc,
@@ -1207,6 +1229,7 @@ static const struct net_device_ops rtl9602c_eth_wan_ops = {
 	.ndo_open		= rtl9602c_eth_wan_open,
 	.ndo_stop		= rtl9602c_eth_wan_stop,
 	.ndo_start_xmit		= rtl9602c_eth_wan_xmit,
+	.ndo_tx_timeout		= rtl9602c_eth_wan_tx_timeout,
 	.ndo_set_mac_address	= rtl9602c_eth_wan_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -1598,6 +1621,12 @@ static void rtl9602c_eth_tx_rekick(struct rtl9602c_eth *ep)
 	}
 }
 
+static bool rtl9602c_eth_rx_waiting(const struct rtl9602c_eth *ep)
+{
+	return luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||
+	       (ep->n_rxq > 1 && luna_rx_ready(ep->rxq[1].ring, ep->rxq[1].head));
+}
+
 /* NAPI poll: drain RX up to `budget`, then (under tx_lock) ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 79. */
 static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
@@ -1624,8 +1653,7 @@ static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
 		ep_wr(ep, R_ISR1, ep_rd(ep, R_ISR1));
 		iowrite16(ioread16(ep->base + R_IMR) | IMR_RX_BITS, ep->base + R_IMR);
 		ep_wr(ep, R_IMR0, ep_rd(ep, R_IMR0) | IMR0_TX_BITS);
-		if (luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||	/* its bit went to the ack */
-		    (ep->n_rxq > 1 && luna_rx_ready(ep->rxq[1].ring, ep->rxq[1].head))) {
+		if (rtl9602c_eth_rx_waiting(ep)) {	/* its bit went to the ack */
 			ep->dbg_rx_repoll++;
 			napi_schedule(napi);
 		}
@@ -1645,6 +1673,8 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 	rtl9602c_eth_omci_reclaim(ep);
 	rtl9602c_eth_tx_rekick(ep);
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
+	if (eth_ring_watch_rx(&luna_ring_watch, ep->ndev, rtl9602c_eth_rx_waiting(ep), ep->dbg_filled))
+		napi_schedule(&ep->napi);
 	/* While a park is pending, tighten the cadence so the 60ms escalation
 	 * ladder is not quantised by the 100ms backstop interval. */
 	mod_timer(&ep->poll_timer, jiffies +
@@ -2410,6 +2440,11 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
 #include "rtl9602c_ipmc.c"
 #endif
 
+static void rtl9602c_eth_tx_timeout(struct net_device *ndev, unsigned int txqueue)
+{
+	rtl9602c_eth_ring_timeout(netdev_priv(ndev), ndev);
+}
+
 static const struct net_device_ops rtl9602c_eth_netdev_ops = {
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	.ndo_setup_tc		= rtl9602c_l34_setup_tc,
@@ -2417,6 +2452,7 @@ static const struct net_device_ops rtl9602c_eth_netdev_ops = {
 	.ndo_open		= rtl9602c_eth_open,
 	.ndo_stop		= rtl9602c_eth_stop,
 	.ndo_start_xmit		= rtl9602c_eth_xmit,
+	.ndo_tx_timeout		= rtl9602c_eth_tx_timeout,
 	.ndo_set_mac_address	= rtl9602c_eth_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -2946,6 +2982,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &rtl9602c_eth_netdev_ops;
+	ndev->watchdog_timeo = msecs_to_jiffies(ETH_TX_TIMEOUT_MS);
 	ret = luna_mib_attach(ndev, ep->sw, ep->swm, &rtl9602c_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
@@ -2975,8 +3012,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	WRITE_ONCE(g_ep, ep);
-	ret = eth_devm_register_netdev(dev, ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
-							ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch);
+	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam | ETH_NO_get_regs);
 	if (ret)
 		return ret;
 
@@ -3006,7 +3042,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			eth_hw_addr_set(wan, wmac);
 			luna_omci_set_wan_mac(wmac);
 			netif_carrier_off(wan);
-			if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_link_ksettings |
+			if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_get_link_ksettings |
 								     ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
 								     ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch) == 0)
 				ep->wan_ndev = wan;

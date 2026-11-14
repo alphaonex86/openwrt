@@ -16,6 +16,7 @@
 
 #include "luna_eth_regs.h"
 #include "luna_eth_mib.h"
+#include "eth_pause.h"
 
 /* One countable quantity: its published name and where it sits inside the
  * per-port window.  `wide` = a 64-bit counter stored as low word at `off` and
@@ -86,6 +87,7 @@ static const struct luna_mib_field luna_mib_tx[] = {
 struct luna_port_mode {
 	u8	autoneg;
 	u8	duplex;
+	bool	tx_pause, rx_pause;	/* ethtool -a/-A: eth_pause.h */
 	u32	speed;
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(advertising);
 };
@@ -108,6 +110,9 @@ static const char *const luna_rx_len_names[] = {
 	"rx_len_long_lan", "rx_len_short_lan", "rx_len_long_wan", "rx_len_short_wan",
 };
 
+struct eth_ring_watch luna_ring_watch = ETH_RING_WATCH_INIT(luna_ring_watch);
+EXPORT_SYMBOL_GPL(luna_ring_watch);
+
 static bool luna_mib_has_rx(const struct luna_mib_state *s)
 {
 	return s->map && s->map->rx_mib && s->map->n_mib_ports;
@@ -125,8 +130,8 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 }
 
 /* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map;
- * then the received-frame length witnesses. */
-#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names))
+ * then the received-frame length witnesses and the ring watch. */
+#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS)
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
@@ -173,6 +178,7 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 	ethtool_puts(&data, "cpu_port");
 	for (i = 0; i < ARRAY_SIZE(luna_rx_len_names); i++)
 		ethtool_puts(&data, luna_rx_len_names[i]);
+	eth_ring_watch_strings(&data);
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)
@@ -199,6 +205,7 @@ static void luna_mib_get_stats(struct net_device *ndev,
 	*data++ = luna_rx_len.short_lan;
 	*data++ = luna_rx_len.long_wan;
 	*data++ = luna_rx_len.short_wan;
+	data = eth_ring_watch_stats(&luna_ring_watch, data);
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
 			for (i = 0; i < ARRAY_SIZE(luna_mib_rx); i++)
@@ -268,9 +275,24 @@ static void luna_link_supported(unsigned long *sup, u16 bmsr, u16 estat)
 	linkmode_mod_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT, sup, estat & ESTATUS_1000_TFULL);
 }
 
+/* The MAC half of ethtool -A: the PHY advertises, the MAC's own FC fields decide what the port sends. */
+static void luna_pause_apply(struct luna_mib_state *s, unsigned int port, const struct luna_port_mode *m)
+{
+	void __iomem *value = s->sw + s->map->force_ablty + port * 4;
+	void __iomem *mode = s->sw + s->map->ablty_force + port * 4;
+
+	iowrite32(eth_pause_force_value(ioread32(value), ABLTY_TX_FC, ABLTY_RX_FC), value);
+	iowrite32(eth_pause_force_mode(ioread32(mode), ABLTY_TX_FC, ABLTY_RX_FC, m->tx_pause, m->rx_pause), mode);
+}
+
 static void luna_link_check_mac(struct luna_mib_state *s, unsigned int port)
 {
 	u32 forced = ioread32(s->sw + s->map->ablty_force + port * 4);
+	u32 live = ioread32(s->sw + s->map->p_ablty + port * 4);
+
+	if (eth_pause_tx_leaks(live & ABLTY_LINK, live & ABLTY_TX_FC, s->mode[port].tx_pause))
+		netdev_err(s->ndev, "port %u: the MAC sends pause although it is set off (P_ABLTY %08x, ABLTY_FORCE_MODE %08x)\n",
+			   port, live, forced);
 
 	if (forced & (ABLTY_SPEED | ABLTY_DUPLEX))
 		netdev_err(s->ndev,
@@ -432,6 +454,8 @@ static int luna_link_set(struct net_device *ndev,
 	m.autoneg = ks->base.autoneg;
 	m.speed = ks->base.speed;
 	m.duplex = ks->base.duplex;
+	m.tx_pause = s->mode[port].tx_pause;
+	m.rx_pause = s->mode[port].rx_pause;
 	linkmode_copy(m.advertising, ks->link_modes.advertising);
 	rc = luna_link_apply(s, port, &m);
 	if (!rc)
@@ -457,6 +481,37 @@ static int luna_link_nway_reset(struct net_device *ndev)
 	return rc;
 }
 
+static void luna_pause_get(struct net_device *ndev, struct ethtool_pauseparam *p)
+{
+	const struct luna_port_mode *m = &luna_mib.mode[luna_mib.port];
+
+	p->autoneg = m->autoneg;
+	p->tx_pause = m->tx_pause;
+	p->rx_pause = m->rx_pause;
+}
+
+static int luna_pause_set(struct net_device *ndev, struct ethtool_pauseparam *p)
+{
+	struct luna_mib_state *s = &luna_mib;
+	struct luna_port_mode m;
+	int rc;
+
+	if (!s->phy)
+		return -EOPNOTSUPP;
+	m = s->mode[s->port];
+	if (p->autoneg != m.autoneg)
+		return -EINVAL;		/* pause follows the port's own auto-negotiation */
+	m.tx_pause = p->tx_pause;
+	m.rx_pause = p->rx_pause;
+	eth_pause_advertise(m.advertising, m.tx_pause, m.rx_pause);
+	rc = luna_link_apply(s, s->port, &m);
+	if (rc)
+		return rc;
+	luna_pause_apply(s, s->port, &m);
+	s->mode[s->port] = m;
+	return 0;
+}
+
 static void luna_link_default(struct luna_port_mode *m)
 {
 	static const int bits[] = {
@@ -469,7 +524,10 @@ static void luna_link_default(struct luna_port_mode *m)
 
 	memset(m, 0, sizeof(*m));
 	m->autoneg = AUTONEG_ENABLE;
+	m->tx_pause = ETH_PAUSE_TX_DEFAULT;
+	m->rx_pause = ETH_PAUSE_RX_DEFAULT;
 	linkmode_set_bit_array(bits, ARRAY_SIZE(bits), m->advertising);
+	eth_pause_advertise(m->advertising, m->tx_pause, m->rx_pause);
 }
 
 /* Called by a driver after its own PHY bring-up: every port gets its mode
@@ -483,6 +541,7 @@ void luna_mib_phy_reapply(struct net_device *ndev)
 		return;
 	for (port = 0; port < s->map->n_copper; port++) {
 		luna_link_apply(s, port, &s->mode[port]);
+		luna_pause_apply(s, port, &s->mode[port]);
 		luna_link_check_mac(s, port);
 	}
 }
@@ -497,6 +556,8 @@ static const struct ethtool_ops luna_mib_ethtool_ops = {
 	.get_link_ksettings	= luna_link_get,
 	.set_link_ksettings	= luna_link_set,
 	.nway_reset		= luna_link_nway_reset,
+	.get_pauseparam		= luna_pause_get,
+	.set_pauseparam		= luna_pause_set,
 };
 
 /* ★ THE NAME-LENGTH CHECK IS HERE AND NOT IN A COMMENT, ...
@@ -537,7 +598,8 @@ int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
 
 	if (!ndev || !ndev->dev.parent || !sw || !map || !map->n_mib_ports ||
 	    map->n_copper > LUNA_LINK_PORTS ||
-	    (phy && (!phy->lock || !phy->read || !phy->write || !map->p_ablty)))
+	    (phy && (!phy->lock || !phy->read || !phy->write || !map->p_ablty || !map->force_ablty ||
+		     !map->ablty_force)))
 		return -EINVAL;
 	if (s->ndev || ndev->ethtool_ops == &luna_mib_ethtool_ops)
 		return -EBUSY;

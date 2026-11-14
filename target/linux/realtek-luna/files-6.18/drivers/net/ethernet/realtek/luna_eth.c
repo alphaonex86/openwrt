@@ -456,6 +456,7 @@ struct luna_eth {
 	 * invalidate it -- no bounce buffers needed. */
 	struct luna_rxq		rxq[2];		/* [0] data, [1] control */
 	unsigned int		n_rxq;
+	u32			rx_taken;	/* descriptors consumed, free running: the ring watch */
 
 	struct tx_desc		*tx_ring;
 	dma_addr_t		tx_ring_dma;
@@ -2242,6 +2243,7 @@ static int eth_rx(struct luna_eth *ep, struct luna_rxq *q, int budget)
 		q->head = (i + 1) % q->size;
 		done++;
 	}
+	ep->rx_taken += done;
 	return done;
 }
 
@@ -2271,6 +2273,12 @@ static void eth_tx_reclaim(struct luna_eth *ep)
 		netif_wake_queue(ep->ndev);
 }
 
+static bool eth_rx_waiting(const struct luna_eth *ep)
+{
+	return luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||
+	       (ep->n_rxq > 1 && luna_rx_ready(ep->rxq[1].ring, ep->rxq[1].head));
+}
+
 static int eth_napi_poll(struct napi_struct *napi, int budget)
 {
 	struct luna_eth *ep = container_of(napi, struct luna_eth, napi);
@@ -2290,8 +2298,7 @@ static int eth_napi_poll(struct napi_struct *napi, int budget)
 		ep_wr(ep, R_ISR1, ep_rd(ep, R_ISR1));
 		iowrite16(IMR_RX_BITS, ep->base + R_IMR);
 		ep_wr(ep, R_IMR0, IMR0_TX_BITS);
-		if (luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||	/* its bit went to the ack */
-		    (ep->n_rxq > 1 && luna_rx_ready(ep->rxq[1].ring, ep->rxq[1].head)))
+		if (eth_rx_waiting(ep))	/* its bit went to the ack */
 			napi_schedule(napi);
 	}
 	return work;
@@ -2317,7 +2324,8 @@ static void eth_backstop(struct timer_list *t)
 {
 	struct luna_eth *ep = timer_container_of(ep, t, backstop);
 
-	napi_schedule(&ep->napi);
+	napi_schedule(&ep->napi);	/* already the recovery: the watch only counts and escalates */
+	eth_ring_watch_rx(&luna_ring_watch, ep->ndev, eth_rx_waiting(ep), ep->rx_taken);
 	mod_timer(&ep->backstop, jiffies + msecs_to_jiffies(backstop_ms));
 }
 
@@ -2577,10 +2585,29 @@ static int eth_stop(struct net_device *ndev)
 	return 0;
 }
 
+/* The kernel's TX watchdog on eth0 and gpon0, which share ring 0; only eth0 stops its queue (backpressure), so
+ * in practice it is the one it fires on. */
+static void eth_ring_timeout(struct luna_eth *ep, struct net_device *ndev)
+{
+	unsigned long flags;
+
+	netdev_err(ndev, "tx timeout: ring head %u dirty %u\n", ep->tx_head, ep->tx_dirty);
+	eth_ring_watch_tx(&luna_ring_watch, ndev);
+	spin_lock_irqsave(&ep->tx_lock, flags);
+	eth_tx_reclaim(ep);
+	spin_unlock_irqrestore(&ep->tx_lock, flags);
+}
+
+static void eth_tx_timeout(struct net_device *ndev, unsigned int txqueue)
+{
+	eth_ring_timeout(netdev_priv(ndev), ndev);
+}
+
 static const struct net_device_ops luna_eth_netdev_ops = {
 	.ndo_open		= eth_open,
 	.ndo_stop		= eth_stop,
 	.ndo_start_xmit		= eth_xmit,
+	.ndo_tx_timeout		= eth_tx_timeout,
 	.ndo_set_mac_address	= eth_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 #if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)
@@ -2652,10 +2679,16 @@ static int luna_eth_wan_stop(struct net_device *ndev)
 	return 0;
 }
 
+static void luna_eth_wan_tx_timeout(struct net_device *ndev, unsigned int txqueue)
+{
+	eth_ring_timeout(*(struct luna_eth **)netdev_priv(ndev), ndev);
+}
+
 static const struct net_device_ops luna_eth_wan_ops = {
 	.ndo_open		= luna_eth_wan_open,
 	.ndo_stop		= luna_eth_wan_stop,
 	.ndo_start_xmit		= luna_eth_wan_xmit,
+	.ndo_tx_timeout		= luna_eth_wan_tx_timeout,
 	.ndo_set_mac_address	= luna_eth_wan_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 #if IS_ENABLED(CONFIG_LUNA_FLOWOFFLOAD)
@@ -2688,7 +2721,7 @@ static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
 	eth_hw_addr_set(wan, wmac);
 	luna_omci_set_wan_mac(wmac);
 	netif_carrier_off(wan);
-	if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_link_ksettings |
+	if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_get_link_ksettings |
 						     ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
 						     ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch)) {
 		dev_warn(dev, "gpon0 (WAN) register failed; no WAN datapath\n");
@@ -2814,6 +2847,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 	}
 
 	ndev->netdev_ops = &luna_eth_netdev_ops;
+	ndev->watchdog_timeo = msecs_to_jiffies(ETH_TX_TIMEOUT_MS);
 	ret = luna_mib_attach(ndev, ep->sw, ep->c->sw_map, &luna_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
@@ -2852,8 +2886,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 		ndev->hw_features |= NETIF_F_HW_TC;
 		ndev->features |= NETIF_F_HW_TC;
 	}
-	ret = eth_devm_register_netdev(dev, ndev, NULL, ETH_NO_ndo_tx_timeout | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
-							ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch);
+	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam | ETH_NO_get_regs);
 	if (ret)
 		return ret;
 	luna_eth_wan_register(ep, dev);

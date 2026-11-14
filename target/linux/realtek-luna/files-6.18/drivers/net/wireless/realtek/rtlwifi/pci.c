@@ -1975,14 +1975,15 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
-	_rtl_pci_deinit_trx_ring(hw);
-
 	synchronize_irq(rtlpci->pdev->irq);
 	tasklet_kill(&rtlpci->rx_tasklet);
 	skb_queue_purge(&rtlpci->rx_inject);
 	tasklet_kill(&rtlpriv->works.irq_tasklet);
 	tasklet_kill(&rtlpriv->works.tx_tasklet);
 	cancel_work_sync(&rtlpriv->works.lps_change_work);
+
+	/* only once nothing can run on them */
+	_rtl_pci_deinit_trx_ring(hw);
 }
 
 static int rtl_pci_init(struct ieee80211_hw *hw, struct pci_dev *pdev)
@@ -2011,6 +2012,8 @@ static int rtl_pci_start(struct ieee80211_hw *hw)
 
 	int err;
 
+	/* no RX pass between the ring reset and hw_init's index clear */
+	tasklet_disable(&rtlpci->rx_tasklet);
 	rtl_pci_reset_trx_ring(hw);
 
 	rtlpci->driver_is_goingto_unload = false;
@@ -2024,6 +2027,7 @@ static int rtl_pci_start(struct ieee80211_hw *hw)
 	}
 
 	err = rtlpriv->cfg->ops->hw_init(hw);
+	tasklet_enable(&rtlpci->rx_tasklet);
 	if (err) {
 		rtl_dbg(rtlpriv, COMP_INIT, DBG_DMESG,
 			"Failed to config hardware!\n");

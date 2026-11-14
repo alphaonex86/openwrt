@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+# The LAN boots with its ULA only: 30-onu-ipv6-prefix-guard adds the wan6 class at run time once the
+# delegated prefix is routed back, and any later `uci commit network` persists that delta into every boot.
+
+START=19
+
+boot() {
+	case " $(uci -q get network.lan.ip6class) " in
+	*" wan6 "*) ;;
+	*) return 0 ;;
+	esac
+	uci del_list network.lan.ip6class=wan6 &&
+		{ uci -q get network.lan.ip6class >/dev/null || uci add_list network.lan.ip6class=local; } &&
+		uci commit network ||
+		logger -t onu-ipv6-prefix-boot "the committed wan6 class stays: the LAN announces a prefix before it is judged"
+}

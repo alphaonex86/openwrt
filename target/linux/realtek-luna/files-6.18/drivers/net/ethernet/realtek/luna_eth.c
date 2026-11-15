@@ -49,6 +49,7 @@
 #include <linux/mii.h>
 #include <linux/module.h>
 #include <linux/eth_netdev_contract.h>
+#include "eth_pon_link.h"	/* the PON WAN netdev's ethtool link */
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
@@ -2698,6 +2699,12 @@ static const struct net_device_ops luna_eth_wan_ops = {
 #endif
 };
 
+/* The PON WAN netdev: link state and line rate by the standard call (eth_pon_link.h). */
+static const struct ethtool_ops luna_wan_ethtool_ops = {
+	.get_link		= ethtool_op_get_link,
+	.get_link_ksettings	= eth_pon_get_link_ksettings,
+};
+
 /* Create gpon0 beside eth0.  A failure is reported and LEFT non-fatal: eth0 and
  * the OMCC are what keep the board reachable and ranged, and losing the LAN
  * because the WAN could not be registered would turn a WAN defect into a brick. */
@@ -2715,6 +2722,7 @@ static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
 	SET_NETDEV_DEV(wan, dev);
 	strscpy(wan->name, "gpon0", IFNAMSIZ);
 	wan->netdev_ops = &luna_eth_wan_ops;
+	wan->ethtool_ops = &luna_wan_ethtool_ops;
 	if (ep->flow) {
 		wan->hw_features |= NETIF_F_HW_TC;
 		wan->features |= NETIF_F_HW_TC;
@@ -2723,7 +2731,7 @@ static void luna_eth_wan_register(struct luna_eth *ep, struct device *dev)
 	eth_hw_addr_set(wan, wmac);
 	luna_omci_set_wan_mac(wmac);
 	netif_carrier_off(wan);
-	if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_get_link_ksettings |
+	if (eth_devm_register_netdev(dev, wan, NULL,
 						     ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
 						     ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch)) {
 		dev_warn(dev, "gpon0 (WAN) register failed; no WAN datapath\n");

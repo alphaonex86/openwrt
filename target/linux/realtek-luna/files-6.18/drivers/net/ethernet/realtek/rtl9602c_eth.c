@@ -4,6 +4,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/eth_netdev_contract.h>
+#include "eth_pon_link.h"	/* the PON WAN netdev's ethtool link */
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/dma-mapping.h>
@@ -2966,6 +2967,12 @@ static const struct luna_loop_ops rtl9602c_loop_ops = {
 	.gate	= rtl9602c_loop_gate,
 };
 
+/* The PON WAN netdev: link state and line rate by the standard call (eth_pon_link.h). */
+static const struct ethtool_ops rtl9602c_wan_ethtool_ops = {
+	.get_link		= ethtool_op_get_link,
+	.get_link_ksettings	= eth_pon_get_link_ksettings,
+};
+
 static int rtl9602c_eth_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -3153,6 +3160,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			SET_NETDEV_DEV(wan, dev);
 			strscpy(wan->name, "gpon0", IFNAMSIZ);
 			wan->netdev_ops = &rtl9602c_eth_wan_ops;
+			wan->ethtool_ops = &rtl9602c_wan_ethtool_ops;
 			/* Keep the LAN and WAN feature declarations consistent. */
 			wan->hw_features |= NETIF_F_HW_TC;
 			wan->features |= NETIF_F_HW_TC;
@@ -3162,7 +3170,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			eth_hw_addr_set(wan, wmac);
 			luna_omci_set_wan_mac(wmac);
 			netif_carrier_off(wan);
-			if (eth_devm_register_netdev(dev, wan, NULL, ETH_NO_get_link_ksettings |
+			if (eth_devm_register_netdev(dev, wan, NULL,
 								     ETH_NO_set_link_ksettings | ETH_NO_get_pauseparam | ETH_NO_set_pauseparam |
 								     ETH_NO_get_ethtool_stats | ETH_NO_get_ringparam | ETH_NO_get_regs | ETH_NO_rx_watch) == 0)
 				ep->wan_ndev = wan;

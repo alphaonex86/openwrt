@@ -75,6 +75,13 @@
 	status = "okay";
 };
 
+/* the ZX279200 PON MAC (1556:5555, BAR0 decodes 256 MiB); the stock kernel's window: CPU 0x08000000 = bus 0x40000000 */
+&pcie0 {
+	compatible = "brcm,iproc-hr2-pcie";
+	ranges = <0x82000000 0 0x40000000 0x08000000 0 0x08000000>;
+	status = "okay";
+};
+
 /* the UART runs on the 100 MHz APB clock: the unit's U-Boot divisor is 54 at 115200 */
 &uart0 {
 	clock-frequency = <100000000>;

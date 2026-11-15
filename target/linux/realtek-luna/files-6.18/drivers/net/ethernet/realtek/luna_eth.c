@@ -2888,7 +2888,7 @@ static int luna_eth_probe(struct platform_device *pdev)
 		ndev->hw_features |= NETIF_F_HW_TC;
 		ndev->features |= NETIF_F_HW_TC;
 	}
-	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam | ETH_NO_get_regs);
+	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam);
 	if (ret)
 		return ret;
 	luna_eth_wan_register(ep, dev);

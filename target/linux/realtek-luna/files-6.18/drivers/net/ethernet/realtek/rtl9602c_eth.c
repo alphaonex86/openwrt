@@ -27,6 +27,7 @@
 #include "luna_gpon_nic.h"
 #include "luna_wan_vlan.h"
 #include "luna_eth_mib.h"
+#include "eth_chip_patch.h"
 #include "luna_loop.h"		/* LAN loop detection, the switch engine on this die */
 #include "luna_gmac_logic.h"	/* family GMAC ring packings (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
@@ -559,6 +560,21 @@ static int rtl9602c_gphy_raw_write__locked(struct rtl9602c_eth *ep, u16 val, u32
 		return -ETIMEDOUT;
 	iowrite32(val, ep->sw + SW_GPHY_IND_WD);
 	return rtl9602c_gphy_raw_cmd__locked(ep, cmd);
+}
+
+/* One word of a PHY's own address space, beyond the MII registers. */
+static int rtl9602c_gphy_ocp_write__locked(struct rtl9602c_eth *ep, unsigned int phyad, u32 ocp, u16 val)
+{
+	return rtl9602c_gphy_raw_write__locked(ep, val, GPHY_IND_PHY(phyad) | ocp | GPHY_IND_WREN | GPHY_IND_EN);
+}
+
+static int rtl9602c_gphy_ocp_read__locked(struct rtl9602c_eth *ep, unsigned int phyad, u32 ocp, u16 *out)
+{
+	int rc = rtl9602c_gphy_raw_cmd__locked(ep, GPHY_IND_PHY(phyad) | ocp | GPHY_IND_EN);
+
+	if (!rc)
+		*out = ioread32(ep->sw + SW_GPHY_IND_RD) & 0xffff;
+	return rc;
 }
 
 static inline unsigned int tx_slot(struct rtl9602c_eth *ep, unsigned int counter)
@@ -2046,6 +2062,92 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
  * dev/MEASURED-rtl9602c_eth.c.md sec 85. */
 #define SW_RDY_FOR_PATCH_TRIES	200000	/* 200 ms at 1 us a try; the bound the wait below refuses at */
 
+/* What the stock firmware writes to the two copper PHYs after every reset, before it declares them patched: the FE
+ * PHY's link-down power saving, the GE PHY's 10M word, then the GE PHY's parameters (address, value) [tier 1: the
+ * table of the stock kernel, the same in both RTL9602C boards' stock]. */
+#define RTL9602C_GE_PHY		1
+#define GPHY_SRAM_ADDR		0xa436	/* a PHY parameter: its address here ... */
+#define GPHY_SRAM_DATA		0xa438	/* ... then its value here */
+#define GE_PARAM(addr, val)	{ RTL9602C_GE_PHY, true, GPHY_SRAM_ADDR, addr }, { RTL9602C_GE_PHY, false, GPHY_SRAM_DATA, val }
+static const struct eth_phy_word rtl9602c_gphy_words[] = {
+	{ 0, false, 0xa430, 0x019c }, { RTL9602C_GE_PHY, false, 0xbce4, 0x0000 },
+	GE_PARAM(0x809a, 0x4ad4), GE_PARAM(0x809e, 0x0506), GE_PARAM(0x809c, 0xd107), GE_PARAM(0x80a4, 0x930c), GE_PARAM(0x80a2, 0x8b19),	/* 1000M master */
+	GE_PARAM(0x80b0, 0x8006), GE_PARAM(0x80ac, 0x429c), GE_PARAM(0x80b4, 0x5319), GE_PARAM(0x80b2, 0xff7f),			/* 1000M slave */
+	GE_PARAM(0x808e, 0x15a4), GE_PARAM(0x8089, 0x6bf7), GE_PARAM(0x808a, 0xf708), GE_PARAM(0x8092, 0x401e), GE_PARAM(0x8090, 0xe61f),
+	GE_PARAM(0x8088, 0xb06b),									/* 100M */
+	GE_PARAM(0x8062, 0x2000), GE_PARAM(0x806a, 0x2300), GE_PARAM(0x8072, 0x2300), GE_PARAM(0x804d, 0x2444),			/* green tables */
+};
+
+static int rtl9602c_patch_efuse(void *ctx, unsigned int entry, u16 *out)
+{
+	struct rtl9602c_eth *ep = ctx;
+
+	return luna_efuse_read(ep->sw, ep->swm, entry, out);
+}
+
+static int rtl9602c_patch_phy_rd(void *ctx, unsigned int phy, u32 reg, u16 *out)
+{
+	return rtl9602c_gphy_ocp_read__locked(ctx, phy, reg, out);
+}
+
+static int rtl9602c_patch_phy_wr(void *ctx, unsigned int phy, u32 reg, u16 val)
+{
+	return rtl9602c_gphy_ocp_write__locked(ctx, phy, reg, val);
+}
+
+static int rtl9602c_efuse_phy_wr(void *ctx, unsigned int phy, u32 reg, u16 val)
+{
+	struct rtl9602c_eth *ep = ctx;
+	int rc = rtl9602c_gphy_ocp_write__locked(ep, phy, reg, val);
+
+	netdev_info(ep->ndev, "efuse patch: phy %u word %#x <= %#06x (%d)\n", phy, reg, val, rc);
+	return rc;
+}
+
+/* The efuse names a register by its unmapped address: only the switch core is this driver's to write. */
+static int rtl9602c_efuse_reg_wr(void *ctx, u32 addr, u32 val)
+{
+	struct rtl9602c_eth *ep = ctx;
+	u32 off = addr - (0xa0000000u | (u32)SWCORE_PHYS);
+
+	if (addr < (0xa0000000u | (u32)SWCORE_PHYS) || off > ep->swm->swcore_size - 4 || (off & 3)) {
+		netdev_warn(ep->ndev, "efuse patch: %#x <= %#x is outside the switch core: NOT written\n", addr, val);
+		return -ERANGE;
+	}
+	iowrite32(val, ep->sw + off);
+	netdev_info(ep->ndev, "efuse patch: switch %#x <= %#x\n", off, val);
+	return 0;
+}
+
+static const struct eth_chip_patch_io rtl9602c_words_io = {
+	.phy_rd = rtl9602c_patch_phy_rd, .phy_wr = rtl9602c_patch_phy_wr,
+};
+static const struct eth_chip_patch_io rtl9602c_efuse_io = {
+	.efuse = rtl9602c_patch_efuse, .phy_wr = rtl9602c_efuse_phy_wr, .reg_wr = rtl9602c_efuse_reg_wr,
+};
+/* [tier 1: the stock reader and its patch loop] */
+static const struct eth_efuse_geom rtl9602c_efuse_geom = {
+	.entries = LUNA_EFUSE_ENTRIES, .count = 11, .first = 12, .phys = 3,
+};
+
+/* Never fatal: a unit whose PHY refuses a word runs as it did before this patch existed, and says so. */
+static void rtl9602c_gphy_patch__locked(struct rtl9602c_eth *ep)
+{
+	struct eth_efuse_patch_stat st;
+	struct eth_phy_words_stat ws;
+	int rc, erc;
+
+	rc = eth_phy_words_apply(&rtl9602c_words_io, ep, rtl9602c_gphy_words, ARRAY_SIZE(rtl9602c_gphy_words), &ws);
+	if (rc)
+		netdev_err(ep->ndev, "gphy patch: the PHY parameters did NOT all land (%d): the copper ports run unpatched\n",
+			   rc);
+	erc = eth_efuse_patch(&rtl9602c_efuse_io, ep, &rtl9602c_efuse_geom, &st);
+	netdev_info(ep->ndev,
+		    "gphy patch: %u word(s) (%d), %u did not hold their value (the first held %04x); efuse patch %s (%d): %u PHY word(s), %u register word(s), %u refused, %u failed\n",
+		    ws.words, rc, ws.differed, ws.first, st.present ? "programmed" : "not programmed", erc,
+		    st.phy_words, st.reg_words, st.refused, st.failed);
+}
+
 /* > 0, or negative and the caller must NOT bring the ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 86. */
 static int rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
@@ -2089,6 +2191,9 @@ static int rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 			   rc);
 		return rc;
 	}
+	mutex_lock(&rtl9602c_gphy_lock);
+	rtl9602c_gphy_patch__locked(ep);
+	mutex_unlock(&rtl9602c_gphy_lock);
 	/* the SECOND site of the same register -- from the chip table too, or the
 	 * conversion would be half done, which is worse than none: one write
 	 * would follow a corrected offset and the other would not. */
@@ -3027,7 +3132,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	WRITE_ONCE(g_ep, ep);
-	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam | ETH_NO_get_regs);
+	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam);
 	if (ret)
 		return ret;
 

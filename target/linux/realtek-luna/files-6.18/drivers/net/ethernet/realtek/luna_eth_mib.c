@@ -4,6 +4,7 @@
  * datapath. */
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/ethtool.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -16,7 +17,9 @@
 
 #include "luna_eth_regs.h"
 #include "luna_eth_mib.h"
+#include "luna_gpon_nic.h"
 #include "eth_pause.h"
+#include "eth_chip_patch.h"
 
 /* One countable quantity: its published name and where it sits inside the
  * per-port window.  `wide` = a 64-bit counter stored as low word at `off` and
@@ -115,6 +118,36 @@ static const char *const luna_rx_len_names[] = {
 struct eth_ring_watch luna_ring_watch = ETH_RING_WATCH_INIT(luna_ring_watch);
 EXPORT_SYMBOL_GPL(luna_ring_watch);
 
+/* The register dump of this chip (its map's ranges): ethtool -d, and the kernel log at the first stalled
+ * port of a boot, before anything recovers it. Once: a second stall prints its state line only. */
+static u32 luna_sw_rd(void *ctx, u32 at)
+{
+	return ioread32(luna_mib.sw + at);
+}
+
+static int luna_regs_len(struct net_device *ndev)
+{
+	return eth_regs_words(luna_mib.map->dump, ARRAY_SIZE(luna_mib.map->dump)) * 2 * sizeof(u32);
+}
+
+static void luna_regs_get(struct net_device *ndev, struct ethtool_regs *regs, void *data)
+{
+	regs->version = 1;
+	eth_regs_pairs(luna_mib.map->dump, ARRAY_SIZE(luna_mib.map->dump), luna_sw_rd, NULL, data);
+}
+
+static void luna_mib_stall_dump(struct net_device *ndev)
+{
+	static bool printed;
+
+	if (printed)
+		return;
+	printed = true;
+	eth_regs_log(ndev, "stall dump", luna_mib.map->dump, ARRAY_SIZE(luna_mib.map->dump), luna_sw_rd, NULL);
+	if (IS_ENABLED(CONFIG_LUNA_GPON))
+		luna_gpon_stall_dump(ndev);
+}
+
 /* What a stall looked like, before it is recovered: the link above the port, the chip's own crash word, and per port
  * the egress pages it holds (now in the low half, the most ever in the high half) with the pause frames it received. */
 static void luna_mib_stall_state(struct net_device *ndev)
@@ -130,6 +163,7 @@ static void luna_mib_stall_state(struct net_device *ndev)
 		scnprintf(crash, sizeof(crash), "%08x", ioread32(s->sw + s->map->crash_intr));
 	netdev_err(ndev, "stall state: carrier %d, up %d time(s), crash word %s, egress pages/pause frames in per port%s\n",
 		   netif_carrier_ok(ndev), atomic_read(&ndev->carrier_up_count), crash, ports);
+	luna_mib_stall_dump(ndev);
 }
 
 /* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it. */
@@ -623,6 +657,52 @@ void luna_mib_phy_reapply(struct net_device *ndev)
 }
 EXPORT_SYMBOL_GPL(luna_mib_phy_reapply);
 
+/* One 16-bit entry of the chip's efuse. -> 0, -EOPNOTSUPP on a chip whose efuse registers are not established. */
+int luna_efuse_read(void __iomem *sw, const struct luna_sw_map *map, unsigned int entry, u16 *out)
+{
+	static DEFINE_MUTEX(lock);
+	int rc = -ETIMEDOUT;
+	unsigned int i;
+	u32 v;
+
+	if (!map->efuse_cmd)
+		return -EOPNOTSUPP;
+	if (entry >= LUNA_EFUSE_ENTRIES)
+		return -EINVAL;
+	mutex_lock(&lock);
+	iowrite32(LUNA_EFUSE_BUSY | entry, sw + map->efuse_cmd);
+	for (i = 0; rc && i < 1000; i++) {
+		v = ioread32(sw + map->efuse_cmd + 4);
+		if (v & LUNA_EFUSE_BUSY) {
+			udelay(1);
+			continue;
+		}
+		*out = v & 0xffff;
+		rc = 0;
+	}
+	mutex_unlock(&lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(luna_efuse_read);
+
+static int luna_efuse_len(struct net_device *ndev)
+{
+	return luna_mib.map->efuse_cmd ? LUNA_EFUSE_ENTRIES * 2 : 0;
+}
+
+static int luna_efuse_entry(void *ctx, unsigned int entry, u16 *out)
+{
+	return luna_efuse_read(luna_mib.sw, luna_mib.map, entry, out);
+}
+
+/* The chip efuse as ethtool's EEPROM: ethtool -e. */
+static int luna_efuse_get(struct net_device *ndev, struct ethtool_eeprom *ee, u8 *data)
+{
+	static const struct eth_chip_patch_io io = { .efuse = luna_efuse_entry };
+
+	return eth_efuse_bytes(&io, NULL, ee->offset, ee->len, data);
+}
+
 static const struct ethtool_ops luna_mib_ethtool_ops = {
 	.get_drvinfo		= luna_mib_get_drvinfo,
 	.get_link		= ethtool_op_get_link,
@@ -634,6 +714,10 @@ static const struct ethtool_ops luna_mib_ethtool_ops = {
 	.nway_reset		= luna_link_nway_reset,
 	.get_pauseparam		= luna_pause_get,
 	.set_pauseparam		= luna_pause_set,
+	.get_eeprom_len		= luna_efuse_len,
+	.get_eeprom		= luna_efuse_get,
+	.get_regs_len		= luna_regs_len,
+	.get_regs		= luna_regs_get,
 };
 
 /* ★ THE NAME-LENGTH CHECK IS HERE AND NOT IN A COMMENT, ...

@@ -53,6 +53,7 @@
 #include <linux/kernel.h>	/* sscanf */
 #include <linux/types.h>
 #include <linux/bits.h>
+#include "eth_regs_dump.h"
 #include "luna_gmac_logic.h"	/* struct luna_rx_layout: the per-die RX field map */
 #include "luna_ctl_acl.h"	/* struct luna_ctl_acl: the control-ethertype ACL */
 
@@ -501,6 +502,10 @@ struct luna_sw_map {
 	u32 pe_used;		/* per-port egress pages in use, one word per port; 0 = not established */
 	u32 sw_rst;		/* SOFTWARE_RST; 0 = not established */
 	u32 crash_intr;		/* CRASH_INTR: what the chip itself latched (a hung transmitter per port); 0 = not established */
+	u32 efuse_cmd;		/* EFUSE_IND_CMD (start bit 16 | entry), its answer in the next word; 0 = not established */
+	/* The words of a register dump (ethtool -d, and the first stalled port of a boot): only ranges already
+	 * read on a running unit of this chip, on both firmwares. A range of 0 words ends the list. */
+	struct eth_reg_range dump[12];
 	u8  n_mib_ports;	/* MIB port index range is 0..n_mib_ports-1	*/
 	/* ★ THE MAC-LEVEL MIB ARRAY, and it is ESTABLISHED ON ONE DIE ONLY.
 	 * Offset (from the MAC base, not the switch base) of the fourteen 16-bit
@@ -561,6 +566,10 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.pe_used	= 0x2D028,	/* [tier 1, read on a unit whose CPU port sent nothing] */
 	.sw_rst		= 0x00104,	/* [tier 1, its core reset reopened that port, tables and fibre kept] */
 	.crash_intr	= 0x00164,	/* [tier 1, bit 5 rose when a unit's port 1 stopped sending] */
+	.efuse_cmd	= 0x0001c,	/* [tier 1, the stock reader] */
+	.dump		= { { 0x00000, 192 }, { 0x11000, 36 }, { 0x20004, 14 }, { 0x20100, 15 }, { 0x20200, 15 },
+			    { 0x20300, 15 }, { 0x23000, 75 }, { 0x2d018, 3 }, { 0x2d028, 4 }, { 0x2d058, 32 },
+			    { 0x2d800, 48 } },
 	.n_mib_ports	= 4,		/* register map port index 0..3 */
 	.gmac_mib16	= 0x10,		/* the 16-bit MAC MIB array [tier 2, stock hw_reg] */
 	.omci_cpu_reason = 246,	/* RTL9602C_CHIP_ID -> omciRsn 246 [tier 3, gponapi.c] */
@@ -598,6 +607,7 @@ static const struct luna_sw_map rtl9603cvd_sw_map = {
 	.ctl_acl	= &rtl9603cvd_ctl_acl,
 	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9603CVD,	/* [tier 3, its register map] */
 	.n_mib_ports	= 7,		/* register map port index 0..6 */
+	.dump		= { { 0x00000, 192 }, { 0x23000, 64 } },
 	.gmac_mib16	= 0,		/* NOT ESTABLISHED on this die -- no mac_* rows */
 	.omci_cpu_reason = 229,	/* RTL9603CVD_CHIP_ID -> omciRsn 229 [tier 3, gponapi.c] */
 	.rx_layout	= &luna_rx_layout_rtl9603cvd,

@@ -29,6 +29,10 @@ int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
 		    const struct luna_sw_map *map, const struct luna_phy_ops *phy);
 void luna_mib_phy_reapply(struct net_device *ndev);
 
+#define LUNA_EFUSE_ENTRIES	128		/* [tier 1 on the RTL9602C: its stock reader refuses entry 128] */
+#define LUNA_EFUSE_BUSY		0x10000u	/* the start bit of the command word, the busy bit of the answer */
+int luna_efuse_read(void __iomem *sw, const struct luna_sw_map *map, unsigned int entry, u16 *out);
+
 /* Received frames whose length is off their own IP header, by side: ethtool -S rx_len_*. */
 extern struct eth_rx_len luna_rx_len;
 

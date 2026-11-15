@@ -5027,19 +5027,32 @@ static int bosadump_proc_show_locked(struct seq_file *s, void *v)
 /* Full PON-IP register dump in the EXACT format of cross-compiler/stock_dump_good.txt
  * ("0x1bf0XXXX YYYYYYYY"), so mine-vs-stock diffing needs no reformatting. Covers the
  * 0x0000-0x54fc span the stock oracle captured. Read once: cat /proc/pidump. */
+/* Only the mapped PON-IP windows (gaps bus-fault on read): the readable spans of
+ * cross-compiler/stock_dump_good.txt, in order. */
+static const struct eth_reg_range pidump_ranges[] = {
+	{ 0x0000, 256 }, { 0x2000, 768 }, { 0x4000, 64 }, { 0x5400, 64 },
+};
+
+static u32 pidump_rd(void *ctx, u32 at)
+{
+	return pi_rd(at);
+}
+
+/* The same windows in the kernel log, at the first stalled port of a boot (luna_eth_mib.c). */
+void luna_gpon_stall_dump(struct net_device *ndev)
+{
+	if (ponip_base)
+		eth_regs_log(ndev, "stall pon", pidump_ranges, ARRAY_SIZE(pidump_ranges), pidump_rd, NULL);
+}
+EXPORT_SYMBOL_GPL(luna_gpon_stall_dump);
+
 static int pidump_proc_show(struct seq_file *s, void *v)
 {
-	/* Only the mapped PON-IP windows (gaps bus-fault on read). Ranges match the
-	 * readable spans of cross-compiler/stock_dump_good.txt. */
-	static const u32 ranges[][2] = {
-		{0x0000, 0x03fc}, {0x2000, 0x2bfc},	/* the four readable PON-IP windows */
-		{0x4000, 0x40fc}, {0x5400, 0x54fc},	/* of stock_dump_good.txt, in order */
-	};
 	u32 off, val;
 	int r;
 
-	for (r = 0; r < (int)ARRAY_SIZE(ranges); r++)
-		for (off = ranges[r][0]; off <= ranges[r][1]; off += 4) {
+	for (r = 0; r < (int)ARRAY_SIZE(pidump_ranges); r++)
+		for (off = pidump_ranges[r].at; off < pidump_ranges[r].at + pidump_ranges[r].words * 4; off += 4) {
 			val = pi_rd(off);
 			if (val)	/* skip zeros: keeps the dump small for reliable serial read */
 				seq_printf(s, "0x%08x %08x\n", 0x1bf00000u + off, val);

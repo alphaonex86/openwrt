@@ -101,9 +101,10 @@ static void idm_stop_hw(struct idm *p)
 
 /*
  * The stock kernel's order: stopped, coalescing, buffer size, rings, sizes, every receive slot handed over. New rings
- * do not rewind the port: it resumes each ring at the slot after the frames sent or received but not yet
- * acknowledged (netifd reopens the port at boot, ten sent still counted; on the unit, restarting at slot 0 put
- * every frame a ring lap late), so the driver starts there and acknowledges them.
+ * do not rewind the port: re-initialised (netifd reopens it at boot), it resumes each ring where it stopped. The
+ * driver keeps its own positions across a stop, skips the frames still counted and acknowledges them. On the unit, a
+ * transmit ring restarted at slot 0 put every frame a ring lap late, and a receive ring restarted at slot 0 after one
+ * frame handed each frame up only when the next one came (2026-11-15: ping time = ping interval, ssh 10-110 s).
  */
 static void idm_init_hw(struct idm *p)
 {
@@ -129,15 +130,14 @@ static void idm_init_hw(struct idm *p)
 	wr(p, IDM_TX_BASE + 4, upper_32_bits(tx_ring));
 	wr(p, IDM_RING_SIZE, SLOTS << 16 | SLOTS);
 	wr(p, IDM_RX_ACK, SLOTS << 16);
-	p->rx_next = rx_left % SLOTS;
-	p->tx.next = tx_left % SLOTS;
+	p->rx_next = (p->rx_next + rx_left) % SLOTS;
 	p->tx.inflight = 0;
 	if (rx_left)
 		wr(p, IDM_RX_ACK, rx_left << 16 | rx_left);
 	if (tx_left)
 		wr(p, IDM_TX_KICK, tx_left);
-	netdev_info(p->ndev, "%u sent and %u received left unacknowledged: the rings start at those slots\n",
-		    tx_left, rx_left);
+	netdev_info(p->ndev, "%u sent and %u received left unacknowledged: the rings resume at slots %u and %u\n",
+		    tx_left, rx_left, p->tx.next, p->rx_next);
 }
 
 static void idm_rx_one(struct idm *p, unsigned int slot)

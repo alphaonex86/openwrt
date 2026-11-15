@@ -144,7 +144,7 @@ void rtl_restart_hw(struct ieee80211_hw *hw)
 	rtlpriv->restart_asked = now;
 	if (rtlpriv->restarts >= RTL_RESTARTS_MAX) {
 		if (rtlpriv->restarts == RTL_RESTARTS_MAX)
-			pr_err("rtlwifi: %u restarts did not cure the adapter: none again before %u quiet seconds\n",
+			pr_err("%u restarts did not cure the adapter: none again before %u quiet seconds\n",
 			       RTL_RESTARTS_MAX, RTL_RESTART_CURED_S);
 		rtlpriv->restarts = RTL_RESTARTS_MAX + 1;
 		return;

@@ -336,6 +336,21 @@ static void __init luna_pcie_perst(bool assert)
 	mb();
 }
 
+/* The endpoint as the previous boot left it. Out of reset here, it kept its
+ * bus mastering from that boot up to the reset below. */
+static void __init luna_pcie_perst_entry(void)
+{
+	u32 bit;
+
+	if (!chip->perst_data)
+		return;
+	bit = 1u << chip->perst_bit;
+	pr_info("realtek-pcie: endpoint reset line at entry: pad %s, %s, level %s\n",
+		readl((void __iomem *)chip->perst_pad_en) & bit ? "gpio" : "not gpio",
+		readl((void __iomem *)chip->perst_dir) & bit ? "driven" : "not driven",
+		readl((void __iomem *)chip->perst_data) & bit ? "high (out of reset)" : "low (in reset)");
+}
+
 /* Full PCIe host bring-up, in the controller's own reset ...
  * dev/MEASURED-pcie-luna.c.md sec 13. */
 static int __init luna_pcie_reset(void)
@@ -344,6 +359,7 @@ static int __init luna_pcie_reset(void)
 	int i;
 
 	/* 0. Hold the endpoint in reset for the whole bring-up. */
+	luna_pcie_perst_entry();
 	luna_pcie_perst(true);
 	mdelay(10);
 

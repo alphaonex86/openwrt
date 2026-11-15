@@ -115,18 +115,21 @@ static const char *const luna_rx_len_names[] = {
 struct eth_ring_watch luna_ring_watch = ETH_RING_WATCH_INIT(luna_ring_watch);
 EXPORT_SYMBOL_GPL(luna_ring_watch);
 
-/* What a stall looked like, before it is recovered: the link above the port and the egress pages every port holds
- * (now in the low half, the most ever in the high half). */
+/* What a stall looked like, before it is recovered: the link above the port, the chip's own crash word, and per port
+ * the egress pages it holds (now in the low half, the most ever in the high half) with the pause frames it received. */
 static void luna_mib_stall_state(struct net_device *ndev)
 {
 	struct luna_mib_state *s = &luna_mib;
-	char pages[LUNA_LINK_PORTS * 9 + 1] = "";
+	char ports[LUNA_LINK_PORTS * 20 + 1] = "", crash[12] = "not asked";
 	unsigned int port, n = 0;
 
 	for (port = 0; s->map->pe_used && port < s->map->n_mib_ports && port < LUNA_LINK_PORTS; port++)
-		n += scnprintf(pages + n, sizeof(pages) - n, " %08x", ioread32(s->sw + s->map->pe_used + port * 4));
-	netdev_err(ndev, "stall state: carrier %d, up %d time(s), egress pages per port%s\n", netif_carrier_ok(ndev),
-		   atomic_read(&ndev->carrier_up_count), pages);
+		n += scnprintf(ports + n, sizeof(ports) - n, " %08x/%u", ioread32(s->sw + s->map->pe_used + port * 4),
+			       ioread32(s->sw + s->map->rx_mib + port * SW_STAT_PORT_MIB_STRIDE + LUNA_MIB_RX_PAUSE));
+	if (s->map->crash_intr)
+		scnprintf(crash, sizeof(crash), "%08x", ioread32(s->sw + s->map->crash_intr));
+	netdev_err(ndev, "stall state: carrier %d, up %d time(s), crash word %s, egress pages/pause frames in per port%s\n",
+		   netif_carrier_ok(ndev), atomic_read(&ndev->carrier_up_count), crash, ports);
 }
 
 /* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it. */
@@ -166,10 +169,12 @@ void luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready)
 		bool cpu = port == s->map->cpu_port;
 		bool ready = cpu ? cpu_ready : port < s->map->n_copper &&
 			(ioread32(s->sw + s->map->p_ablty + port * 4) & ABLTY_LINK);
+		u32 held = ioread32(s->sw + s->map->pe_used + port * 4) & PE_USED_NOW;
 
+		/* a page carries a minimal frame at least */
 		if (!eth_port_egress_judge(ndev, &luna_port_egress[port], cpu ? "CPU" : "copper", ready,
-					   ioread32(s->sw + s->map->rx_mib + at + LUNA_MIB_RX_PAUSE),
-					   ioread32(s->sw + s->map->pe_used + port * 4) & PE_USED_NOW,
+					   ioread32(s->sw + s->map->rx_mib + at + LUNA_MIB_RX_PAUSE), held,
+					   held * ETH_ZLEN,
 					   ioread32(s->sw + SW_STAT_PORT_TX_MIB + at + LUNA_MIB_TX_OCTETS)))
 			continue;
 		luna_mib_stall_state(ndev);

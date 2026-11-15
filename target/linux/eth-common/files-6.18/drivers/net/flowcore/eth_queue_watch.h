@@ -106,19 +106,22 @@ static inline enum eth_watch eth_egress_held_sample(struct eth_egress_watch *e, 
 	return eth_egress_watch_sample(e, e->offered + (queued >= ETH_EGRESS_STALL_FRAMES ? queued : 0), sent, now_ms);
 }
 /* One switch port: `ready` = it has a link (the CPU port: its ring owes nothing); a port its partner paused since
- * the last sample holds its queue by right and is not judged either. */
+ * the last sample holds its queue by right and is not judged either. `drain` = the least the port counts out when
+ * the queue it holds leaves: a port that keeps its queue and counts out less is held too, its trickle is not sending
+ * (a unit in service: 1014 pages kept 7 min at 25 octets/s). */
 struct eth_port_egress {
 	struct eth_egress_watch watch;
 	u32 paused;
 };
 
 static inline enum eth_watch eth_port_egress_sample(struct eth_port_egress *p, bool ready, u32 paused, u32 queued,
-						    u32 sent, u64 now_ms)
+						    u32 drain, u32 sent, u64 now_ms)
 {
 	bool judged = ready && paused == p->paused;
+	bool trickle = judged && queued >= ETH_EGRESS_STALL_FRAMES && sent - p->watch.sent < drain;
 
 	p->paused = paused;
-	return eth_egress_held_sample(&p->watch, judged ? queued : 0, sent, now_ms);
+	return eth_egress_held_sample(&p->watch, judged ? queued : 0, trickle ? p->watch.sent : sent, now_ms);
 }
 #ifdef __KERNEL__
 #include <linux/ethtool.h>
@@ -178,9 +181,10 @@ static inline void eth_egress_watch_act(struct net_device *ndev, const struct et
 }
 /* -> true when the caller must recover the port (reset its switch core). */
 static inline bool eth_port_egress_judge(struct net_device *ndev, struct eth_port_egress *p, const char *name,
-					 bool ready, u32 paused, u32 queued, u32 sent)
+					 bool ready, u32 paused, u32 queued, u32 drain, u32 sent)
 {
-	enum eth_watch v = eth_port_egress_sample(p, ready, paused, queued, sent, jiffies64_to_msecs(get_jiffies_64()));
+	enum eth_watch v = eth_port_egress_sample(p, ready, paused, queued, drain, sent,
+						  jiffies64_to_msecs(get_jiffies_64()));
 
 	eth_egress_watch_act(ndev, &p->watch, v, name);
 	return v == ETH_WATCH_RECOVER;

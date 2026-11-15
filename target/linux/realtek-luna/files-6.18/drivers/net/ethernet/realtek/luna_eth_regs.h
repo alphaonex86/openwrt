@@ -500,6 +500,7 @@ struct luna_sw_map {
 	u32 rx_mib;		/* STAT_PORT_RX_MIB base; 0 = not established */
 	u32 pe_used;		/* per-port egress pages in use, one word per port; 0 = not established */
 	u32 sw_rst;		/* SOFTWARE_RST; 0 = not established */
+	u32 crash_intr;		/* CRASH_INTR: what the chip itself latched (a hung transmitter per port); 0 = not established */
 	u8  n_mib_ports;	/* MIB port index range is 0..n_mib_ports-1	*/
 	/* ★ THE MAC-LEVEL MIB ARRAY, and it is ESTABLISHED ON ONE DIE ONLY.
 	 * Offset (from the MAC base, not the switch base) of the fourteen 16-bit
@@ -559,6 +560,7 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.rx_mib		= SW_STAT_PORT_RX_MIB_RTL9602C,	/* [tier 3, its register map] */
 	.pe_used	= 0x2D028,	/* [tier 1, read on a unit whose CPU port sent nothing] */
 	.sw_rst		= 0x00104,	/* [tier 1, its core reset reopened that port, tables and fibre kept] */
+	.crash_intr	= 0x00164,	/* [tier 1, bit 5 rose when a unit's port 1 stopped sending] */
 	.n_mib_ports	= 4,		/* register map port index 0..3 */
 	.gmac_mib16	= 0x10,		/* the 16-bit MAC MIB array [tier 2, stock hw_reg] */
 	.omci_cpu_reason = 246,	/* RTL9602C_CHIP_ID -> omciRsn 246 [tier 3, gponapi.c] */

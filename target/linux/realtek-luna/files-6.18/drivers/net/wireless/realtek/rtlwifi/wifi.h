@@ -2718,7 +2718,10 @@ struct rtl_priv {
 	 */
 	unsigned long status;
 	unsigned long restart_asked;	/* jiffies of the last request, 0 = none */
-	u8 restarts;			/* since the adapter last stayed quiet */
+	u8 restarts;			/* in a row, none followed by a transmitted beacon */
+	u32 restarts_total;
+	u32 bcn_tx_ok;			/* beacons the chip reported sent (TBDOK) */
+	u32 bcn_tx_ok_at_restart;
 
 	/* tables for dm */
 	struct dig_t dm_digtable;

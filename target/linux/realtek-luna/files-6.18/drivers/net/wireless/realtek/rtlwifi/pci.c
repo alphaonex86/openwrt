@@ -1026,9 +1026,11 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 	}
 
 	/*<1> beacon related */
-	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_TBDOK])
+	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_TBDOK]) {
+		WRITE_ONCE(rtlpriv->bcn_tx_ok, rtlpriv->bcn_tx_ok + 1);
 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE,
 			"beacon ok interrupt!\n");
+	}
 
 	if (unlikely(intvec.inta & rtlpriv->cfg->maps[RTL_IMR_TBDER]))
 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE,

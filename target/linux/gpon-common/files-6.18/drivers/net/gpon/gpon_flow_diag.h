@@ -26,6 +26,7 @@ enum gpon_flow_refusal {
 	GPON_FLOW_REF_VLAN_ACTION,	/* a tag push/pop: no engine here can   */
 	GPON_FLOW_REF_ACTION_ID,	/* an action verb we do not implement   */
 	GPON_FLOW_REF_INCOMPLETE,	/* redirect / NAT / port: one missing   */
+	GPON_FLOW_REF_ROUTED_V4,	/* IPv4 with no NAT: this engine cannot */
 	GPON_FLOW_REF_NOMEM,
 	GPON_FLOW_REF_ENGINE,		/* the family's install() FAILED        */
 	GPON_FLOW_REF_BY_DESIGN,	/* the family DECLINED: this leg needs

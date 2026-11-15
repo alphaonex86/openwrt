@@ -27,7 +27,7 @@ struct gpon_flow_act {
 	 * ops->wan_vlan: the VID the US leg pushes, or the DS leg's pop.	*/
 	u16 vlan_vid;		/* US: 1..4094, 0 = no tag pushed		*/
 	u8  vlan_pop;		/* DS: 1 = the rule pops one tag		*/
-	u8  routed;		/* IPv6: forwarded, no address rewritten	*/
+	u8  routed;		/* forwarded, no address rewritten: IPv6, or IPv4 with no NAT */
 };
 
 /* The devices the rule names, and which leg this is. The core ...
@@ -79,6 +79,10 @@ struct gpon_flow_ops {
 
 	/* The engine forwards routed IPv6 flows; false = refused as not-ipv4. */
 	bool ipv6;
+
+	/* The engine forwards IPv4 flows that carry no NAT (a public subnet behind
+	 * the unit); false = refused as routed-v4. */
+	bool ipv4_routed;
 
 	/* Bytes of per-entry family state, appended to the core's ...
 	 * dev/MEASURED-gpon_flow_offload.h.md sec 6. */

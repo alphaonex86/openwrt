@@ -221,6 +221,8 @@ int gpon_flow_act_from_tc(struct gpon_flow_offload *fo, struct flow_rule *rule,
 
 	act->dmac_valid = got_dmac_lo && got_dmac_hi;
 
+	if (!act->nat_valid && !act->port_valid)
+		act->routed = 1;	/* IPv4 too: a public subnet behind the unit */
 	if (act->routed) {
 		if (!*odev_out || act->nat_valid || act->port_valid) {
 			if (why)
@@ -364,6 +366,11 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	err = gpon_flow_act_from_tc(fo, rule, ctx.ds_leg, &act, &ctx.odev, &why);
 	if (err)
 		goto out_put;
+	if (act.routed && key.ip_ver != 6 && !fo->ops->ipv4_routed) {
+		why = GPON_FLOW_REF_ROUTED_V4;
+		err = -EOPNOTSUPP;
+		goto out_put;
+	}
 
 	err = gpon_flow_install_entry(fo, &key, &act, &ctx, f->cookie, &why);
 	if (err)

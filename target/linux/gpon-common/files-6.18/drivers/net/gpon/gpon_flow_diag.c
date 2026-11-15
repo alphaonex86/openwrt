@@ -21,6 +21,7 @@ static const char * const gpon_flow_refusal_names[GPON_FLOW_REF__COUNT] = {
 	[GPON_FLOW_REF_VLAN_ACTION]	= "vlan-action",
 	[GPON_FLOW_REF_ACTION_ID]	= "action-id",
 	[GPON_FLOW_REF_INCOMPLETE]	= "incomplete",
+	[GPON_FLOW_REF_ROUTED_V4]	= "routed-v4",
 	[GPON_FLOW_REF_NOMEM]		= "nomem",
 	[GPON_FLOW_REF_ENGINE]		= "engine",
 	[GPON_FLOW_REF_BY_DESIGN]	= "by-design",

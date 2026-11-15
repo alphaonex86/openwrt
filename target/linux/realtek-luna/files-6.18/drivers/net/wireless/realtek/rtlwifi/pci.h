@@ -220,6 +220,7 @@ struct rtl_pci {
 	u16 hang_rp[RTL_PCI_MAX_TX_QUEUE_COUNT];
 	unsigned long hang_since[RTL_PCI_MAX_TX_QUEUE_COUNT];	/* jiffies, 0 = no clock */
 	bool pcie_tx_stuck;
+	bool tx_hang_told;
 
 	 /*ASPM*/ u8 const_pci_aspm;
 	u8 const_hwsw_rfoff_d3;

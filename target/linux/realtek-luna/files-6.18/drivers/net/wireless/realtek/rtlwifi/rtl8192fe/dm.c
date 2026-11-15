@@ -1222,14 +1222,18 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	spin_unlock(&rtlpriv->locks.rf_ps_lock);
 
 	rtl92fe_txdma_error(hw);
-	if (rtl92fe_tx_hang_detect(hw)) {
+	if (!rtl92fe_tx_hang_detect(hw)) {
+		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_told = false;
+	} else {
 		struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
 		rtlpci->tx_hang_resets++;
-		pr_warn("TX stuck: %s (txdma_err=%u so far), restart_on_tx_hang=%d\n",
-			rtlpci->pcie_tx_stuck ? "the PCIe engine reports itself stuck (0x3f3)"
-					      : "a queue's HW index unmoved for 60 s, no other queue alive",
-			rtlpci->txdma_err, rtl92fe_restart_on_tx_hang);
+		if (!rtlpci->tx_hang_told)
+			pr_warn("TX stuck: %s (txdma_err=%u so far), restart_on_tx_hang=%d\n",
+				rtlpci->pcie_tx_stuck ? "the PCIe engine reports itself stuck (0x3f3)"
+						      : "a queue's HW index unmoved for 60 s, no other queue alive",
+				rtlpci->txdma_err, rtl92fe_restart_on_tx_hang);
+		rtlpci->tx_hang_told = true;
 		if (rtl92fe_restart_on_tx_hang)
 			rtl_restart_hw(hw);
 	}

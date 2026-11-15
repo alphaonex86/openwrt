@@ -129,13 +129,30 @@ static void rtl_op_stop(struct ieee80211_hw *hw, bool suspend);
  * so start() stops the adapter first and forgets what is about to be
  * replayed -- else start() returns 0 on a live chip and add_interface
  * refuses the vif it still holds.
+ * A fault that survives RTL_RESTARTS_MAX restarts is left alone until it
+ * has asked for none during RTL_RESTART_CURED_S: a dead card is not
+ * restarted for ever.
  */
 void rtl_restart_hw(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	unsigned long now = jiffies ? jiffies : 1;
 
-	if (!test_and_set_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status))
+	if (rtlpriv->restart_asked &&
+	    time_after_eq(now, rtlpriv->restart_asked + RTL_RESTART_CURED_S * HZ))
+		rtlpriv->restarts = 0;
+	rtlpriv->restart_asked = now;
+	if (rtlpriv->restarts >= RTL_RESTARTS_MAX) {
+		if (rtlpriv->restarts == RTL_RESTARTS_MAX)
+			pr_err("rtlwifi: %u restarts did not cure the adapter: none again before %u quiet seconds\n",
+			       RTL_RESTARTS_MAX, RTL_RESTART_CURED_S);
+		rtlpriv->restarts = RTL_RESTARTS_MAX + 1;
+		return;
+	}
+	if (!test_and_set_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status)) {
+		rtlpriv->restarts++;
 		ieee80211_restart_hw(hw);
+	}
 }
 EXPORT_SYMBOL_GPL(rtl_restart_hw);
 

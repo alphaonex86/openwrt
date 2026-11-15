@@ -2717,6 +2717,8 @@ struct rtl_priv {
 	 * interface or hardware
 	 */
 	unsigned long status;
+	unsigned long restart_asked;	/* jiffies of the last request, 0 = none */
+	u8 restarts;			/* since the adapter last stayed quiet */
 
 	/* tables for dm */
 	struct dig_t dm_digtable;

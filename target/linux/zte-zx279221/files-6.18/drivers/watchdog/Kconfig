@@ -456,6 +456,15 @@ config ARM_SBSA_WATCHDOG
 	  To compile this driver as module, choose M here: The module
 	  will be called sbsa_gwdt.
 
+config C610_CPLD_WDT
+	tristate "ZTE ZXA10 C610 board CPLD watchdogs"
+	depends on SPI && OF
+	select WATCHDOG_CORE
+	help
+	  Closes the one-minute boot watchdog of the C610 board CPLD, which
+	  the boot loader arms before it starts a kernel, and offers the
+	  CPLD's long watchdog as a standard watchdog.
+
 config ZX279221_WDT
 	tristate "ZTE ZX279221 SoC watchdog"
 	depends on ARM64 || COMPILE_TEST

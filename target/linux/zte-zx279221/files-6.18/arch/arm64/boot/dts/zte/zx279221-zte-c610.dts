@@ -173,6 +173,21 @@
 			memory-region = <&mgmt_dma>;
 		};
 
+		/* SSP0, polled; the board CPLD on chip select 0, in mode 1 at 8 MHz as the stock kernel reaches it */
+		spi@7109000 {
+			compatible = "zte,zx279221-spi";
+			reg = <0x0 0x7109000 0x0 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			cpld@0 {
+				compatible = "zte,c610-cpld";
+				reg = <0>;
+				spi-cpha;
+				spi-max-frequency = <8000000>;
+			};
+		};
+
 		rstcfg: syscon@7300004 {
 			compatible = "zte,zx279221-rstcfg", "syscon";
 			reg = <0x0 0x7300004 0x0 0x4>;

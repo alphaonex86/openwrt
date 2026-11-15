@@ -115,20 +115,36 @@ static const char *const luna_rx_len_names[] = {
 struct eth_ring_watch luna_ring_watch = ETH_RING_WATCH_INIT(luna_ring_watch);
 EXPORT_SYMBOL_GPL(luna_ring_watch);
 
+/* What a stall looked like, before it is recovered: the link above the port and the egress pages every port holds
+ * (now in the low half, the most ever in the high half). */
+static void luna_mib_stall_state(struct net_device *ndev)
+{
+	struct luna_mib_state *s = &luna_mib;
+	char pages[LUNA_LINK_PORTS * 9 + 1] = "";
+	unsigned int port, n = 0;
+
+	for (port = 0; s->map->pe_used && port < s->map->n_mib_ports && port < LUNA_LINK_PORTS; port++)
+		n += scnprintf(pages + n, sizeof(pages) - n, " %08x", ioread32(s->sw + s->map->pe_used + port * 4));
+	netdev_err(ndev, "stall state: carrier %d, up %d time(s), egress pages per port%s\n", netif_carrier_ok(ndev),
+		   atomic_read(&ndev->carrier_up_count), pages);
+}
+
 /* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it. */
 static struct eth_egress_watch luna_pon_egress;
 
 void luna_mib_pon_egress_sample(struct net_device *wan, u32 offered)
 {
 	struct luna_mib_state *s = &luna_mib;
+	enum eth_watch v;
 	u32 sent;
 
 	if (!s->sw)
 		return;
 	sent = ioread32(s->sw + SW_STAT_PORT_TX_MIB + s->map->pon_port * SW_STAT_PORT_MIB_STRIDE + LUNA_MIB_TX_OCTETS);
-	eth_egress_watch_act(wan, &luna_pon_egress,
-			     eth_egress_watch_sample(&luna_pon_egress, offered, sent, jiffies64_to_msecs(get_jiffies_64())),
-			     "fibre");
+	v = eth_egress_watch_sample(&luna_pon_egress, offered, sent, jiffies64_to_msecs(get_jiffies_64()));
+	if (v != ETH_WATCH_OK)
+		luna_mib_stall_state(wan);
+	eth_egress_watch_act(wan, &luna_pon_egress, v, "fibre");
 }
 EXPORT_SYMBOL_GPL(luna_mib_pon_egress_sample);
 
@@ -156,6 +172,7 @@ void luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready)
 					   ioread32(s->sw + s->map->pe_used + port * 4) & PE_USED_NOW,
 					   ioread32(s->sw + SW_STAT_PORT_TX_MIB + at + LUNA_MIB_TX_OCTETS)))
 			continue;
+		luna_mib_stall_state(ndev);
 		netdev_err(ndev, "port %u: resetting the switch core\n", port);
 		iowrite32(ioread32(s->sw + s->map->sw_rst) | SW_RST_CORE, s->sw + s->map->sw_rst);
 		luna_core_resets++;

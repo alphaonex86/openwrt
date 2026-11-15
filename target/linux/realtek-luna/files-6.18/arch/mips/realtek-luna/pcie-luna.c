@@ -13,6 +13,8 @@
 #include <linux/pci.h>
 #include <linux/types.h>
 
+#include "luna.h"
+
 /* SoC system controller registers (KSEG1, uncached). Present on BOTH chips
  * except where the table says otherwise -- see SOC_PINMUX. */
 #define SOC_PINMUX	((void __iomem *)0xb800004cul)	/* 9602C only          */
@@ -315,7 +317,7 @@ static struct pci_controller luna_pcie_controller = {
 
 /* bring-up ---------- Drive the endpoint PERST# pin. ACTIVE ...
  * dev/MEASURED-pcie-luna.c.md sec 12. */
-static void __init luna_pcie_perst(bool assert)
+static void luna_pcie_perst(bool assert)
 {
 	u32 bit;
 
@@ -334,6 +336,15 @@ static void __init luna_pcie_perst(bool assert)
 		writel(readl((void __iomem *)chip->perst_data) | bit,
 		       (void __iomem *)chip->perst_data);
 	mb();
+}
+
+/* The endpoint goes into reset before the SoC does. A card no driver stopped
+ * (a panic) keeps its bus mastering through the bootloader and into the next
+ * kernel, whose memory its receive ring still points into. */
+void luna_pcie_endpoint_reset(void)
+{
+	if (chip)
+		luna_pcie_perst(true);
 }
 
 /* The endpoint as the previous boot left it. Out of reset here, it kept its

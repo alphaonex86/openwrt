@@ -27,8 +27,8 @@ Index: linux-6.18.31/arch/mips/include/asm/cpu-features.h
  
  /*
 + * The RLX "Taroko" core is a hybrid: it uses R3000-style exception entry and
-+ * return (no R4000 EXL/ERET) together with an r4k-style 4-way cache whose
-+ * virtual indexing introduces D-cache aliases.  Pin those capabilities here so
++ * return (no R4000 EXL/ERET) together with an r4k-style 4-way cache that is
++ * physically indexed: no D-cache alias.  Pin those capabilities here so
 + * the generic feature tests describe the hybrid exactly, independent of the
 + * option bits the probe leaves set.  Definitions placed before the #ifndef
 + * fallbacks below take precedence.  (The core does implement the MIPS32
@@ -39,7 +39,7 @@ Index: linux-6.18.31/arch/mips/include/asm/cpu-features.h
 +#define cpu_has_3kex		1
 +#define cpu_has_3k_cache	0
 +#define cpu_has_4k_cache	1
-+#define cpu_has_dc_aliases	1
++#define cpu_has_dc_aliases	0
 +#endif
 +
 +/*
@@ -321,7 +321,27 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/mm/c-r4k.c
 +++ linux-6.18.31/arch/mips/mm/c-r4k.c
-@@ -1624,6 +1624,7 @@ void au1x00_fixup_config_od(void)
+@@ -760,6 +760,9 @@ static void r4k_dma_cache_wback_inv(unsi
+ 	if (WARN_ON(size == 0))
+ 		return;
+ 
++	if (IS_ENABLED(CONFIG_CPU_R3K_TLB))
++		iob();	/* the stock firmware drains the write buffer first */
++
+ 	preempt_disable();
+ 	if (cpu_has_inclusive_pcaches) {
+ 		if (size >= scache_size) {
+@@ -826,6 +829,9 @@ static void r4k_dma_cache_inv(unsigned l
+ 	if (WARN_ON(size == 0))
+ 		return;
+ 
++	if (IS_ENABLED(CONFIG_CPU_R3K_TLB))
++		iob();	/* the stock firmware drains the write buffer first */
++
+ 	preempt_disable();
+ 
+ 	if (current_cpu_type() == CPU_BMIPS5000)
+@@ -1624,6 +1630,7 @@ void au1x00_fixup_config_od(void)
  
  static void nxp_pr4450_fixup_config(void)
  {
@@ -329,7 +349,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  	unsigned long config0;
  
  	config0 = read_c0_config();
-@@ -1635,6 +1636,7 @@ static void nxp_pr4450_fixup_config(void
+@@ -1635,6 +1642,7 @@ static void nxp_pr4450_fixup_config(void
  		    ((_page_cachable_default >> _CACHE_SHIFT) << 28));
  	write_c0_config(config0);
  	NXP_BARRIER();
@@ -337,7 +357,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  }
  
  static int cca = -1;
-@@ -1650,9 +1652,22 @@ early_param("cca", cca_setup);
+@@ -1650,9 +1658,22 @@ early_param("cca", cca_setup);
  
  static void coherency_setup(void)
  {
@@ -360,133 +380,61 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  
  	pr_debug("Using cache attribute %d\n", cca);
  	change_c0_config(CONF_CM_CMASK, cca);
-@@ -1705,6 +1720,45 @@ static void r4k_cache_error_setup(void)
+@@ -1705,6 +1726,41 @@ static void r4k_cache_error_setup(void)
  	}
  }
  
 +#ifdef CONFIG_CPU_R3K_TLB
 +/*
-+ * The RLX "Taroko" core provides a single-shot cache-control register (CP0
-+ * $20) that writes back+invalidates the whole D-cache and invalidates the
-+ * whole I-cache regardless of geometry.  The per-line "cache" instruction
-+ * also works on this core (used for the DMA paths), but for the whole-cache
-+ * maintenance hooks we issue this register op: it is geometry-independent so
-+ * correctness never depends on the probed line/size being exact, and these
-+ * hooks are off the per-packet datapath so the extra work is immaterial.
-+ *
-+ * Operation bits: 0x200 = D writeback+invalidate, 0x002 = I invalidate.
-+ * Order is D-before-I (push dirty data lines to memory, then drop stale
-+ * instruction lines); a sync separates them.  The register self-completes,
-+ * so no done-bit poll is needed.
++ * The RLX "Taroko" core has no index-type cache instruction: a whole-cache
++ * operation is one write to its cache-control register (CP0 $20), armed by
++ * a zero first.  Run them as the stock firmware does: at boot and for a
++ * range larger than the cache, never on a fork, an exit or a mapping.
 + */
 +#define LUNA_CCTL_D_WBINV	0x200
 +#define LUNA_CCTL_I_INV		0x002
 +
-+static inline void luna_flush_cache_all(void)
++static inline void luna_cctl(unsigned int op)
 +{
 +	__asm__ __volatile__(
 +		"	.set	push		\n"
 +		"	.set	noreorder	\n"
-+		"	mtc0	$0, $20		\n"	/* arm: clear control */
-+		"	nop; nop		\n"
-+		"	mtc0	%0, $20		\n"	/* D writeback+invalidate */
-+		"	nop; nop		\n"
-+		"	sync			\n"
 +		"	mtc0	$0, $20		\n"
 +		"	nop; nop		\n"
-+		"	mtc0	%1, $20		\n"	/* I invalidate */
++		"	mtc0	%0, $20		\n"
 +		"	nop; nop		\n"
++		"	sync			\n"
 +		"	.set	pop		\n"
-+		:
-+		: "r" (LUNA_CCTL_D_WBINV), "r" (LUNA_CCTL_I_INV)
-+		: "memory");
++		: : "r" (op) : "memory");
++}
++
++static void luna_blast_dcache(void)
++{
++	luna_cctl(LUNA_CCTL_D_WBINV);
++}
++
++static void luna_blast_icache(void)
++{
++	luna_cctl(LUNA_CCTL_I_INV);
 +}
 +#endif /* CONFIG_CPU_R3K_TLB */
 +
  void r4k_cache_init(void)
  {
  	extern void build_clear_page(void);
-@@ -1763,6 +1817,29 @@ void r4k_cache_init(void)
+@@ -1763,6 +1819,12 @@ void r4k_cache_init(void)
  	_dma_cache_inv		= r4k_dma_cache_inv;
  #endif /* CONFIG_DMA_NONCOHERENT */
  
 +#ifdef CONFIG_CPU_R3K_TLB
-+	/*
-+	 * Route every whole-cache and range/page maintenance hook through the
-+	 * geometry-independent cache-control blast.  The DMA hooks set just
-+	 * above keep using the efficient per-line "cache" instruction since
-+	 * they sit on the network datapath; these hooks do not.
-+	 */
-+	flush_cache_all		= luna_flush_cache_all;
-+	__flush_cache_all	= luna_flush_cache_all;
-+	flush_cache_mm		= (void *)luna_flush_cache_all;
-+	flush_cache_page	= (void *)luna_flush_cache_all;
-+	flush_cache_range	= (void *)luna_flush_cache_all;
-+	__flush_kernel_vmap_range = (void *)luna_flush_cache_all;
-+	__flush_cache_vmap	= luna_flush_cache_all;
-+	__flush_cache_vunmap	= luna_flush_cache_all;
-+	flush_icache_all	= luna_flush_cache_all;
-+	flush_data_cache_page	= (void *)luna_flush_cache_all;
-+	flush_icache_range	= (void *)luna_flush_cache_all;
-+	local_flush_icache_range	= (void *)luna_flush_cache_all;
-+	__flush_icache_user_range	= (void *)luna_flush_cache_all;
-+	__local_flush_icache_user_range	= (void *)luna_flush_cache_all;
++	r4k_blast_dcache	= luna_blast_dcache;
++	r4k_blast_icache	= luna_blast_icache;
++	flush_cache_range	= (void *)cache_noop;
 +#endif /* CONFIG_CPU_R3K_TLB */
 +
  	build_clear_page();
  	build_copy_page();
  
-@@ -1771,7 +1848,11 @@ void r4k_cache_init(void)
- 	 * caches. Therefore, do not use CONFIG_MIPS_CMP to decide whether
- 	 * or not to flush caches.
- 	 */
-+#ifdef CONFIG_CPU_R3K_TLB
-+	luna_flush_cache_all();
-+#else
- 	local_r4k___flush_cache_all(NULL);
-+#endif
- 
- 	coherency_setup();
- 	board_cache_error_setup = r4k_cache_error_setup;
-Index: linux-6.18.31/arch/mips/mm/init.c
-===================================================================
---- linux-6.18.31.orig/arch/mips/mm/init.c
-+++ linux-6.18.31/arch/mips/mm/init.c
-@@ -167,7 +167,13 @@ void copy_user_highpage(struct page *to,
- 	void *vfrom, *vto;
- 
- 	vto = kmap_atomic(to);
--	if (cpu_has_dc_aliases &&
-+	/*
-+	 * The RLX "Taroko" core resolves its D-cache aliases by blasting the
-+	 * whole cache in the flush hooks rather than through the R4000
-+	 * colour-coherent temporary mapping, so skip kmap_coherent and take the
-+	 * plain-copy path (which marks the folio dcache-dirty for a later flush).
-+	 */
-+	if (!IS_ENABLED(CONFIG_CPU_R3K_TLB) && cpu_has_dc_aliases &&
- 	    folio_mapped(src) && !folio_test_dcache_dirty(src)) {
- 		vfrom = kmap_coherent(from, vaddr);
- 		copy_page(vto, vfrom);
-@@ -191,7 +197,8 @@ void copy_to_user_page(struct vm_area_st
- {
- 	struct folio *folio = page_folio(page);
- 
--	if (cpu_has_dc_aliases &&
-+	/* RLX: skip the colour-coherent mapping; see copy_user_highpage(). */
-+	if (!IS_ENABLED(CONFIG_CPU_R3K_TLB) && cpu_has_dc_aliases &&
- 	    folio_mapped(folio) && !folio_test_dcache_dirty(folio)) {
- 		void *vto = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
- 		memcpy(vto, src, len);
-@@ -211,7 +218,8 @@ void copy_from_user_page(struct vm_area_
- {
- 	struct folio *folio = page_folio(page);
- 
--	if (cpu_has_dc_aliases &&
-+	/* RLX: skip the colour-coherent mapping; see copy_user_highpage(). */
-+	if (!IS_ENABLED(CONFIG_CPU_R3K_TLB) && cpu_has_dc_aliases &&
- 	    folio_mapped(folio) && !folio_test_dcache_dirty(folio)) {
- 		void *vfrom = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
- 		memcpy(dst, vfrom, len);
 Index: linux-6.18.31/arch/mips/mm/tlbex.c
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/mm/tlbex.c

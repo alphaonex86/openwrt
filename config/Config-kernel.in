@@ -1082,6 +1082,41 @@ config KERNEL_SLUB_DEBUG_ON
 	  This enables by default sanity_checks, red_zone, poison and store_user
 	  debugging options for all caches.
 
+config KERNEL_PAGE_POISONING
+	bool "Poison pages after freeing"
+	default n
+	help
+	  A freed page is filled with a pattern, checked when the page is
+	  allocated again: a write into free memory (a device still doing DMA
+	  into a buffer its driver released) is reported. Diagnostic images only.
+
+config KERNEL_DEBUG_PAGEALLOC
+	bool "Debug page memory allocations"
+	select KERNEL_DEBUG_KERNEL
+	select KERNEL_PAGE_POISONING
+	default n
+
+config KERNEL_DEBUG_PAGEALLOC_ENABLE_DEFAULT
+	bool "Enable debug page memory allocations by default"
+	depends on KERNEL_DEBUG_PAGEALLOC
+	default n
+	help
+	  Switches the check on with no kernel command line word.
+
+config KERNEL_DMA_API_DEBUG
+	bool "Debugging of DMA-API usage"
+	select KERNEL_DEBUG_KERNEL
+	default n
+	help
+	  Reports a driver that frees or unmaps a DMA buffer it never mapped,
+	  maps one twice, or leaves one mapped when it unbinds. Costs several
+	  megabytes of RAM: diagnostic images only.
+
+config KERNEL_DEBUG_LIST
+	bool "Debug linked list manipulation"
+	select KERNEL_DEBUG_KERNEL
+	default n
+
 config KERNEL_DEBUG_KMEMLEAK
 	bool "Kernel memory leak detector (/sys/kernel/debug/kmemleak)"
 	select KERNEL_DEBUG_KERNEL

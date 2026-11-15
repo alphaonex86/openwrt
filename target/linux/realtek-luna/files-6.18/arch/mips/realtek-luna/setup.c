@@ -52,7 +52,6 @@ static void luna_machine_restart(char *command)
 {
 	local_irq_disable();
 	pr_emerg("Restarting via SoC watchdog full-chip reset...\n");
-	luna_pcie_endpoint_reset();
 	/* Full-chip reset, fastest scale (2^25 LX clocks ~ 0.17s), ...
 	 * dev/MEASURED-setup.c.md sec 12. */
 	__raw_writel(LUNA_RSTWDT_EN |

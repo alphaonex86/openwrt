@@ -100,6 +100,26 @@ static inline enum eth_watch eth_egress_watch_sample(struct eth_egress_watch *e,
 	e->since_ms = 0;
 	return ETH_WATCH_OK;
 }
+/* The same for a port nobody hands frames to one by one: `queued` = what its queue holds now. */
+static inline enum eth_watch eth_egress_held_sample(struct eth_egress_watch *e, u32 queued, u32 sent, u64 now_ms)
+{
+	return eth_egress_watch_sample(e, e->offered + (queued >= ETH_EGRESS_STALL_FRAMES ? queued : 0), sent, now_ms);
+}
+/* One switch port: `ready` = it has a link (the CPU port: its ring owes nothing); a port its partner paused since
+ * the last sample holds its queue by right and is not judged either. */
+struct eth_port_egress {
+	struct eth_egress_watch watch;
+	u32 paused;
+};
+
+static inline enum eth_watch eth_port_egress_sample(struct eth_port_egress *p, bool ready, u32 paused, u32 queued,
+						    u32 sent, u64 now_ms)
+{
+	bool judged = ready && paused == p->paused;
+
+	p->paused = paused;
+	return eth_egress_held_sample(&p->watch, judged ? queued : 0, sent, now_ms);
+}
 #ifdef __KERNEL__
 #include <linux/ethtool.h>
 #include <linux/jiffies.h>
@@ -145,7 +165,7 @@ static inline void eth_watch_act(struct net_device *ndev, const struct eth_queue
 			   w->rx_stalls, w->tx_timeouts);
 }
 
-/* The first strike is logged, the second reboots: nothing softer is known to reopen a port (a MAC link bounce does not). */
+/* The first strike is logged and is the driver's to recover (its switch core reset), the second reboots. */
 static inline void eth_egress_watch_act(struct net_device *ndev, const struct eth_egress_watch *e, enum eth_watch v,
 					const char *port)
 {
@@ -155,6 +175,15 @@ static inline void eth_egress_watch_act(struct net_device *ndev, const struct et
 	if (v == ETH_WATCH_RECOVER)
 		netdev_err(ndev, "the %s port sent none of the frames handed to it for %u s (stall #%u)\n", port,
 			   ETH_EGRESS_STALL_MS / 1000, e->stalls);
+}
+/* -> true when the caller must recover the port (reset its switch core). */
+static inline bool eth_port_egress_judge(struct net_device *ndev, struct eth_port_egress *p, const char *name,
+					 bool ready, u32 paused, u32 queued, u32 sent)
+{
+	enum eth_watch v = eth_port_egress_sample(p, ready, paused, queued, sent, jiffies64_to_msecs(get_jiffies_64()));
+
+	eth_egress_watch_act(ndev, &p->watch, v, name);
+	return v == ETH_WATCH_RECOVER;
 }
 /* -> true when the caller should recover (schedule its NAPI). */
 static inline bool eth_ring_watch_rx(struct eth_ring_watch *rw, struct net_device *ndev, bool pending, u32 consumed)

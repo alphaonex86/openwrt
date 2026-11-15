@@ -2,7 +2,16 @@ Index: linux-6.18.31/arch/mips/Kconfig
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/Kconfig
 +++ linux-6.18.31/arch/mips/Kconfig
-@@ -2498,13 +2498,13 @@ config CPU_R4X00_BUGS64
+@@ -12,7 +12,7 @@ config MIPS
+ 	select ARCH_HAS_FORTIFY_SOURCE
+ 	select ARCH_HAS_KCOV
+ 	select ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE if !EVA
+-	select ARCH_HAS_PTE_SPECIAL if !(32BIT && CPU_HAS_RIXI)
++	select ARCH_HAS_PTE_SPECIAL if !(32BIT && CPU_HAS_RIXI) && !CPU_R3K_TLB
+ 	select ARCH_HAS_STRNCPY_FROM_USER
+ 	select ARCH_HAS_STRNLEN_USER
+ 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
+@@ -2526,13 +2526,13 @@ config CPU_R4X00_BUGS64
  
  config MIPS_ASID_SHIFT
  	int
@@ -321,7 +330,32 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/mm/c-r4k.c
 +++ linux-6.18.31/arch/mips/mm/c-r4k.c
-@@ -760,6 +760,9 @@ static void r4k_dma_cache_wback_inv(unsi
+@@ -628,6 +628,12 @@ static void r4k_flush_cache_page(struct
+ static inline void local_r4k_flush_data_cache_page(void * addr)
+ {
+ 	r4k_blast_dcache_page((unsigned long) addr);
++	/*
++	 * RLX: a frame keeps the instructions of its previous content until
++	 * they are dropped here, when its new content is first mapped.
++	 */
++	if (IS_ENABLED(CONFIG_CPU_R3K_TLB))
++		r4k_blast_icache_page((unsigned long) addr);
+ }
+ 
+ static void r4k_flush_data_cache_page(unsigned long addr)
+@@ -651,6 +657,11 @@ static inline void __local_r4k_flush_ica
+ 						  unsigned int type,
+ 						  bool user)
+ {
++	if (IS_ENABLED(CONFIG_CPU_R3K_TLB) && end - start > icache_size) {
++		r4k_blast_icache();	/* the RLX does both caches in one operation */
++		return;
++	}
++
+ 	if (!cpu_has_ic_fills_f_dc) {
+ 		if (type == R4K_INDEX ||
+ 		    (type & R4K_INDEX && end - start >= dcache_size)) {
+@@ -760,6 +771,9 @@ static void r4k_dma_cache_wback_inv(unsi
  	if (WARN_ON(size == 0))
  		return;
  
@@ -331,7 +365,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  	preempt_disable();
  	if (cpu_has_inclusive_pcaches) {
  		if (size >= scache_size) {
-@@ -826,6 +829,9 @@ static void r4k_dma_cache_inv(unsigned l
+@@ -826,6 +840,9 @@ static void r4k_dma_cache_inv(unsigned l
  	if (WARN_ON(size == 0))
  		return;
  
@@ -341,7 +375,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  	preempt_disable();
  
  	if (current_cpu_type() == CPU_BMIPS5000)
-@@ -1624,6 +1630,7 @@ void au1x00_fixup_config_od(void)
+@@ -1624,6 +1641,7 @@ void au1x00_fixup_config_od(void)
  
  static void nxp_pr4450_fixup_config(void)
  {
@@ -349,7 +383,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  	unsigned long config0;
  
  	config0 = read_c0_config();
-@@ -1635,6 +1642,7 @@ static void nxp_pr4450_fixup_config(void
+@@ -1635,6 +1653,7 @@ static void nxp_pr4450_fixup_config(void
  		    ((_page_cachable_default >> _CACHE_SHIFT) << 28));
  	write_c0_config(config0);
  	NXP_BARRIER();
@@ -357,7 +391,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  }
  
  static int cca = -1;
-@@ -1650,9 +1658,22 @@ early_param("cca", cca_setup);
+@@ -1650,9 +1669,21 @@ early_param("cca", cca_setup);
  
  static void coherency_setup(void)
  {
@@ -366,11 +400,10 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
 +	 * The RLX core pairs an R3000-style TLB (whose EntryLo carries a single
 +	 * "uncached" bit, not the R4000 3-bit cache-coherency field) with an
 +	 * r4k-style cache, so the R4000 Config.CM coherency-mode programming
-+	 * below does not apply.  Default mappings are cacheable (uncached bit
-+	 * clear -> 0) and cache coherency is driven by the cache-control
-+	 * primitive instead of Config.CM.
++	 * below does not apply.  A mapping is cached write-allocate, the one
++	 * cached policy the stock firmware uses.
 +	 */
-+	_page_cachable_default = 0;
++	_page_cachable_default = _CACHE_CACHABLE_NONCOHERENT;
 +	return;
 +#else
  	if (cca < 0 || cca > 7)
@@ -380,7 +413,7 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  
  	pr_debug("Using cache attribute %d\n", cca);
  	change_c0_config(CONF_CM_CMASK, cca);
-@@ -1705,6 +1726,41 @@ static void r4k_cache_error_setup(void)
+@@ -1705,6 +1736,46 @@ static void r4k_cache_error_setup(void)
  	}
  }
  
@@ -388,53 +421,71 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
 +/*
 + * The RLX "Taroko" core has no index-type cache instruction: a whole-cache
 + * operation is one write to its cache-control register (CP0 $20), armed by
-+ * a zero first.  Run them as the stock firmware does: at boot and for a
-+ * range larger than the cache, never on a fork, an exit or a mapping.
++ * a zero first.  Only the two forms the stock firmware runs are used, each
++ * as ONE operation: the D-cache write-back+invalidate alone, or that with
++ * the I-cache invalidate.  Never one operation chained to another.
 + */
 +#define LUNA_CCTL_D_WBINV	0x200
-+#define LUNA_CCTL_I_INV		0x002
++#define LUNA_CCTL_ALL		0x202
 +
-+static inline void luna_cctl(unsigned int op)
-+{
-+	__asm__ __volatile__(
-+		"	.set	push		\n"
-+		"	.set	noreorder	\n"
-+		"	mtc0	$0, $20		\n"
-+		"	nop; nop		\n"
-+		"	mtc0	%0, $20		\n"
-+		"	nop; nop		\n"
-+		"	sync			\n"
-+		"	.set	pop		\n"
-+		: : "r" (op) : "memory");
-+}
++#define luna_cctl(op)						\
++	__asm__ __volatile__(					\
++		"	.set	push		\n"		\
++		"	.set	noreorder	\n"		\
++		"	mtc0	$0, $20		\n"		\
++		"	li	$8, %0		\n"		\
++		"	mtc0	$8, $20		\n"		\
++		"	.set	pop		\n"		\
++		: : "i" (op) : "$8", "memory")
 +
 +static void luna_blast_dcache(void)
 +{
 +	luna_cctl(LUNA_CCTL_D_WBINV);
 +}
 +
-+static void luna_blast_icache(void)
++static void luna_blast_all(void)
 +{
-+	luna_cctl(LUNA_CCTL_I_INV);
++	luna_cctl(LUNA_CCTL_ALL);
++}
++
++/* An executable range that goes away: drop its instructions, as stock does. */
++static void luna_flush_cache_range(struct vm_area_struct *vma,
++				   unsigned long start, unsigned long end)
++{
++	if ((vma->vm_flags & VM_EXEC) && has_valid_asid(vma->vm_mm, R4K_INDEX))
++		luna_blast_all();
 +}
 +#endif /* CONFIG_CPU_R3K_TLB */
 +
  void r4k_cache_init(void)
  {
  	extern void build_clear_page(void);
-@@ -1763,6 +1819,12 @@ void r4k_cache_init(void)
+@@ -1763,6 +1834,13 @@ void r4k_cache_init(void)
  	_dma_cache_inv		= r4k_dma_cache_inv;
  #endif /* CONFIG_DMA_NONCOHERENT */
  
 +#ifdef CONFIG_CPU_R3K_TLB
 +	r4k_blast_dcache	= luna_blast_dcache;
-+	r4k_blast_icache	= luna_blast_icache;
-+	flush_cache_range	= (void *)cache_noop;
++	r4k_blast_icache	= luna_blast_all;
++	__flush_cache_all	= luna_blast_all;
++	flush_cache_range	= luna_flush_cache_range;
 +#endif /* CONFIG_CPU_R3K_TLB */
 +
  	build_clear_page();
  	build_copy_page();
  
+@@ -1771,7 +1849,11 @@ void r4k_cache_init(void)
+ 	 * caches. Therefore, do not use CONFIG_MIPS_CMP to decide whether
+ 	 * or not to flush caches.
+ 	 */
++#ifdef CONFIG_CPU_R3K_TLB
++	luna_blast_all();
++#else
+ 	local_r4k___flush_cache_all(NULL);
++#endif
+ 
+ 	coherency_setup();
+ 	board_cache_error_setup = r4k_cache_error_setup;
 Index: linux-6.18.31/arch/mips/mm/tlbex.c
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/mm/tlbex.c
@@ -481,17 +532,49 @@ Index: linux-6.18.31/arch/mips/include/asm/pgtable-bits.h
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/include/asm/pgtable-bits.h
 +++ linux-6.18.31/arch/mips/include/asm/pgtable-bits.h
-@@ -241,6 +241,19 @@ static inline uint64_t pte_to_entrylo(un
+@@ -102,14 +102,14 @@ enum pgtable_bits {
+ 	_PAGE_WRITE_SHIFT,
+ 	_PAGE_ACCESSED_SHIFT,
+ 	_PAGE_MODIFIED_SHIFT,
+-#if defined(CONFIG_ARCH_HAS_PTE_SPECIAL)
+-	_PAGE_SPECIAL_SHIFT,
+-#endif
+-#if defined(CONFIG_HAVE_ARCH_SOFT_DIRTY)
+-	_PAGE_SOFT_DIRTY_SHIFT,
+-#endif
  
- #define _CACHE_CACHABLE_NONCOHERENT 0
+-	/* Used by TLB hardware (placed in EntryLo) */
++	/*
++	 * Used by TLB hardware (placed in EntryLo).  On the RLX "Taroko" core
++	 * bits 5..7 are the cache write policy of the page (write-allocate,
++	 * mergeable, coherent), so no software bit may live there: this CPU
++	 * has no PTE special bit and no soft-dirty bit.
++	 */
++	_CACHE_WALLOC_SHIFT,
+ 	_PAGE_GLOBAL_SHIFT = 8,
+ 	_PAGE_VALID_SHIFT,
+ 	_PAGE_DIRTY_SHIFT,
+@@ -181,7 +181,7 @@ enum pgtable_bits {
+ #define _PAGE_DIRTY		(1 << _PAGE_DIRTY_SHIFT)
+ #if defined(CONFIG_CPU_R3K_TLB)
+ # define _CACHE_UNCACHED	(1 << _CACHE_UNCACHED_SHIFT)
+-# define _CACHE_MASK		_CACHE_UNCACHED
++# define _CACHE_MASK		(_CACHE_UNCACHED | (7 << _CACHE_WALLOC_SHIFT))
+ # define PFN_PTE_SHIFT		PAGE_SHIFT
+ #else
+ # define _CACHE_MASK		(7 << _CACHE_SHIFT)
+@@ -239,8 +239,19 @@ static inline uint64_t pte_to_entrylo(un
+  */
+ #if defined(CONFIG_CPU_R3K_TLB)
+ 
+-#define _CACHE_CACHABLE_NONCOHERENT 0
++/* A cached page is write-allocate, as the stock firmware maps every page. */
++#define _CACHE_CACHABLE_NONCOHERENT (1 << _CACHE_WALLOC_SHIFT)
  #define _CACHE_UNCACHED_ACCELERATED _CACHE_UNCACHED
 +/*
-+ * The R3000-style TLB has no multi-bit cache-coherency field in EntryLo, only
-+ * the single "uncached" bit defined above, so there is no _CACHE_SHIFT here.
-+ * The R4000 cache-attribute variants all collapse to plain cacheable (0);
-+ * define them so the generic _CACHE_SHIFT-based fallbacks below are skipped.
-+ * (Needed by the RLX hybrid, which pairs this TLB layout with the r4k cache
-+ * code that references these names.)
++ * There is no _CACHE_SHIFT with this TLB layout; the R4000 cache-attribute
++ * variants are defined so the generic _CACHE_SHIFT-based fallbacks below are
++ * skipped (the r4k cache code references these names for other CPUs).
 + */
 +#define _CACHE_CACHABLE_NO_WA	0
 +#define _CACHE_CACHABLE_WA	0

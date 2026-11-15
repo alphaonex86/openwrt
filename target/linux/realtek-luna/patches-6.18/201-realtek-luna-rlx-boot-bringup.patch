@@ -125,7 +125,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  	LONG_L	v1, TI_TP_VALUE(k1)
 --- a/arch/mips/mm/c-r4k.c
 +++ b/arch/mips/mm/c-r4k.c
-@@ -1180,6 +1180,49 @@ static void probe_pcache(void)
+@@ -1185,6 +1185,49 @@ static void probe_pcache(void)
  		c->options |= MIPS_CPU_PREFETCH;
  		break;
  
@@ -175,7 +175,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  	default:
  		if (!(config & MIPS_CONF_M))
  			panic("Don't know how to probe P-caches on this cpu.");
-@@ -1557,6 +1600,14 @@ static void setup_scache(void)
+@@ -1562,6 +1605,14 @@ static void setup_scache(void)
  		/* don't need to worry about L2, fully coherent */
  		return;
  

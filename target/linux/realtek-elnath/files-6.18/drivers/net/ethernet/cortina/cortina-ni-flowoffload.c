@@ -2117,6 +2117,15 @@ static int cn_flow_install(void *sh, const struct gpon_flow_key *k,
 	if (vlan_wan)
 		return -EOPNOTSUPP;
 	if (ds_leg) {
+		/* The DS egress is an NI port picked by its FDB ldpid; a WiFi
+		 * station's MAC can sit in that FDB too, and the flow then leaves
+		 * by a LAN port while its station waits.  Only ours egress here. */
+		if (!odev || !odev->netdev_ops ||
+		    odev->netdev_ops->ndo_setup_tc != cortina_ni_setup_tc) {
+			cn_rep_dbg("refuse: DS leg egress %s is not an NI port (keeps SW path)\n",
+				   odev ? netdev_name(odev) : "none");
+			return -EOPNOTSUPP;
+		}
 		if (!hw_ds_offload) {
 			cn_rep_dbg("refuse: DS/reply leg, hw_ds_offload=0 (keeps the CPU punt path)\n");
 			return -EOPNOTSUPP;

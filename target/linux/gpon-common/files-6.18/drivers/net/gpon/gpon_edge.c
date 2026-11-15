@@ -45,6 +45,22 @@ static bool gpon_edge_ipv4(struct net_device *dev, u32 *ip, u8 *prefix)
 	return false;
 }
 
+unsigned int gpon_edge_lan_addrs(struct net_device *lan)
+{
+	const struct in_ifaddr *ifa;
+	struct in_device *in;
+	unsigned int n = 0;
+
+	rcu_read_lock();
+	in = __in_dev_get_rcu(gpon_edge_l3_dev(lan));
+	if (in)
+		in_dev_for_each_ifa_rcu(ifa, in)
+			n += ifa->ifa_scope == RT_SCOPE_UNIVERSE;
+	rcu_read_unlock();
+	return n;
+}
+EXPORT_SYMBOL_GPL(gpon_edge_lan_addrs);
+
 static u16 gpon_edge_vlan(struct net_device *dev)
 {
 	return is_vlan_dev(dev) ? vlan_dev_vlan_id(dev) : 0;

@@ -111,6 +111,10 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		strscpy(o->iif, ctx->idev ? ctx->idev->name : "-", sizeof(o->iif));
 		ep->l34.offer_n++;
 	}
+	/* The tables describe one LAN subnet; once the engine runs, the switch drops every frame of another one
+	 * (measured on a unit: a second subnet went silent after the first NAT flow). */
+	if (gpon_edge_lan_addrs(ep->ndev) > 1)
+		return l34_refuse(&ep->l34, "the LAN holds a second address the engine has no row for");
 	if (ctx->ds_leg || a->nat_is_da) {
 		ep->l34.ds_legs++;
 		if (!a->dmac_valid || !ctx->odev ||
@@ -354,10 +358,14 @@ static int rtl9602c_l34_inetaddr_event(struct notifier_block *nb,
 {
 	struct rtl9602c_eth *ep = container_of(nb, struct rtl9602c_eth, l34_addr_nb);
 	struct in_ifaddr *ifa = ptr;
+	bool wan_left, lan_second;
 	int ret;
 
-	if (event != NETDEV_DOWN || !ep->fo || !ep->l34.provisioned ||
-	    ntohl(ifa->ifa_local) != ep->l34.edge.wan_ip)
+	if (!ep->fo || !ep->l34.provisioned)
+		return NOTIFY_DONE;
+	wan_left = event == NETDEV_DOWN && ntohl(ifa->ifa_local) == ep->l34.edge.wan_ip;
+	lan_second = event == NETDEV_UP && gpon_edge_lan_addrs(ep->ndev) > 1;
+	if (!wan_left && !lan_second)
 		return NOTIFY_DONE;
 	mutex_lock(&rtl9602c_l34_tc_mutex);
 	/* under this mutex no install is in flight, so a flush that succeeded
@@ -367,11 +375,11 @@ static int rtl9602c_l34_inetaddr_event(struct notifier_block *nb,
 		ret = rtl9602c_l34_wan_release(&ep->l34, true);
 	mutex_unlock(&rtl9602c_l34_tc_mutex);
 	if (ret)
-		netdev_warn(ep->ndev, "L34: WAN %pI4 left and its tables were NOT released (%d)\n",
-			    &ifa->ifa_local, ret);
+		netdev_warn(ep->ndev, "L34: %pI4 %s and the tables were NOT released (%d)\n", &ifa->ifa_local,
+			    wan_left ? "left the WAN" : "is a second LAN address", ret);
 	else
-		netdev_info(ep->ndev, "L34: WAN %pI4 left; its tables are released\n",
-			    &ifa->ifa_local);
+		netdev_info(ep->ndev, "L34: %pI4 %s; the tables are released\n", &ifa->ifa_local,
+			    wan_left ? "left the WAN" : "is a second LAN address");
 	return NOTIFY_DONE;
 }
 

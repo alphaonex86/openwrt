@@ -71,5 +71,7 @@ int gpon_edge_read_v6(struct net_device *lan, struct net_device *wan,
 		      const u32 sa[4], const u32 da[4], struct net_device *odev,
 		      struct gpon_edge *e, const char **why);
 bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b);
+/* The IPv4 addresses the LAN interface (its bridge) holds: an edge describes the first one alone. */
+unsigned int gpon_edge_lan_addrs(struct net_device *lan);
 
 #endif /* GPON_EDGE_H */

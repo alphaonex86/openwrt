@@ -265,7 +265,7 @@ struct rtl9602c_l34 {
 	 * a control path needs. */
 	u32		hit_shadow[L34_NAPT_ENTRIES / 32];
 	unsigned long	hit_swept;	/* jiffies of the last sweep */
-#define L34_REFUSE_REASONS 8	/* distinct refusal sites; a 9th is COUNTED as other */
+#define L34_REFUSE_REASONS 9	/* distinct refusal sites; a 10th is COUNTED as other */
 	u32		refusals;	/* flows left on the software path	*/
 	u32		ds_legs;	/* downstream neighbour requests */
 	/* The last few NAPT indexes this driver INSTALLED, so the dump can read

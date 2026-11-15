@@ -11,7 +11,9 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 
+#include "gpon_olt_mac.h"
 #include "gpon_regseq.h"
+#include "gpon_olt_zte.h"
 
 #define ZX_CHIP_ID		0x00000
 #define ZX_CHIP_SEL		0x00004
@@ -23,6 +25,21 @@
 #define ZX_DDR_CTRLS		2
 #define ZX_LINKS		8
 #define ZX_POLL_TRIES		500		/* x GPON_REGSEQ_POLL_US = 100 ms; the firmware waits 1 + 2 + 4 ms */
+
+/* PON link n's MAC window (gpptest 2.3.1R ZX2763_*); the port below drives link 0. */
+#define ZX_W(n)			(0x14000 + ((n) >> 1) * 0x4000 + ((n) & 1) * 0x1800)
+#define ZX_MAP_T_RANGING	3		/* "SnMem": the ranging map */
+#define ZX_MAP_T_CFG		4
+#define ZX_MAP_SN_ENTRY		1150		/* bit 3: serial-number acquisition open (stock in its VM) */
+#define ZX_MAP_SN_OPEN		BIT(3)
+#define ZX_DS_CTRL		0x1000		/* in a link's window: bit 1 its downstream sender on */
+#define ZX_DS_ON		BIT(1)
+#define ZX_ONUS			8
+#define ZX_PORT_LINKS		1		/* link 0 only until the others are brought up */
+
+struct zx_chip {
+	struct gpon_olt_mac mac;
+};
 
 static void __iomem *zx_regs;		/* one chip per board: gpon_regseq's io carries no context */
 
@@ -142,43 +159,25 @@ static void zx_ddr_center(u32 base, u32 res[12])
 		zx_wr(base + 0x460 + 0x10 * i, out[i]);
 }
 
-/* gpon_regseq_run on a table whose addresses are relative to @base. */
-static int zx_run_at(u32 base, const struct gpon_regseq_op *seq, unsigned int n)
-{
-	struct gpon_regseq_op op;
-	unsigned int i;
-	int ret;
-
-	for (i = 0; i < n; i++) {
-		op = seq[i];
-		if (op.opc != GPON_REGSEQ_DLY)
-			op.addr += base;
-		ret = gpon_regseq_run(&zx_io, &op, 1);
-		if (ret)
-			return ret;
-	}
-	return 0;
-}
-
 static int zx_ddr_init(struct device *dev, unsigned int c)
 {
 	u32 base = ZX_DDR(c), res[12];
 	int ret;
 
-	ret = zx_run_at(base, zx_ddr_start, ARRAY_SIZE(zx_ddr_start));
+	ret = gpon_regseq_run_at(&zx_io, base, zx_ddr_start, ARRAY_SIZE(zx_ddr_start));
 	if (ret) {
 		dev_err(dev, "ddr%u: init not done: 0x1b0=0x%08x (%d)\n", c, zx_rd(base + 0x1b0), ret);
 		return ret;
 	}
-	ret = zx_run_at(base, zx_ddr_train, ARRAY_SIZE(zx_ddr_train));
+	ret = gpon_regseq_run_at(&zx_io, base, zx_ddr_train, ARRAY_SIZE(zx_ddr_train));
 	if (ret) {
 		dev_err(dev, "ddr%u: training not done: 0xc00=0x%08x (%d)\n", c, zx_rd(base + 0xc00), ret);
 		return ret;
 	}
 	zx_ddr_center(base, res);
-	ret = zx_run_at(base, zx_ddr_apply, ARRAY_SIZE(zx_ddr_apply));
+	ret = gpon_regseq_run_at(&zx_io, base, zx_ddr_apply, ARRAY_SIZE(zx_ddr_apply));
 	if (!ret)
-		ret = zx_run_at(base, zx_ddr_cal, ARRAY_SIZE(zx_ddr_cal));
+		ret = gpon_regseq_run_at(&zx_io, base, zx_ddr_cal, ARRAY_SIZE(zx_ddr_cal));
 	if (!ret && (zx_rd(base + 0x800) & BIT(9)))
 		ret = -EIO;
 	if (ret) {
@@ -187,6 +186,101 @@ static int zx_ddr_init(struct device *dev, unsigned int c)
 	}
 	dev_info(dev, "ddr%u: init 0x%08x train 0x%08x cal 0x%08x, lanes %*ph\n", c, zx_rd(base + 0x1b0),
 		 zx_rd(base + 0xc00), zx_rd(base + 0x800), (int)sizeof(res), res);
+	return 0;
+}
+
+/* ---- the PON links: the ZTE PON MAC block (zte_ponmac) under the common OLT PON MAC shell (gpon_olt_mac) ------ */
+
+static u32 zx_pm_rd(void *ctx, u32 off)
+{
+	return zx_rd(off);
+}
+
+static void zx_pm_wr(void *ctx, u32 off, u32 val)
+{
+	zx_wr(off, val);
+}
+
+static const struct zte_ponmac_layout zx_layout = {
+	.ploamu_msg = 0x898, .ploamu_rtd = 0x8a8, .ploamu_rtd_mask = 0xffff,	/* the round trip: INFERRED */
+	.ploamu_held = 0x8ac, .ploamd_ctrl = 0x1280, .ploamd_msg = 0x1284,
+	.map_cmd = 0x1814, .map_read_bit = 27, .map_table_shift = 22, .ind_ready_first = true,
+};
+
+static const u32 zx_window[ZX_LINKS] = {
+	ZX_W(0), ZX_W(1), ZX_W(2), ZX_W(3), ZX_W(4), ZX_W(5), ZX_W(6), ZX_W(7),
+};
+
+static const struct zte_ponmac zx_pm = {
+	.lay = &zx_layout, .rd = zx_pm_rd, .wr = zx_pm_wr, .window = zx_window,
+};
+
+static int zx_ploam_tx(void *chip, unsigned int link, const u8 m[GPON_OLT_PLOAM_DS_LEN])
+{
+	return zte_ponmac_ploam_tx(&zx_pm, link, m);
+}
+
+static bool zx_ploam_rx(void *chip, unsigned int link, u8 m[GPON_OLT_PLOAM_US_LEN], u32 *rtd)
+{
+	return zte_ponmac_ploam_rx(&zx_pm, link, m, rtd);
+}
+
+static int zx_sn_window(void *chip, unsigned int link, bool open)
+{
+	u32 cfg;
+	int ret = zte_ponmac_map_read(&zx_pm, link, ZX_MAP_T_CFG, ZX_MAP_SN_ENTRY, &cfg, 1);
+
+	if (ret)
+		return ret;
+	cfg = open ? cfg | ZX_MAP_SN_OPEN : cfg & ~ZX_MAP_SN_OPEN;
+	return zte_ponmac_map_write(&zx_pm, link, ZX_MAP_T_CFG, ZX_MAP_SN_ENTRY, &cfg, 1);
+}
+
+/* A ranging map entry for the ONU's default Alloc-ID (its ONU-ID) with PLOAMu. INFERRED: start/stop left 0. */
+static int zx_ranging_grant(void *chip, unsigned int link, u8 onu_id)
+{
+	u32 w[2] = { 0, (u32)onu_id << 12 | BIT(10) };
+
+	return zte_ponmac_map_write(&zx_pm, link, ZX_MAP_T_RANGING, 0, w, 2);
+}
+
+/* No access to the chip after this: at reboot the host bridge resets the link next (an access then aborts). */
+static void zx_stop(void *chip)
+{
+	unsigned int n;
+
+	for (n = 0; n < ZX_PORT_LINKS; n++)
+		zx_wr(ZX_W(n) + ZX_DS_CTRL, zx_rd(ZX_W(n) + ZX_DS_CTRL) & ~ZX_DS_ON);
+}
+
+static const struct gpon_olt_mac_ops zx_ops = {
+	.ploam_tx = zx_ploam_tx, .sn_window = zx_sn_window, .ranging_grant = zx_ranging_grant,
+	.ploam_rx = zx_ploam_rx, .stop = zx_stop,	/* no OMCI path yet: the CPU frame pipe is a later stage */
+};
+
+static int zx_pon_start(struct pci_dev *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct gpon_olt_profile tmpl;
+	struct zx_chip *z;
+	unsigned int n;
+	int ret;
+
+	z = devm_kzalloc(dev, sizeof(*z), GFP_KERNEL);
+	if (!z)
+		return -ENOMEM;
+	/* Each link's downstream sender, off after the reset: until it is on, its PLOAMd takes 14 messages, then holds
+	 * the start bit for ever (unit, 2026-11-15; stock sets the bit last before its first PLOAM). */
+	for (n = 0; n < ZX_PORT_LINKS; n++)
+		zx_wr(ZX_W(n) + ZX_DS_CTRL, zx_rd(ZX_W(n) + ZX_DS_CTRL) | ZX_DS_ON);
+	gpon_olt_profile_default(&tmpl);
+	tmpl.alloc_id = 256;
+	tmpl.gem_port = 1024;
+	ret = gpon_olt_mac_start(&z->mac, dev, "zx279200", &zx_ops, z, ZX_PORT_LINKS, ZX_ONUS, &tmpl);
+	if (ret)
+		return ret;
+	pci_set_drvdata(pdev, z);
+	dev_info(dev, "OLT PON port on link 0, %u ONUs\n", ZX_ONUS);
 	return 0;
 }
 
@@ -217,6 +311,9 @@ static int zx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			goto fail;
 	}
 	dev_info(dev, "stage ddr: done\n");
+	ret = zx_pon_start(pdev);
+	if (ret)
+		goto fail;
 	return 0;
 fail:
 	zx_regs = NULL;
@@ -225,6 +322,10 @@ fail:
 
 static void zx_remove(struct pci_dev *pdev)
 {
+	struct zx_chip *z = pci_get_drvdata(pdev);
+
+	if (z)
+		gpon_olt_mac_stop(&z->mac);
 	zx_regs = NULL;
 }
 
@@ -239,6 +340,7 @@ static struct pci_driver zx_driver = {
 	.id_table = zx_ids,
 	.probe = zx_probe,
 	.remove = zx_remove,
+	.shutdown = zx_remove,
 };
 module_pci_driver(zx_driver);
 

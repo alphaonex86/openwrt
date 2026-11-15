@@ -14,17 +14,32 @@
 #define GPON_OLT_MAC_PLOAM_BUDGET	16	/* upstream PLOAMs taken per link and tick */
 #define GPON_OLT_MAC_OMCI_BUDGET	256	/* upstream frames taken per tick */
 
+/* The held downstream PLOAMs, oldest first, until the sender is busy. */
+static void link_ds_flush(struct gpon_olt_mac_link *l)
+{
+	while (l->ds_n) {
+		if (l->mac->ops->ploam_tx(l->mac->chip, l->link, l->ds_q[l->ds_head])) {
+			l->ploam_busy++;
+			return;
+		}
+		l->ds_head = (l->ds_head + 1) % GPON_OLT_MAC_PLOAM_QUEUE;
+		l->ds_n--;
+		l->ds_ploam++;
+	}
+}
+
 static void link_ds_ploam(void *sh, const u8 m[GPON_OLT_PLOAM_DS_LEN])
 {
 	struct gpon_olt_mac_link *l = sh;
 
-	if (l->mac->ops->ploam_tx(l->mac->chip, l->link, m)) {
-		l->ploam_busy++;
-		pr_warn_ratelimited("%s: link %u downstream PLOAM busy, message %02x dropped\n", l->mac->name, l->link,
-				    m[1]);
+	if (l->ds_n == GPON_OLT_MAC_PLOAM_QUEUE) {
+		l->ploam_drop++;
+		pr_warn_ratelimited("%s: link %u downstream PLOAM queue full, message %02x dropped\n", l->mac->name,
+				    l->link, m[1]);
 		return;
 	}
-	l->ds_ploam++;
+	memcpy(l->ds_q[(l->ds_head + l->ds_n++) % GPON_OLT_MAC_PLOAM_QUEUE], m, GPON_OLT_PLOAM_DS_LEN);
+	link_ds_flush(l);
 }
 
 static void link_sn_window(struct gpon_olt_mac_link *l, bool open)
@@ -57,8 +72,11 @@ static void link_ranging_grant(void *sh, u8 onu_id)
 static int link_ds_omci(void *sh, u16 gem_port, const u8 *pdu, unsigned int len)
 {
 	struct gpon_olt_mac_link *l = sh;
-	int rc = l->mac->ops->omci_tx(l->mac->chip, l->link, gem_port, pdu, len);
+	int rc;
 
+	if (!l->mac->ops->omci_tx)
+		return -EOPNOTSUPP;
+	rc = l->mac->ops->omci_tx(l->mac->chip, l->link, gem_port, pdu, len);
 	if (rc == -EBUSY) {
 		l->omci_full++;
 		pr_warn_ratelimited("%s: link %u OMCI downstream queue full\n", l->mac->name, l->link);
@@ -105,7 +123,7 @@ static void link_us_ploam(struct gpon_olt_mac_link *l, const u8 *m, u32 rtd, u32
 
 static void mac_us_omci(struct gpon_olt_mac *mac, unsigned int link, u16 gem_port, const u8 *pdu, u32 now)
 {
-	if (link >= mac->n_links) {
+	if (link >= mac->n_links || !mac->ops->omci_tx) {
 		mac->rx_other++;
 		return;
 	}
@@ -142,9 +160,11 @@ static void mac_tick(struct timer_list *t)
 	unsigned int i;
 
 	spin_lock_bh(&mac->lock);
-	for (i = 0; i < mac->n_links; i++)
+	for (i = 0; i < mac->n_links; i++) {
 		if (mac->links[i].sn_open)
 			link_sn_window(&mac->links[i], false);
+		link_ds_flush(&mac->links[i]);
+	}
 	mac_poll(mac, now);
 	for (i = 0; i < mac->n_links; i++)
 		gpon_olt_port_tick(&mac->links[i].port, now);
@@ -186,9 +206,13 @@ static int mac_show(struct seq_file *m, void *v)
 		for (k = 0; k < l->port.n_eng; k++)
 			if (gpon_olt_port_show(&l->port, k, line, sizeof(line)))
 				seq_puts(m, line);
-		seq_printf(m, "link %u ploam ds %llu busy %llu us %llu omci ds %llu full %llu us %llu grant_fail %llu\n",
-			   i, l->ds_ploam, l->ploam_busy, l->us_ploam, l->ds_omci, l->omci_full, l->us_omci,
-			   l->grant_fail);
+		seq_printf(m, "link %u ploam ds %llu busy %llu drop %llu us %llu ", i, l->ds_ploam, l->ploam_busy,
+			   l->ploam_drop, l->us_ploam);
+		if (mac->ops->omci_tx)
+			seq_printf(m, "omci ds %llu full %llu us %llu", l->ds_omci, l->omci_full, l->us_omci);
+		else
+			seq_puts(m, "omci: no path");
+		seq_printf(m, " grant_fail %llu\n", l->grant_fail);
 	}
 	seq_printf(m, "rx_other %llu\n", mac->rx_other);
 	spin_unlock_bh(&mac->lock);
@@ -203,8 +227,8 @@ int gpon_olt_mac_start(struct gpon_olt_mac *mac, struct device *dev, const char 
 	const char *refused;
 	unsigned int i;
 
-	if (!ops || !ops->ploam_tx || !ops->sn_window || !ops->ranging_grant || !ops->omci_tx || !ops->stop ||
-	    !n_links || !n_onus)
+	if (!ops || !ops->ploam_tx || !ops->sn_window || !ops->ranging_grant || (ops->omci_rx && !ops->omci_tx) ||
+	    !ops->stop || !n_links || !n_onus)
 		return dev_err_probe(dev, -EINVAL, "%s: the OLT PON MAC shell refused its ops\n", name);
 	mac->links = devm_kcalloc(dev, n_links, sizeof(*mac->links), GFP_KERNEL);
 	eng = devm_kcalloc(dev, array_size(n_links, n_onus), sizeof(*eng), GFP_KERNEL);

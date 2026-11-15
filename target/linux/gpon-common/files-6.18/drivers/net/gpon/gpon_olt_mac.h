@@ -14,17 +14,20 @@
 
 #include "gpon_olt_port.h"
 
+#define GPON_OLT_MAC_PLOAM_QUEUE	16	/* downstream PLOAMs held per link while the sender is busy */
+
 struct device;
 
 /* Called under the shell's lock (softirq context, never sleeping); @link < n_links. */
 struct gpon_olt_mac_ops {
-	/* 0, or -EBUSY while the link's sender still holds the previous message; the chip adds the CRC */
+	/* 0, or -EBUSY while the link's sender still holds the previous message (never waiting): the shell offers it
+	 * again at the next tick; the chip adds the CRC */
 	int (*ploam_tx)(void *chip, unsigned int link, const u8 msg[GPON_OLT_PLOAM_DS_LEN]);
 	/* the chip grants serial-number requests while open; one that grants once per call ignores a close */
 	int (*sn_window)(void *chip, unsigned int link, bool open);
 	/* one ranging grant to the default Alloc-ID of @onu_id (its ONU-ID) */
 	int (*ranging_grant)(void *chip, unsigned int link, u8 onu_id);
-	/* 0, -EBUSY when the downstream queue is full */
+	/* 0, -EBUSY when the downstream queue is full; NULL for a chip with no OMCI path (omci_rx NULL too) */
 	int (*omci_tx)(void *chip, unsigned int link, u16 gem_port, const u8 *pdu, unsigned int len);
 	/* Polled each tick; NULL for a chip that pushes its upstream through gpon_olt_mac_us_*() instead.
 	 * -> true with the oldest upstream PLOAM taken off the chip and the round trip measured with it */
@@ -42,7 +45,9 @@ struct gpon_olt_mac_link {
 	unsigned int link;
 	struct gpon_olt_port port;
 	bool sn_open;
-	u64 ds_ploam, ploam_busy, us_ploam, ds_omci, omci_full, us_omci, grant_fail;
+	u8 ds_q[GPON_OLT_MAC_PLOAM_QUEUE][GPON_OLT_PLOAM_DS_LEN];
+	unsigned int ds_head, ds_n;
+	u64 ds_ploam, ploam_busy, ploam_drop, us_ploam, ds_omci, omci_full, us_omci, grant_fail;
 };
 
 struct gpon_olt_mac {

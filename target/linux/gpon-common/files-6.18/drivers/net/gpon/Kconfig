@@ -227,11 +227,21 @@ config GPON_OLT_MAC
 	  tick, the lock, one OLT port per PON link, /proc/<driver>.  The
 	  chip driver keeps its registers and bring-up.
 
+config GPON_OLT_ZTE
+	bool
+	depends on GPON_CORE
+	help
+	  The ZTE GPON OLT PON MAC block (gpon_olt_zte.c): PLOAM both ways and
+	  the indirect memories of each PON link's window, selected by each
+	  ZTE OLT chip driver that carries it.
+
 config ZX279200
 	bool "ZX279200 GPON OLT PON MAC (PCIe)"
 	depends on PCI
 	depends on ARCH_BCM_IPROC
 	select GPON_CORE
+	select GPON_OLT_MAC
+	select GPON_OLT_ZTE
 	select GPON_REGSEQ
 	help
 	  The 8-port GPON OLT PON MAC of the V-SOL V1600G, on PCIe (its source

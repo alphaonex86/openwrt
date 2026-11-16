@@ -1194,6 +1194,7 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
 	bool fw_current_inpsmode = false;
 	bool fw_ps_awake = true;
+	bool stuck, payload_err;
 
 	rtlpriv->cfg->ops->get_hw_reg(hw, HW_VAR_FW_PSMODE_STATUS,
 				      (u8 *)(&fw_current_inpsmode));
@@ -1222,7 +1223,9 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	spin_unlock(&rtlpriv->locks.rf_ps_lock);
 
 	rtl92fe_txdma_error(hw);
-	if (!rtl92fe_tx_hang_detect(hw)) {
+	stuck = rtl92fe_tx_hang_detect(hw);
+	payload_err = rtl92fe_txdma_hangup(hw);
+	if (!stuck && !payload_err) {
 		rtl_pcidev(rtl_pcipriv(hw))->tx_hang_told = false;
 	} else {
 		struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
@@ -1231,7 +1234,8 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 		if (!rtlpci->tx_hang_told)
 			pr_warn("TX stuck: %s (txdma_err=%u so far), restart_on_tx_hang=%d\n",
 				rtlpci->pcie_tx_stuck ? "the PCIe engine reports itself stuck (0x3f3)"
-						      : "a queue's HW index unmoved for 60 s, no other queue alive",
+				: payload_err ? "a TX payload over/underrun (TXDMA_STATUS OVF|UDN)"
+					      : "a queue's HW index unmoved for 60 s, no other queue alive",
 				rtlpci->txdma_err, rtl92fe_restart_on_tx_hang);
 		rtlpci->tx_hang_told = true;
 		if (rtl92fe_restart_on_tx_hang)

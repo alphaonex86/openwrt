@@ -2070,6 +2070,7 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 		return;
 	rtlpci->txdma_err++;
 	rtlpci->txdma_status |= status;
+	rtlpci->txdma_unseen |= status;
 	rtl_write_dword(rtlpriv, REG_TXDMA_STATUS, status);
 	/* The beacon's side of the moment: under an Ethernet load the WiFi TX
 	 * path carries almost only beacons, so the context that discriminates
@@ -2085,6 +2086,17 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 			    rtl_read_dword(rtlpriv, REG_MGQ_TXBD_IDX));
 	rtl92fe_txbd_dump(rtlpriv, &rtlpci->tx_ring[BE_QUEUE],
 			  rtl_read_dword(rtlpriv, REG_BEQ_TXBD_IDX));
+}
+
+/* The vendor's check_hangup: a TX payload over/underrun since the last watchdog tick is a hang
+ * by itself. An empty ring halts with no index left to watch and no 0x3f3 witness. */
+bool rtl92fe_txdma_hangup(struct ieee80211_hw *hw)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	u32 seen = rtlpci->txdma_unseen;
+
+	rtlpci->txdma_unseen = 0;
+	return seen & (BIT(13) | BIT(14));	/* PAYLOAD_OVF | PAYLOAD_UDN */
 }
 
 void rtl92fe_interrupt_recognized(struct ieee80211_hw *hw,

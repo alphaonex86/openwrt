@@ -2,7 +2,7 @@
 /* TIER: CHIP */
 /* zx279128_gpon_desc.h -- the transmit descriptor of the ZX279128 PON ring, PURE (host-tested): word 1 bits 26-24
  * the queue (7 for OMCI), bits 31-27 the T-CONT, word 2 bits 13-2 the GEM port, bit 31 OMCI, and word 4 bits 13-0
- * the length again (stock sets it on every frame; without it the queue manager never takes the frame).
+ * the length again, as stock sets it on every frame.
  */
 #ifndef _ZX279128_GPON_DESC_H
 #define _ZX279128_GPON_DESC_H

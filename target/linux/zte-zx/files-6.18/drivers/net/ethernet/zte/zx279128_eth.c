@@ -25,6 +25,7 @@
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
 
@@ -59,6 +60,12 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PP_CFG0			0x140004
 #define PP_CFG1			0x140008
 #define PP_RX_OFFSET		0x140060	/* 0x11: a received frame starts 16 bytes into its buffer */
+/* the packet processor's own DDR tables (stock: ACL 4 MB at 0x46720000, OPC counters 512 KB after it). Their reset
+ * values lie past our 128 MB and the DDR answers modulo 128 MB: left alone they point into kernel RAM. */
+#define PP_OPC_PM_BASE		0x144018
+#define PP_ACL_BASE		0x144038
+#define PP_ACL_BYTES		0x400000
+#define PP_OPC_PM_BYTES		0x80000
 #define PP_LIST_NORMAL		0x144010
 #define PP_LIST_JUMBO		0x144014
 #define PP_RX_RING		0x14401c
@@ -166,6 +173,7 @@ struct zx_eth {
 	dma_addr_t rx_dma;
 	u32 *tx_area;		/* ring 0, then ring 1 */
 	dma_addr_t tx_dma;
+	u32 tables;
 	unsigned int rx_next[2][RX_QUEUES];
 	struct eth_tx_ring tx[2];
 	struct eth_rx_len rx_len;
@@ -313,6 +321,8 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, PP_CLS_W2C, 0x00140000);
 	wr(e, PP_CLS_W1C, 0);
 
+	wr(e, PP_ACL_BASE, e->tables);
+	wr(e, PP_OPC_PM_BASE, e->tables + PP_ACL_BYTES);
 	wr(e, BMU_CTRL, 0);
 	wr(e, BMU_CFG0, 0x0104c040);
 	wr(e, BMU_CFG1, 0x3f);
@@ -746,6 +756,8 @@ static void zx_board_mac(struct zx_eth *e)
 static int zx_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct reserved_mem *tables;
+	struct device_node *np;
 	struct zx_eth *e;
 	int irq, pon_irq, ret, i;
 
@@ -775,6 +787,13 @@ static int zx_probe(struct platform_device *pdev)
 	e->tx_area = dmam_alloc_coherent(dev, 2 * TX_RING_BYTES, &e->tx_dma, GFP_KERNEL);
 	if (!e->pool || !e->lists || !e->rx_area || !e->tx_area)
 		return dev_err_probe(dev, -ENOMEM, "no DMA memory for the pools and rings\n");
+	np = of_parse_phandle(dev->of_node, "memory-region", 0);
+	tables = np ? of_reserved_mem_lookup(np) : NULL;
+	of_node_put(np);
+	if (!tables || tables->size < PP_ACL_BYTES + PP_OPC_PM_BYTES || tables->base > U32_MAX - tables->size)
+		return dev_err_probe(dev, -EINVAL, "no reserved memory-region of %u bytes for the packet processor's tables\n",
+				     PP_ACL_BYTES + PP_OPC_PM_BYTES);
+	e->tables = tables->base;
 	for (i = 0; i < NORMAL_BUFS; i++)
 		e->lists[i] = cpu_to_be16(i);
 	for (i = 0; i < JUMBO_BUFS; i++)

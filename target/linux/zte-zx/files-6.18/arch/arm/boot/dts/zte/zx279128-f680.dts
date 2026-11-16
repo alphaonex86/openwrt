@@ -22,6 +22,18 @@
 		reg = <0x40000000 0x8000000>;
 	};
 
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* the packet processor's ACL and OPC counter tables, where stock puts them */
+		pp_tables: pp-tables@46720000 {
+			reg = <0x46720000 0x480000>;
+			no-map;
+		};
+	};
+
 	/*
 	 * The panel lamps on SoC GPIO, all active low: stock's board table (board id 20, read from the eight strap pins
 	 * 59-64/20/21) sets every lamp output high at init but POWER, and its LED commands index that same table.
@@ -95,6 +107,7 @@
  * The stock U-Boot holds it high; the GPON driver keeps it high until its transmitter is enabled.
  */
 &eth {
+	memory-region = <&pp_tables>;
 	laser-enable-gpios = <&gpio4 8 1>;
 	optics = <&optics>;
 };

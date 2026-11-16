@@ -2,6 +2,7 @@
 /dts-v1/;
 
 #include "zx279128.dtsi"
+#include "zx279128-f680-omci-uni.dtsi"
 
 / {
 	model = "ZTE ZXHN F680";

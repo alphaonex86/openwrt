@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * The F680's OMCI panel, a node of the root, from its own stock MIB upload: the unit's NAND bank 0 run in its VM
+ * (virt/zx279128, rooted_stock.py) on the vODN OLT, 2026-11-16, 607 records.
+ * Stock also reports what this does not declare: its VEIP 0x0401 (ME 329 and its UNI-G; the core's VEIP instance is
+ * common) and the UNI-Gs 0x0301-0x0308 of its eight WiFi ports (the core holds 8 UNI-Gs). This shell does not apply
+ * a UNI's administrative state: no ethernet-uni-ports.
+ */
+/ {
+	omci-uni {
+		/* ME 11, expected and sensed type 47 (10/100/1000BASE-T) each */
+		ethernet-uni-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0104>;
+		ethernet-uni-types = /bits/ 8 <47 47 47 47>;
+		/* ME 264: one per Ethernet UNI and the POTS one */
+		uni-g-instances = /bits/ 16 <0x0101 0x0102 0x0103 0x0104 0x0201>;
+		pots-uni-instances = /bits/ 16 <0x0201>;
+	};
+};

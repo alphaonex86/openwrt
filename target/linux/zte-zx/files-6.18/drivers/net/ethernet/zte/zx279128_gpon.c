@@ -680,7 +680,8 @@ static int zx_sn_set(const char *val, const struct kernel_param *kp)
 		spin_lock_bh(&zx_pon->lock);
 		memcpy(zx_pon->sn, zx_sn, sizeof(zx_sn));
 		gpon_ploam_set_sn(&zx_pon->p, zx_sn);
-		omci_onu_init(zx_pon->onu, zx_sn, get_random_u8());
+		/* a new identity, the same panel */
+		omci_onu_reinit(zx_pon->onu, zx_sn, get_random_u8());
 		omci_onu_set_wan_mac(zx_pon->onu, zx_pon->wan.dev->dev_addr);
 		zx_mac_identity(zx_pon);
 		spin_unlock_bh(&zx_pon->lock);
@@ -703,6 +704,31 @@ static int zx_sn_get(char *buf, const struct kernel_param *kp)
 static const struct kernel_param_ops zx_sn_ops = { .set = zx_sn_set, .get = zx_sn_get };
 module_param_cb(sn, &zx_sn_ops, NULL, 0644);
 MODULE_PARM_DESC(sn, "G.984.3 serial number, AAAAhhhhhhhh; without one the unit never answers the OLT");
+
+static const void *zx_of_prop(void *np, const char *name, int *len)
+{
+	*len = -1;
+	return of_get_property(np, name, len);
+}
+
+/* The board's /omci-uni panel, every refusal said; none keeps the core's single-UNI default. */
+static void zx_omci_panel(struct omci_onu *onu, struct device *dev)
+{
+	struct device_node *np = of_find_node_by_path("/omci-uni");
+	struct omci_panel_decl d;
+	u8 port[OMCI_UNI_MAX], port_n;
+
+	if (!np)
+		return;
+	omci_onu_declare_panel(onu, zx_of_prop, np, port, ARRAY_SIZE(port), &port_n, &d);
+	of_node_put(np);
+	if (d.unis_why)
+		dev_err(dev, "/omci-uni REFUSED: %s -- keeping the single-UNI default\n", d.unis_why);
+	if (d.unis && !port_n)
+		dev_info(dev, "/omci-uni: %d UNIs, their administrative state modelled and not applied\n", d.unis);
+	if (d.part)
+		dev_err(dev, "/omci-uni %s REFUSED: %s -- that part keeps its default\n", d.part, d.part_why);
+}
 
 struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, struct zx_eth *eth,
 			    const u8 *board_mac)
@@ -741,6 +767,7 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 	pon->cfg.data_tcont = 1;
 	pon->cfg.trace = true;
 	omci_onu_init(pon->onu, pon->sn, get_random_u8());
+	zx_omci_panel(pon->onu, dev);
 	missing = gpon_ploam_init(&pon->p, &zx_ops, &pon->cfg, pon, pon->sn);
 	if (missing)
 		dev_err(dev, "the PLOAM core refused the shell: %s\n", missing);

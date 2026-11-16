@@ -100,7 +100,8 @@
 #define US_AES_SWITCH		0x100020
 #define US_AES_KEY		0x100038
 #define US_PLI_MAX		0x100414
-#define TM_TCONTS		0x160000	/* the T-CONT count, bit 3 a request that clears itself */
+#define TM_TCONTS		0x160000	/* bits 2-0 the T-CONT class (1-6; 0 sends no GEM upstream), bit 3 a request */
+#define TM_TCONT_CLASS_16	5	/* 16 T-CONTs, 800-byte PLI slice: stock's */
 
 #define ZX_TICK_MS		10
 #define ZX_US_FIFO		8
@@ -119,7 +120,7 @@ static const struct zx_reg zx_mac_init[] = {
 	{ MAC_ONU, 0x00ff0007, 0xff << 16 | GPON_O1_INITIAL }, { MAC_EQD, 0x00ffffff, 0 },
 	{ MAC_DELIM, 0x00ffffff, 0xab5983 }, { MAC_DELIM_SIZE, 3, 3 },
 	{ MAC_RX_CFG, 0x770, 0x520 }, { MAC_PLOAM_CFG, 0xf, 8 },
-	{ TOP_CAP, 0x7ff, 0x100 }, { US_PLI_MAX, ~0u, 400 }, { TM_TCONTS, ~0u, 16 | 8 },
+	{ TOP_CAP, 0x7ff, 0x100 }, { US_PLI_MAX, ~0u, 400 }, { TM_TCONTS, 0xf, TM_TCONT_CLASS_16 | 8 },
 	{ TOP_CTRL, BIT(15) | BIT(1), BIT(15) | BIT(1) }, { MAC_BIP_CTRL, 1, 0 },
 	{ MAC_START_CHECK, BIT(4), BIT(4) }, { MAC_RX_CFG, BIT(16), 0 }, { MAC_OMCI_MAX, 0x3fff, 2000 },
 };

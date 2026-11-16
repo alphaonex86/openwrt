@@ -44,6 +44,27 @@ static int tx_wbflush;
 module_param(tx_wbflush, int, 0444);
 MODULE_PARM_DESC(tx_wbflush, "DIAGNOSTIC: drain the write buffer (mb) before a TX descriptor is handed over (default 0)");
 
+#ifdef CONFIG_RTLWIFI_TX_TIMING
+/* ns with IRQs off per data frame: all, bookkeeping, free-descriptor read, fill, publish; then frames. */
+static unsigned long long tx_ns[6];
+module_param_array(tx_ns, ullong, NULL, 0644);
+MODULE_PARM_DESC(tx_ns, "DIAGNOSTIC: IRQ-off TX ns: all,bookkeeping,avail_read,fill,publish,frames (write zeros to restart)");
+
+static void tx_ns_account(const u64 *t)
+{
+	tx_ns[0] += t[4] - t[0];
+	tx_ns[1] += t[1] - t[0];
+	tx_ns[2] += t[2] - t[1];
+	tx_ns[3] += t[3] - t[2];
+	tx_ns[4] += t[4] - t[3];
+	tx_ns[5]++;
+}
+#define TX_NS(t, i)	((t)[i] = ktime_get_ns())
+#else
+#define TX_NS(t, i)	do { } while (0)
+#define tx_ns_account(t)	do { } while (0)
+#endif
+
 static int comp_tmout_dis = 1;
 module_param(comp_tmout_dis, int, 0444);
 MODULE_PARM_DESC(comp_tmout_dis,
@@ -1758,6 +1779,7 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 	struct rtl_tx_desc stage_desc;
 	struct rtl_tx_buffer_desc stage_bd;
 	u8 *fill_desc, *fill_bd, *fill_entry;
+	u64 tx_t[5] __maybe_unused;
 
 	if (ieee80211_is_mgmt(fc))
 		rtl_tx_mgmt_proc(hw, skb);
@@ -1778,6 +1800,7 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 		rtlpriv->stats.txbytesunicast += skb->len;
 
 	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
+	TX_NS(tx_t, 0);
 	if (beacon_window && rtlpci->bcn_prep_budget_us &&
 	    (u32)((u32)ktime_to_us(ktime_get()) - READ_ONCE(rtlpci->bcn_irq_us)) >
 	    rtlpci->bcn_prep_budget_us) {
@@ -1843,12 +1866,14 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 		}
 	}
 
+	TX_NS(tx_t, 1);
 	if (hw_queue != BEACON_QUEUE && rtlpriv->cfg->ops->get_available_desc &&
 	    rtlpriv->cfg->ops->get_available_desc(hw, hw_queue) == 0) {
 		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
 			"get_available_desc fail\n");
 		goto drop;
 	}
+	TX_NS(tx_t, 2);
 
 	if (ieee80211_is_data(fc))
 		rtlpriv->cfg->ops->led_control(hw, LED_CTL_TX);
@@ -1906,6 +1931,7 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 		}
 	}
 
+	TX_NS(tx_t, 3);
 	__skb_queue_tail(&ring->queue, skb);
 
 	if (tx_wbflush)
@@ -1930,6 +1956,10 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 		ieee80211_stop_queue(hw, skb_get_queue_mapping(skb));
 	}
 
+	if (hw_queue != BEACON_QUEUE) {
+		TX_NS(tx_t, 4);
+		tx_ns_account(tx_t);
+	}
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
 
 	rtlpriv->cfg->ops->tx_polling(hw, hw_queue);

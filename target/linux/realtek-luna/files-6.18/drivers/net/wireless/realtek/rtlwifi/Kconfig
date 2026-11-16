@@ -153,6 +153,16 @@ config RTLWIFI_PCI
 config RTLWIFI_USB
 	tristate
 
+config RTLWIFI_TX_TIMING
+	bool "Time the IRQ-off PCI TX section"
+	depends on RTLWIFI_PCI
+	default n
+	help
+	  Diagnostic: nanoseconds spent with IRQs off per transmitted frame, split
+	  into bookkeeping, the free-descriptor register read, the descriptor fill
+	  and the publish; read and reset in /sys/module/rtl_pci/parameters/tx_ns.
+	  The perf image only.
+
 config RTLWIFI_DEBUG
 	bool "Debugging output for rtlwifi driver family"
 	depends on RTLWIFI

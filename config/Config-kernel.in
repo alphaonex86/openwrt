@@ -1020,6 +1020,14 @@ config KERNEL_LUNA_GPHY_RTL9607C_REVB
 	  An RTL9607C board's layer turns it on; other Luna chips keep a kernel
 	  without its tables and code.
 
+config KERNEL_RTLWIFI_TX_TIMING
+	bool "rtlwifi: time the IRQ-off PCI TX section"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  build-openwrt.py variant "perf": where a transmitted WiFi frame spends
+	  its IRQ-off time.
+
 config KERNEL_LUNA_DEBUG
 	bool "Luna bring-up markers and driver diagnostics"
 	depends on TARGET_realtek_luna

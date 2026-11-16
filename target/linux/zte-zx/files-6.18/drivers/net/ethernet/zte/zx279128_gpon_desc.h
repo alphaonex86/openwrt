@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* TIER: CHIP */
 /* zx279128_gpon_desc.h -- the transmit descriptor of the ZX279128 PON ring, PURE (host-tested): word 1 bits 26-24
- * the queue (7 for OMCI), bits 31-27 the T-CONT, word 2 bits 13-2 the GEM port, bit 31 OMCI, and word 4 zero.
+ * the queue (7 for OMCI), bits 31-27 the T-CONT, word 2 bits 13-2 the GEM port, bit 31 OMCI, and word 4 bits 13-0
+ * the length again (stock sets it on every frame; without it the queue manager never takes the frame).
  */
 #ifndef _ZX279128_GPON_DESC_H
 #define _ZX279128_GPON_DESC_H
@@ -25,6 +26,7 @@ static inline bool zx279128_pon_tx_desc(u32 d[ZX_TX_DESC_WORDS], u32 buf, u32 of
 	d[1] = (tcont << 3 | (omci ? ZX_TXD_OMCI_QUEUE : 0)) << 24 | 1;
 	d[2] = ZX_TXD_PON_W2 | (omci ? ZX_TXD_PON_OMCI : 0) | buf << 14 | gem << 2;
 	d[3] = ZX_TXD_PON_W3 | len << 13 | offset << 7;
+	d[4] = len;
 	return true;
 }
 

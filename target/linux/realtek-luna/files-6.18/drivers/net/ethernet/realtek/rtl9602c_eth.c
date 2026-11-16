@@ -262,6 +262,8 @@ static bool rtl9602c_uni_port_locked(unsigned int port)
  * dev/MEASURED-rtl9602c_eth.c.md sec 18. */
 #define SW_WFQ_CTRL		0x2d800
 #define   SW_WFQ_MODE_WRR	BIT(17)	/* queues served by packet count; clear = by byte weight */
+#define SW_FC_PON_GLB_HI_TH	0x2311C	/* [25:16] on, [9:0] off, in pages of the shared pool */
+#define SW_FC_PON_GLB_LO_TH	0x23120
 #define SW_FC_P_LO_TH		0x230F0
 #define SW_FC_P_FCOFF_HI_TH	0x230F4
 #define SW_FC_P_FCOFF_LO_TH	0x230F8
@@ -1892,6 +1894,10 @@ static void rtl9602c_cpu_tag_arm(struct rtl9602c_eth *ep)
 	iowrite32(0x00400034, ep->sw + SW_FC_P_LO_TH);
 	iowrite32(0x00f000ea, ep->sw + SW_FC_P_FCOFF_HI_TH);
 	iowrite32(0x00400034, ep->sw + SW_FC_P_FCOFF_LO_TH);
+	/* Stock puts the fibre-side global thresholds (560/548, 534/519) above what the shared pool can hold
+	 * (it stops near 496), so that state never engages; the reset values (512/500, 486/471) are within reach. */
+	iowrite32(0x02300224, ep->sw + SW_FC_PON_GLB_HI_TH);
+	iowrite32(0x02160207, ep->sw + SW_FC_PON_GLB_LO_TH);
 }
 
 static void rtl9602c_hw_program(struct rtl9602c_eth *ep)

@@ -46,7 +46,7 @@
 /* Chip level (offsets from 0x92000000). */
 #define TOP_RAM_INIT		0x04001c	/* bits 3-0 written 1 start a RAM init and read 0 once done */
 #define TOP_CAP			0x040020
-#define TOP_DYING_GASP		0x040024	/* bit 16: watch the supply */
+#define TOP_DYING_GASP		0x040024	/* bit 15 re-detect, bit 16 watch the supply, bit 17 pulsed: forget a gasp */
 #define TOP_INT			0x040040
 #define TOP_INT_MASK		0x040044	/* 1 = masked */
 #define TOP_INT_GPON		BIT(0)
@@ -88,6 +88,7 @@
 #define MAC_LASER		0x0d8000	/* bit 1: forced off */
 #define MAC_SN			0x0d8040
 #define MAC_US_GO		0x0d8048	/* write 1 to send; reads non-zero while busy */
+#define MAC_US_DG_SENT		0x0d814c	/* bits 3-0: Dying_Gasp messages the MAC sent itself */
 #define MAC_US_PLOAM		0x0d804c
 #define MAC_US_REPEAT		0x0d8058	/* bits 17-16 the repeat count, bits 5-0 = 3 as stock */
 #define MAC_PREAMBLE		0x0d80d4	/* bits: Type 1 << 18 | Type 2 << 10 | Type 3 (10 bits) */
@@ -153,6 +154,7 @@ struct zx_pon {
 	unsigned int us_head, us_count;
 	u32 o5_lost;
 	u32 grants_seen;		/* MAC_RX_ALLOC_WR at the last grant poll */
+	u32 dg_sent;			/* MAC_US_DG_SENT at the last grant poll */
 	u64 ploam_rx, ploam_tx, ploam_tx_dropped, omci_rx, omci_tx, omci_tx_fail, rx_foreign;
 };
 
@@ -200,6 +202,8 @@ static void zx_us_drain(struct zx_pon *pon)
 		for (w = 0; w < 3; w++)
 			wr(pon, MAC_US_PLOAM + 4 * w, get_unaligned_be32(m + 4 * w));
 		wr(pon, MAC_US_GO, 1);
+		if (IS_ENABLED(CONFIG_GPON_PLOAM_DIAG) && m[1] != PLM_US_REI)
+			dev_info(pon->dev, "upstream PLOAM %*ph\n", GPON_PLOAM_US_LEN, m);
 		pon->us_head = (pon->us_head + 1) % ZX_US_FIFO;
 		pon->us_count--;
 		pon->ploam_tx++;
@@ -401,9 +405,18 @@ static int zx_ds_bip_errors(void *sh, u32 *count)
 	return 0;
 }
 
-/* The MAC sends its own Dying_Gasp: the core's template has no register here, the supply watch does. */
+static bool zx_dg_watch = true;
+module_param_named(dg_watch, zx_dg_watch, bool, 0644);
+MODULE_PARM_DESC(dg_watch, "arm the supply watch at Ranging_Time (0: no Dying_Gasp is ever sent)");
+
+/* The MAC sends its own Dying_Gasp: the core's template has no register here, the supply watch does.
+ * A gasp the MAC saw before the arm is forgotten first (bit 15 cleared, bit 17 pulsed), as stock's re-detect does. */
 static void zx_arm_dying_gasp(void *sh, const u8 m[GPON_PLOAM_US_LEN])
 {
+	if (!zx_dg_watch)
+		return;
+	fld(sh, TOP_DYING_GASP, BIT(15) | BIT(17), BIT(17));
+	fld(sh, TOP_DYING_GASP, BIT(17), 0);
 	fld(sh, TOP_DYING_GASP, BIT(16), BIT(16));
 }
 
@@ -584,9 +597,13 @@ static void zx_pon_tick(struct timer_list *t)
 	gpon_ploam_poll_rei(&pon->p, now);
 	if (!(pon->p.ticks % ZX_GRANT_POLL_TICKS)) {
 		u32 grants = rd(pon, MAC_RX_ALLOC_WR);
+		u32 dg = rd(pon, MAC_US_DG_SENT) & 0xf;
 
 		gpon_ploam_poll_grants(&pon->p, grants - pon->grants_seen, now);
 		pon->grants_seen = grants;
+		if (dg != pon->dg_sent)
+			dev_warn_ratelimited(pon->dev, "the MAC sent a Dying_Gasp (counter %u -> %u)\n", pon->dg_sent, dg);
+		pon->dg_sent = dg;
 	}
 	zx_data_sync(pon);
 	zx_optic_selftest(pon);

@@ -44,6 +44,8 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PHY_FIRST 0x0a		/* port p's internal PHY sits at MDIO 0x0a + p */
 
 /* Global (offsets from 0x92000000): block resets, active low. */
+#define G_PON_RESET		0x000000	/* the GPON MAC's blocks (bits 4-0) */
+#define G_PON_RESET_MS		10
 #define G_RESET			0x000008
 #define G_RESET_KEEP		0x03000000	/* bits U-Boot never pulses */
 #define G_RESET_PORT(p)		BIT(6 + (p))
@@ -276,6 +278,11 @@ static int zx_hw_init(struct zx_eth *e)
 	u32 v;
 	int i, q;
 
+	/* the stock kernel resets the GPON MAC before the network blocks: nothing its transmitter took in from the
+	 * OLT's grants since power-up (they come in O1 too) survives into this kernel */
+	wr(e, G_PON_RESET, 0);
+	msleep(G_PON_RESET_MS);
+	wr(e, G_PON_RESET, 0xffffffff);
 	for (i = 0; i < ZX_ETH_PORTS; i++)
 		wr(e, MAC(i) + MAC_CTRL, 0);
 	reset_pulse(e, 0xffffffff);

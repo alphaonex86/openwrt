@@ -94,7 +94,7 @@
 #define MAC_PREAMBLE_PTN	0x0d80d8
 #define MAC_DELIM_SIZE		0x0d80dc
 #define MAC_DELIM		0x0d80e0
-#define MAC_BOH_LATCH		0x0d80e4
+#define MAC_BOH_LATCH		0x0d80e4	/* write 1: the transmitter re-reads the preamble; reads back 0 */
 #define MAC_POWER_LEVEL		0x0d8064	/* bits 1-0 */
 #define US_AES_SWITCH		0x100020
 #define US_AES_KEY		0x100038
@@ -112,10 +112,10 @@ struct zx_reg {
 	u32 off, mask, val;
 };
 
-/* The MAC as stock's GPON module leaves it before it starts: O1, no ONU-ID, the default burst overhead. */
+/* The MAC as stock's GPON module leaves it before it starts: O1, no ONU-ID, the default delimiter (the preamble:
+ * zx_preamble()). */
 static const struct zx_reg zx_mac_init[] = {
 	{ MAC_ONU, 0x00ff0007, 0xff << 16 | GPON_O1_INITIAL }, { MAC_EQD, 0x00ffffff, 0 },
-	{ MAC_PREAMBLE_PTN, 0xff, 0xaa }, { MAC_PREAMBLE, 0x03ffffff, 3 },
 	{ MAC_DELIM, 0x00ffffff, 0xab5983 }, { MAC_DELIM_SIZE, 3, 3 },
 	{ MAC_RX_CFG, 0x770, 0x520 }, { MAC_PLOAM_CFG, 0xf, 8 },
 	{ TOP_CAP, 0x7ff, 0x100 }, { US_PLI_MAX, ~0u, 400 }, { TM_TCONTS, ~0u, 16 | 8 },
@@ -222,24 +222,34 @@ static void zx_ploam_tx(void *sh, u8 queue, const u8 m[GPON_PLOAM_US_LEN])
 	zx_us_drain(pon);
 }
 
+/* Stock's preamble write, after each state change: the lengths in bits, Type 3 only from O3, then the re-read. */
+static void zx_preamble(struct zx_pon *pon, enum gpon_ostate st)
+{
+	const struct gpon_ploam *p = &pon->p;
+	u32 t3 = st >= GPON_O3_SERIAL ? min_t(u32, p->boh_t3, 127) : 0;
+
+	wr(pon, MAC_PREAMBLE_PTN, p->boh_ptn);
+	wr(pon, MAC_PREAMBLE, min_t(u32, p->boh_t1, 31) * 8 << 18 | min_t(u32, p->boh_t2, 31) * 8 << 10 | t3 * 8);
+	wr(pon, MAC_BOH_LATCH, 1);
+}
+
 /* --- the core's ops */
 static void zx_boh_write(void *sh, u32 cfg_word, const u8 *oh, u8 size)
 {
 	struct zx_pon *pon = sh;
 	const struct gpon_ploam *p = &pon->p;
 
-	wr(pon, MAC_PREAMBLE_PTN, p->boh_ptn);
-	wr(pon, MAC_PREAMBLE, min_t(u32, p->boh_t1, 31) * 8 << 18 | min_t(u32, p->boh_t2, 31) * 8 << 10 |
-	   min_t(u32, p->boh_t3, 127) * 8);
 	/* level 3 is reserved: stock keeps the level it had */
 	if (p->boh_power != 3)
 		fld(pon, MAC_POWER_LEVEL, 3, p->boh_power);
 	wr(pon, MAC_DELIM, p->boh_delim[0] << 16 | p->boh_delim[1] << 8 | p->boh_delim[2]);
 	wr(pon, MAC_DELIM_SIZE, 3);
-	wr(pon, MAC_BOH_LATCH, 1);
 	/* a new serial-number response delay with each overhead, as stock */
 	fld(pon, MAC_RAND_DELAY, 0xff, get_random_u32_below(MAC_RAND_DELAY_MAX));
 	wr(pon, MAC_RAND_EN, 1);
+	/* an Extended_Burst_Length in O3 changes no state: the preamble now; elsewhere the state write carries it */
+	if (p->state == GPON_O3_SERIAL)
+		zx_preamble(pon, p->state);
 }
 
 static u32 zx_min_delay(void *sh)
@@ -267,7 +277,12 @@ static void zx_none(void *sh)
 
 static void zx_set_hw_state(void *sh, enum gpon_ostate st)
 {
-	fld(sh, MAC_ONU, 7, st);
+	struct zx_pon *pon = sh;
+
+	if ((rd(pon, MAC_ONU) & 7) == st)
+		return;
+	fld(pon, MAC_ONU, 7, st);
+	zx_preamble(pon, st);
 }
 
 static void zx_data_teardown(struct zx_pon *pon)
@@ -637,6 +652,7 @@ static int zx_mac_start(struct zx_pon *pon)
 	}
 	writel(readl(pon->pinmux) & ~PINMUX_PON_BIT, pon->pinmux);
 	zx_regs(pon, zx_mac_init, ARRAY_SIZE(zx_mac_init), true);
+	zx_preamble(pon, GPON_O1_INITIAL);
 	for (i = 0; i < MAC_GEM_PORTS; i++)
 		wr(pon, MAC_GEM(i), 0);
 	wr(pon, MAC_INT, MAC_INT_ALL);

@@ -107,21 +107,31 @@ static inline enum eth_watch eth_egress_held_sample(struct eth_egress_watch *e, 
 }
 /* One switch port: `ready` = it has a link (the CPU port: its ring owes nothing); a port its partner paused since
  * the last sample holds its queue by right and is not judged either. `drain` = the least the port counts out when
- * the queue it holds leaves: a port that keeps its queue and counts out less is held too, its trickle is not sending
- * (a unit in service: 1014 pages kept 7 min at 25 octets/s). */
+ * the queue it holds leaves: a port that keeps its queue and counts out less in a whole second is held too, its
+ * trickle is not sending (units in service: 1014 pages kept 7 min at 25 octets/s, 430 pages 79 min at a few kB/s). */
+#define ETH_EGRESS_SPAN_MS	1000
 struct eth_port_egress {
 	struct eth_egress_watch watch;
+	u64 span_ms;		/* start of the current span */
+	u32 span_sent;		/* the port's sent count then */
 	u32 paused;
+	bool trickle;		/* the last whole span counted out less than the queue kept */
 };
 
 static inline enum eth_watch eth_port_egress_sample(struct eth_port_egress *p, bool ready, u32 paused, u32 queued,
 						    u32 drain, u32 sent, u64 now_ms)
 {
 	bool judged = ready && paused == p->paused;
-	bool trickle = judged && queued >= ETH_EGRESS_STALL_FRAMES && sent - p->watch.sent < drain;
+	bool held;
 
+	if (now_ms - p->span_ms >= ETH_EGRESS_SPAN_MS) {
+		p->trickle = sent - p->span_sent < drain;
+		p->span_sent = sent;
+		p->span_ms = now_ms;
+	}
+	held = judged && queued >= ETH_EGRESS_STALL_FRAMES && p->trickle;
 	p->paused = paused;
-	return eth_egress_held_sample(&p->watch, judged ? queued : 0, trickle ? p->watch.sent : sent, now_ms);
+	return eth_egress_held_sample(&p->watch, judged ? queued : 0, held ? p->watch.sent : sent, now_ms);
 }
 #ifdef __KERNEL__
 #include <linux/ethtool.h>

@@ -50,7 +50,7 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define G_ENABLE		0x00000c
 #define G_ENABLE_PP		BIT(17)
 #define G_PP_AUX		0x040018	/* U-Boot: 0, then 0x1c = 0xf */
-#define G_INT_MASK		0x040044	/* the chip's interrupt sources, 1 = masked (0x1ff after reset) */
+#define G_INT_MASK		0x040044	/* the chip's interrupt sources, 1 = masked (0x1ff after reset: 9-31 open) */
 #define G_INT_PP		BIT(2)
 
 /* Packet processor. */
@@ -354,7 +354,8 @@ static int zx_hw_init(struct zx_eth *e)
 	udelay(1000);
 	wr(e, G_ENABLE, rd(e, G_ENABLE) | G_ENABLE_PP);
 	wr(e, PP_INT_MASK, ~0u);
-	wr(e, G_INT_MASK, rd(e, G_INT_MASK) & ~G_INT_PP);
+	/* every source masked but ours, as stock masks them all first (0xfffffff3); the PON opens bit 0 itself */
+	wr(e, G_INT_MASK, ~G_INT_PP);
 	return 0;
 }
 

@@ -1196,6 +1196,7 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	bool fw_ps_awake = true;
 	bool stuck, payload_err;
 
+	rtl_pcidev(rtl_pcipriv(hw))->tick_us = (u32)ktime_to_us(ktime_get());
 	rtlpriv->cfg->ops->get_hw_reg(hw, HW_VAR_FW_PSMODE_STATUS,
 				      (u8 *)(&fw_current_inpsmode));
 	rtlpriv->cfg->ops->get_hw_reg(hw, HW_VAR_FWLPS_RF_ON,
@@ -1223,6 +1224,7 @@ void rtl92fe_dm_watchdog(struct ieee80211_hw *hw)
 	spin_unlock(&rtlpriv->locks.rf_ps_lock);
 
 	rtl92fe_txdma_error(hw);
+	rtl_pcidev(rtl_pcipriv(hw))->probe_us = (u32)ktime_to_us(ktime_get());
 	stuck = rtl92fe_tx_hang_detect(hw);
 	payload_err = rtl92fe_txdma_hangup(hw);
 	if (!stuck && !payload_err) {

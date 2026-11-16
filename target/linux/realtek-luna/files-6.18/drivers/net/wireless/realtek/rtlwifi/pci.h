@@ -217,6 +217,7 @@ struct rtl_pci {
 	u32 txdma_err;
 	u32 txdma_status;
 	u32 txdma_unseen;	/* TXDMA_STATUS bits not yet judged by the watchdog */
+	u32 tick_us, probe_us;	/* the last watchdog tick's start and its 0x3f3 probe (us) */
 	u32 tx_hang_resets;
 	u16 hang_rp[RTL_PCI_MAX_TX_QUEUE_COUNT];
 	unsigned long hang_since[RTL_PCI_MAX_TX_QUEUE_COUNT];	/* jiffies, 0 = no clock */

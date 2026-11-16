@@ -2076,8 +2076,10 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 	 * path carries almost only beacons, so the context that discriminates
 	 * a late beacon rewrite from a starved DMA is printed with the error.
 	 */
-	pr_warn_ratelimited("TXDMA error 0x%08x (%u so far) bcn: %uus after irq, tasklet done at %uus, tasklet %u late %u, DWBCN0 0x%08x free_tail 0x%02x mgq_idx 0x%08x\n",
-			    status, rtlpci->txdma_err,
+	pr_warn_ratelimited("TXDMA error 0x%08x (%u so far, %s) tick: %uus after start, %uus after probe; bcn: %uus after irq, tasklet done at %uus, tasklet %u late %u, DWBCN0 0x%08x free_tail 0x%02x mgq_idx 0x%08x\n",
+			    status, rtlpci->txdma_err, in_hardirq() ? "irq" : "poll",
+			    (u32)ktime_to_us(ktime_get()) - rtlpci->tick_us,
+			    (u32)ktime_to_us(ktime_get()) - rtlpci->probe_us,
 			    (u32)ktime_to_us(ktime_get()) - rtlpci->bcn_irq_us,
 			    rtlpci->bcn_done_us - rtlpci->bcn_irq_us,
 			    rtlpci->bcn_tasklet, rtlpci->bcn_late,

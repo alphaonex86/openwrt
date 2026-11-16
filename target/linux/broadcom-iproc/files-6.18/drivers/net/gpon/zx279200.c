@@ -6,7 +6,9 @@
  * order (big-endian on the bus). Offsets, values and order are read from the unit and its firmware's behaviour.
  */
 
+#include <linux/unaligned.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -14,6 +16,7 @@
 #include "gpon_olt_mac.h"
 #include "gpon_regseq.h"
 #include "gpon_olt_zte.h"
+#include "eth_rx_geom.h"
 
 #define ZX_CHIP_ID		0x00000
 #define ZX_CHIP_SEL		0x00004
@@ -34,11 +37,43 @@
 #define ZX_MAP_SN_OPEN		BIT(3)
 #define ZX_DS_CTRL		0x1000		/* in a link's window: bit 1 its downstream sender on */
 #define ZX_DS_ON		BIT(1)
+/* The CPU frame pipe (the unit's firmware): two rings of {status, address} descriptors, bit 31 the chip's. */
+#define ZX_BR_INT_EN		0x00010
+#define ZX_TX_BASE		0x10400
+#define ZX_TX_CFG		0x10404
+#define ZX_RX_BASE		0x10408
+#define ZX_RX_CFG		0x1040c
+#define ZX_DMA_CTRL		0x10410
+#define ZX_INT_MASK		0x10418
+#define ZX_RING			255
+#define ZX_RING_CFG		0x1ff		/* the firmware's: 8 set, 7:0 the ring length */
+#define ZX_DMA_CTRL_ON		0x08000030	/* the firmware's */
+#define ZX_DESC_OWN		BIT(31)
+#define ZX_RXD_LEN_MASK		0xffff
+#define ZX_RX_BUF		2048
+#define ZX_TX_BUF		64
+#define ZX_HDR			8		/* 0x30, 0, chip, link, 0, 0, GEM port */
+#define ZX_HDR_OMCI		0x30
 #define ZX_ONUS			8
 #define ZX_PORT_LINKS		1		/* link 0 only until the others are brought up */
 
+/* An upstream frame: the chip's 8-byte header, then the payload; the length counts both and no FCS (the firmware
+ * copies header + 48 bytes of an OMCI frame of that length). */
+static const struct eth_rx_layout zx_rx_layout = {
+	.prefix = 0, .head = ZX_HDR, .fcs = ETH_RX_FCS_NOT_IN_LEN, .buf = ZX_RX_BUF,
+};
+
+struct zx_desc {
+	__be32 status, addr;
+};
+
 struct zx_chip {
+	struct pci_dev *pdev;
 	struct gpon_olt_mac mac;
+	struct zx_desc *tx, *rx;
+	dma_addr_t tx_dma, rx_dma, txb_dma, rxb_dma;
+	u8 *txb, *rxb;
+	unsigned int tx_cur, rx_cur;
 };
 
 static void __iomem *zx_regs;		/* one chip per board: gpon_regseq's io carries no context */
@@ -244,19 +279,93 @@ static int zx_ranging_grant(void *chip, unsigned int link, u8 onu_id)
 	return zte_ponmac_map_write(&zx_pm, link, ZX_MAP_T_RANGING, 0, w, 2);
 }
 
+static int zx_omci_tx(void *chip, unsigned int link, u16 gem_port, const u8 *pdu, unsigned int len)
+{
+	struct zx_chip *z = chip;
+	struct zx_desc *d = &z->tx[z->tx_cur];
+	u8 *buf = z->txb + ZX_TX_BUF * z->tx_cur;
+
+	if (len > ZX_TX_BUF - ZX_HDR)
+		return -EMSGSIZE;
+	if (be32_to_cpu(READ_ONCE(d->status)) & ZX_DESC_OWN)
+		return -EBUSY;
+	memset(buf, 0, ZX_HDR);
+	buf[0] = ZX_HDR_OMCI;
+	buf[3] = link;
+	put_unaligned_be16(gem_port, buf + 6);
+	memcpy(buf + ZX_HDR, pdu, len);
+	dma_wmb();
+	WRITE_ONCE(d->status, cpu_to_be32(ZX_DESC_OWN | (ZX_HDR + len)));
+	z->tx_cur = (z->tx_cur + 1) % ZX_RING;
+	return 0;
+}
+
+static int zx_omci_rx(void *chip, unsigned int *link, u16 *gem_port, u8 pdu[GPON_OLT_OMCI_LEN])
+{
+	struct zx_chip *z = chip;
+	struct zx_desc *d = &z->rx[z->rx_cur];
+	u32 st = be32_to_cpu(READ_ONCE(d->status));
+	const u8 *f = z->rxb + ZX_RX_BUF * z->rx_cur;
+	struct eth_rx_frame fr = { 0 };
+	int rc = -EPROTO;
+
+	if (!(st & ZX_DESC_OWN))
+		return 0;
+	dma_rmb();
+	if (eth_rx_frame_geom(&zx_rx_layout, eth_rx_dlen(st, ZX_RXD_LEN_MASK), true, &fr) == ETH_RX_OK &&
+	    fr.len >= GPON_OLT_OMCI_LEN && f[0] == ZX_HDR_OMCI) {
+		*link = f[3] & 0x7f;
+		*gem_port = get_unaligned_be16(f + 6);
+		memcpy(pdu, f + fr.off, GPON_OLT_OMCI_LEN);
+		rc = 1;
+	}
+	WRITE_ONCE(d->status, 0);
+	z->rx_cur = (z->rx_cur + 1) % ZX_RING;
+	return rc;
+}
+
 /* No access to the chip after this: at reboot the host bridge resets the link next (an access then aborts). */
 static void zx_stop(void *chip)
 {
 	unsigned int n;
 
+	zx_wr(ZX_INT_MASK, 0);
+	zx_wr(ZX_TX_CFG, 0);	/* INFERRED: bit 8 clear stops a ring */
+	zx_wr(ZX_RX_CFG, 0);
 	for (n = 0; n < ZX_PORT_LINKS; n++)
 		zx_wr(ZX_W(n) + ZX_DS_CTRL, zx_rd(ZX_W(n) + ZX_DS_CTRL) & ~ZX_DS_ON);
 }
 
 static const struct gpon_olt_mac_ops zx_ops = {
 	.ploam_tx = zx_ploam_tx, .sn_window = zx_sn_window, .ranging_grant = zx_ranging_grant,
-	.ploam_rx = zx_ploam_rx, .stop = zx_stop,	/* no OMCI path yet: the CPU frame pipe is a later stage */
+	.omci_tx = zx_omci_tx, .ploam_rx = zx_ploam_rx, .omci_rx = zx_omci_rx, .stop = zx_stop,
 };
+
+/* The frame pipe as the firmware sets it up: both rings, the DMA control word, both interrupts unmasked. */
+static int zx_pipe_init(struct zx_chip *z)
+{
+	struct device *dev = &z->pdev->dev;
+	unsigned int i;
+
+	z->tx = dmam_alloc_coherent(dev, ZX_RING * sizeof(*z->tx), &z->tx_dma, GFP_KERNEL);
+	z->rx = dmam_alloc_coherent(dev, ZX_RING * sizeof(*z->rx), &z->rx_dma, GFP_KERNEL);
+	z->txb = dmam_alloc_coherent(dev, ZX_RING * ZX_TX_BUF, &z->txb_dma, GFP_KERNEL);
+	z->rxb = dmam_alloc_coherent(dev, ZX_RING * ZX_RX_BUF, &z->rxb_dma, GFP_KERNEL);
+	if (!z->tx || !z->rx || !z->txb || !z->rxb)
+		return -ENOMEM;
+	for (i = 0; i < ZX_RING; i++) {
+		z->tx[i] = (struct zx_desc){ 0, cpu_to_be32(z->txb_dma + ZX_TX_BUF * i) };
+		z->rx[i] = (struct zx_desc){ 0, cpu_to_be32(z->rxb_dma + ZX_RX_BUF * i) };
+	}
+	zx_wr(ZX_TX_BASE, z->tx_dma);
+	zx_wr(ZX_RX_BASE, z->rx_dma);
+	zx_wr(ZX_DMA_CTRL, ZX_DMA_CTRL_ON);
+	zx_wr(ZX_INT_MASK, 3);
+	zx_wr(ZX_BR_INT_EN, 0x40);
+	zx_wr(ZX_TX_CFG, ZX_RING_CFG);
+	zx_wr(ZX_RX_CFG, ZX_RING_CFG);
+	return 0;
+}
 
 static int zx_pon_start(struct pci_dev *pdev)
 {
@@ -266,9 +375,17 @@ static int zx_pon_start(struct pci_dev *pdev)
 	unsigned int n;
 	int ret;
 
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return dev_err_probe(dev, ret, "no 32-bit DMA\n");
+	pci_set_master(pdev);
 	z = devm_kzalloc(dev, sizeof(*z), GFP_KERNEL);
 	if (!z)
 		return -ENOMEM;
+	z->pdev = pdev;
+	ret = zx_pipe_init(z);
+	if (ret)
+		return dev_err_probe(dev, ret, "frame pipe\n");
 	/* Each link's downstream sender, off after the reset: until it is on, its PLOAMd takes 14 messages, then holds
 	 * the start bit for ever (unit, 2026-11-15; stock sets the bit last before its first PLOAM). */
 	for (n = 0; n < ZX_PORT_LINKS; n++)

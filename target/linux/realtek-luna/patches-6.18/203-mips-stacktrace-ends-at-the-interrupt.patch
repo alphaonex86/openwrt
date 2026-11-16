@@ -1,0 +1,44 @@
+From: OpenWrt realtek-luna
+Subject: MIPS: a saved stack trace ends where the interrupt was taken
+
+stack_trace_save() followed the unwinder from the interrupt stack into the
+code the interrupt cut short. That code is not a caller of the interrupt:
+with it in the trace, an allocation made from a softirq got a different
+trace for every instruction it happened to interrupt, and the stack depot
+behind SLUB's owner tracking stored each of them for ever. Measured on an
+RTL9602C unit forwarding real traffic: 150820 traces, 13.7 MB, 0.2 MB a
+minute, until the unit was out of memory.
+
+The trace now stops when the unwinder leaves the interrupt stack. The oops
+backtrace (show_backtrace) keeps walking into the interrupted code.
+
+--- a/arch/mips/kernel/stacktrace.c
++++ b/arch/mips/kernel/stacktrace.c
+@@ -9,6 +9,7 @@
+ #include <linux/sched/task_stack.h>
+ #include <linux/stacktrace.h>
+ #include <linux/export.h>
++#include <asm/irq.h>
+ #include <asm/stacktrace.h>
+ 
+ /*
+@@ -51,6 +52,9 @@
+ 		return;
+ 	}
+ 	do {
++		bool irq = tsk == current && !preemptible() &&
++			   on_irq_stack(raw_smp_processor_id(), sp);
++
+ 		if (savesched || !in_sched_functions(pc)) {
+ 			if (trace->skip > 0)
+ 				trace->skip--;
+@@ -60,6 +64,9 @@
+ 				break;
+ 		}
+ 		pc = unwind_stack(tsk, &sp, pc, &ra);
++		/* what the interrupt cut short is not its caller */
++		if (irq && !on_irq_stack(raw_smp_processor_id(), sp))
++			break;
+ 	} while (pc);
+ #else
+ 	save_raw_context_stack(trace, sp, savesched);

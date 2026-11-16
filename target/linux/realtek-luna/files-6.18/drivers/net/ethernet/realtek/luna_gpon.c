@@ -1117,6 +1117,8 @@ enum {
 #define SC_IND_WD               (swc->sc_ind_wd)
 #define WRAP_GPHY_MISC          (swc->wrap_gphy_misc)
 #define THERMAL_CTRL_0          (swc->thermal_ctrl_0)
+/* RTL9602C: bit 16 turns the thermal meter on; its code is [22:16] of the word after it */
+#define THERMAL_CTRL_2_9602C    (THERMAL_CTRL_0 + 8)
 #define FORCE_P_ABLTY           (swc->force_p_ablty)
 #define ABLTY_FORCE_MODE        (swc->ablty_force_mode)
 #define DYNGASP_CTRL            (swc->dyngasp_ctrl)
@@ -9792,6 +9794,7 @@ static void __init rtl9602c_sc_ldo_init(void)
 	(void)sw_rd(SC_DATA);
 	sw_wr(THERMAL_CTRL_0, sw_rd(THERMAL_CTRL_0) | 0x00800000u);			/* THERMAL: set bit23 */
 	sw_wr(THERMAL_CTRL_0, (sw_rd(THERMAL_CTRL_0) & 0xff80ffffu) | 0x006c0000u);	/* preserve low-16 */
+	sw_wr(THERMAL_CTRL_2_9602C, sw_rd(THERMAL_CTRL_2_9602C) | BIT(16));	/* the meter on, as stock */
 	pr_info("luna-gpon: sc_ldo_init AFTER: 0x130=0x%08x\n", sw_rd(THERMAL_CTRL_0));
 }
 

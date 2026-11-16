@@ -260,6 +260,8 @@ static bool rtl9602c_uni_port_locked(unsigned int port)
 #define SW_ABLTY_1G_FD_UP	(0x2 | BIT(2) | BIT(4))
 /* MAC_CPU_TAG_CTRL: TAG_AWARE[9] makes the switch parse the ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 18. */
+#define SW_WFQ_CTRL		0x2d800
+#define   SW_WFQ_MODE_WRR	BIT(17)	/* queues served by packet count; clear = by byte weight */
 #define SW_FC_P_LO_TH		0x230F0
 #define SW_FC_P_FCOFF_HI_TH	0x230F4
 #define SW_FC_P_FCOFF_LO_TH	0x230F8
@@ -736,6 +738,10 @@ static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
 	if (ep->swm->cfg_unhiol)
 		iowrite32(ioread32(ep->sw + ep->swm->cfg_unhiol) | BIT(0),
 			  ep->sw + ep->swm->cfg_unhiol);
+
+	/* Egress queues are served round-robin, as the stock firmware of this chip and of the
+	 * RTL9601D runs them; the reset value is the byte-weighted mode stock never runs. */
+	iowrite32(ioread32(ep->sw + SW_WFQ_CTRL) | SW_WFQ_MODE_WRR, ep->sw + SW_WFQ_CTRL);
 
 	/* (c) WRAP_GPHY_MISC.PATCH_PHY_DONE — swcore 0x110 bit0: the "switch ready /
 	 * PHY patch done" latch the stock switch init asserts at completion. Without it

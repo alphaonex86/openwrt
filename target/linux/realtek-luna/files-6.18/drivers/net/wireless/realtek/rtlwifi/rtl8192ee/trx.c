@@ -696,7 +696,8 @@ void rtl92ee_tx_fill_desc(struct ieee80211_hw *hw,
 		skb_push(skb, EM_HDR_LEN);
 		memset(skb->data, 0, EM_HDR_LEN);
 	}
-	mapping = dma_map_single(&rtlpci->pdev->dev, skb->data, skb->len,
+	mapping = ptcb_desc->premapped ? ptcb_desc->dma :
+		  dma_map_single(&rtlpci->pdev->dev, skb->data, skb->len,
 				 DMA_TO_DEVICE);
 	if (dma_mapping_error(&rtlpci->pdev->dev, mapping)) {
 		rtl_dbg(rtlpriv, COMP_SEND, DBG_TRACE,

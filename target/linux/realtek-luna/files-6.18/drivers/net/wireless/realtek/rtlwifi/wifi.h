@@ -2142,6 +2142,9 @@ struct rtl_tcb_desc {
 	/* The max value by HW */
 	u32 empkt_len[10];
 	bool tx_enable_sw_calc_duration;
+	/* a data frame the bus layer mapped before its IRQ-off section */
+	bool premapped;
+	dma_addr_t dma;
 };
 
 struct rtl_wow_pattern {

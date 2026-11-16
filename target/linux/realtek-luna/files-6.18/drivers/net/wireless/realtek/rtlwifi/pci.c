@@ -574,7 +574,7 @@ static void _rtl_pci_tx_isr(struct ieee80211_hw *hw, int prio)
 		struct sk_buff *skb;
 		struct ieee80211_tx_info *info;
 		__le16 fc;
-		u16 queue;
+		u16 queue, behind;
 		u8 tid;
 		u8 *entry;
 
@@ -583,7 +583,12 @@ static void _rtl_pci_tx_isr(struct ieee80211_hw *hw, int prio)
 		else
 			entry = (u8 *)(&ring->desc[ring->idx]);
 
-		if (!rtlpriv->cfg->ops->is_tx_desc_closed(hw, prio, ring->idx))
+		/* The cached chip read index only lags the real one: a slot behind it in
+		 * the in-flight window is done, so the chip is asked once per batch. */
+		behind = (ring->cur_tx_rp + ring->entries - ring->idx) % ring->entries;
+		if (!(rtlpriv->use_new_trx_flow && behind &&
+		      behind <= skb_queue_len(&ring->queue)) &&
+		    !rtlpriv->cfg->ops->is_tx_desc_closed(hw, prio, ring->idx))
 			return;
 		ring->idx = (ring->idx + 1) % ring->entries;
 
@@ -1799,6 +1804,20 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 	else
 		rtlpriv->stats.txbytesunicast += skb->len;
 
+	/* The cache write-back of a data frame runs before the IRQ-off section;
+	 * early mode still writes into the frame inside the fill, so it maps there. */
+	ptcb_desc->premapped = hw_queue != BEACON_QUEUE &&
+			       !rtlpriv->rtlhal.earlymode_enable;
+	if (ptcb_desc->premapped) {
+		ptcb_desc->dma = dma_map_single(&rtlpci->pdev->dev, skb->data,
+						skb->len, DMA_TO_DEVICE);
+		if (dma_mapping_error(&rtlpci->pdev->dev, ptcb_desc->dma)) {
+			rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING, "TX DMA mapping error\n");
+			ieee80211_free_txskb(hw, skb);
+			return -ENOBUFS;
+		}
+	}
+
 	spin_lock_irqsave(&rtlpriv->locks.irq_th_lock, flags);
 	TX_NS(tx_t, 0);
 	if (beacon_window && rtlpci->bcn_prep_budget_us &&
@@ -1867,7 +1886,9 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 	}
 
 	TX_NS(tx_t, 1);
+	/* The in-flight count bounds the chip's own: ask it only near full. */
 	if (hw_queue != BEACON_QUEUE && rtlpriv->cfg->ops->get_available_desc &&
+	    skb_queue_len(&ring->queue) + 2 > ring->entries &&
 	    rtlpriv->cfg->ops->get_available_desc(hw, hw_queue) == 0) {
 		rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
 			"get_available_desc fail\n");
@@ -1968,6 +1989,9 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 
 drop:
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
+	if (ptcb_desc->premapped)
+		dma_unmap_single(&rtlpci->pdev->dev, ptcb_desc->dma, skb->len,
+				 DMA_TO_DEVICE);
 	/* adapter_tx consumes the packet even when the ring is full -- and SAYS so: a
 	 * command packet the chip never took must not be reported as sent (Codex, 2026-09-28). */
 	ieee80211_free_txskb(hw, skb);

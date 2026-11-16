@@ -91,6 +91,11 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PP_RX_RELEASE_GO	0x154064	/* write 1, reads 0 when taken */
 #define PP_RX_RELEASE		0x154068	/* ring << 14 | n << 4 | 8 | queue */
 #define PP_Q_ENABLE		0x15406c
+#define RED_OUT			0x000000	/* PP_Q_SEL table: out-queue, in-queue, buffer-queue thresholds */
+#define RED_IN			0x800000
+#define RED_BUF			0x1000000
+#define RED_OUT_QUEUES		0x109
+#define RED_QUEUES		0x100
 #define PP_DMA_CTRL		0x164000
 #define PP_DMA_BYTEORDER	0x000f0000
 #define PP_DMA_IRQ		0x164004
@@ -278,13 +283,44 @@ static void reset_pulse(struct zx_eth *e, u32 mask)
 	wr(e, G_RESET, 0xffffffff);
 }
 
+static int red_queue_write(struct zx_eth *e, u32 sel, const u32 w[4])
+{
+	u32 v;
+
+	if (readl_poll_timeout(e->base + PP_Q_READY, v, v & 1, 10, 100000)) {
+		dev_err(e->dev, "packet processor queue 0x%x never ready (0x%08x)\n", sel, v);
+		return -ETIMEDOUT;
+	}
+	wr(e, PP_Q_SEL, sel);
+	wr(e, PP_Q_CFG3, w[3]);
+	wr(e, PP_Q_CFG2, w[2]);
+	wr(e, PP_Q_CFG1, w[1]);
+	wr(e, PP_Q_CFG, w[0]);
+	return 0;
+}
+
+/* Every queue's thresholds as the stock kernel's init leaves them: an out-queue left 0 drops what the CPU sends
+ * upstream (out-queue 24 carries the OMCI, the queue manager's "up sw drop" 0x92158058 counts it). */
+static int red_queues_init(struct zx_eth *e)
+{
+	static const u32 in[4] = { 0x200020 }, buf[4] = { 0x3fffff, 0x400000, 0xc0020, 4 };
+	int q;
+
+	for (q = 0; q < RED_OUT_QUEUES; q++) {
+		u32 out[4] = { q < 16 ? 0x3ff : 0x7ff040 };
+
+		if (red_queue_write(e, RED_OUT | q, out) ||
+		    (q < RED_QUEUES && (red_queue_write(e, RED_IN | q, in) || red_queue_write(e, RED_BUF | q, buf))))
+			return -ETIMEDOUT;
+	}
+	return 0;
+}
+
 static int zx_hw_init(struct zx_eth *e)
 {
-	static const u32 q_cfg[3][2] = { { 0x000000, 0x400 }, { 0x800000, 0x200080 }, { 0x1000000, 0xc00 } };
 	static const u32 dma_irq[][2] = { { 0x164028, 1 }, { 0x16402c, 1 }, { 0x164030, 100000 }, { 0x164034, 0x80 },
 					  { PP_DMA_IRQ, 0x7f }, { 0x164020, 0x40 }, { 0x164024, 0x40 } };
-	u32 v;
-	int i, q;
+	int i;
 
 	/* the stock kernel resets the GPON MAC before the network blocks: nothing its transmitter took in from the
 	 * OLT's grants since power-up (they come in O1 too) survives into this kernel */
@@ -295,19 +331,8 @@ static int zx_hw_init(struct zx_eth *e)
 		wr(e, MAC(i) + MAC_CTRL, 0);
 	reset_pulse(e, 0xffffffff);
 	wr(e, PP_INT_CFG, 0x000fffff);
-	if (readl_poll_timeout(e->base + PP_Q_READY, v, v & 1, 10, 100000)) {
-		dev_err(e->dev, "packet processor queues never ready (0x%08x)\n", v);
+	if (red_queues_init(e))
 		return -ETIMEDOUT;
-	}
-	for (i = 0; i < ARRAY_SIZE(q_cfg); i++) {
-		for (q = 0; q < RX_QUEUES; q++) {
-			wr(e, PP_Q_SEL, q_cfg[i][0] | q);
-			wr(e, PP_Q_CFG3, 0);
-			wr(e, PP_Q_CFG2, 0);
-			wr(e, PP_Q_CFG1, 0);
-			wr(e, PP_Q_CFG, q_cfg[i][1]);
-		}
-	}
 	wr(e, PP_Q_ENABLE, 1);
 	wr(e, PP_DMA_CTRL, rd(e, PP_DMA_CTRL) | PP_DMA_BYTEORDER);
 	for (i = 0; i < ARRAY_SIZE(dma_irq); i++)
@@ -355,8 +380,8 @@ static int zx_hw_init(struct zx_eth *e)
 		for (i = 0; i < ARRAY_SIZE(sw_table); i++)
 			wr(e, sw_table[i][0], sw_table[i][1]);
 	}
-	for (q = 0; q < 64; q++) {
-		wr(e, SW_Q_SEL, 0x00800000 | q);
+	for (i = 0; i < 64; i++) {
+		wr(e, SW_Q_SEL, 0x00800000 | i);
 		wr(e, SW_Q_BASE, 0x92310000);
 		wr(e, SW_Q_CFG1, 0);
 		wr(e, SW_Q_CFG, 0x80);

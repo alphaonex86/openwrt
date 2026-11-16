@@ -226,7 +226,6 @@ static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
 #define OMCI_RESV	2	/* LAN xmit stops this many slots early so the sparse shared-ring OMCI inject always has room (never dropped) */
 #define DUMMY_RING_SIZE	4	/* idle filler armed on the unused HW TX rings (gap rings) */
 #define RX_CPU_PREFIX	2	/* switch CPU-port prepends a 2-byte offset word on RX */
-static const struct eth_rx_csum_layout rtl9602c_rx_csum = RTL9602C_RX_CSUM_LAYOUT;
 /* MEASURED (field X111W capture 2026-11-06): the descriptor length counts the frame AND its FCS, not the prefix. */
 static const struct eth_rx_layout rtl9602c_rx_layout = {
 	.prefix = RX_CPU_PREFIX, .fcs = ETH_RX_FCS_IN_LEN, .buf = RX_BUF_SIZE,
@@ -1453,6 +1452,8 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_report_oper_up);
 
 /* `napi_ctx` says whether the caller is INSIDE napi->poll. It ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 69. */
+static const struct eth_rx_csum_layout rtl9602c_rx_csum = RTL9602C_RX_CSUM_LAYOUT;
+
 static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int budget,
 			   bool napi_ctx)
 {

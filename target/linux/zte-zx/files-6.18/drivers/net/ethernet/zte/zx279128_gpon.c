@@ -35,6 +35,7 @@
 #include "gpon_common.h"
 #include "gpon_data_plan.h"
 #include "gpon_hwaddr.h"
+#include "gpon_tx_probe.h"
 #include "gpon_ploam.h"
 #include "gpon_omci_core.h"
 #include "gpon_optics_i2c.h"
@@ -722,6 +723,20 @@ static int zx_sn_get(char *buf, const struct kernel_param *kp)
 static const struct kernel_param_ops zx_sn_ops = { .set = zx_sn_set, .get = zx_sn_get };
 module_param_cb(sn, &zx_sn_ops, NULL, 0644);
 MODULE_PARM_DESC(sn, "G.984.3 serial number, AAAAhhhhhhhh; without one the unit never answers the OLT");
+
+#ifdef CONFIG_GPON_GEM_DIAG
+static int zx_omci_tx_probe(u16 gem)
+{
+	u8 msg[OMCI_LEN] = { 0 };
+	int ret;
+
+	mutex_lock(&zx_pon_mutex);
+	ret = zx_pon ? zx_eth_pon_tx(zx_pon->eth, msg, OMCI_LEN, gem, zx_pon->cfg.omcc_tcont, true) : -ENODEV;
+	mutex_unlock(&zx_pon_mutex);
+	return ret;
+}
+GPON_TX_PROBE_PARAM(zx_omci_tx_probe);
+#endif
 
 static const void *zx_of_prop(void *np, const char *name, int *len)
 {

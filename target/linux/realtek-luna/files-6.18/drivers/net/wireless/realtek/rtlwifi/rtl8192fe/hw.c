@@ -241,6 +241,10 @@ MODULE_PARM_DESC(nosnoop,
 		 "keep the endpoint's Enable-No-Snoop DevCtl bit as the chip powers "
 		 "up with it (default 1); 0 clears DevCtl[15:8] as mainline does");
 
+static bool nofw;
+module_param(nofw, bool, 0644);
+MODULE_PARM_DESC(nofw, "DIAGNOSTIC: bring the chip up without its 8051 firmware (default 0)");
+
 static void _rtl92fe_resume_tx_beacon(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -1639,7 +1643,7 @@ int rtl92fe_hw_init(struct ieee80211_hw *hw)
 	 * power-on tail in place, the high-offset FW-FIFO writes (0x4000) complete,
 	 * so the real download path runs. Non-fatal: even on failure the radio
 	 * still brings up for scan/monitor. */
-	err = rtl92fe_download_fw(hw, false);
+	err = nofw ? -ECANCELED : rtl92fe_download_fw(hw, false);
 	rtlhal->fw_ready = !err;
 	if (err)
 		pr_warn("rtl8192fe: FW download failed (err=%d)\n", err);

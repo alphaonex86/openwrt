@@ -82,16 +82,13 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PP_CLS_W2C		0x14c02c
 #define PP_CLS_CTRL		0x14c080
 #define PP_CLS_CTRL2		0x14c088
-#define PP_Q_SEL		0x154014
-#define PP_Q_READY		0x154018
-#define PP_Q_CFG		0x15401c
-#define PP_Q_CFG1		0x154020
-#define PP_Q_CFG2		0x154024
-#define PP_Q_CFG3		0x154028
+#define RED_TABLES		0x154000
+#define USCH_TABLES		0x15c000
+#define UOPC_TABLES		0x160000
 #define PP_RX_RELEASE_GO	0x154064	/* write 1, reads 0 when taken */
 #define PP_RX_RELEASE		0x154068	/* ring << 14 | n << 4 | 8 | queue */
 #define PP_Q_ENABLE		0x15406c
-#define RED_OUT			0x000000	/* PP_Q_SEL table: out-queue, in-queue, buffer-queue thresholds */
+#define RED_OUT			0x000000	/* RED table: out-queue, in-queue, buffer-queue thresholds */
 #define RED_IN			0x800000
 #define RED_BUF			0x1000000
 #define RED_OUT_QUEUES		0x109
@@ -283,19 +280,19 @@ static void reset_pulse(struct zx_eth *e, u32 mask)
 	wr(e, G_RESET, 0xffffffff);
 }
 
-static int red_queue_write(struct zx_eth *e, u32 sel, const u32 w[4])
+/* One row of the table engine at @eng (+0x18 bit 0 ready, +0x14 row select, data words from +0x1c): the words high
+ * to low, the first last (it commits the row). */
+static int pp_table_write(struct zx_eth *e, u32 eng, u32 sel, const u32 *w, int n)
 {
 	u32 v;
 
-	if (readl_poll_timeout(e->base + PP_Q_READY, v, v & 1, 10, 100000)) {
-		dev_err(e->dev, "packet processor queue 0x%x never ready (0x%08x)\n", sel, v);
+	if (readl_poll_timeout(e->base + eng + 0x18, v, v & 1, 10, 100000)) {
+		dev_err(e->dev, "packet processor table 0x%x row 0x%x never ready (0x%08x)\n", eng, sel, v);
 		return -ETIMEDOUT;
 	}
-	wr(e, PP_Q_SEL, sel);
-	wr(e, PP_Q_CFG3, w[3]);
-	wr(e, PP_Q_CFG2, w[2]);
-	wr(e, PP_Q_CFG1, w[1]);
-	wr(e, PP_Q_CFG, w[0]);
+	wr(e, eng + 0x14, sel);
+	while (n--)
+		wr(e, eng + 0x1c + 4 * n, w[n]);
 	return 0;
 }
 
@@ -309,10 +306,38 @@ static int red_queues_init(struct zx_eth *e)
 	for (q = 0; q < RED_OUT_QUEUES; q++) {
 		u32 out[4] = { q < 16 ? 0x3ff : 0x7ff040 };
 
-		if (red_queue_write(e, RED_OUT | q, out) ||
-		    (q < RED_QUEUES && (red_queue_write(e, RED_IN | q, in) || red_queue_write(e, RED_BUF | q, buf))))
+		if (pp_table_write(e, RED_TABLES, RED_OUT | q, out, 4) ||
+		    (q < RED_QUEUES && (pp_table_write(e, RED_TABLES, RED_IN | q, in, 4) ||
+					pp_table_write(e, RED_TABLES, RED_BUF | q, buf, 4))))
 			return -ETIMEDOUT;
 	}
+	return 0;
+}
+
+/* The upstream scheduler and output processor as the stock kernel and its TM module leave them: rows of
+ * { table << 22 | index, data0, data1 }; the OPC's command, modify and flow RAM chain flows 1-3 and flow 0. */
+static int upstream_tables_init(struct zx_eth *e)
+{
+	/* scheduler enables, its ageing time, the OPC's padding (minimum length << 1 | on) */
+	static const u32 regs[][2] = { { 0x15c000, 0x77 }, { 0x15c004, 0x0bebc200 }, { 0x160028, 0x20 << 1 | 1 } };
+	static const u32 usch[][2] = { { 0xc0000f, 0x30d40 }, { 0x000001, 0x80 } };
+	static const u32 uopc[][3] = {
+		{ 0xc00000, 0x10000 },
+		{ 0xc00001, 0x20002 }, { 0xc00002, 0x30001 }, { 0xc00003, 0x10000 }, { 0x800000, 1 }, { 0x000001, 0 },
+		{ 0xc00004, 0x20002 }, { 0xc00005, 0x30002 }, { 0xc00006, 0x10000 }, { 0x800001, 4 }, { 0x000002, 1 },
+		{ 0xc00007, 0x20002 }, { 0xc00008, 0x30003 }, { 0xc00009, 0x10000 }, { 0x800002, 7 }, { 0x000003, 2 },
+		{ 0x1400000, 0xc7180000 }, { 0x800003, 0x1ff000, 0xc0716300 }, { 0x000000, 0x3fe03, 0x600000 },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++)
+		wr(e, regs[i][0], regs[i][1]);
+	for (i = 0; i < ARRAY_SIZE(usch); i++)
+		if (pp_table_write(e, USCH_TABLES, usch[i][0], &usch[i][1], 1))
+			return -ETIMEDOUT;
+	for (i = 0; i < ARRAY_SIZE(uopc); i++)
+		if (pp_table_write(e, UOPC_TABLES, uopc[i][0], &uopc[i][1], 2))
+			return -ETIMEDOUT;
 	return 0;
 }
 
@@ -331,7 +356,7 @@ static int zx_hw_init(struct zx_eth *e)
 		wr(e, MAC(i) + MAC_CTRL, 0);
 	reset_pulse(e, 0xffffffff);
 	wr(e, PP_INT_CFG, 0x000fffff);
-	if (red_queues_init(e))
+	if (red_queues_init(e) || upstream_tables_init(e))
 		return -ETIMEDOUT;
 	wr(e, PP_Q_ENABLE, 1);
 	wr(e, PP_DMA_CTRL, rd(e, PP_DMA_CTRL) | PP_DMA_BYTEORDER);

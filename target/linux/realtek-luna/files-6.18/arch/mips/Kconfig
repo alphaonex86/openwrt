@@ -680,7 +680,6 @@ config REALTEK_LUNA
 	bool "Realtek Luna GPON ONU (RTL960xC RLX Taroko / RTL9607C interAptiv)"
 	select BOOT_RAW
 	select COMMON_CLK
-	select CPU_HAS_WB
 	select DMA_NONCOHERENT
 	select IRQ_MIPS_CPU
 	select IRQ_DOMAIN
@@ -704,6 +703,10 @@ config REALTEK_LUNA
 	#   RTL9607C "interAptiv" (MIPS32 R2): R4000 TLB (8-bit ASID) in a
 	#     Coherent Processing System, with a GIC, the R2 vectored/external
 	#     interrupt modes.
+	#     Its bus write buffer is drained by an uncached store+load; the
+	#     Taroko stock firmware has no such drain (sync and an uncached
+	#     load at its DMA cache operations only).
+	select CPU_HAS_WB if CPU_MIPS32_R2
 	select SYS_SUPPORTS_SMP if CPU_MIPS32_R2
 	select SYS_SUPPORTS_MIPS_CPS if CPU_MIPS32_R2
 	select MIPS_CPU_SCACHE if CPU_MIPS32_R2

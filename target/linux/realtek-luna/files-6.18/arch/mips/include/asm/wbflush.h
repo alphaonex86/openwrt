@@ -14,7 +14,7 @@
 
 /* The vDSO runs in user space and touches no device: it cannot reach the
  * kernel's __wbflush(), and needs no write-buffer drain -- a plain sync there.
- * (Luna: CPU_HAS_WB is selected for the whole family, 2026-09-28.) */
+ * (Luna: CPU_HAS_WB is selected on the interAptiv SoCs only.) */
 #if defined(CONFIG_CPU_HAS_WB) && !defined(__VDSO__)
 
 extern void (*__wbflush)(void);

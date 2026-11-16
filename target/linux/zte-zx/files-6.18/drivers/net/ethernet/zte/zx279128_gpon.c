@@ -319,9 +319,13 @@ static void zx_set_hw_onu_id(void *sh, u8 onu_id)
 {
 	struct zx_pon *pon = sh;
 
+	bool ranged = onu_id != GPON_PLOAM_ONU_ID_BROADCAST;
+
 	fld(pon, MAC_ONU, 0xff << 16, onu_id << 16);
-	if (onu_id == GPON_PLOAM_ONU_ID_BROADCAST)
+	if (!ranged)
 		zx_session_clear(pon);
+	/* slot 32 (Alloc-ID 254) answers serial-number grants only until an ONU-ID is assigned, as stock */
+	fld(pon, MAC_TCONT_PAIR(32), 0x1fff << 16, ((ranged ? 0 : MAC_TCONT_EN) | 0xfe) << 16);
 }
 
 static void zx_on_below_o5(void *sh)

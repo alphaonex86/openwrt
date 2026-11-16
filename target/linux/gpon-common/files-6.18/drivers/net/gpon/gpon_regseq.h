@@ -13,8 +13,8 @@ enum gpon_regseq_opc {
 	GPON_REGSEQ_FLD,	/* read-modify-write bits [msb:lsb] = `val`	*/
 	GPON_REGSEQ_DLY,	/* wait `val` milliseconds			*/
 	GPON_REGSEQ_POLL,	/* poll bit `lsb` of `addr` up to `val` times	*/
-	GPON_REGSEQ_REP,	/* `addr` times, the `val` slots after it: each a WR, then its STEP */
-	GPON_REGSEQ_STEP,	/* a REP slot's address and value strides (`addr`, `val`), mod 2^32 */
+	GPON_REGSEQ_REP,	/* `addr` times, the `val` slots after it: each a WR or a POLL, then its STEP */
+	GPON_REGSEQ_STEP,	/* a REP slot's address and value strides (`addr`, `val`), mod 2^32; a POLL's is 0 */
 };
 
 struct gpon_regseq_op {
@@ -68,7 +68,7 @@ void gpon_regseq_fld(const struct gpon_regseq_io *io, u32 addr,
 #define GPON_DLY(ms)		{ GPON_REGSEQ_DLY,  0,   0,   0,   (ms) }
 #define GPON_POLL(a, bit, n)	{ GPON_REGSEQ_POLL, (bit), (bit), (a), (n) }
 /* An indirect-memory fill or a per-block repeat, as a vendor init writes it: REP(times, slots), then per slot
- * WR(first address, first value) and STEP(address stride, value stride). */
+ * WR(first address, first value) or POLL(first address, bit, tries), and STEP(address stride, value stride). */
 #define GPON_REP(times, slots)	{ GPON_REGSEQ_REP,  0,   0,   (times), (slots) }
 #define GPON_STEP(da, dv)	{ GPON_REGSEQ_STEP, 0,   0,   (da), (dv) }
 

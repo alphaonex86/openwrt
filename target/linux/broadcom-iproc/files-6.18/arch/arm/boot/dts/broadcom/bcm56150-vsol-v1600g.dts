@@ -38,6 +38,12 @@
 		interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
+	/* the switch core's CMICd: its init replays the stock firmware's (its GPIO words below belong to cmic_gpio) */
+	switch@48000000 {
+		compatible = "brcm,bcm56150-switch";
+		reg = <0x48000000 0x40000>;
+	};
+
 	/* the switch core's CMICd GPIO, the stock kernel's lines 0-3: input, output and output-enable words, no IRQ */
 	cmic_gpio: gpio@48002000 {
 		compatible = "brcm,bcm6345-gpio";

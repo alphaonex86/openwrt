@@ -1,0 +1,40 @@
+From: Confiared <contact@confiared.com>
+Subject: [PATCH] net: broadcom: the XGS switch CMIC core and the BCM56150 switch init
+
+The CMIC core (S-Channel, MIIM, init table replay) and the BCM56150
+switch-core driver that replays its init table at probe.
+
+Signed-off-by: Confiared <contact@confiared.com>
+---
+--- a/drivers/net/ethernet/broadcom/Kconfig
++++ b/drivers/net/ethernet/broadcom/Kconfig
+@@ -274,4 +274,18 @@
+ 	  This configuration enables the Broadcom ASP 2.0 Ethernet controller
+ 	  driver which is present in Broadcom STB SoCs such as 72165.
+ 
++config BCM_CMIC
++	tristate
++	help
++	  The CMIC of a Broadcom XGS switch core: its S-Channel, its MIIM
++	  master and the replay of a chip's init table.
++
++config BCM56150_SWITCH
++	tristate "BCM56150 (Hurricane2) switch core init"
++	depends on ARCH_BCM_IPROC || COMPILE_TEST
++	select BCM_CMIC
++	help
++	  Brings up the switch core of a BCM56150 iProc host (V-SOL V1600G)
++	  at probe, from the init table generated from its stock firmware.
++
+ endif # NET_VENDOR_BROADCOM
+--- a/drivers/net/ethernet/broadcom/Makefile
++++ b/drivers/net/ethernet/broadcom/Makefile
+@@ -15,6 +15,8 @@
+ obj-$(CONFIG_BGMAC) += bgmac.o
+ obj-$(CONFIG_BGMAC_BCMA) += bgmac-bcma.o bgmac-bcma-mdio.o
+ obj-$(CONFIG_BGMAC_PLATFORM) += bgmac-platform.o
++obj-$(CONFIG_BCM_CMIC) += bcm_cmic.o
++obj-$(CONFIG_BCM56150_SWITCH) += bcm56150.o
+ obj-$(CONFIG_SYSTEMPORT) += bcmsysport.o
+ obj-$(CONFIG_BNXT) += bnxt/
+ obj-$(CONFIG_BCMASP) += asp2/

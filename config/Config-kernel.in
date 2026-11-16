@@ -1045,6 +1045,14 @@ config KERNEL_ZX279200
 	  The V-SOL V1600G board's layer turns it on: the 8-port PON MAC behind
 	  the host's PCIe.
 
+config KERNEL_BCM56150_SWITCH
+	bool "BCM56150 switch core init"
+	depends on TARGET_broadcom_iproc
+	default n
+	help
+	  The V-SOL V1600G board's layer turns it on: the switch core brought
+	  up from the init table generated from its stock firmware.
+
 config KERNEL_VSOL_V1600G_WDT
 	bool "V-SOL V1600G board watchdog"
 	depends on TARGET_broadcom_iproc

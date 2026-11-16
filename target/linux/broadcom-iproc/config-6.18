@@ -1,4 +1,5 @@
 # CONFIG_ARM_ATAG_DTB_COMPAT is not set
+# CONFIG_BCM56150_SWITCH is not set
 # CONFIG_BCM_CYGNUS_PHY is not set
 # CONFIG_CLK_BCM_NS2 is not set
 # CONFIG_CLK_BCM_SR is not set

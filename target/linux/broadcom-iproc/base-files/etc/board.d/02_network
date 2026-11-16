@@ -8,6 +8,9 @@ case "$(board_name)" in
 vsol,v1600g)
 	# the management RJ45 at the stock firmware's default management address
 	ucidef_set_interface "lan" device "eth0" protocol "static" ipaddr "192.168.8.200"
+	# the OLT's layer-2 service, no address: the PON port alone until the switch driver gives it an uplink
+	# (then "pon0 <uplink>", which the helper makes the bridge br-olt)
+	ucidef_set_interface "olt" device "pon0" protocol "none"
 	;;
 esac
 

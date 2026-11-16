@@ -301,6 +301,8 @@ obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_platform.o
 obj-$(CONFIG_GPON_OLT_ROLE) += gpon_olt_port.o
 # The shell every OLT PON MAC driver shares: tick, lock, a port per link, /proc.
 obj-$(CONFIG_GPON_OLT_MAC) += gpon_olt_mac.o
+# Each PON link of an OLT PON MAC as a netdev pon<N>, through the netdev contract.
+obj-$(CONFIG_GPON_OLT_MAC) += gpon_olt_pon.o
 # The ZTE OLT PON MAC block every ZTE OLT chip carries: PLOAM and the indirect memories.
 obj-$(CONFIG_GPON_OLT_ZTE) += gpon_olt_zte.o
 # The ZX279200 OLT PON MAC (its source: target/linux/broadcom-iproc).

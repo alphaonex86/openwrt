@@ -18,6 +18,7 @@
 #include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include "eth_rx_csum.h"
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "luna_gpon_regs.h"	/* the family's luna_sw_io(): a struct hwio over the SWCORE base */
 #include "regtable.h"		/* flowcore: gpon_ind_poll() -- the ONE bounded busy-wait */
@@ -225,6 +226,7 @@ static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
 #define OMCI_RESV	2	/* LAN xmit stops this many slots early so the sparse shared-ring OMCI inject always has room (never dropped) */
 #define DUMMY_RING_SIZE	4	/* idle filler armed on the unused HW TX rings (gap rings) */
 #define RX_CPU_PREFIX	2	/* switch CPU-port prepends a 2-byte offset word on RX */
+static const struct eth_rx_csum_layout rtl9602c_rx_csum = RTL9602C_RX_CSUM_LAYOUT;
 /* MEASURED (field X111W capture 2026-11-06): the descriptor length counts the frame AND its FCS, not the prefix. */
 static const struct eth_rx_layout rtl9602c_rx_layout = {
 	.prefix = RX_CPU_PREFIX, .fcs = ETH_RX_FCS_IN_LEN, .buf = RX_BUF_SIZE,
@@ -1567,6 +1569,9 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 			}
 			luna_rx_len_note(skb->data, skb->len, rdev == ep->wan_ndev);
 			skb->protocol = eth_type_trans(skb, rdev);
+			skb->ip_summed = (rdev->features & NETIF_F_RXCSUM) &&
+					 eth_rx_csum_ok(&rtl9602c_rx_csum, opts1) ?
+					 CHECKSUM_UNNECESSARY : CHECKSUM_NONE;
 			rdev->stats.rx_packets++;
 			rdev->stats.rx_bytes += fr.len;
 			/* NAPI poll context: napi_gro_receive, not netif_rx -- which ...
@@ -3129,8 +3134,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	if (!ep->loop)
 		return -ENOMEM;
 	/* TC feature bit; nftables TC_SETUP_FT registration does not consult it. */
-	ndev->hw_features |= NETIF_F_HW_TC;
-	ndev->features |= NETIF_F_HW_TC;
+	ndev->hw_features |= NETIF_F_HW_TC | NETIF_F_RXCSUM;
+	ndev->features |= NETIF_F_HW_TC | NETIF_F_RXCSUM;
 	/* Permit a LIVE MAC change (no iface down/up): the per-board ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 120. */
 	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
@@ -3174,8 +3179,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 			wan->netdev_ops = &rtl9602c_eth_wan_ops;
 			wan->ethtool_ops = &rtl9602c_wan_ethtool_ops;
 			/* Keep the LAN and WAN feature declarations consistent. */
-			wan->hw_features |= NETIF_F_HW_TC;
-			wan->features |= NETIF_F_HW_TC;
+			wan->hw_features |= NETIF_F_HW_TC | NETIF_F_RXCSUM;
+			wan->features |= NETIF_F_HW_TC | NETIF_F_RXCSUM;
 			/* Initial WAN MAC = board MAC + offset; re-derived at open + on eth0 MAC
 			 * changes once rtk_factory provisions the real board MAC onto eth0. */
 			rtl9602c_wan_mac(wmac, ndev->dev_addr);

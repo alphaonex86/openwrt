@@ -287,6 +287,16 @@ bool l34_iface_blackholes(const u32 *netif, const u32 *cpu_rt, u32 own_ip,
 #define TXD2_OMCI_EFID		0x00080000u	/* opts2 bit19 efid (stock word2 = 0x80080000) */
 #define TXD3_9602C_PMASK(p)	(((p) & 0x3Fu) << 23)	/* opts3[28:23] tx_portmask */
 #define TXD3_9602C_DST_SID(s)	(((s) & 0x7Fu) << 16)	/* opts3[22:16] tx_dst_stream_id (the steering SID) */
+/* RX opts1 checksum verdict (eth_rx_csum.h), RE'd from the stock kernel: [20:17] the parsed protocol,
+ * [26] IPv4 header checksum failed, [25] L4 checksum failed; [23] an IP fragment is never good
+ * (stricter than stock). An initializer, so a host test needs no kernel object to read it. */
+#define RTL9602C_RX_CSUM_LAYOUT {						\
+	.proto_shift = 17, .proto_mask = 0xf,					\
+	.v4_protos = 0x78,	/* 3..6: TCP, UDP, ICMP, IGMP */		\
+	.v6_protos = 0x700,	/* 8..10: TCP, UDP, ICMPv6 */			\
+	.v4_failed = (1u << 26) | (1u << 25), .v6_failed = 1u << 25,		\
+	.never = 1u << 23,							\
+}
 #define TXD3_OMCI_9602C(sid)	(TXD3_9602C_PMASK(1u << GMAC_PON_PORT) | \
 				 TXD3_9602C_DST_SID(sid))	/* = 0x08400000 for SID 64 */
 

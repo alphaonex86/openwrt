@@ -29,6 +29,7 @@ THE CORE/SHELL RULE IT OBEYS
 """
 
 import argparse
+import glob
 import os
 import re
 import shutil
@@ -227,8 +228,11 @@ class Guard:
         d = self.p(GPON_DIR)
         present = {f[:-2] for f in os.listdir(d) if f.endswith(".c")} if os.path.isdir(d) else set()
 
-        self.check(not (built - present), "W4.declared_no_src",
-                   "declared but no .c: " + ", ".join(sorted(built - present)))
+        # a chip's source may live in its own target's overlay of this directory (zx279200: broadcom-iproc)
+        overlays = glob.glob(self.p("target/linux/*/files-%s/drivers/net/gpon/*.c" % VER))
+        anywhere = present | {os.path.basename(f)[:-2] for f in overlays}
+        self.check(not (built - anywhere), "W4.declared_no_src",
+                   "declared but no .c in any overlay: " + ", ".join(sorted(built - anywhere)))
         self.check(not (set(pending) - present), "W4.pending_no_src",
                    "pending but no .c: " + ", ".join(sorted(set(pending) - present)))
         self.check(not (built & set(pending)), "W4.both",
@@ -501,6 +505,9 @@ MUTATIONS = [
     # nothing accounts for.
     ("W4.src_never_built", SHARED_FILES + "/drivers/net/gpon/Makefile",
      lambda s: re.sub(r'^obj-\$\(CONFIG_GPON_OLT_ROLE\) \+= gpon_olt_platform\.o$', '', s, flags=re.M)),
+    # an object declared with no source in any overlay.
+    ("W4.declared_no_src", SHARED_FILES + "/drivers/net/gpon/Makefile",
+     lambda s: s + "\nobj-$(CONFIG_GPON_OLT_ROLE) += gpon_no_such_source.o\n"),
     # the "reason is a placeholder" arm.
     ("W4.pending_reason", SHARED_FILES + "/drivers/net/gpon/Makefile",
      lambda s: re.sub(r'^obj-\$\(CONFIG_GPON_OLT_ROLE\) \+= gpon_olt_platform\.o$',

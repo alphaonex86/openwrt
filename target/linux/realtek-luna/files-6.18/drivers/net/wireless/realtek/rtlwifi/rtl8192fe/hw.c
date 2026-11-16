@@ -2064,7 +2064,9 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct rtl8192_tx_ring *bcn = &rtlpci->tx_ring[BEACON_QUEUE];
 	u32 status = rtl_read_dword(rtlpriv, REG_TXDMA_STATUS);
+	unsigned int i;
 
 	if (!status)
 		return;
@@ -2088,6 +2090,12 @@ void rtl92fe_txdma_error(struct ieee80211_hw *hw)
 			    rtl_read_dword(rtlpriv, REG_MGQ_TXBD_IDX));
 	rtl92fe_txbd_dump(rtlpriv, &rtlpci->tx_ring[BE_QUEUE],
 			  rtl_read_dword(rtlpriv, REG_BEQ_TXBD_IDX));
+	/* The beacon slots the chip downloads from: a lost payload byte placed against its address. */
+	for (i = 0; bcn->buffer_desc && i < bcn->entries; i++)
+		pr_warn_ratelimited("TXDMA error BCN %d: w0 %08x payload %u@%08x\n", i,
+				    le32_to_cpu(bcn->buffer_desc[i].dword[0]),
+				    le32_to_cpu(bcn->buffer_desc[i].dword[4]) & 0xffff,
+				    le32_to_cpu(bcn->buffer_desc[i].dword[5]));
 }
 
 /* The vendor's check_hangup: a TX payload over/underrun since the last watchdog tick is a hang

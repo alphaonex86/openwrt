@@ -1755,6 +1755,9 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 	u64 before, after;
 	u8 own;
 	u8 temp_one = 1;
+	struct rtl_tx_desc stage_desc;
+	struct rtl_tx_buffer_desc stage_bd;
+	u8 *fill_desc, *fill_bd, *fill_entry;
 
 	if (ieee80211_is_mgmt(fc))
 		rtl_tx_mgmt_proc(hw, skb);
@@ -1856,27 +1859,40 @@ static int rtl_pci_tx_timed(struct ieee80211_hw *hw,
 	 */
 	before = rtlpriv->cfg->ops->get_desc(hw, entry, true,
 					     HW_DESC_TXBUFF_ADDR);
+	fill_desc = (u8 *)pdesc;
+	fill_bd = (u8 *)ptx_bd_desc;
+	fill_entry = entry;
 	if (hw_queue != BEACON_QUEUE) {
-		memset(entry, 0, rtlpriv->use_new_trx_flow ?
-		       sizeof(*ptx_bd_desc) : sizeof(*pdesc));
+		/* The ring is uncached and the fill is read-modify-write: build the
+		 * slot in cached memory, then copy it with plain stores. */
+		memset(&stage_desc, 0, sizeof(stage_desc));
+		memset(&stage_bd, 0, sizeof(stage_bd));
+		fill_desc = (u8 *)&stage_desc;
+		fill_bd = ptx_bd_desc ? (u8 *)&stage_bd : NULL;
+		fill_entry = rtlpriv->use_new_trx_flow ? fill_bd : fill_desc;
 		before = 0;
 	}
 	if (!rtlpriv->use_new_trx_flow && hw_queue != BEACON_QUEUE) {
 		u32 next = (u32)ring->dma +
 			   ((idx + 1) % ring->entries) * sizeof(*pdesc);
 
-		rtlpriv->cfg->ops->set_desc(hw, (u8 *)pdesc, true,
+		rtlpriv->cfg->ops->set_desc(hw, fill_desc, true,
 					    HW_DESC_TX_NEXTDESC_ADDR, (u8 *)&next);
 	}
 	if (ptcb_desc->cmd_or_init)
-		rtlpriv->cfg->ops->fill_tx_cmddesc(hw, (u8 *)pdesc, skb);
+		rtlpriv->cfg->ops->fill_tx_cmddesc(hw, fill_desc, skb);
 	else
-		rtlpriv->cfg->ops->fill_tx_desc(hw, hdr, (u8 *)pdesc,
-			(u8 *)ptx_bd_desc, info, sta, skb, hw_queue, ptcb_desc);
+		rtlpriv->cfg->ops->fill_tx_desc(hw, hdr, fill_desc,
+			fill_bd, info, sta, skb, hw_queue, ptcb_desc);
 	/* A descriptor the chip layer did not fill is never published. */
-	after = rtlpriv->cfg->ops->get_desc(hw, entry, true, HW_DESC_TXBUFF_ADDR);
+	after = rtlpriv->cfg->ops->get_desc(hw, fill_entry, true, HW_DESC_TXBUFF_ADDR);
 	if (!after || after == before)
 		goto drop;
+	if (fill_desc == (u8 *)&stage_desc) {
+		memcpy(pdesc, &stage_desc, sizeof(*pdesc));
+		if (ptx_bd_desc)
+			memcpy(ptx_bd_desc, &stage_bd, sizeof(*ptx_bd_desc));
+	}
 	if (hw_queue == BEACON_QUEUE) {
 		/* The skb keeps its own mapping (unmapped when it is retired); the chip is
 		 * pointed at the one fixed coherent copy when there is one. */

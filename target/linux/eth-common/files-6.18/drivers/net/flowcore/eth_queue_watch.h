@@ -15,31 +15,25 @@
 #define ETH_RX_STALL_MS		2000
 /* The kernel's own TX watchdog period when a driver names none (dev_watchdog: 5 * HZ). */
 #define ETH_TX_TIMEOUT_MS	5000
-/* A recovery needed 5 times inside one minute does not hold: reboot, so the report survives in pstore. */
-#define ETH_RECOVERY_LIMIT	5
-#define ETH_RECOVERY_WINDOW_MS	60000
 
 enum eth_watch { ETH_WATCH_OK, ETH_WATCH_RECOVER, ETH_WATCH_REBOOT };
 
 struct eth_queue_watch {
 	u64 since_ms;		/* a frame has waited since then with nothing consumed; 0 = none waits */
-	u64 window_ms;		/* start of the current recovery window */
 	u32 consumed;		/* the ring's consumed count at the last sample */
-	u32 in_window;
+	struct restart_budget rx_budget;	/* a frame taken after a recovery cured it */
+	struct restart_budget tx_budget;	/* cured only by RESTART_CURED_MS without a timeout */
 	u32 rx_stalls;		/* ethtool -S rx_ring_stalls */
 	u32 tx_timeouts;	/* ethtool -S tx_ring_timeouts */
 	u32 recoveries;		/* ethtool -S ring_recoveries */
 };
 
-/* Every recovery, RX or TX, is counted here. -> REBOOT on the ETH_RECOVERY_LIMIT-th inside one window. */
-static inline enum eth_watch eth_watch_recovering(struct eth_queue_watch *w, u64 now_ms)
+/* Every recovery, RX or TX, spends its direction's restart budget; a spent one reboots, the report in pstore.
+ * RX traffic never cures a TX hang. */
+static inline enum eth_watch eth_watch_recovering(struct eth_queue_watch *w, struct restart_budget *b, u64 now_ms)
 {
-	if (!w->in_window || now_ms - w->window_ms >= ETH_RECOVERY_WINDOW_MS) {
-		w->window_ms = now_ms;
-		w->in_window = 0;
-	}
 	w->recoveries++;
-	return ++w->in_window >= ETH_RECOVERY_LIMIT ? ETH_WATCH_REBOOT : ETH_WATCH_RECOVER;
+	return restart_budget_spend(b, now_ms, NULL) ? ETH_WATCH_RECOVER : ETH_WATCH_REBOOT;
 }
 
 /* One sample: `pending` = a frame waits at the consumer index, `consumed` = frames taken so far (free running). */
@@ -48,6 +42,8 @@ static inline enum eth_watch eth_rx_watch_sample(struct eth_queue_watch *w, bool
 	bool took = consumed != w->consumed;
 
 	w->consumed = consumed;
+	if (took)
+		restart_budget_cured(&w->rx_budget);
 	if (took || !pending) {
 		w->since_ms = 0;
 		return ETH_WATCH_OK;
@@ -60,13 +56,13 @@ static inline enum eth_watch eth_rx_watch_sample(struct eth_queue_watch *w, bool
 		return ETH_WATCH_OK;
 	w->since_ms = 0;
 	w->rx_stalls++;
-	return eth_watch_recovering(w, now_ms);
+	return eth_watch_recovering(w, &w->rx_budget, now_ms);
 }
 
 static inline enum eth_watch eth_tx_watch_timeout(struct eth_queue_watch *w, u64 now_ms)
 {
 	w->tx_timeouts++;
-	return eth_watch_recovering(w, now_ms);
+	return eth_watch_recovering(w, &w->tx_budget, now_ms);
 }
 
 /* An egress port that sends NOTHING of what it is handed is not congested (a congested port still sends):
@@ -171,9 +167,8 @@ static inline void eth_watch_act(struct net_device *ndev, const struct eth_queue
 				 const char *what)
 {
 	if (v == ETH_WATCH_REBOOT)
-		panic("%s: %s: %u ring recoveries within %u s (rx stalls %u, tx timeouts %u): rebooting\n",
-		      netdev_name(ndev), what, ETH_RECOVERY_LIMIT, ETH_RECOVERY_WINDOW_MS / 1000, w->rx_stalls,
-		      w->tx_timeouts);
+		panic("%s: %s: %u ring recoveries in a row did not cure it (rx stalls %u, tx timeouts %u): rebooting\n",
+		      netdev_name(ndev), what, RESTART_TRIES, w->rx_stalls, w->tx_timeouts);
 	if (v == ETH_WATCH_RECOVER)
 		netdev_err(ndev, "%s: ring recovery #%u (rx stalls %u, tx timeouts %u)\n", what, w->recoveries,
 			   w->rx_stalls, w->tx_timeouts);

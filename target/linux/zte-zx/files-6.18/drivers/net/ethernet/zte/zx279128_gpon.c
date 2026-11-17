@@ -52,6 +52,8 @@
 #define TOP_INT			0x040040
 #define TOP_INT_MASK		0x040044	/* 1 = masked */
 #define TOP_INT_GPON		BIT(0)
+#define TOP_INT_ROGUE		BIT(4)	/* rogue-ONU detect: stock opens it and only notes it */
+#define TOP_INT_OPEN		(TOP_INT_GPON | TOP_INT_ROGUE)	/* stock also opens 0x8 and 0x80 (IDM): no handler here yet */
 #define TOP_CTRL		0x040068	/* bit 15 dying gasp valid, bit 2 transmit path, bit 1 rogue detect */
 /* MAC, downstream. */
 #define MAC_INT			0x0c0000	/* write 1 to clear; bit 7 is a level: a received PLOAM waits */
@@ -160,7 +162,7 @@ struct zx_pon {
 	u32 o5_lost;
 	u32 grants_seen;		/* MAC_RX_ALLOC_WR at the last grant poll */
 	u32 dg_sent;			/* MAC_US_DG_SENT at the last grant poll */
-	u64 ploam_rx, ploam_tx, ploam_tx_dropped, omci_rx, omci_tx, omci_tx_fail, rx_foreign;
+	u64 ploam_rx, ploam_tx, ploam_tx_dropped, omci_rx, omci_tx, omci_tx_fail, rx_foreign, rogue_irq;
 };
 
 static DEFINE_MUTEX(zx_pon_mutex);	/* zx_pon and zx_sn */
@@ -552,10 +554,13 @@ static irqreturn_t zx_pon_irq(int irq, void *data)
 {
 	struct zx_pon *pon = data;
 	u32 now = jiffies_to_msecs(jiffies);
+	u32 top = rd(pon, TOP_INT) & ~rd(pon, TOP_INT_MASK);
 	unsigned int n;
 
-	if (!(rd(pon, TOP_INT) & ~rd(pon, TOP_INT_MASK) & TOP_INT_GPON))
-		return IRQ_NONE;
+	if (top & TOP_INT_ROGUE)
+		pon->rogue_irq++;
+	if (!(top & TOP_INT_GPON))
+		return top & TOP_INT_ROGUE ? IRQ_HANDLED : IRQ_NONE;
 	spin_lock_bh(&pon->lock);
 	wr(pon, MAC_INT, rd(pon, MAC_INT) & MAC_INT_ALL & ~MAC_INT_PLOAM);
 	for (n = 0; n < ZX_PLOAM_BURST && (rd(pon, MAC_INT) & MAC_INT_PLOAM); n++) {
@@ -649,8 +654,8 @@ static int zx_gpon_show(struct seq_file *m, void *v)
 	seq_printf(m, "onu_state:   O%u\nonu_id:      %u\nfiber:       los=%d lof=%d\n", pon->p.state, pon->p.onu_id,
 		   !!(rx & MAC_RX_LOS), !!(rx & MAC_RX_LOF));
 	seq_printf(m, "omcc:        %s gem=%u\n", pon->omcc ? "up" : "down", pon->omcc_gem);
-	seq_printf(m, "ploam:       rx=%llu tx=%llu tx_dropped=%llu\n", pon->ploam_rx, pon->ploam_tx,
-		   pon->ploam_tx_dropped);
+	seq_printf(m, "ploam:       rx=%llu tx=%llu tx_dropped=%llu rogue_irq=%llu\n", pon->ploam_rx, pon->ploam_tx,
+		   pon->ploam_tx_dropped, pon->rogue_irq);
 	seq_printf(m, "omci:        rx=%llu tx=%llu tx_fail=%llu\n", pon->omci_rx, pon->omci_tx, pon->omci_tx_fail);
 	seq_printf(m, "wan:         %s gem=%u alloc=%u service=%s vid=%u rx_foreign=%llu\n",
 		   pon->armed.installed ? "armed" : "off", pon->armed.gem, pon->armed.alloc,
@@ -837,7 +842,7 @@ struct zx_pon *zx_pon_probe(struct device *dev, void __iomem *base, int irq, str
 		dev_warn(dev, "no /proc/gpon, /proc/gpon_health\n");
 	timer_setup(&pon->tick, zx_pon_tick, 0);
 	mod_timer(&pon->tick, jiffies + msecs_to_jiffies(ZX_TICK_MS));
-	fld(pon, TOP_INT_MASK, TOP_INT_GPON, 0);
+	fld(pon, TOP_INT_MASK, TOP_INT_OPEN, 0);
 	pon->optics_np = of_parse_phandle(dev->of_node, "optics", 0);
 	gpon_optics_i2c_start(&pon->optics, dev, &pon->lock, pon->onu, pon->optics_np ? zx_optics_read : NULL, pon);
 	return pon;
@@ -850,7 +855,7 @@ void zx_pon_remove(struct zx_pon *pon)
 	mutex_lock(&zx_pon_mutex);
 	zx_pon = NULL;
 	mutex_unlock(&zx_pon_mutex);
-	fld(pon, TOP_INT_MASK, TOP_INT_GPON, TOP_INT_GPON);
+	fld(pon, TOP_INT_MASK, TOP_INT_OPEN, TOP_INT_OPEN);
 	wr(pon, MAC_INT_MASK, ~0u);
 	free_irq(pon->irq, pon);
 	timer_delete_sync(&pon->tick);

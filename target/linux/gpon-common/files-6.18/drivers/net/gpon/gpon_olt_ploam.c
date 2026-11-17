@@ -231,8 +231,16 @@ static void on_sn(struct gpon_olt_pon *p, const u8 *m, u32 now)
 	struct gpon_olt_link_rec *r;
 
 	p->sn_rx++;
-	if (m[0] != GPON_ONU_ID_BROADCAST)
+	if (m[0] != GPON_ONU_ID_BROADCAST) {
+		/* G.984.3: only an unranged ONU answers the serial-number grant; a ranged one doing so is a wrong answer */
+		r = gpon_olt_pon_find(p, m[0]);
+		if (r && r->state >= GPON_OLT_LINK_PASSWORD && r->state <= GPON_OLT_LINK_UP) {
+			ring(p, GPON_UNSUP_UNKNOWN, m[0], "no Serial_Number_ONU from a ranged ONU", m,
+			     GPON_OLT_PLOAM_US_LEN);
+			deactivate(p, r, GPON_OLT_LINK_LOST, GPON_OLT_DOWN_DEACTIVATED, now);
+		}
 		return;
+	}
 	r = by_sn(p, &m[2]);
 	if (!r) {
 		r = new_rec(p, &m[2]);

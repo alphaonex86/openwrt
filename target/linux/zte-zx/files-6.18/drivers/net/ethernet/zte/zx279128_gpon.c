@@ -73,6 +73,7 @@
 #define MAC_GEM(port)		(0x0cc000 + 4 * (port))	/* bit 0 accepted, bit 1 encrypted */
 #define MAC_GEM_PORTS		4096
 #define MAC_OMCC		0x0d0000	/* bits 31-20 the OMCC's GEM port, bit 0 OMCI to the CPU */
+#define MAC_ETH_MAX		0x0d0004
 #define MAC_OMCI_MAX		0x0d0008
 /* MAC, upstream. */
 #define MAC_ONU			0x0d4000	/* bits 2-0 the O-state, bits 23-16 the ONU-ID */
@@ -124,7 +125,8 @@ static const struct zx_reg zx_mac_init[] = {
 	{ MAC_RX_CFG, 0x770, 0x520 }, { MAC_PLOAM_CFG, 0xf, 8 },
 	{ TOP_CAP, 0x7ff, 0x100 }, { US_PLI_MAX, ~0u, 400 }, { TM_TCONTS, 0xf, TM_TCONT_CLASS_16 | 8 },
 	{ TOP_CTRL, BIT(15) | BIT(1), BIT(15) | BIT(1) }, { MAC_BIP_CTRL, 1, 0 },
-	{ MAC_START_CHECK, BIT(4), BIT(4) }, { MAC_RX_CFG, BIT(16), 0 }, { MAC_OMCI_MAX, 0x3fff, 2000 },
+	{ MAC_START_CHECK, BIT(4), BIT(4) }, { MAC_RX_CFG, BIT(16), 0 },
+	{ MAC_ETH_MAX, 0x3fff, 2000 }, { MAC_OMCI_MAX, 0x3fff, 2000 },
 };
 
 /* Stock's transmit enable, in its order; off is every value 0 and the laser forced off. */

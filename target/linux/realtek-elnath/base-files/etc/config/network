@@ -6,6 +6,8 @@ config interface 'loopback'
 
 config globals 'globals'
 	option ula_prefix 'auto'
+	option irq_cpu_eth '1'
+	option irq_cpu_wifi '0'
 
 # M3d: LAN = br-lan bridging eth0 (Cortina-NI port0) with the WiFi APs
 # (wlan0 2.4G + wlan1 5G join via wifi-iface network 'lan'), mirroring the

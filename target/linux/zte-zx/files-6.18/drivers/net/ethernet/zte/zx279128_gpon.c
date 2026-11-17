@@ -42,6 +42,7 @@
 #include "gpon_omci_me.h"
 #include "gpon_sn.h"
 #include "gpon_soft_wan.h"
+#include "zx279128_eth_logic.h"
 #include "zx279128_gpon.h"
 
 /* Chip level (offsets from 0x92000000). */
@@ -268,7 +269,7 @@ static void zx_set_eqd(void *sh, u32 multiframe, u32 intraframe)
 	struct zx_pon *pon = sh;
 
 	if (pon->p.state < GPON_O4_RANGING) {
-		wr(pon, MAC_PRE_EQD, (multiframe * (GPON_PLOAM_EQD_FRAME_LEN / 8) + intraframe / 8) & 0x1fffff);
+		wr(pon, MAC_PRE_EQD, zx279128_mac_delay(multiframe * (GPON_PLOAM_EQD_FRAME_LEN / 8) + intraframe / 8));
 		wr(pon, MAC_EQD, 0);
 		return;
 	}

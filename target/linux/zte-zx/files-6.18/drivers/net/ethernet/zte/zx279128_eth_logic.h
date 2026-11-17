@@ -28,6 +28,7 @@
 #define ZX_RXD_GEM_MASK		0x003ffc00u	/* word 1 */
 #define ZX_RXD_JUMBO		(1u << 31)	/* word 1 */
 #define ZX_BUF_SIZE		0x800
+#define ZX_GPON_FRAME_BYTES	19440	/* one 125 us downstream frame at 1.24416 Gbit/s */
 #define ZX_BUF_OFFSET		16	/* where a frame starts in its buffer, both ways, once 0x92140060 = 0x11 */
 
 /* MEASURED on F680 unit 2, 2026-11-12: its U-Boot's receive descriptors gave 60 for the host's 42-byte ARP
@@ -61,5 +62,8 @@ enum zx_rx_verdict zx279128_rx_parse(const u32 w[ZX_RX_DESC_WORDS], const struct
 bool zx279128_tx_desc(u32 d[ZX_TX_DESC_WORDS], u32 buf, u32 offset, u32 len, u32 buf_size, unsigned int port);
 /* d zeroed; -> can len bytes at `offset` of buffer `buf` be described at all? */
 bool zx279128_tx_fits(u32 d[ZX_TX_DESC_WORDS], u32 buf, u32 offset, u32 len, u32 buf_size);
+/* A delay of `bytes` in the GPON MAC's delay registers' form: bits 20-16 whole 125 us frames (19440 bytes, at most
+ * 31), bits 15-0 the bytes left over, as stock writes its pre-assigned delay (0x920d4024). */
+u32 zx279128_mac_delay(u32 bytes);
 
 #endif

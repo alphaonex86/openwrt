@@ -51,6 +51,13 @@ bool zx279128_tx_fits(u32 d[ZX_TX_DESC_WORDS], u32 buf, u32 offset, u32 len, u32
 	return eth_tx_fits(&zx_tx_max, buf, offset, len, buf_size);
 }
 
+u32 zx279128_mac_delay(u32 bytes)
+{
+	u32 frames = bytes / ZX_GPON_FRAME_BYTES;
+
+	return (frames > 31 ? 31 : frames) << 16 | bytes % ZX_GPON_FRAME_BYTES;
+}
+
 bool zx279128_tx_desc(u32 d[ZX_TX_DESC_WORDS], u32 buf, u32 offset, u32 len, u32 buf_size, unsigned int port)
 {
 	if (!zx279128_tx_fits(d, buf, offset, len, buf_size) || port >= ZX_ETH_PORTS)

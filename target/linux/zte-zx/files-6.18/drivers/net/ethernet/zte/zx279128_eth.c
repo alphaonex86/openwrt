@@ -379,7 +379,9 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, PP_OPC_PM_BASE, e->tables + PP_ACL_BYTES);
 	wr(e, BMU_CTRL, 0);
 	wr(e, BMU_CFG0, 0x0104c040);
-	wr(e, BMU_CFG1, 0x3f);
+	wr(e, 0x168008, 0x0104c040);
+	wr(e, BMU_CFG1, 0xbf);
+	wr(e, 0x16805c, 0xf);
 	wr(e, PP_POOL_NORMAL, e->pool_dma);
 	wr(e, PP_POOL_JUMBO, e->pool_dma + NORMAL_BUFS * BUF_SIZE);
 	wr(e, PP_LIST_NORMAL, e->lists_dma);
@@ -390,6 +392,11 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, BMU_COUNT_JUMBO, JUMBO_BUFS << 16);
 	wr(e, BMU_ALLOC, 0);
 	wr(e, BMU_CTRL, 1);
+	/* the rest of the stock kernel's packet-processor init: without it the first upstream frame never becomes GEM */
+	wr(e, 0x314080, 2);
+	wr(e, 0x144058, 0x700);
+	wr(e, 0x158008, 0);
+	wr(e, 0x16c1d0, 0x400);
 	wr(e, PP_RX_RING, e->rx_dma);
 	wr(e, PP_CFG0, 0x71000050);
 	wr(e, PP_CFG1, 0x00000041);

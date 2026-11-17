@@ -76,7 +76,6 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PP_INT_STATUS		0x144040	/* bits 1-0: receive work pending; the line is status & ~mask */
 #define PP_INT_MASK		0x144044	/* 1 = masked */
 #define PP_INT_RX		0x3
-#define PP_INT_CFG		0x144048
 #define PP_CLS_SEL		0x14c014
 #define PP_CLS_W1C		0x14c01c
 #define PP_CLS_W2C		0x14c02c
@@ -123,7 +122,7 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define SW_Q_CFG		0x31401c
 #define SW_Q_CFG1		0x314020
 #define SW_Q_BASE		0x314024
-#define SW_INT_MASK		0x32c008
+#define GREG_RAM_INIT		0x32c008	/* one RAM-init request bit per switch-side RAM */
 #define SW_INT_CFG		0x32c050
 
 /* Port MAC p at 0x921c0000 + p x 0x40000. */
@@ -343,7 +342,9 @@ static int upstream_tables_init(struct zx_eth *e)
 
 static int zx_hw_init(struct zx_eth *e)
 {
-	static const u32 ram_init[][2] = { { 0x144050, 0x0fffffff }, { 0x144058, 0x7ff }, { 0x144060, 0x7ffff } };
+	/* the packet processor's RAM-init requests, the values of stock's own TM init */
+	static const u32 ram_init[][2] = { { 0x144048, 0x7fff }, { 0x144050, 0x0fffffff }, { 0x144058, 0x7ff },
+					   { 0x144060, 0x1ffff } };
 	static const u32 dma_irq[][2] = { { 0x164028, 1 }, { 0x16402c, 1 }, { 0x164030, 100000 }, { 0x164034, 0x80 },
 					  { PP_DMA_IRQ, 0x7f }, { 0x164020, 0x40 }, { 0x164024, 0x40 } };
 	int i;
@@ -356,8 +357,7 @@ static int zx_hw_init(struct zx_eth *e)
 	for (i = 0; i < ZX_ETH_PORTS; i++)
 		wr(e, MAC(i) + MAC_CTRL, 0);
 	reset_pulse(e, 0xffffffff);
-	wr(e, PP_INT_CFG, 0x000fffff);
-	/* the other RAM-init requests of stock's TM init (0x92144050/58/60), before any table row is written */
+	/* before any table row is written */
 	for (i = 0; i < ARRAY_SIZE(ram_init); i++)
 		wr(e, ram_init[i][0], ram_init[i][1]);
 	if (red_queues_init(e) || upstream_tables_init(e))
@@ -394,7 +394,7 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, PP_CFG0, 0x71000050);
 	wr(e, PP_CFG1, 0x00000041);
 
-	wr(e, SW_INT_MASK, 0xffffffff);
+	wr(e, GREG_RAM_INIT, 0xffffffff);
 	for (i = 0; i < 7; i++)
 		wr(e, SW_PORT_EN(i), 1);
 	wr(e, SW_CPU_CFG, 0x80010000);

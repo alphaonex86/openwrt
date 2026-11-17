@@ -65,5 +65,11 @@ bool zx279128_tx_fits(u32 d[ZX_TX_DESC_WORDS], u32 buf, u32 offset, u32 len, u32
 /* A delay of `bytes` in the GPON MAC's delay registers' form: bits 20-16 whole 125 us frames (19440 bytes, at most
  * 31), bits 15-0 the bytes left over, as stock writes its pre-assigned delay (0x920d4024). */
 u32 zx279128_mac_delay(u32 bytes);
+/* How many buffers the BMU takes back now, from its free status 0x921680dc (bits 8-3), as the stock kernel
+ * counts them before every free. */
+static inline u32 zx279128_bmu_free_credits(u32 status)
+{
+	return (status & 0x1ff) >> 3;
+}
 
 #endif

@@ -111,7 +111,7 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define BMU_COUNT_NORMAL	0x168048	/* entries << 16 */
 #define BMU_COUNT_JUMBO		0x16804c
 #define BMU_CFG1		0x168058
-#define BMU_FREE_STATUS		0x1680dc	/* bit 3 set: no free credit */
+#define BMU_FREE_STATUS		0x1680dc	/* bits 8-3: free credits */
 
 /* Switch. */
 #define SW_CTRL			0x304000
@@ -257,7 +257,7 @@ static void bmu_free(struct zx_eth *e, u32 buf, bool jumbo)
 	int i;
 
 	for (i = 0; i < POLL_TRIES; i++) {
-		if (!(rd(e, BMU_FREE_STATUS) & BIT(3))) {
+		if (zx279128_bmu_free_credits(rd(e, BMU_FREE_STATUS))) {
 			wr(e, BMU_FREE, buf | jumbo << 15);
 			return;
 		}

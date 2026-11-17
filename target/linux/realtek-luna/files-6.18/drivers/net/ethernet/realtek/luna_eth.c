@@ -517,6 +517,16 @@ static struct omci_onu luna_eth_onu;
 
 static inline u32 ep_rd(struct luna_eth *ep, u32 r) { return ioread32(ep->base + r); }
 static inline void ep_wr(struct luna_eth *ep, u32 r, u32 v) { iowrite32(v, ep->base + r); }
+
+/* The MSR top byte is ours (msr_top): a recovery of the CPU/fibre path puts it back and names a drift. */
+static void luna_eth_msr_apply(struct luna_eth *ep, bool recovering)
+{
+	u32 was = ep_rd(ep, R_MSR), want = (was & 0x00ffffff) | ((msr_top & 0xffu) << 24);
+
+	if (recovering && was != want)
+		netdev_err(ep->ndev, "NIC MSR read %08x, ours %08x: put back\n", was, want);
+	ep_wr(ep, R_MSR, want);
+}
 static inline u32 sw_rd(struct luna_eth *ep, u32 r) { return ioread32(ep->sw + r); }
 static inline void sw_wr(struct luna_eth *ep, u32 r, u32 v) { iowrite32(v, ep->sw + r); }
 static inline void sw_or(struct luna_eth *ep, u32 r, u32 v) { sw_wr(ep, r, sw_rd(ep, r) | v); }
@@ -1961,10 +1971,7 @@ static void eth_hw_program(struct luna_eth *ep)
 			ep_wr(ep, R_RRING_ROUTE + k * 4, ep->n_rxq > 1 ? CTL_RX_ROUTE : 0);
 	}
 
-	/* MSR(0x58) top byte -- see the msr_top param note.  0xf0 is stock's
-	 * value and it WEDGES our datapath. */
-	ep_wr(ep, R_MSR,
-	      (ep_rd(ep, R_MSR) & 0x00ffffff) | ((msr_top & 0xffu) << 24));
+	luna_eth_msr_apply(ep, false);
 	eth_set_hwaddr(ep, ep->ndev->dev_addr);
 	ep_wr(ep, R_MAR0, 0xffffffff);
 	ep_wr(ep, R_MAR4, 0xffffffff);
@@ -2326,8 +2333,8 @@ static void eth_backstop(struct timer_list *t)
 
 	napi_schedule(&ep->napi);	/* already the recovery: the watch only counts and escalates */
 	eth_ring_watch_rx(&luna_ring_watch, ep->ndev, eth_rx_waiting(ep), ep->rx_taken);
-	if (ep->wan_ndev)
-		luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets);
+	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
+		luna_eth_msr_apply(ep, true);
 	luna_mib_port_egress_sample(ep->ndev, !eth_rx_waiting(ep));
 	mod_timer(&ep->backstop, jiffies + msecs_to_jiffies(backstop_ms));
 }

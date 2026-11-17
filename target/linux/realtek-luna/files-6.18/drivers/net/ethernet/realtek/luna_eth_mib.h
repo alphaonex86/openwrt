@@ -43,8 +43,9 @@ static inline void luna_rx_len_note(const u8 *frame, u32 len, bool wan)
 
 /* The family's ring watch (eth_queue_watch.h): both drivers sample it, ethtool -S shows it. */
 extern struct eth_ring_watch luna_ring_watch;
-/* From the driver's watch timer: `offered` = frames it put on the ring for the fibre port so far. */
-void luna_mib_pon_egress_sample(struct net_device *wan, u32 offered);
+/* From the driver's watch timer: `offered` = frames it put on the ring for the fibre port so far.
+ * -> true when the fibre path was recovered: the driver then puts its own NIC programming back. */
+bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered);
 /* From the same timer: every other switch port; `cpu_ready` = the receive ring holds nothing the driver owes. */
 void luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready);
 

@@ -483,6 +483,16 @@ static struct rtl9602c_eth *g_ep;	/* single-instance, for /proc diag */
 static inline u32 ep_rd(struct rtl9602c_eth *ep, u32 r) { return ioread32(ep->base + r); }
 static inline void ep_wr(struct rtl9602c_eth *ep, u32 r, u32 v) { iowrite32(v, ep->base + r); }
 
+/* The MSR top byte is ours (msr_top): a recovery of the CPU/fibre path puts it back and names a drift. */
+static void rtl9602c_eth_msr_apply(struct rtl9602c_eth *ep, bool recovering)
+{
+	u32 was = ep_rd(ep, R_MSR), want = (was & 0x00ffffff) | ((msr_top & 0xffu) << 24);
+
+	if (recovering && was != want)
+		netdev_err(ep->ndev, "NIC MSR read %08x, ours %08x: put back\n", was, want);
+	ep_wr(ep, R_MSR, want);
+}
+
 /* SW-follows-HW slot mapping. TxCDO is NOT writable while the ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 25. */
 #define SW_PHY_PWRDN_GUARD	0x00214
@@ -1718,8 +1728,8 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 	if (eth_ring_watch_rx(&luna_ring_watch, ep->ndev, rtl9602c_eth_rx_waiting(ep), ep->dbg_filled))
 		napi_schedule(&ep->napi);
-	if (ep->wan_ndev)
-		luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets);
+	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
+		rtl9602c_eth_msr_apply(ep, true);
 	luna_mib_port_egress_sample(ep->ndev, !rtl9602c_eth_rx_waiting(ep));
 	/* While a park is pending, tighten the cadence so the 60ms escalation
 	 * ladder is not quantised by the 100ms backstop interval. */
@@ -1952,8 +1962,7 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 	ep->ctl_ring_on = ep->n_rxq > 1;
 	rtl9602c_rx_route(ep);
 
-	/* MSR top byte: see the msr_top param note (0xf0 kills sparse TX). */
-	ep_wr(ep, R_MSR, (ep_rd(ep, R_MSR) & 0x00ffffff) | ((msr_top & 0xffu) << 24));
+	rtl9602c_eth_msr_apply(ep, false);
 	rtl9602c_eth_set_hwaddr(ep, ndev->dev_addr);	/* IDR wiped by the reset */
 	iowrite32(0xffffffff, ep->base + R_MAR0);		/* MAR0 */
 	iowrite32(0xffffffff, ep->base + R_MAR4);		/* MAR4 */
@@ -2388,8 +2397,7 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 	ep_wr(ep, R_RXOKMUL, 0x010c0000);	/* stock O5 counter snapshot -- a MIB word, not config; see rtl9602c_hw_program() */
 	ep_wr(ep, R_IMR0, IMR0_TX_BITS);	/* per-ring TX-completion IRQ mask, rings 0-5 (stock 0x3f) */
 	iowrite16(IMR_RX_BITS, ep->base + R_IMR);	/* RX IRQ mask: RX_OK + RX-err + RDU (stock 0xf835) */
-	ep_wr(ep, R_MSR, (ep_rd(ep, R_MSR) & 0x00ffffff) |
-			((msr_top & 0xffu) << 24));	/* MSR top byte: param (0xf0 kills sparse TX, see msr_top) */
+	rtl9602c_eth_msr_apply(ep, false);
 	iowrite32(0xffffffff, ep->base + R_MAR0);	/* MAR0: accept-all-multicast */
 	iowrite32(0xffffffff, ep->base + R_MAR4);	/* MAR4 */
 	/* IO_CMD1 = the exact stock start value 0x323f0001, decoded ...

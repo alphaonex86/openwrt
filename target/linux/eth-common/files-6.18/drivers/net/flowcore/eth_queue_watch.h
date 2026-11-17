@@ -8,6 +8,7 @@
 #define _ETH_QUEUE_WATCH_H
 
 #include <linux/types.h>
+#include "restart_budget.h"
 
 /* A poll runs every few ms under load: a waiting frame untouched for 2 s is never saturation, and it is
  * caught well before the soft-lockup detector (20 s) or a hardware watchdog (~35 s) would act. */
@@ -69,15 +70,15 @@ static inline enum eth_watch eth_tx_watch_timeout(struct eth_queue_watch *w, u64
 }
 
 /* An egress port that sends NOTHING of what it is handed is not congested (a congested port still sends):
- * it is a black hole, and the link above it stays up. 8 frames over 10 s is one strike, the 2nd in a row reboots. */
+ * it is a black hole, and the link above it stays up. 8 frames over 10 s is one stall; each is recovered through
+ * the restart budget, and a stall once it is spent reboots. */
 #define ETH_EGRESS_STALL_MS	10000
 #define ETH_EGRESS_STALL_FRAMES	8
-#define ETH_EGRESS_STRIKES	2
 struct eth_egress_watch {
 	u64 since_ms;		/* frames were handed since then and none left; 0 = none waits */
 	u32 offered;		/* the handed count when the port last sent, or was last judged */
 	u32 sent;		/* the port's own sent count at the last sample */
-	u32 strikes;		/* stalls in a row */
+	struct restart_budget budget;	/* the recoveries of its stalls; a send cures it */
 	u32 stalls;		/* ethtool -S egress_stalls */
 };
 /* One sample of one port: `offered` = frames handed to it, `sent` = what it counted out, both free running. */
@@ -85,7 +86,7 @@ static inline enum eth_watch eth_egress_watch_sample(struct eth_egress_watch *e,
 {
 	if (sent != e->sent) {
 		e->sent = sent;
-		e->strikes = 0;
+		restart_budget_cured(&e->budget);
 	} else if (offered != e->offered) {
 		if (!e->since_ms)
 			e->since_ms = now_ms ? now_ms : 1;
@@ -94,7 +95,7 @@ static inline enum eth_watch eth_egress_watch_sample(struct eth_egress_watch *e,
 		e->stalls++;
 		e->offered = offered;
 		e->since_ms = 0;
-		return ++e->strikes >= ETH_EGRESS_STRIKES ? ETH_WATCH_REBOOT : ETH_WATCH_RECOVER;
+		return restart_budget_spend(&e->budget, now_ms, NULL) ? ETH_WATCH_RECOVER : ETH_WATCH_REBOOT;
 	}
 	e->offered = offered;
 	e->since_ms = 0;
@@ -178,16 +179,17 @@ static inline void eth_watch_act(struct net_device *ndev, const struct eth_queue
 			   w->rx_stalls, w->tx_timeouts);
 }
 
-/* The first strike is logged and is the driver's to recover (its switch core reset), the second reboots. */
+/* A stall is logged and is the driver's to recover (its CPU/fibre path reset); once RESTART_TRIES recoveries in a
+ * row did not make the port send, the next stall reboots. */
 static inline void eth_egress_watch_act(struct net_device *ndev, const struct eth_egress_watch *e, enum eth_watch v,
 					const char *port)
 {
 	if (v == ETH_WATCH_REBOOT)
-		panic("%s: the %s port sent none of the frames handed to it for %u s (%u stalls): rebooting\n",
-		      netdev_name(ndev), port, ETH_EGRESS_STRIKES * ETH_EGRESS_STALL_MS / 1000, e->stalls);
+		panic("%s: the %s port sent none of the frames handed to it after %u recoveries (%u stalls): rebooting\n",
+		      netdev_name(ndev), port, RESTART_TRIES, e->stalls);
 	if (v == ETH_WATCH_RECOVER)
-		netdev_err(ndev, "the %s port sent none of the frames handed to it for %u s (stall #%u)\n", port,
-			   ETH_EGRESS_STALL_MS / 1000, e->stalls);
+		netdev_err(ndev, "the %s port sent none of the frames handed to it for %u s (stall #%u, recovery %u of %u)\n",
+			   port, ETH_EGRESS_STALL_MS / 1000, e->stalls, e->budget.in_row, RESTART_TRIES);
 }
 /* -> true when the caller must recover the port (reset its switch core). */
 static inline bool eth_port_egress_judge(struct net_device *ndev, struct eth_port_egress *p, const char *name,

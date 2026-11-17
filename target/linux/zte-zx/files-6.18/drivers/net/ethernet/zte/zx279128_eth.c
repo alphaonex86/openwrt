@@ -82,6 +82,10 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PP_CLS_CTRL		0x14c080
 #define PP_CLS_CTRL2		0x14c088
 #define RED_TABLES		0x154000
+#define RED_CTRL		0x154004
+#define RED_CPU_RESERVE		0x154010
+#define RED_OUT_SHARE_MAX	0x154070
+#define QMG_UP_RAM_THD		0x158000	/* stock's tm_pp_qmg_initial: 0x1580, reset 0x3e80 */
 #define USCH_TABLES		0x15c000
 #define UOPC_TABLES		0x160000
 #define PP_RX_RELEASE_GO	0x154064	/* write 1, reads 0 when taken */
@@ -299,7 +303,7 @@ static int pp_table_write(struct zx_eth *e, u32 eng, u32 sel, const u32 *w, int 
  * upstream (out-queue 24 carries the OMCI, the queue manager's "up sw drop" 0x92158058 counts it). */
 static int red_queues_init(struct zx_eth *e)
 {
-	static const u32 in[4] = { 0x200020 }, buf[4] = { 0x3fffff, 0x400000, 0xc0020, 4 };
+	static const u32 in[4] = { 0x200020 }, buf[4] = { 0x3fc03fff, 0x400000, 0xc0020, 4 };
 	int q;
 
 	for (q = 0; q < RED_OUT_QUEUES; q++) {
@@ -310,6 +314,10 @@ static int red_queues_init(struct zx_eth *e)
 					pp_table_write(e, RED_TABLES, RED_BUF | q, buf, 4))))
 			return -ETIMEDOUT;
 	}
+	/* enable, open-out, share mode; CPU reserve; all-out share max (stock's TM RED init) */
+	wr(e, RED_CTRL, 0x3e);
+	wr(e, RED_CPU_RESERVE, 8);
+	wr(e, RED_OUT_SHARE_MAX, 0x1800);
 	return 0;
 }
 
@@ -318,7 +326,8 @@ static int red_queues_init(struct zx_eth *e)
 static int upstream_tables_init(struct zx_eth *e)
 {
 	/* scheduler enables, its ageing time, the OPC's padding (minimum length << 1 | on) */
-	static const u32 regs[][2] = { { 0x15c000, 0x77 }, { 0x15c004, 0x0bebc200 }, { 0x160028, 0x20 << 1 | 1 } };
+	static const u32 regs[][2] = { { 0x15c000, 0x77 }, { 0x15c004, 0x0bebc200 }, { QMG_UP_RAM_THD, 0x1580 },
+				       { 0x160028, 0x20 << 1 | 1 } };
 	static const u32 usch[][2] = { { 0xc0000f, 0x30d40 }, { 0x000001, 0x80 } };
 	static const u32 uopc[][3] = {
 		{ 0xc00000, 0x10000 },

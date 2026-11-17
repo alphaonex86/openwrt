@@ -347,6 +347,7 @@ static int upstream_tables_init(struct zx_eth *e)
 
 static int zx_hw_init(struct zx_eth *e)
 {
+	static const u32 ram_init[][2] = { { 0x144050, 0x0fffffff }, { 0x144058, 0x7ff }, { 0x144060, 0x7ffff } };
 	static const u32 dma_irq[][2] = { { 0x164028, 1 }, { 0x16402c, 1 }, { 0x164030, 100000 }, { 0x164034, 0x80 },
 					  { PP_DMA_IRQ, 0x7f }, { 0x164020, 0x40 }, { 0x164024, 0x40 } };
 	int i;
@@ -360,6 +361,9 @@ static int zx_hw_init(struct zx_eth *e)
 		wr(e, MAC(i) + MAC_CTRL, 0);
 	reset_pulse(e, 0xffffffff);
 	wr(e, PP_INT_CFG, 0x000fffff);
+	/* the other RAM-init requests of stock's TM init (0x92144050/58/60), before any table row is written */
+	for (i = 0; i < ARRAY_SIZE(ram_init); i++)
+		wr(e, ram_init[i][0], ram_init[i][1]);
 	if (red_queues_init(e) || upstream_tables_init(e))
 		return -ETIMEDOUT;
 	wr(e, PP_Q_ENABLE, 1);

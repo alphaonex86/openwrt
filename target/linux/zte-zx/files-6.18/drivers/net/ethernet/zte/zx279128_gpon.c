@@ -455,6 +455,8 @@ static void zx_trace(void *sh, enum gpon_ploam_ev ev, u32 a, u32 b)
 
 	if (ev == GPON_PLOAM_EV_STATE)
 		dev_info(pon->dev, "PON state O%u => O%u\n", a, b);
+	else if (IS_ENABLED(CONFIG_GPON_PLOAM_DIAG) && ev == GPON_PLOAM_EV_DS)
+		dev_info(pon->dev, "downstream PLOAM ONU-ID %u message 0x%02x\n", a, b);
 }
 
 static void zx_unsupported(void *sh, const char *kind, int cls, u32 val, const char *want, const u8 *data,

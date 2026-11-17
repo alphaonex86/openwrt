@@ -15,6 +15,7 @@
 #include <linux/completion.h>
 #include <linux/bitfield.h>
 #include "debug.h"
+#include "restart_budget.h"
 
 #define	MASKBYTE0				0xff
 #define	MASKBYTE1				0xff00
@@ -2720,9 +2721,7 @@ struct rtl_priv {
 	 * interface or hardware
 	 */
 	unsigned long status;
-	unsigned long restart_asked;	/* jiffies of the last request, 0 = none */
-	u8 restarts;			/* in a row, none followed by a transmitted beacon */
-	u32 restarts_total;
+	struct restart_budget restarts;	/* a restart followed by a transmitted beacon cured the adapter */
 	u32 bcn_tx_ok;			/* beacons the chip reported sent (TBDOK) */
 	u32 bcn_tx_ok_at_restart;
 

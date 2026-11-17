@@ -84,8 +84,6 @@ static inline bool rtl_is_any_assoc_req(__le16 fc)
 
 /* rtlpriv->status bit beside RTL_STATUS_INTERFACE_START (wifi.h, bit 0) */
 #define RTL_STATUS_HW_RESTART		1
-#define RTL_RESTARTS_MAX		3
-#define RTL_RESTART_CURED_S		600
 void rtl_restart_hw(struct ieee80211_hw *hw);
 
 #endif

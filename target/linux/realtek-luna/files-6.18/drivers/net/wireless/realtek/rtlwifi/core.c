@@ -129,37 +129,30 @@ static void rtl_op_stop(struct ieee80211_hw *hw, bool suspend);
  * so start() stops the adapter first and forgets what is about to be
  * replayed -- else start() returns 0 on a live chip and add_interface
  * refuses the vif it still holds.
- * A restart after which the chip sent a beacon again cured the adapter and
- * spends nothing; RTL_RESTARTS_MAX in a row that did not are the last until
- * the adapter asks for none during RTL_RESTART_CURED_S: a dead card is not
- * restarted for ever.
+ * A restart after which the chip sent a beacon again cured the adapter; the
+ * common restart budget keeps a dead card from being restarted for ever.
  */
 void rtl_restart_hw(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	unsigned long now = jiffies ? jiffies : 1;
 	u32 bcn_tx_ok = READ_ONCE(rtlpriv->bcn_tx_ok);
+	bool first_spent;
 
-	if (bcn_tx_ok != rtlpriv->bcn_tx_ok_at_restart ||
-	    (rtlpriv->restart_asked &&
-	     time_after_eq(now, rtlpriv->restart_asked + RTL_RESTART_CURED_S * HZ)))
-		rtlpriv->restarts = 0;
+	if (bcn_tx_ok != rtlpriv->bcn_tx_ok_at_restart)
+		restart_budget_cured(&rtlpriv->restarts);
 	rtlpriv->bcn_tx_ok_at_restart = bcn_tx_ok;
-	rtlpriv->restart_asked = now;
-	if (rtlpriv->restarts >= RTL_RESTARTS_MAX) {
-		if (rtlpriv->restarts == RTL_RESTARTS_MAX)
+	if (test_and_set_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status))
+		return;
+	if (!restart_budget_spend(&rtlpriv->restarts, jiffies64_to_msecs(get_jiffies_64()), &first_spent)) {
+		clear_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status);
+		if (first_spent)
 			pr_err("%u restarts did not cure the adapter: none again before %u quiet seconds\n",
-			       RTL_RESTARTS_MAX, RTL_RESTART_CURED_S);
-		rtlpriv->restarts = RTL_RESTARTS_MAX + 1;
+			       RESTART_TRIES, RESTART_CURED_MS / 1000);
 		return;
 	}
-	if (!test_and_set_bit(RTL_STATUS_HW_RESTART, &rtlpriv->status)) {
-		rtlpriv->restarts++;
-		rtlpriv->restarts_total++;
-		pr_warn("restart %u since boot, %u in a row with no beacon sent after it\n",
-			rtlpriv->restarts_total, rtlpriv->restarts - 1);
-		ieee80211_restart_hw(hw);
-	}
+	pr_warn("restart %u since boot, %u in a row with no beacon sent after it\n",
+		rtlpriv->restarts.total, rtlpriv->restarts.in_row - 1);
+	ieee80211_restart_hw(hw);
 }
 EXPORT_SYMBOL_GPL(rtl_restart_hw);
 

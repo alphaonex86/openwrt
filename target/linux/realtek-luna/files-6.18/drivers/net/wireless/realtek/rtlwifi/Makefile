@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
+# the common restart budget (restart_budget.h), shared with the Ethernet drivers
+subdir-ccflags-y += -I$(srctree)/drivers/net/flowcore
 obj-$(CONFIG_RTLWIFI) 		+= rtlwifi.o
 rtlwifi-objs	:=		\
 		base.o		\

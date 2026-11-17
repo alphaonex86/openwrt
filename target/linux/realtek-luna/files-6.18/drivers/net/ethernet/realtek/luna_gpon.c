@@ -1435,11 +1435,6 @@ MODULE_PARM_DESC(bosa_i2c_restore_pad, "restore SOC_IO_MODE_EN[13]=0 (optical-SD
 static bool lan_keep_open = true;
 module_param(lan_keep_open, bool, 0644);
 MODULE_PARM_DESC(lan_keep_open, "keep LAN open from boot independent of GPON/WAN state (default 1); 0=legacy O5-gated");
-/* force_soc_clk: before the SerDes bring-up, write the 3 SoC ...
- * dev/MEASURED-luna_gpon.c.md sec 50. */
-static bool force_soc_clk;
-module_param(force_soc_clk, bool, 0644);
-MODULE_PARM_DESC(force_soc_clk, "1=write live-stock SoC clock regs 0x18000100/12c/140 before SerDes bring-up (cold-start fix candidate); 0=legacy");
 /* serdes_clkgate_rstb: gate the SerDes word clock (STOP_CLK=1) across the interface
  * reset-B release and un-gate LAST, so the word divider restarts on one defined edge
  * (defeats the async-reset-on-running-divider ~50% serializer-phase coin-flip). The
@@ -10266,25 +10261,6 @@ static int __init rtl9602c_gpon_init(void)
 		luna_c2_clkgate_rstb = serdes_clkgate_rstb;	/* A/B: clock-gated reset-B release (rank-1 cold-start fix candidate) */
 		luna_c2_skip_rstb_dance = serdes_skip_rstb_dance;	/* A/B: skip the gratuitous DIG_1D reset-B pulse (already released) */
 		luna_c2_minimal_analog = serdes_minimal_analog;	/* A/B: skip the over-configure golden-table writes (match stock's minimal set) */
-		if (force_soc_clk) {
-			/* Match the live-stock values of three SoC sysreg words, ...
-			 * dev/MEASURED-luna_gpon.c.md sec 262. */
-			static const struct { u32 off, val; } soc_clk[] = {
-				{ 0x18000100u, 0x00440e00u },	/* strap / pin-status word (bit 5 = CKSEL, read by stock _is_CKSEL_25MHz): stock's live value */
-				{ 0x1800012cu, 0x024d024du },	/* DRAM auto-calibration result word A (two identical 16-bit halves), stock stage-1 store @0x9fc14b70: stock's value on the captured boot */
-				{ 0x18000140u, 0x024d024du },	/* DRAM auto-calibration result word B, stock stage-1 store @0x9fc14b74: same encoding, same boot */
-			};
-			unsigned int k;
-			for (k = 0; k < ARRAY_SIZE(soc_clk); k++) {
-				void __iomem *a = ioremap(soc_clk[k].off, 4);
-				if (a) {
-					writel(soc_clk[k].val, a);
-					pr_info("luna-gpon: force_soc_clk [%#x]<=%#x ->%#x\n",
-						soc_clk[k].off, soc_clk[k].val, readl(a));
-					iounmap(a);
-				}
-			}
-		}
 		/* CROSS-SUBSYSTEM ORDER (bosa_before_serdes): stage the external BOSA RX
 		 * analog and settle BEFORE the SoC SerDes bring-up, matching stock, so the
 		 * CMU locks against a settled front-end. The duplicate bosa_probe() and

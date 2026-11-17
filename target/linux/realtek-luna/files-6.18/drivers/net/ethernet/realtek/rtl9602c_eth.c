@@ -100,18 +100,12 @@ MODULE_PARM_DESC(omci_doorbell_bit,
 /* GMAC bring-up mode. Stock latches the multi-ring fetch ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 5. */
 static unsigned int gmac_reset = 1;	/* now safe to reset: rtl9602c_uboot_swcore_bringup() re-runs U-Boot's GMAC<->switch resync after the IP-block reset, breaking the old "reset kills egress" catch-22, and the stock GMAC init re-establishes the GMAC0-TX->US-NIC direct link */
-/* Same-board diff (stock-WORKING vs mine-BROKEN) SoC-ctrl bits 0x18000100[8]/0x18000104[2]
- * (stock sets, mine doesn't; candidate IP-mux/US-NIC clock/power). Default 1 (test); 0=off. */
-static unsigned int ipmux_soc = 1;
-module_param(ipmux_soc, uint, 0644);
-MODULE_PARM_DESC(ipmux_soc, "1=set the same-board-diff SoC-ctrl bits 0x18000100[8]/0x18000104[2] at reset");
-/* Same-board diff (stock vs mine) NETWORK-ENGINE / IP-mux bits: 0x18001000 bit19 (stock set, mine clear)
- * and 0x18001098 (stock=0x0004e123, mine=0x0018a123: clear bits19,20; set bits14,18). These were ONLY
- * live-poked before (in the cycling/false-negative state) — NEVER baked at init before the US-NIC latches.
- * The IP-mux is exactly where the cpu-tag US-OMCI frame vanishes (RX_OK=0), so bake them quiescent. */
-static unsigned int ipmux_neteng = 1;
-module_param(ipmux_neteng, uint, 0644);
-MODULE_PARM_DESC(ipmux_neteng, "1=bake same-board-diff network-engine IP-mux bits 0x18001000[19]/0x18001098 at reset");
+/* The DRAM controller page. The boot loader trains it on every boot; we write only what stock's own
+ * value proves: MEMCTL_MCR bit 19 (stock set, the boot loader clear) and the per-packet flush bit of
+ * MEMCTL_FLUSH that stock's NIC xmit pokes. dram_ctl_write_guard.py refuses any other write. */
+#define MEMCTL_PHYS	0x18001000
+#define MEMCTL_MCR	0x00
+#define MEMCTL_FLUSH	0x38
 module_param(gmac_reset, uint, 0644);	/* sampled at open(): ifdown/ifup re-applies */
 MODULE_PARM_DESC(gmac_reset, "1=cold GMAC bring-up (IP-block reset + stock IO_CMD edge), 0=legacy inherited");
 
@@ -369,7 +363,7 @@ struct rtl9602c_eth {
 	const struct luna_sw_map *swm;
 	void __iomem	*base;
 	void __iomem	*sw;	/* switch core */
-	void __iomem	*txgo;	/* network-engine TX-fetch page 0x18001000; +0x38 bit31 = per-packet GO */
+	void __iomem	*txgo;	/* the DRAM controller page, MEMCTL_PHYS */
 	struct net_device *ndev;
 	struct net_device *wan_ndev;	/* gpon0: WAN data-GEM netdev (DS demux'd from PON port 2, US steered to GPON_DATA_FLOW) */
 	struct device	*dev;
@@ -997,9 +991,9 @@ static void rtl9602c_eth_tx_fetch(struct rtl9602c_eth *ep)
 
 	if (!ep->txgo)
 		return;
-	iowrite32(ioread32(ep->txgo + 0x38) | BIT(31), ep->txgo + 0x38);
+	iowrite32(ioread32(ep->txgo + MEMCTL_FLUSH) | BIT(31), ep->txgo + MEMCTL_FLUSH);
 	for (n = 0; n < 100; n++) {
-		if (!(ioread32(ep->txgo + 0x38) & BIT(31)))
+		if (!(ioread32(ep->txgo + MEMCTL_FLUSH) & BIT(31)))
 			break;
 		cpu_relax();
 	}
@@ -2348,24 +2342,8 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 		rtl9602c_datapath_tables_init();
 		rtl9602c_hw_program(ep);
 		rtl9602c_tx_align(ep);	/* fresh engine: CDO=0 -> rot 0 */
-		/* SAME-BOARD DIFF FIX (stock-WORKING vs ours-BROKEN): the ...
-		 * dev/MEASURED-rtl9602c_eth.c.md sec 94. */
-		if (ipmux_soc) {
-			void __iomem *s100 = (void __iomem *)0xb8000100ul;
-			void __iomem *s104 = (void __iomem *)0xb8000104ul;
-			writel(readl(s100) | BIT(8), s100);	/* 0x18000100 bit8 -> stock */
-			writel(readl(s104) | BIT(2), s104);	/* 0x18000104 bit2 -> stock */
-		}
-		if (ipmux_neteng) {
-			/* network-engine / IP-mux page 0x18001000 (KSEG1 0xb8001000). RMW the exact
-			 * same-board-diff bits to stock-WORKING values (don't clobber dynamic bits):
-			 *   0x18001000: set bit19 (stock 0x10281e6f vs mine 0x10201e6f)
-			 *   0x18001098: clear bits19,20; set bits14,18 (stock 0x0004e123 vs mine 0x0018a123) */
-			void __iomem *n000 = (void __iomem *)0xb8001000ul;
-			void __iomem *n098 = (void __iomem *)0xb8001098ul;
-			writel(readl(n000) | BIT(19), n000);
-			writel((readl(n098) & ~(BIT(19) | BIT(20))) | BIT(14) | BIT(18), n098);
-		}
+		if (ep->txgo)	/* stock's value of this one bit; the boot loader's training stays */
+			iowrite32(ioread32(ep->txgo + MEMCTL_MCR) | BIT(19), ep->txgo + MEMCTL_MCR);
 		/* Re-establish the FULL PON US/DS-NIC datapath against the ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 95. */
 		gpon_pbo_init();
@@ -3066,9 +3044,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->swm = &rtl9602c_sw_map;
 	ep->n_rxq = ep->swm->ctl_acl ? 2 : 1;
 	ep->sw = devm_ioremap(dev, SWCORE_PHYS, ep->swm->swcore_size);
-	/* network-engine TX-fetch GO register page (phys 0x18001000, ...
-	 * dev/MEASURED-rtl9602c_eth.c.md sec 139. */
-	ep->txgo = devm_ioremap(dev, 0x18001000, 0x1000);
+	ep->txgo = devm_ioremap(dev, MEMCTL_PHYS, 0x1000);
 
 	/* Snapshot the bootloader's live GMAC0 control config to re-assert at open. */
 	ep->ub_tcr = ep_rd(ep, R_TCR);

@@ -301,11 +301,14 @@ bool l34_iface_blackholes(const u32 *netif, const u32 *cpu_rt, u32 own_ip,
 				 TXD3_9602C_DST_SID(sid))	/* = 0x08400000 for SID 64 */
 
 void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add);
-bool rtl9602c_rx_is_ds_omci(const struct luna_rx_layout *rxl,
-			    bool trap_on, u32 opts2, u32 opts3,
-			    const u8 *data, u32 len, unsigned int pon_port,
-			    unsigned int omci_reason,
-			    unsigned int cpu_prefix, u32 buf_size);
+/* A received frame is downstream OMCI only when the switch trapped it from the PON port; one whose bytes merely look
+ * like an OMCI header is forwarded (field X111W 2026-11-17: HTTP text was eaten as OMCI), named for the diagnostics. */
+enum rtl9602c_ds_omci { RTL9602C_DS_OMCI_NONE, RTL9602C_DS_OMCI_TRAPPED, RTL9602C_DS_OMCI_LOOKALIKE };
+enum rtl9602c_ds_omci rtl9602c_rx_ds_omci(const struct luna_rx_layout *rxl,
+					  bool trap_on, u32 opts2, u32 opts3,
+					  const u8 *data, u32 len, unsigned int pon_port,
+					  unsigned int omci_reason,
+					  unsigned int cpu_prefix, u32 buf_size);
 bool rtl9602c_rx_wan_demux(const struct luna_rx_layout *rxl, u32 opts3,
 			   const u8 *dst, const u8 *wan_mac,
 			   unsigned int pon_port);

@@ -472,6 +472,7 @@ struct rtl9602c_eth {
 	 * OMCC GEM datapath (rtl9602c_eth_set_omci_sid). */
 	bool		omci_trap_on;
 	u32		dbg_omci_rx;	/* DS OMCI frames trapped to the CPU */
+	u32		dbg_omci_lookalike;	/* frames that look like OMCI, not trapped as OMCI: forwarded */
 	u32		dbg_omci_rxlen;	/* length of the last OMCI frame */
 	u8		dbg_omci_rxbuf[48];	/* the last DS OMCI baseline message */
 
@@ -1464,6 +1465,29 @@ EXPORT_SYMBOL(rtl9602c_eth_omci_report_oper_up);
  * dev/MEASURED-rtl9602c_eth.c.md sec 69. */
 static const struct eth_rx_csum_layout rtl9602c_rx_csum = RTL9602C_RX_CSUM_LAYOUT;
 
+/* -> true for a DS OMCI the switch trapped. A frame that only looks like one is forwarded: counted, and under the
+ * OMCI diagnostics named with its port, so where such frames come from is seen (the field's came before its CPU-port
+ * stalls). */
+static bool rtl9602c_omci_taken(struct rtl9602c_eth *ep, const struct rx_desc *d, const u8 *data,
+				const struct eth_rx_frame *fr)
+{
+	enum rtl9602c_ds_omci omci = rtl9602c_rx_ds_omci(ep->swm->rx_layout, ep->omci_trap_on, d->opts2, d->opts3,
+							  data, fr->off + fr->len, ep->swm->pon_port,
+							  ep->swm->omci_cpu_reason, fr->off, RX_BUF_SIZE);
+
+	if (omci != RTL9602C_DS_OMCI_LOOKALIKE)
+		return omci == RTL9602C_DS_OMCI_TRAPPED;
+	ep->dbg_omci_lookalike++;
+#ifdef CONFIG_GPON_OMCI_DIAG
+	if (net_ratelimit())
+		netdev_info(ep->ndev, "a frame that looks like OMCI, not trapped as OMCI, forwarded: port %u reason %u %*ph\n",
+			    luna_gmac_rx_src_port(ep->swm->rx_layout, d->opts3),
+			    luna_gmac_rx_reason(ep->swm->rx_layout, d->opts2, d->opts3),
+			    (int)min_t(u32, fr->len, 16), data + fr->off);
+#endif
+	return false;
+}
+
 static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int budget,
 			   bool napi_ctx)
 {
@@ -1507,12 +1531,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 			dev_kfree_skb_any(skb);
 		/* DS-OMCI classifier + BOTH-ends length guard: hoisted to ...
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 71. */
-		} else if (rtl9602c_rx_is_ds_omci(ep->swm->rx_layout, ep->omci_trap_on,
-					   q->ring[i].opts2,
-					   q->ring[i].opts3,
-					   skb->data, fr.off + fr.len, ep->swm->pon_port,
-					   ep->swm->omci_cpu_reason,
-					   fr.off, RX_BUF_SIZE)) {
+		} else if (rtl9602c_omci_taken(ep, &q->ring[i], skb->data, &fr)) {
 			/* DS OMCI on the OMCC. Capture for /proc, then hand the raw G.988
 			 * message (prefix stripped) to the responder. */
 			ep->dbg_omci_rx++;
@@ -2663,8 +2682,8 @@ static int rtl9602c_ethdump_show(struct seq_file *m, void *v)
 		   ep->rxq[0].head, ep->dbg_rx_repoll, ep->ctl_ring_on, ep->dbg_ctl_rx);
 	seq_printf(m, "last RX frame (pre-pull, len=%u): %*ph\n",
 		   ep->dbg_rxlen, (int)sizeof(ep->dbg_rxbuf), ep->dbg_rxbuf);
-	seq_printf(m, "omci: trap=%u rx=%u lastlen=%u msg=%*ph\n",
-		   ep->omci_trap_on, ep->dbg_omci_rx, ep->dbg_omci_rxlen,
+	seq_printf(m, "omci: trap=%u rx=%u lookalike_forwarded=%u lastlen=%u msg=%*ph\n",
+		   ep->omci_trap_on, ep->dbg_omci_rx, ep->dbg_omci_lookalike, ep->dbg_omci_rxlen,
 		   (int)sizeof(ep->dbg_omci_rxbuf), ep->dbg_omci_rxbuf);
 	seq_printf(m, "omci_tx: resp=%u drop=%u unhandled=%u mds=%u sn=%*ph\n",
 		   ep->dbg_omci_tx, ep->dbg_omci_tx_drop, ep->dbg_omci_unhandled,

@@ -396,19 +396,19 @@ void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add)
 
 /* DS-OMCI classifier + length guard, SPLIT from ...
  * dev/MEASURED-rtl9602c_l34_logic.c.md sec 7. */
-bool rtl9602c_rx_is_ds_omci(const struct luna_rx_layout *rxl,
-			    bool trap_on, u32 opts2, u32 opts3,
-			    const u8 *data, u32 len, unsigned int pon_port,
-			    unsigned int omci_reason,
-			    unsigned int cpu_prefix, u32 buf_size)
+enum rtl9602c_ds_omci rtl9602c_rx_ds_omci(const struct luna_rx_layout *rxl,
+					  bool trap_on, u32 opts2, u32 opts3,
+					  const u8 *data, u32 len, unsigned int pon_port,
+					  unsigned int omci_reason,
+					  unsigned int cpu_prefix, u32 buf_size)
 {
 	if (!trap_on || len < cpu_prefix + 8 || len > buf_size)
-		return false;
+		return RTL9602C_DS_OMCI_NONE;
 	if (luna_gmac_rx_reason(rxl, opts2, opts3) == omci_reason &&
 	    luna_gmac_rx_src_port(rxl, opts3) == pon_port)
-		return true;
+		return RTL9602C_DS_OMCI_TRAPPED;
 	return (data[cpu_prefix + 3] == 0x0a || data[cpu_prefix + 3] == 0x0b) &&
-	       !(data[cpu_prefix + 2] & 0x80);
+	       !(data[cpu_prefix + 2] & 0x80) ? RTL9602C_DS_OMCI_LOOKALIKE : RTL9602C_DS_OMCI_NONE;
 }
 
 /* WAN demux verdict, SPLIT from rtl9602c_eth_rx(): does this ...

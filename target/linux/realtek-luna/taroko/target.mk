@@ -16,7 +16,9 @@ CPU_TYPE:=mips32
 # interaptiv subtarget (interAptiv core, unaffected).
 # -mfix-rlx (toolchain/gcc 990-mips-fix-rlx.patch): an RLX branch whose delay slot
 # is a three-operand mul writing the branch's register decides on the mul result.
-CFLAGS:=-Os -pipe -mno-branch-likely -mips32 -mtune=mips32 -fno-schedule-insns2 -mfix-rlx
+# -mdivide-breaks: the core lacks the trap instructions (teq), so gcc's divide-by-zero
+# check is a `break 7` instead: every userland division otherwise took an emulated RI.
+CFLAGS:=-Os -pipe -mno-branch-likely -mips32 -mtune=mips32 -fno-schedule-insns2 -mfix-rlx -mdivide-breaks
 
 # THE SUBTARGET IS THE CORE, AND THE NAME NOW SAYS SO.  A part belongs here when
 # its own boot banner and /proc/cpuinfo say RLX / Taroko -- nothing about its

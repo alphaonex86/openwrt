@@ -209,6 +209,9 @@ MODULE_PARM_DESC(ctrl_queue, "CPU WAN control frames (PPP LCP/auth/IPCP, PPPoE d
 		 "their own flow, the data T-CONT's next queue (default on)");
 static u8 luna_data_qid;
 static bool gpon_sn_changed;		/* SN (re)provisioned -> FSM must re-range */
+/* An OMCI identity value changed: the next serial write re-registers as a changed serial does,
+ * since an OLT reads the identity only at a fresh MIB (field X111W on Entel, 2026-11-18). */
+static bool luna_omci_id_dirty;
 
 /* Forward declaration: the core FSM object is defined with ...
  * dev/MEASURED-luna_gpon.c.md sec 272. */
@@ -324,7 +327,7 @@ static int onu_sn_set(const char *val, const struct kernel_param *kp)
 	if (ret || !gpon_sn_is_set(parsed))
 		return -EINVAL;
 	mutex_lock(&bosa_lock);
-	changed = gpon_sn_differs(val);
+	changed = gpon_sn_differs(val) || READ_ONCE(luna_omci_id_dirty);
 	if (luna_stopping) {
 		ret = -ESHUTDOWN;
 		goto out;
@@ -343,6 +346,7 @@ static int onu_sn_set(const char *val, const struct kernel_param *kp)
 	if (ret)
 		goto out;
 	if (changed) {
+		WRITE_ONCE(luna_omci_id_dirty, false);
 		memcpy(gpon_sn_bytes, parsed, sizeof(parsed));
 		gpon_sn_changed = true;
 		gpon_ploam_set_sn(&luna_ploam, gpon_sn_bytes);
@@ -8021,13 +8025,15 @@ static int luna_timing_show(struct seq_file *s, void *v)
 }
 
 /* The OMCI identity stock's omci_app takes from the unit's MIB; gpon_provision
- * writes each one here before the serial.  luna_omci_id is what attach seeds a
+ * writes each one here before the serial, and a changed one re-registers at that
+ * serial write (luna_omci_id_dirty).  luna_omci_id is what attach seeds a
  * model with; the charp only answers reads of the parameter. */
 static char *onu_omci_id[OMCI_ID_FIELDS];
 
 static int onu_omci_id_param_set(const char *val, const struct kernel_param *kp)
 {
 	enum omci_id_field f = (char **)kp->arg - onu_omci_id;
+	struct omci_identity was;
 	unsigned long flags;
 	int ret;
 
@@ -8039,8 +8045,11 @@ static int onu_omci_id_param_set(const char *val, const struct kernel_param *kp)
 	spin_lock_irqsave(&luna_omci_lock, flags);
 	if (!luna_omci_id_set)
 		omci_id_default(&luna_omci_id);
+	was = luna_omci_id;
 	luna_omci_id_set = true;
 	omci_id_set_str(&luna_omci_id, f, val);
+	if (memcmp(&was, &luna_omci_id, sizeof(was)))
+		WRITE_ONCE(luna_omci_id_dirty, true);
 	if (luna_omci.onu)
 		luna_omci.onu->id = luna_omci_id;
 	spin_unlock_irqrestore(&luna_omci_lock, flags);

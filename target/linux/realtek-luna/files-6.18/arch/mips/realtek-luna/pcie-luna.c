@@ -348,7 +348,7 @@ void luna_pcie_endpoint_reset(void)
 }
 
 /* The endpoint as the previous boot left it. Out of reset here, it kept its
- * bus mastering from that boot up to the reset below. */
+ * bus mastering from that boot up to luna_pcie_endpoint_hold(). */
 static void __init luna_pcie_perst_entry(void)
 {
 	u32 bit;
@@ -370,7 +370,6 @@ static int __init luna_pcie_reset(void)
 	int i;
 
 	/* 0. Hold the endpoint in reset for the whole bring-up. */
-	luna_pcie_perst_entry();
 	luna_pcie_perst(true);
 	mdelay(10);
 
@@ -452,6 +451,17 @@ static const struct luna_pcie_chip *__init luna_pcie_which(void)
 		if (of_machine_is_compatible(all[i]->root_compat))
 			return all[i];
 	return NULL;
+}
+
+/* The endpoint goes into reset as soon as the board is known (device_tree_init): a card a watchdog bite
+ * left running would write into this kernel's memory until the host bring-up, a late initcall. */
+void __init luna_pcie_endpoint_hold(void)
+{
+	chip = luna_pcie_which();
+	if (!chip)
+		return;
+	luna_pcie_perst_entry();
+	luna_pcie_perst(true);
 }
 
 static int __init luna_pcie_init(void)

@@ -271,6 +271,9 @@ static void __init luna_ram_root_leaves_flash(void)
 void __init device_tree_init(void)
 {
 	unflatten_and_copy_device_tree();
+	/* Bus masters left running stop before the page allocator owns their buffers. */
+	luna_gmac_quiesce_inherited();
+	luna_pcie_endpoint_hold();
 	luna_ram_root_leaves_flash();
 
 	mips_cm_probe();

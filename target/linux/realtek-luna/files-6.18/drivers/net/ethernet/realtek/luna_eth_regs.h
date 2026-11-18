@@ -78,6 +78,7 @@
 #define R_ISR			0x3e	/* 16-bit RX/TX IRQ status, write-1-to-clear */
 #define R_IMR0			0xd0	/* 32-bit per-ring TX-completion mask (stock = 0x3f) */
 #define R_ISR1			0xd8	/* 32-bit per-ring TX-completion status, W1C */
+#define R_RxFDP		0x13F0	/* RX ring0 descriptor base (bus address) */
 #define R_RxDesNum		0x1430	/* RX ring0 size + flow-control thresholds */
 #define R_IO_CMD		0x1434	/* DMA enable + per-ring TX kick (bit0 = ring0) */
 #define R_IO_CMD1		0x1438

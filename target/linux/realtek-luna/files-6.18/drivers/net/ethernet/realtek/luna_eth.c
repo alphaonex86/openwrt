@@ -212,7 +212,6 @@ MODULE_PARM_DESC(lan_flood_direct, "send CPU-originated multicast/broadcast to a
 #define R_RxCDO2	0x1394	/* RX ring 2: CDO[31:16] | size-1 [11:0]	*/
 #define R_RxDesNum2	0x1398	/* RX ring 2: size-1 [11:0]			*/
 #define R_RxDesWrap2	0x139C	/* RX ring 2: pause on [27:16] / off [11:0]	*/
-#define R_RxFDP0	0x13F0	/* RX ring0 fetch-descriptor pointer		*/
 #define R_RxCDO0	0x13F4	/* RX ring0: RxCDO[31:16] | RxRingSize[15:8]	*/
 				/* 32-BIT register: the store must not be 16-bit. MSR(0x58) ...
 				 * dev/MEASURED-luna_eth.c.md sec 3. */
@@ -1951,7 +1950,7 @@ static void eth_hw_program(struct luna_eth *ep)
 	/* ring pointers (writable only while the engine is stopped). */
 	ep_wr(ep, R_TxFDP0, ep->tx_ring_dma | DMA_BUS_WINDOW);
 	iowrite16(0, ep->base + R_TxCDO0);
-	ep_wr(ep, R_RxFDP0, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
+	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
 	/* Was this file's own spelling of the family packing -- the THIRD copy. */
 	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);

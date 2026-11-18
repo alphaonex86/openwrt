@@ -15,6 +15,12 @@ u32 luna_gmac_rxdesnum_pack(unsigned int ring_size, unsigned int th_on,
 	       (th_off & 0xff) << 8 | (((ring_size - 1) >> 8) & 0xf) << 4;
 }
 
+/* The ring size a R_RxDesNum word declares, whoever wrote it: 1..4096. */
+unsigned int luna_gmac_rxdesnum_entries(u32 desnum)
+{
+	return ((desnum >> 24) & 0xff) + (((desnum >> 4) & 0xf) << 8) + 1;
+}
+
 /* R_RxCDO field packing: RxRingSize[15:8] low byte + [7:4] the high nibble.
  * RxCDO[31:16] is left 0 — hardware-owned, and the vendor RMWs to preserve it.
  * That RMW is the SHELL's, because it needs a read. */

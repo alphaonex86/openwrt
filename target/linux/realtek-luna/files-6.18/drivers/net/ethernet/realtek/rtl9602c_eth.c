@@ -165,7 +165,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * is the RxFDP/RxCDO pair below.  NOT a TX table -- a TX ring activates on TxFDP
  * + OWN(opts1) + kick.  Kept only to document the address. */
 #define R_RxMRingCfg(k)	(0x1380 + (k) * 16)	/* RX multiring k config block (stock stride 16) */
-#define R_RxFDP		0x13F0	/* RX ring0 fetch-descriptor pointer (phys) */
 #define R_RxCDO		0x13F4	/* RX ring0 current-descriptor offset */
 /* ★ RX multiring k's {FDP, CDO} pair sits at +0 / +4 of its 16-byte block --
  * the layout ring 0 has at R_RxFDP/R_RxCDO and every TX ring has at
@@ -450,7 +449,6 @@ struct rtl9602c_eth {
 
 	/* Bootloader GMAC0 control snapshot (inherited). */
 	u32		ub_tcr, ub_rcr, ub_config, ub_cputagcr, ub_cputag1cr;
-	u32		ub_iocmd, ub_iocmd1;
 
 	/* RX datapath debug counters (see /proc/ethdump). */
 	u32		dbg_poll;	/* poll-timer ticks */
@@ -3052,8 +3050,6 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->ub_config = ep_rd(ep, R_CONFIG);
 	ep->ub_cputagcr = ep_rd(ep, R_CPUTAGCR);
 	ep->ub_cputag1cr = ep_rd(ep, R_CPUTAG1CR);
-	ep->ub_iocmd = ep_rd(ep, R_IO_CMD);
-	ep->ub_iocmd1 = ep_rd(ep, R_IO_CMD1);
 
 	/* ★ THE BRING-UP DEFAULT IS REFUSED, not merely validated. ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 116. */
@@ -3164,9 +3160,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	dev_info(dev, "RTL9602C NIC at %pR, MAC %pM (inherited IO_CMD %08x)\n",
-		 platform_get_resource(pdev, IORESOURCE_MEM, 0),
-		 ndev->dev_addr, ep->ub_iocmd);
+	dev_info(dev, "RTL9602C NIC at %pR, MAC %pM\n",
+		 platform_get_resource(pdev, IORESOURCE_MEM, 0), ndev->dev_addr);
 
 	/* gpon0: the WAN data-GEM netdev (clean-room nas0-equivalent). Shares ep's RX/TX
 	 * rings + NAPI (owned by eth0); RX is demux'd by ingress port (PON port 2 -> gpon0)

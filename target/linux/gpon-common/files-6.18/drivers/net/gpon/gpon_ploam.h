@@ -153,6 +153,7 @@ enum gpon_ploam_ev {
 	GPON_PLOAM_EV_KEEP_LOCK_GIVEUP,	/* a = ticks since the keep-lock DEACT, b = state */
 	GPON_PLOAM_EV_O3_UNHEARD,	/* a = ticks at O3, b = SN offers so far  */
 	GPON_PLOAM_EV_O5_UNGRANTED,	/* a = ticks at O5 with no grant, b = streak */
+	GPON_PLOAM_EV_RERANGE_ASKED,	/* a = state left, b = ms held at O1        */
 };
 
 /* The imperative shell: every entry is a SIDE EFFECT the core ...
@@ -388,6 +389,7 @@ struct gpon_ploam {
 	u32 rerange_last_log_ms;	/* 0 = never logged (flap damping)           */
 	u32 rerange_cnt;
 	u32 last_outage_ms;
+	u32 rerange_hold_until_ms;	/* an asked re-range holds O1 until here; 0 = none */
 	/* --- counters the shell/proc read -------------------------------- */
 	u32 sn_tx;			/* Serial_Number_ONU messages emitted        */
 	u32 ds_rx;			/* DS PLOAMs dispatched (DS-lock liveness)   */
@@ -481,5 +483,9 @@ int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark, u32
 int gpon_ploam_poll_sn_reoffer(struct gpon_ploam *o, u32 now_ms);
 int gpon_ploam_poll_keepalive(struct gpon_ploam *o, u32 now_ms);
 int gpon_ploam_poll_rei(struct gpon_ploam *o, u32 now_ms);
+/* A re-range asked from our own side (a lab proof of an O5 loss): forget the activation and hold
+ * O1, sending nothing, for `hold_ms`. -> 1 when it left a state, 0 at O1 (nothing to leave) or O7
+ * (an emergency stop is the OLT's to lift). */
+int gpon_ploam_rerange(struct gpon_ploam *o, u32 hold_ms, u32 now_ms);
 
 #endif /* GPON_PLOAM_H */

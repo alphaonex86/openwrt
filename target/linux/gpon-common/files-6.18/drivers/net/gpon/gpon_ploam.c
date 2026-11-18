@@ -267,7 +267,9 @@ static void set_state(struct gpon_ploam *o, enum gpon_ostate st, u32 now_ms)
 	/* hold: keep the FSM parked at O1 — refuse every advance past O1 so the
 	 * GPON never ranges or deactivates and the shared switch datapath stops
 	 * churning, leaving the LAN bridge and the WiFi AP stable. */
-	if (o->cfg->hold && st > GPON_O1_INITIAL)
+	if (o->rerange_hold_until_ms && (s32)(o->rerange_hold_until_ms - now_ms) <= 0)
+		o->rerange_hold_until_ms = 0;
+	if ((o->cfg->hold || o->rerange_hold_until_ms) && st > GPON_O1_INITIAL)
 		return;
 	if (o->state != st)
 		ev(o, GPON_PLOAM_EV_STATE, o->state, st);
@@ -382,6 +384,8 @@ int gpon_ploam_ds(struct gpon_ploam *o, const u8 *m, unsigned int len, u32 now_m
 			set_eqd(o, pre_eqd);
 			set_state(o, GPON_O2_STANDBY, now_ms);
 			set_state(o, GPON_O3_SERIAL, now_ms);
+			if (o->state != GPON_O3_SERIAL)
+				break;		/* held at O1: nothing goes up */
 			/* Re-lock the TX CMU PLL now the downstream optics are ...
 			 * dev/MEASURED-gpon_ploam.c.md sec 42. */
 			o->ops->analog_relock(o->sh);
@@ -986,6 +990,16 @@ int gpon_ploam_poll_los(struct gpon_ploam *o, bool optic_los, bool sds_dark,
 		}
 	}
 	return (int)(o->tx_total - tx0);
+}
+
+int gpon_ploam_rerange(struct gpon_ploam *o, u32 hold_ms, u32 now_ms)
+{
+	if (o->state <= GPON_O1_INITIAL || o->state == GPON_O7_EMERGENCY)
+		return 0;
+	ev(o, GPON_PLOAM_EV_RERANGE_ASKED, o->state, hold_ms);
+	o->rerange_hold_until_ms = (now_ms + hold_ms) | 1;
+	leave_o5(o, now_ms);
+	return 1;
 }
 
 /* :6834-6836 — while unregistered at O3, re-offer the Serial_Number_ONU about

@@ -1513,6 +1513,22 @@ MODULE_PARM_DESC(apc_offk, "run rtl8290b_apc_init B-variant OFFK ignition (compl
 static bool gpon_hold;	/* default false: range to O5 normally (so the O5 selftest fires) */
 module_param(gpon_hold, bool, 0444);
 MODULE_PARM_DESC(gpon_hold, "hold the GPON FSM at O1 (no ranging) -> stable br-lan/WiFi for LAN+WiFi access (GPON/WAN disabled)");
+
+/* One O5 loss asked from our own side (device_api pon_rerange, a lab board): the FSM poll serves it. */
+static atomic_t pon_rerange_req = ATOMIC_INIT(0);
+
+static int pon_rerange_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int s;
+
+	if (kstrtouint(val, 0, &s) || !s || s > 600)
+		return -EINVAL;
+	atomic_set(&pon_rerange_req, s);
+	return 0;
+}
+static const struct kernel_param_ops pon_rerange_ops = { .set = pon_rerange_set };
+module_param_cb(pon_rerange, &pon_rerange_ops, NULL, 0200);
+MODULE_PARM_DESC(pon_rerange, "write 1..600: leave the activation now, stay silent at O1 that many seconds, then range again");
 /* gpon_sn_bytes is defined near the top: the onu_sn setter needs it. */
 static struct timer_list gpon_fsm_timer;
 /* The tick and the downstream-PLOAM interrupt both drive the core under it. */
@@ -8999,6 +9015,7 @@ static const char * const luna_ev_name[] = {
 	[GPON_PLOAM_EV_KEEP_LOCK_GIVEUP] = "KEEP_LOCK_GIVEUP",
 	[GPON_PLOAM_EV_O3_UNHEARD]	= "O3_UNHEARD",
 	[GPON_PLOAM_EV_O5_UNGRANTED]	= "O5_UNGRANTED",
+	[GPON_PLOAM_EV_RERANGE_ASKED]	= "RERANGE_ASKED",
 };
 
 static const char *o5loss_ev_name(int ev, char *b, size_t n)
@@ -9051,6 +9068,7 @@ static bool luna_ev_is_decisive(enum gpon_ploam_ev ev)
 	case GPON_PLOAM_EV_ONU_ID:
 	case GPON_PLOAM_EV_O5_WATCHDOG:
 	case GPON_PLOAM_EV_O5_UNGRANTED:
+	case GPON_PLOAM_EV_RERANGE_ASKED:
 	case GPON_PLOAM_EV_LOS_RERANGE:
 	case GPON_PLOAM_EV_SN_REPROVISIONED:
 	case GPON_PLOAM_EV_UNHANDLED:
@@ -9611,6 +9629,16 @@ drain_downstream:
 	if (!(luna_ploam.ticks % 100))
 		gpon_ploam_poll_grants(&luna_ploam, gpon_bwm_acpt_since(&gpon_bwm_acpt_watch_last),
 				       luna_now_ms());
+
+	if (atomic_read(&pon_rerange_req)) {
+		unsigned int s = atomic_xchg(&pon_rerange_req, 0);
+		u8 was = gpon_fsm_state;
+
+		if (gpon_ploam_rerange(&luna_ploam, s * 1000, luna_now_ms()))
+			luna_log("pon_rerange: O%u left, O1 held %u s\n", was, s);
+		else
+			luna_log("pon_rerange: refused at O%u, nothing to leave\n", was);
+	}
 
 	/* Autonomous downstream-LOS recovery (fiber pull). The OLT ...
 	 * dev/MEASURED-luna_gpon.c.md sec 327. */

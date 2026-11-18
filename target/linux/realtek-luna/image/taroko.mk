@@ -13,12 +13,12 @@ define Device/hsgq_x111w
   SOC := rtl9602c
   # NOR persistent image (raw MTD; the vendor fwu.sh flashes a uImage -> k0 and a
   # squashfs -> r0). Partition sizes from the live device /proc/mtd:
-  #   k0 = 0x2f0000 (3008k) kernel, its bank's last 64k the crashlog; r0 = 0x4c0000 (4864k) rootfs.
+  #   k0 = 0x300000 (3072k) kernel; r0 = 0x4a0000 (4736k) rootfs, then the bank's last 128k the crashlog.
   # SIZE GUARD: KERNEL_SIZE auto-fires check-size on the kernel (image.mk), and the
   # explicit check-size on kernel.bin/rootfs.bin makes the BUILD fail if either
   # overflows its partition -- an oversize image is never written to the device.
-  KERNEL_SIZE := $(call flash_kernel_size,3008k)
-  IMAGE_SIZE := 4864k
+  KERNEL_SIZE := $(call flash_kernel_size,3072k)
+  IMAGE_SIZE := 4736k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
@@ -52,11 +52,11 @@ define Device/vsol_v2801rgw
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9602c
   # One bank on an 8 MiB Winbond EF4017, from the unit's own /proc/mtd and U-Boot env:
-  #   k0 = 0x290000 (2624k) kernel at 0xa0000, the 64k crashlog at 0x330000,
-  #   r0 = 0x4c0000 (4864k) rootfs at 0x340000 (operator 2026-10-18: a crashlog on every model).
+  #   k0 = 0x2a0000 (2688k) kernel at 0xa0000, r0 = 0x4a0000 (4736k) rootfs at 0x340000,
+  #   the 128k crashlog at 0x7e0000 (operator 2026-10-18: a crashlog on every model).
   # check-size fails the BUILD when either overflows: an oversize image never reaches a unit.
-  KERNEL_SIZE := $(call flash_kernel_size,2624k)
-  IMAGE_SIZE := 4864k
+  KERNEL_SIZE := $(call flash_kernel_size,2688k)
+  IMAGE_SIZE := 4736k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size
@@ -75,9 +75,9 @@ define Device/hsgq_x100dg
   SOC := rtl9601d
   # 32 MB of RAM cannot unpack a 10 MB initramfs: the dev loop boots the squashfs pair from RAM
   # through phram. The same pair is its flash image: one bank over both of the vendor's 8 MiB,
-  #   k0 = 0x220000 (2176k) at 0x80000, the 64k crashlog at 0x2a0000, r0 = 0x550000 (5440k) at 0x2b0000.
-  KERNEL_SIZE := $(call flash_kernel_size,2176k)
-  IMAGE_SIZE := 5440k
+  #   k0 = 0x230000 (2240k) at 0x80000, r0 = 0x530000 (5312k) at 0x2b0000, the 128k crashlog at 0x7e0000.
+  KERNEL_SIZE := $(call flash_kernel_size,2240k)
+  IMAGE_SIZE := 5312k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | check-size

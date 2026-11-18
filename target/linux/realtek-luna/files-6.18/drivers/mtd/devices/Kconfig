@@ -84,14 +84,6 @@ config LUNA_SPI_NAND
 	  builds that stack and UBI into a NAND board's kernel only (a NOR board
 	  stays without it).
 
-config MTD_ONU_CRASHLOG
-	bool "ONU crash records on a reserved MTD partition"
-	depends on MTD
-	help
-	  A boot record per boot, a clean record per orderly reboot and the kernel
-	  log tail on panic, written to the partition labelled "crashlog" and read
-	  back from /proc/onu_crashlog after any reset.
-
 config MTD_DATAFLASH
 	tristate "Support for AT45xxx DataFlash"
 	depends on SPI_MASTER

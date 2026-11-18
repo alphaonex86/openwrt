@@ -91,6 +91,7 @@ DEFAULT_PACKAGES += \
 	kmod-gpio-button-hotplug \
 	uboot-envtools \
 	iw \
+	kmod-mtdoops \
 	onu-cwmp
 
 $(eval $(call BuildTarget))

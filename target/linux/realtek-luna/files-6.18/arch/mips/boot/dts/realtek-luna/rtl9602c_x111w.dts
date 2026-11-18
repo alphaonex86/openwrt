@@ -134,11 +134,11 @@
 		};
 		partition@80000 {
 			label = "k0";
-			reg = <0x080000 0x2f0000>;	/* 3M kernel bank 0, less its crashlog tail */
+			reg = <0x080000 0x300000>;	/* 3M kernel bank 0 */
 		};
 		partition@380000 {
 			label = "r0";
-			reg = <0x380000 0x4c0000>;	/* 4864K rootfs bank 0 */
+			reg = <0x380000 0x4a0000>;	/* 4736K rootfs bank 0, less its crashlog tail */
 			/* Mark r0 as the squashfs root: MTD_SPLIT_SQUASHFS_ROOT +
 			 * MTD_ROOTFS_ROOT_DEV then set ROOT_DEV -- but the vendor U-Boot
 			 * still passes root=31:5 and it wins, so r0 must stay mtd5: every
@@ -166,9 +166,9 @@
 			reg = <0xb40000 0x4c0000>;	/* 4864K rootfs bank 1 */
 			read-only;
 		};
-		partition@370000 {
+		partition@820000 {
 			label = "crashlog";	/* declared last: see r0 */
-			reg = <0x370000 0x010000>;	/* 64K: onu_crashlog records, operator 2026-10-16 */
+			reg = <0x820000 0x020000>;	/* 128K, the tail of bank 0's rootfs: mtdoops (crashlog arm) */
 		};
 	};
 };

@@ -87,7 +87,8 @@ platform_check_image() {
 		onu_ubi_check_image "$img"
 		return
 	}
-	grep -qs ' /rom squashfs ' /proc/mounts || {
+	. /lib/functions/onu-flash-boot.sh
+	onu_flash_boot || {
 		echo "This ONU runs from RAM, not from its flash: the flash is not ours to replace."
 		return 1
 	}

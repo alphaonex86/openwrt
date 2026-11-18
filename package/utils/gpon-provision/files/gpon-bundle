@@ -31,7 +31,11 @@ for f in version cmdline cpuinfo meminfo; do
 	grab "/proc/$f" "identity-proc-$f.txt"
 done
 grab /proc/mtd identity-proc-mtd.txt
-grab /proc/onu_crashlog crash-records.txt
+if command -v crashlog > /dev/null 2>&1; then
+	step crash-records.txt crashlog
+else
+	note "crash-records.txt absent crashlog"
+fi
 grab /proc/net/dev identity-proc-net-dev.txt
 grab /etc/openwrt_release identity-etc-openwrt_release.txt
 grab /etc/version identity-etc-version.txt

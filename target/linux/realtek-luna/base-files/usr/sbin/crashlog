@@ -1,0 +1,131 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The kernel's panics and oopses, kept by mtdoops in the "crashlog" slice at the tail of our rootfs bank, and
+# this unit's events (boots, clean shutdowns, GPON O5 losses) in our overlay; nothing is written from a RAM boot.
+#   crashlog           one line region=<mtdN|none> boot=<flash|ram> recorder=<on|off>; each record oldest first,
+#                      "--- seq=<n> time=<unix s> rev=<image of the boot that wrote it>" and the kernel log before
+#                      it; then each event, "event n=<k> kind=<boot|shutdown|o5loss> boot=<b> time=<unix s> ..."
+#   crashlog arm       a boot record (prev=clean|crash|upgrade|unclean|none), then mtdoops (/etc/init.d/crashlog)
+#   crashlog shutdown  the clean end of this boot (/etc/init.d/crashlog)
+#   crashlog o5        a new GPON O5 loss of /proc/gpon (every minute, gpon_vlan_watch)
+
+. "$ONU_ROOT/lib/functions/onu-flash-boot.sh"
+
+RECORD=4096
+MAGIC=1560305152
+PART=$(sed -n 's/^\(mtd[0-9]*\): .* "crashlog"$/\1/p' "$ONU_ROOT/proc/mtd")
+EVENTS="$ONU_ROOT/etc/crashlog.events"
+
+say() {
+	logger -t crashlog -p "daemon.$1" "$2"
+}
+
+field() {
+	echo " $2" | sed -n "s/.* $1=\([^ ]*\).*/\1/p"
+}
+
+last_boot() {
+	grep ' kind=boot ' "$EVENTS" 2>/dev/null | tail -n 1
+}
+
+event() {
+	local n
+
+	onu_flash_boot || return 0
+	n=$(field n "$(tail -n 1 "$EVENTS" 2>/dev/null)")
+	echo "n=$((${n:-0} + 1)) $* time=$(date +%s)" >> "$EVENTS" || { say err "event not kept: $*"; return 1; }
+	[ "$(wc -l < "$EVENTS")" -lt 512 ] && return 0
+	tail -n 256 "$EVENTS" > "$EVENTS.new" && mv "$EVENTS.new" "$EVENTS" || say err "$EVENTS not trimmed"
+}
+
+record() {
+	dd if="$ONU_ROOT/dev/${PART}ro" bs=$RECORD skip="$1" count=1 2>/dev/null
+}
+
+# "<seq> <page> <unix s>" of every mtdoops record, oldest first
+records() {
+	local size big i t
+
+	[ -n "$PART" ] || return 0
+	size=$(cat "$ONU_ROOT/sys/class/mtd/$PART/size") || return 1
+	big=$(printf '\001\000' | hexdump -e '1/2 "%u"')
+	i=0
+	# Each record: u32 seq, u32 magic, s64 ns of the wall clock, in the CPU's byte order.
+	while [ $((i * RECORD)) -lt "$size" ]; do
+		set -- $(record $i | hexdump -n 16 -e '4/4 "%u " "\n"')
+		if [ "$2" = $MAGIC ]; then
+			[ "$big" = 256 ] && t=$(($3 * 4294967296 + $4)) || t=$(($4 * 4294967296 + $3))
+			echo "$1 $i $((t / 1000000000))"
+		fi
+		i=$((i + 1))
+	done | sort -n
+}
+
+newest() {
+	records | tail -n 1 | cut -d ' ' -f 1
+}
+
+arm() {
+	local rev last prev seq
+
+	onu_flash_boot || { say notice "not booted from our flash bank: nothing writes the flash, nothing is kept"; return 0; }
+	rev=$(. "$ONU_ROOT/etc/openwrt_release" 2>/dev/null; echo "${DISTRIB_REVISION:-unknown}")
+	last=$(last_boot)
+	seq=$(newest)
+	seq=${seq:-0}
+	if [ "$(field kind "$(tail -n 1 "$EVENTS" 2>/dev/null)")" = shutdown ]; then prev=clean
+	elif [ -z "$last" ]; then prev=none
+	elif [ "$seq" -gt "$(field crash_seq "$last")" ]; then prev=crash
+	elif [ "$(field rev "$last")" != "$rev" ]; then prev=upgrade
+	else prev=unclean
+	fi
+	event "kind=boot boot=$(($(field boot "$last") + 1)) rev=$rev prev=$prev crash_seq=$seq"
+	[ -n "$PART" ] || { say notice "no crashlog partition: no panic is kept"; return 0; }
+	insmod mtdoops mtddev=crashlog || { say err "mtdoops did not load: no panic is kept"; return 1; }
+	dmesg | grep -q "mtdoops: Attached to MTD device ${PART#mtd}\$" || {
+		say err "mtdoops did not attach to $PART: no panic is kept"
+		return 1
+	}
+	say notice "panics and oopses are kept in $PART"
+}
+
+o5() {
+	local boot logged losses
+
+	set -- $(grep '^o5_lost:' "$ONU_ROOT/proc/gpon" 2>/dev/null)
+	losses=${2:-0}
+	[ "$losses" -gt 0 ] 2>/dev/null || return 0
+	boot=$(field boot "$(last_boot)")
+	logged=$(field losses "$(grep " kind=o5loss boot=$boot " "$EVENTS" 2>/dev/null | tail -n 1)")
+	[ "$losses" -gt "${logged:=0}" ] || return 0
+	shift 3		# "o5_lost:", the count and the driver's own recorded=
+	event "kind=o5loss boot=$boot losses=$losses missed=$((losses - logged - 1)) $*"
+}
+
+show() {
+	local boot=ram on=off
+
+	onu_flash_boot && boot=flash
+	[ -d "$ONU_ROOT/sys/module/mtdoops" ] && on=on
+	echo "region=${PART:-none} boot=$boot recorder=$on"
+	records | while read -r seq i t; do
+		# the boot that wrote it: the last one whose newest record at its start was older
+		echo "--- seq=$seq time=$t rev=$(awk -v s="$seq" '/ kind=boot / {
+			c = r = ""
+			for (i = 1; i <= NF; i++) { if ($i ~ /^crash_seq=/) c = substr($i, 11) + 0; if ($i ~ /^rev=/) r = substr($i, 5) }
+			if (c < s) rev = r
+		} END { print (rev == "" ? "unknown" : rev) }' "$EVENTS" 2>/dev/null || echo unknown)"
+		record "$i" | tail -c +17 | tr -d '\377'
+		echo
+	done
+	sed 's/^/event /' "$EVENTS" 2>/dev/null
+	return 0
+}
+
+case "$1" in
+arm) arm ;;
+shutdown) event "kind=shutdown boot=$(field boot "$(last_boot)")" ;;
+o5) o5 ;;
+"") show ;;
+*) echo "usage: crashlog [arm|shutdown|o5]" >&2; exit 2 ;;
+esac

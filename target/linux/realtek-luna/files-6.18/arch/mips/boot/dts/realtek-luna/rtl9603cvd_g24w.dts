@@ -310,11 +310,11 @@
 			};
 			partition@84000 {
 				label = "k0";
-				reg = <0x084000 0x31c000>;	/* 3184K kernel; then the 64K-aligned crashlog */
+				reg = <0x084000 0x334000>;	/* 3280K kernel, the vendor's k0 */
 			};
 			partition@3b8000 {
 				label = "r0";
-				reg = <0x3b8000 0xaa0000>;	/* 10880K rootfs; mtd5, as the vendor's root=31:5 */
+				reg = <0x3b8000 0xa80000>;	/* 10752K rootfs; mtd5, as the vendor's root=31:5 */
 				linux,rootfs;
 			};
 			partition@e58000 {
@@ -322,9 +322,9 @@
 				reg = <0xe58000 0x1a8000>;	/* 1696K, the vendor's: never written */
 				read-only;
 			};
-			partition@3a0000 {
+			partition@e38000 {
 				label = "crashlog";	/* declared last: r0 stays mtd5 */
-				reg = <0x3a0000 0x010000>;	/* 64K: onu_crashlog records; 32K unused before r0 */
+				reg = <0xe38000 0x020000>;	/* 128K, the tail of r0's extent: mtdoops (crashlog arm) */
 			};
 		};
 	};

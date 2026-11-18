@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-or-later
+# This boot's record and the kernel's panics in the flash, and its clean end, from a boot of our own flash bank only.
+START=11
+STOP=90
+
+boot() {
+	crashlog arm
+}
+
+shutdown() {
+	crashlog shutdown
+}

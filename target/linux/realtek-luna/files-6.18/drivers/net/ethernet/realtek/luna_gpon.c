@@ -43,7 +43,6 @@
 #include <linux/workqueue.h>
 #include <linux/of.h>
 #include <linux/gpio/consumer.h>
-#include <linux/onu_crashlog.h>	/* every O5 loss kept in the unit's flash */
 #include <linux/time.h>		/* time64_to_tm: the O5 loss in UTC */
 #include <linux/of_address.h>	/* of_address_to_resource: the board's reserved PBO pools */
 #include <linux/of_irq.h>
@@ -1234,9 +1233,10 @@ static u32 gpon_last_outage_ms;
 static unsigned long gpon_rerange_start_j;
 static unsigned long gpon_rerange_last_log_j;
 
-/* Every O5 loss with its UTC time and the last decisive core event before it, kept in the crash
- * records at most once a minute (operator, 2026-10-19: an OLT re-ranging us, maybe daily at a fixed
- * hour, must not go unseen in the lab or the field). */
+/* Every O5 loss with its UTC time and the last decisive core event before it, in this driver's
+ * log at most once a minute and the last one in /proc/gpon (o5_lost), which `crashlog o5` keeps in
+ * the unit's events (operator, 2026-10-19: an OLT re-ranging us, maybe daily at a fixed hour, must
+ * not go unseen in the lab or the field). */
 #define O5LOSS_SPACING_S	60
 struct o5loss_rec {
 	time64_t at;
@@ -9018,7 +9018,6 @@ static void o5loss_save(struct work_struct *w)
 	struct o5loss_rec r;
 	unsigned long flags;
 	u32 losses, saved;
-	int ret;
 
 	spin_lock_irqsave(&o5loss.lock, flags);
 	r = o5loss.lost;
@@ -9030,15 +9029,11 @@ static void o5loss_save(struct work_struct *w)
 		  "at=%s uptime=%us o5_held=%us\nlast_core_event=%s a=%u b=%u %us_before unknown_ploam_in_o5=%u\n",
 		  losses, losses - saved - 1, at, r.up_s, r.held_s, o5loss_ev_name(r.ev, nm, sizeof(nm)),
 		  r.a, r.b, r.ev_age_s, r.unknown);
-	ret = onu_crashlog_note(text);
+	luna_log("%s", text);
 	spin_lock_irqsave(&o5loss.lock, flags);
-	if (!ret) {
-		o5loss.saved = losses;
-		o5loss.saved_j = jiffies;
-	}
+	o5loss.saved = losses;
+	o5loss.saved_j = jiffies;
 	spin_unlock_irqrestore(&o5loss.lock, flags);
-	if (ret && ret != -ENODEV)
-		luna_log("O5 loss #%u not kept in flash (%d)\n", losses, ret);
 }
 
 /* The events that DECIDE activation, and therefore speak whatever `trace` says.

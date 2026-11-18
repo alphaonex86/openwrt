@@ -45,13 +45,13 @@ define Device/lanly_g24w
   DEVICE_DTS_DIR := $(DTS_DIR)/realtek-luna
   SOC := rtl9603cvd
   # Flash partition sizes MEASURED from the live device /proc/mtd, one bank:
-  #   k0 = 0x31c000 (3184k) kernel at 0x84000, then the 64k-aligned crashlog (0x3a0000),
-  #   r0 = 0xaa0000 (10880k) rootfs at 0x3b8000 (operator 2026-10-19: flash every
+  #   k0 = 0x334000 (3280k) kernel at 0x84000, r0 = 0xa80000 (10752k) rootfs at 0x3b8000,
+  #   then the 128k crashlog (0xe38000) (operator 2026-10-19: flash every
   #   model whose flash holds our image; the stock kept in results/stock_firmware).
   # check-size fails the BUILD when either overflows; dts_vs_measured FLASH_PLAN
   # checks these against the DTS.
-  KERNEL_SIZE := $(call flash_kernel_size,3184k)
-  IMAGE_SIZE := 10880k
+  KERNEL_SIZE := $(call flash_kernel_size,3280k)
+  IMAGE_SIZE := 10752k
   IMAGES := kernel.bin rootfs.bin sysupgrade.bin
   IMAGE/kernel.bin := append-kernel | check-size $$(KERNEL_SIZE)
   IMAGE/rootfs.bin := append-rootfs | pad-rootfs | check-size

@@ -5,8 +5,6 @@
 
 var callCrash = rpc.declare({ object: 'gpon', method: 'crash', expect: { '': {} } });
 
-var CRASH_KINDS = [ 'panic', 'pretimeout', 'unclean' ];
-
 function stamp() {
 	return new Date().toISOString().replace(/[:.]/g, '-');
 }
@@ -19,15 +17,26 @@ return view.extend({
 	records: function(text) {
 		var out = [], cur = null;
 		(text || '').split('\n').forEach(function(line) {
-			var m = line.match(/^--- seq=(\d+) kind=(\S+) boot=(\d+) uptime=(\d+)s$/);
+			var m = line.match(/^--- seq=(\d+) time=(\d+)(?: rev=(\S+))?$/);
 			if (m) {
-				cur = { seq: +m[1], kind: m[2], boot: +m[3], uptime: +m[4], log: '' };
+				cur = { seq: +m[1], time: +m[2], rev: m[3] || 'unknown', log: '' };
 				out.push(cur);
+			} else if (/^event /.test(line)) {
+				cur = null;
 			} else if (cur && line) {
 				cur.log += line + '\n';
 			}
 		});
+		out.forEach(function(x) {
+			x.kind = /watchdog pretimeout/.test(x.log) ? 'pretimeout' : /Kernel panic/.test(x.log) ? 'panic' : 'oops';
+		});
 		return out;
+	},
+
+	events: function(text) {
+		return (text || '').split('\n').filter(function(line) {
+			return /^event .* kind=o5loss /.test(line) || /^event .* prev=(unclean|crash) /.test(line);
+		}).map(function(line) { return line.replace(/^event /, ''); });
 	},
 
 	report: function(r) {
@@ -51,38 +60,39 @@ return view.extend({
 	},
 
 	render: function(r) {
-		var intro = E('p', {}, _('What this unit kept in its own flash about its last resets: a kernel panic with its log, or an UNCLEAN reset (the watchdog or a power cut). If it crashed, download the report and send it to contact@herman-brule.com or attach it to an issue at https://github.com/alphaonex86/openwrt/issues.'));
+		var intro = E('p', {}, _('The kernel crashes this unit kept in its own flash: a panic, a watchdog pretimeout or an oops, each with the kernel log before it and the firmware that wrote it; then each restart that did not shut down cleanly and each GPON link loss. If it crashed, download the report and send it to contact@herman-brule.com or attach it to an issue at https://github.com/alphaonex86/openwrt/issues.'));
 
 		if (!r.available)
 			return E('div', { 'class': 'cbi-map' }, [
 				E('h2', {}, _('Crash')), intro,
-				E('p', { 'class': 'alert-message' }, _('This unit keeps no crash records yet: its flash has no crashlog partition.'))
+				E('p', { 'class': 'alert-message' }, _('This unit keeps no crash records: its flash has no crashlog partition.'))
 			]);
 
 		var recs = this.records(r.text);
-		var crashes = recs.filter(function(x) { return CRASH_KINDS.indexOf(x.kind) >= 0; });
+		var off = / recorder=off/.test(r.text || '') ? E('p', { 'class': 'alert-message' }, _('This boot records no crash: it did not boot from its own flash bank, which it never writes then.')) : '';
 		var rows = recs.map(function(x) {
-			var bad = CRASH_KINDS.indexOf(x.kind) >= 0;
 			return E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td' }, String(x.seq)),
-				E('td', { 'class': 'td' }, bad ? E('strong', {}, x.kind.toUpperCase()) : x.kind),
-				E('td', { 'class': 'td' }, String(x.boot)),
-				E('td', { 'class': 'td' }, '%ds'.format(x.uptime)),
-				E('td', { 'class': 'td' }, x.log ? E('details', {}, [ E('summary', {}, x.log.split('\n')[0]), E('pre', {}, x.log) ]) : '')
+				E('td', { 'class': 'td' }, E('strong', {}, x.kind.toUpperCase())),
+				E('td', { 'class': 'td' }, new Date(x.time * 1000).toISOString()),
+				E('td', { 'class': 'td' }, x.rev),
+				E('td', { 'class': 'td' }, E('details', {}, [ E('summary', {}, x.log.split('\n')[0]), E('pre', {}, x.log) ]))
 			]);
 		});
 
 		return E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, _('Crash')), intro,
-			E('p', {}, crashes.length ? E('strong', {}, _('%d crash(es) recorded.').format(crashes.length)) : _('No crash recorded.')),
+			E('h2', {}, _('Crash')), intro, off,
+			E('p', {}, recs.length ? E('strong', {}, _('%d crash(es) recorded.').format(recs.length)) : _('No crash recorded.')),
 			E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, 'save', r) }, [ _('Download the crash report') ]),
 			E('table', { 'class': 'table' }, [
 				E('tr', { 'class': 'tr table-titles' }, [
 					E('th', { 'class': 'th' }, _('Record')), E('th', { 'class': 'th' }, _('Kind')),
-					E('th', { 'class': 'th' }, _('Boot')), E('th', { 'class': 'th' }, _('Uptime')),
+					E('th', { 'class': 'th' }, _('Time')), E('th', { 'class': 'th' }, _('Firmware')),
 					E('th', { 'class': 'th' }, _('Kernel log'))
 				])
-			].concat(rows))
+			].concat(rows)),
+			E('h3', {}, _('Unclean restarts and GPON link losses')),
+			E('pre', {}, this.events(r.text).join('\n') || _('None recorded.'))
 		]);
 	},
 

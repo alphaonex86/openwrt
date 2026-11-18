@@ -79,7 +79,7 @@
 /* Its own 8 MiB SPI-NOR (A14017). OpenWrt runs from it in ONE bank laid over both of the vendor's:
  * our 2 MB kernel does not fit its 1328K k0 (operator, 2026-10-19: "todos los que caben"); the stock
  * stays whole in results/stock_firmware. The vendor b0 boots img0_kernel (0x80000) with root=31:5, so
- * k0 starts there and r0 is mtd5; the crashlog sits right behind k0 and is declared last. A RAM boot
+ * k0 starts there and r0 is mtd5; the crashlog is the tail of r0's extent, declared last. A RAM boot
  * maps its own rootfs through phram and names it root=/dev/mtdblock0, which wins over linux,rootfs. */
 &spi_nor {
 	reg = <0x14000000 0x800000>, <0x18001200 0x10>;
@@ -111,16 +111,16 @@
 		};
 		partition@80000 {
 			label = "k0";
-			reg = <0x080000 0x220000>;	/* 2176K kernel */
+			reg = <0x080000 0x230000>;	/* 2240K kernel */
 		};
 		partition@2b0000 {
 			label = "r0";
-			reg = <0x2b0000 0x550000>;	/* 5440K rootfs + rootfs_data, to the chip's end */
+			reg = <0x2b0000 0x530000>;	/* 5312K rootfs + rootfs_data */
 			linux,rootfs;
 		};
-		partition@2a0000 {
+		partition@7e0000 {
 			label = "crashlog";	/* declared last: r0 stays mtd5 */
-			reg = <0x2a0000 0x010000>;	/* 64K: onu_crashlog records */
+			reg = <0x7e0000 0x020000>;	/* 128K to the chip's end: mtdoops (crashlog arm) */
 		};
 	};
 };

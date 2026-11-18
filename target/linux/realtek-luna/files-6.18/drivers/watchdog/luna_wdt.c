@@ -13,7 +13,6 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/onu_crashlog.h>
 #include <linux/platform_device.h>
 #include <linux/sched/debug.h>
 #include <linux/spinlock.h>
@@ -276,8 +275,8 @@ static const struct watchdog_ops luna_wdt_ops = {
 };
 
 /* Phase 1 ran out with interrupts still running: nothing fed the watchdog.
- * Print the interrupted context and panic, so the crash log records it before
- * phase 2 resets the chip; without this a hang leaves only "unclean". */
+ * Print the interrupted context and panic, so the crash log (mtdoops) records
+ * it before phase 2 resets the chip; without this a hang leaves nothing. */
 static irqreturn_t luna_wdt_ph1_irq(int irq, void *dev_id)
 {
 	struct luna_wdt *wdt = dev_id;
@@ -287,7 +286,7 @@ static irqreturn_t luna_wdt_ph1_irq(int irq, void *dev_id)
 	writel(LUNA_WDT_INTR_PH1, wdt->base + LUNA_WDT_INTR);
 	if (get_irq_regs())
 		show_regs(get_irq_regs());
-	panic(ONU_CRASHLOG_PRETIMEOUT_PANIC ": nothing fed the watchdog within its %u s timeout",
+	panic("watchdog pretimeout: nothing fed the watchdog within its %u s timeout",
 	      wdt->wdd.timeout);
 	return IRQ_HANDLED;
 }

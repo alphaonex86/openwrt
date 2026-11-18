@@ -169,7 +169,7 @@ Index: linux-6.18.31/arch/mips/kernel/traps.c
 ===================================================================
 --- linux-6.18.31.orig/arch/mips/kernel/traps.c
 +++ linux-6.18.31/arch/mips/kernel/traps.c
-@@ -1150,6 +1150,119 @@ out_sigsegv:
+@@ -1150,6 +1150,135 @@ out_sigsegv:
  	goto out;
  }
  
@@ -210,49 +210,49 @@ Index: linux-6.18.31/arch/mips/kernel/traps.c
 +	vb = (long)regs->regs[rt];
 +
 +	switch (opcode >> 26) {
-+	case 0x1c:				/* SPECIAL2 */
++	case 0x1c: {				/* SPECIAL2 */
++		u64 acc = ((u64)(u32)regs->hi << 32) | (u32)regs->lo;
++		u64 p = (func & 1) ? (u64)(u32)va * (u32)vb
++				   : (u64)((s64)(s32)va * (s32)vb);
++		long val = 0;
++		bool to_rd = true;
++
 +		switch (func) {
 +		case 0x02:			/* mul rd, rs, rt */
-+			if (rd)
-+				regs->regs[rd] = (s32)((s32)va * (s32)vb);
++			val = (s32)((s32)va * (s32)vb);
 +			break;
-+		case 0x00:			/* madd  rs, rt */
-+		case 0x01: {			/* maddu rs, rt */
-+			u64 acc = ((u64)(u32)regs->hi << 32) | (u32)regs->lo;
-+			u64 p = (func == 0x00)
-+			      ? (u64)((s64)(s32)va * (s32)vb)
-+			      : (u64)((u32)va) * (u32)vb;
-+			acc += p;
-+			regs->lo = (s32)(u32)acc;
-+			regs->hi = (s32)(u32)(acc >> 32);
-+			break;
-+		}
-+		case 0x04:			/* msub  rs, rt */
-+		case 0x05: {			/* msubu rs, rt */
-+			u64 acc = ((u64)(u32)regs->hi << 32) | (u32)regs->lo;
-+			u64 p = (func == 0x04)
-+			      ? (u64)((s64)(s32)va * (s32)vb)
-+			      : (u64)((u32)va) * (u32)vb;
-+			acc -= p;
-+			regs->lo = (s32)(u32)acc;
-+			regs->hi = (s32)(u32)(acc >> 32);
-+			break;
-+		}
 +		case 0x20:			/* clz rd, rs */
-+			if (rd)
-+				regs->regs[rd] =
-+					(u32)va ? __builtin_clz((u32)va) : 32;
++			val = (u32)va ? __builtin_clz((u32)va) : 32;
 +			break;
 +		case 0x21:			/* clo rd, rs */
-+			if (rd)
-+				regs->regs[rd] =
-+					(u32)~va ? __builtin_clz((u32)~va) : 32;
++			val = (u32)~va ? __builtin_clz((u32)~va) : 32;
++			break;
++		case 0x00:			/* madd  rs, rt */
++		case 0x01:			/* maddu rs, rt */
++			acc += p;
++			to_rd = false;
++			break;
++		case 0x04:			/* msub  rs, rt */
++		case 0x05:			/* msubu rs, rt */
++			acc -= p;
++			to_rd = false;
 +			break;
 +		default:
 +			return 0;
 +		}
++		/*
++		 * In a delay slot, the branch decides on the registers as they were
++		 * before this instruction: resolve it first, then write the result.
++		 */
 +		compute_return_epc(regs);
++		if (!to_rd) {
++			regs->lo = (s32)(u32)acc;
++			regs->hi = (s32)(u32)(acc >> 32);
++		} else if (rd) {
++			regs->regs[rd] = val;
++		}
 +		return 1;
++	}
 +
 +	case 0x00: {				/* SPECIAL: conditional traps */
 +		int taken;
@@ -284,12 +284,28 @@ Index: linux-6.18.31/arch/mips/kernel/traps.c
 +
 +	return 0;
 +}
++
++/* Emulations done: [0] user, [1] the kernel itself, which must stay 0 (a lab read) */
++static u32 rlx_emulated[2];
++
++#ifdef CONFIG_DEBUG_FS
++#include <linux/debugfs.h>
++#include <asm/debug.h>
++
++static int __init rlx_emulated_debugfs(void)
++{
++	debugfs_create_u32("rlx_emulated_user", 0444, mips_debugfs_dir, &rlx_emulated[0]);
++	debugfs_create_u32("rlx_emulated_kernel", 0444, mips_debugfs_dir, &rlx_emulated[1]);
++	return 0;
++}
++arch_initcall(rlx_emulated_debugfs);
++#endif
 +#endif /* CONFIG_CPU_R3K_TLB */
 +
  asmlinkage void do_ri(struct pt_regs *regs)
  {
  	unsigned int __user *epc = (unsigned int __user *)exception_epc(regs);
-@@ -1159,6 +1272,17 @@ asmlinkage void do_ri(struct pt_regs *re
+@@ -1159,6 +1288,20 @@ asmlinkage void do_ri(struct pt_regs *re
  	unsigned int opcode = 0;
  	int status = -1;
  
@@ -300,8 +316,11 @@ Index: linux-6.18.31/arch/mips/kernel/traps.c
 +	 * code contains these instructions too, and like the R2 fast path it
 +	 * returns before exception_enter().
 +	 */
-+	if (rlx_emulate_insn(regs))
++	if (rlx_emulate_insn(regs)) {
++		rlx_emulated[!user_mode(regs)]++;
++		perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, 0);
 +		return;
++	}
 +#endif
 +
  	/*

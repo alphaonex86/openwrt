@@ -2840,6 +2840,22 @@ static void luna_optic_read_now(void)
 	luna_optic_last_at = jiffies ?: 1;
 }
 
+/* Has the laser's APC loop settled? The bias readback (0x321) is unchanged over one poll (1 s). The ANI-G
+ * cache was filled at O5 entry from the loop's start code: the OLT read 19.7 mA / +5.3 dBm for a converged
+ * 13.7 mA / +2.6 dBm (lab X111W, 5 cold boots, 2026-11-17). A module that manages its own laser is settled. */
+static int apc_bias_prev = -1;
+
+static bool luna_apc_settled(void)
+{
+	int bias, prev = apc_bias_prev;
+
+	if (!bosa_regs_live())
+		return true;
+	bias = bosa_read_reg(0x321);
+	apc_bias_prev = bias;
+	return bias >= 0 && bias == prev;
+}
+
 /* Measure the module and refresh the ANI-G level cache, from process work at a
  * slow cadence (never from the GET path); a level not measured keeps the previous one. */
 static bool gpon_optical_cache_poll(void)
@@ -3115,14 +3131,9 @@ static const struct { u16 reg; u8 val; } bosa_init_golden[] __initconst = {
 	/* A2 bytes 92..95: 0xff (incl. the byte-95 CC_DMI checksum position, not
 	 * maintained) */
 	{BOSA_A2(92),0xff}, {BOSA_A2(93),0xff}, {BOSA_A2(94),0xff}, {BOSA_A2(95),0xff},
-	/* A2 bytes 96..119, live-diagnostics area: a captured snapshot (the MCU
-	 * overwrites these with real readings) */
-	{BOSA_A2(96),0x2c}, {BOSA_A2(97),0x38}, {BOSA_A2(98),0x84}, {BOSA_A2(99),0x98},
-	{BOSA_A2(100),0x18}, {BOSA_A2(101),0x14},
-	{BOSA_A2(102),0x3e},	/* TX optical power word hi (bosa_read16 reads it live) */
-	{BOSA_A2(103),0x52},
-	{BOSA_A2(104),0x00},	/* RX optical power word hi (bosa_read16) */
-	{BOSA_A2(105),0xe5}, {BOSA_A2(106),0xff}, {BOSA_A2(107),0x00}, {BOSA_A2(108),0x00},
+	/* A2 bytes 96..105 (temperature, Vcc, bias, TX and RX power) are not written: nothing on this chip
+	 * refreshes them (a lab capture stayed there for days, rx -16.4 dBm against a live -23.6) */
+	{BOSA_A2(106),0xff}, {BOSA_A2(107),0x00}, {BOSA_A2(108),0x00},
 	{BOSA_A2(109),0x00}, {BOSA_A2(110),0xff}, {BOSA_A2(111),0x00}, {BOSA_A2(112),0x03},
 	{BOSA_A2(113),0xc0}, {BOSA_A2(114),0x00}, {BOSA_A2(115),0x00}, {BOSA_A2(116),0x03},
 	{BOSA_A2(117),0xc0}, {BOSA_A2(118),0x00}, {BOSA_A2(119),0x00},
@@ -6244,9 +6255,11 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 			else
 				scnprintf(a2s, sizeof(a2s), "%d.%02ddBm", a2c / 100,
 					  (a2c < 0 ? -a2c : a2c) % 100);
-			seq_printf(s, "optic_a2:    rx_pwr_raw=%02x%02x (0.1uW) -> %s  [SFF-8472 A2 slave 0x51 b104/105 -- the MODULE's own monitor]\n",
+			seq_printf(s, "optic_a2:    rx_pwr_raw=%02x%02x (0.1uW) -> %s  [SFF-8472 A2 slave 0x51 b104/105 -- %s]\n",
 				   a2h < 0 ? 0xff : a2h & 0xff,
-				   a2l < 0 ? 0xff : a2l & 0xff, a2s);
+				   a2l < 0 ? 0xff : a2l & 0xff, a2s,
+				   bosa_regs_live() ? "an RTL8290B page nothing refreshes, NOT a reading" :
+				   "the MODULE's own monitor");
 			/* The rest of the same page, and on a module with no RTL8290B ...
 			 * dev/MEASURED-luna_gpon.c.md sec 311. */
 			{
@@ -9824,12 +9837,16 @@ static void gpon_optical_work_fn(struct work_struct *w)
 {
 	static unsigned long optical_next;
 	static u32 o5_seen;
+	static int settle_left = -1;	/* polls left for the APC to settle; -1: not waiting */
 	u32 o5 = READ_ONCE(gpon_o5_entry_tick);
 
 	if (o5 != o5_seen) {
 		o5_seen = o5;
-		if (o5)	/* the OLT reads ANI-G once in service: measure now */
+		if (o5) {	/* the OLT reads ANI-G once in service: measure once the laser settled */
 			optical_next = jiffies;
+			apc_bias_prev = -1;
+			settle_left = optical_poll && bosa_regs_live() ? 30 : -1;	/* only the RTL8290B reads its APC */
+		}
 	}
 	mutex_lock(&bosa_lock);
 	if (luna_driver_ready && !luna_stopping) {
@@ -9858,13 +9875,22 @@ static void gpon_optical_work_fn(struct work_struct *w)
 		}
 		if (optical_poll && (bosa_regs_live() || bosa_cal_ready || optics_self_managed) &&
 		    time_after_eq(jiffies, optical_next)) {
-			if (gpon_optical_cache_poll())
-				rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);
-			optical_next = jiffies + msecs_to_jiffies(60000);
+			if (settle_left > 0 && !luna_apc_settled()) {
+				settle_left--;
+				optical_next = jiffies + msecs_to_jiffies(1000);
+			} else {
+				if (!settle_left)
+					luna_log("APC bias still moving after 30 s: ANI-G cached unsettled\n");
+				settle_left = -1;
+				if (gpon_optical_cache_poll())
+					rtl9602c_eth_omci_set_optical(anig_rx_level, anig_tx_level);
+				optical_next = jiffies + msecs_to_jiffies(60000);
+			}
 		}
 		if (luna_selftest_owed()) {
-			if (!luna_optic_last_at ||
-			    time_after(jiffies, luna_optic_last_at + msecs_to_jiffies(60000)))
+			/* while the laser settles, the last settled reading answers */
+			if (settle_left <= 0 && (!luna_optic_last_at ||
+			    time_after(jiffies, luna_optic_last_at + msecs_to_jiffies(60000))))
 				luna_optic_read_now();
 			luna_selftest_hand_over(&luna_optic_last);
 		}

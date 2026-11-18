@@ -27,7 +27,7 @@ void __init luna_gmac_quiesce_inherited(void)
 	unsigned int n;
 
 	if (!(readl(SOC_IP_SEL) & IPSEL_GMAC0)) {
-		pr_info("luna-gmac: engine clock-gated by the boot loader: no inherited DMA\n");
+		pr_info("luna-gmac: boot loader left the engine clock-gated: no DMA to stop\n");
 		return;
 	}
 	io_cmd = ioread32(LUNA_GMAC0 + R_IO_CMD);

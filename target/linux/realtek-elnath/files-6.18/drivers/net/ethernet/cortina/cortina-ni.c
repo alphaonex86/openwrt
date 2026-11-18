@@ -1031,13 +1031,13 @@ static int __init cortina_ni_early_quiesce(void)
 	glb = of_iomap(np, CA_NI_WIN_GLB);
 	of_node_put(np);
 	if (!glb) {
-		pr_warn("%s: early quiesce: GLB window unmapped - the NE keeps the boot loader's DMA targets until probe\n",
+		pr_warn("%s: early quiesce: GLB window unmapped - the boot loader DMA did not stop: the NE keeps its targets until probe\n",
 			CA_NI_DRV_NAME);
 		return 0;
 	}
 	was = readl(glb + CA_NI_GLB_BLOCK_RESET);
 	cortina_ni_ne_quiesce(glb);
-	pr_info("%s: NE quiesced before rootfs (block_reset 0x%08x -> 0x%08x)\n",
+	pr_info("%s: NE quiesced before rootfs (block_reset 0x%08x -> 0x%08x): boot loader DMA stopped\n",
 		CA_NI_DRV_NAME, was, readl(glb + CA_NI_GLB_BLOCK_RESET));
 	iounmap(glb);
 	return 0;

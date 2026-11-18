@@ -338,13 +338,19 @@ static void luna_pcie_perst(bool assert)
 	mb();
 }
 
+#define LUNA_LX0_SLAVE_TIMEOUT	((void __iomem *)0xb8005220ul)	/* Lexra bus 0 slave timeout control */
+#define LX_SLAVE_TIMEOUT_LONGEST	0xf0000000u	/* [31] enable, [30:28] the longest timeout */
+
 /* The endpoint goes into reset before the SoC does. A card no driver stopped
  * (a panic) keeps its bus mastering through the bootloader and into the next
- * kernel, whose memory its receive ring still points into. */
+ * kernel, whose memory its receive ring still points into. As stock's restart,
+ * a bus slave that stops answering first gets a timeout instead of the bus. */
 void luna_pcie_endpoint_reset(void)
 {
-	if (chip)
+	if (chip) {
+		writel(LX_SLAVE_TIMEOUT_LONGEST, LUNA_LX0_SLAVE_TIMEOUT);
 		luna_pcie_perst(true);
+	}
 }
 
 /* The endpoint as the previous boot left it. Out of reset here, it kept its

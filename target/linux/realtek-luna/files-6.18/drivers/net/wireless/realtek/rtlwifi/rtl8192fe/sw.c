@@ -388,6 +388,7 @@ static struct pci_driver rtl92fe_driver = {
 	.id_table = rtl92fe_pci_ids,
 	.probe = rtl_pci_probe,
 	.remove = rtl_pci_disconnect,
+	.shutdown = rtl_pci_shutdown,
 	.driver.pm = &rtlwifi_pm_ops,
 };
 

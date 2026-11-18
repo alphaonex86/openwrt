@@ -2715,6 +2715,18 @@ void rtl_pci_disconnect(struct pci_dev *pdev)
 }
 EXPORT_SYMBOL(rtl_pci_disconnect);
 
+/* Reboot: the card stops raising interrupts and loses bus mastering before the restart, as stock stops its WiFi
+ * hardware first; a panic skips this and the platform's reset line covers it. */
+void rtl_pci_shutdown(struct pci_dev *pdev)
+{
+	struct ieee80211_hw *hw = pci_get_drvdata(pdev);
+
+	if (hw)
+		rtl_priv(hw)->cfg->ops->disable_interrupt(hw);
+	pci_clear_master(pdev);
+}
+EXPORT_SYMBOL(rtl_pci_shutdown);
+
 #ifdef CONFIG_PM_SLEEP
 /***************************************
  * kernel pci power state define:

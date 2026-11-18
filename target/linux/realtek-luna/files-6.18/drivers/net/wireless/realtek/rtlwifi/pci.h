@@ -283,6 +283,7 @@ extern const struct rtl_intf_ops rtl_pci_ops;
 int rtl_pci_probe(struct pci_dev *pdev,
 		  const struct pci_device_id *id);
 void rtl_pci_disconnect(struct pci_dev *pdev);
+void rtl_pci_shutdown(struct pci_dev *pdev);
 #ifdef CONFIG_PM_SLEEP
 int rtl_pci_suspend(struct device *dev);
 int rtl_pci_resume(struct device *dev);

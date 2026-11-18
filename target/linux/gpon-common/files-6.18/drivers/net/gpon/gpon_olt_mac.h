@@ -36,6 +36,8 @@ struct gpon_olt_mac_ops {
 	int (*omci_rx)(void *chip, unsigned int *link, u16 *gem_port, u8 pdu[GPON_OLT_OMCI_LEN]);
 	/* the chip silent: interrupts and queues off; nothing is called after it */
 	void (*stop)(void *chip);
+	/* the burst the chip's receiver detects, broadcast to the ONUs; NULL: the core's */
+	const struct gpon_olt_overhead *burst;
 };
 
 struct gpon_olt_mac;

@@ -1564,9 +1564,16 @@ static const struct gpon_olt_pon_chip zx_pon = {
 	.link_up = zx_link_up, .rd = zx_pm_rd, .regs = zx_pon_regs, .n_regs = ARRAY_SIZE(zx_pon_regs),
 };
 
+/* The burst the receiver detects once stock's MAC/TM init is in: stock's own Upstream_Overhead (32 guard bits,
+ * type 3 preamble 0xaa, delimiter 0xab5983, pre-equalised, no delay) and Extended_Burst_Length (119 / 15 bytes). */
+static const struct gpon_olt_overhead zx_burst = {
+	.guard_bits = 0x20, .preamble3_pattern = 0xaa, .delimiter = { 0xab, 0x59, 0x83 }, .options = 0x20,
+	.preamble3_unranged = 0x77, .preamble3_ranged = 0x0f,
+};
+
 static const struct gpon_olt_mac_ops zx_ops = {
 	.ploam_tx = zx_ploam_tx, .sn_window = zx_sn_window, .ranging_grant = zx_ranging_grant,
-	.omci_tx = zx_omci_tx, .ploam_rx = zx_ploam_rx, .omci_rx = zx_omci_rx, .stop = zx_stop,
+	.omci_tx = zx_omci_tx, .ploam_rx = zx_ploam_rx, .omci_rx = zx_omci_rx, .stop = zx_stop, .burst = &zx_burst,
 };
 
 /* The frame pipe as the firmware sets it up: both rings, the DMA control word, both interrupts unmasked. */
@@ -1642,6 +1649,9 @@ static int zx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	if (zx_regs)
 		return dev_err_probe(dev, -EBUSY, "a second ZX279200: one chip per board\n");
+	ret = gpon_olt_pon_lasers_ready(dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "laser lines\n");
 	ret = pcim_enable_device(pdev);
 	if (ret)
 		return dev_err_probe(dev, ret, "enable\n");

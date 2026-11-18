@@ -247,6 +247,8 @@ int gpon_olt_mac_start(struct gpon_olt_mac *mac, struct device *dev, const char 
 		if (refused)
 			return dev_err_probe(dev, -EINVAL, "%s: link %u: the OLT port refused its %s\n", name, i,
 					     refused);
+		if (ops->burst)
+			mac->links[i].port.pon.overhead = *ops->burst;
 	}
 	if (!proc_create_single_data(name, 0444, NULL, mac_show, mac))
 		return dev_err_probe(dev, -ENOMEM, "/proc/%s not created\n", name);

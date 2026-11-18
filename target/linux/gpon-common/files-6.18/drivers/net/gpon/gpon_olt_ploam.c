@@ -480,6 +480,12 @@ void gpon_olt_pon_tick(struct gpon_olt_pon *p, u32 now_ms)
 		build(m, GPON_ONU_ID_BROADCAST, GPON_OLT_DS_OVERHEAD);
 		put_overhead(&m[2], &p->overhead);
 		send(p, m);
+		if (p->overhead.preamble3_unranged) {
+			build(m, GPON_ONU_ID_BROADCAST, GPON_OLT_DS_EXT_BURST);
+			m[2] = p->overhead.preamble3_unranged;
+			m[3] = p->overhead.preamble3_ranged;
+			send(p, m);
+		}
 		if (p->ops->sn_grant)
 			p->ops->sn_grant(p->sh);
 		p->next_acquire_ms = now_ms + p->acquire_ms;

@@ -38,6 +38,7 @@
 #define GPON_OLT_DS_PASSWORD	0x09
 #define GPON_OLT_DS_ALLOC	0x0a
 #define GPON_OLT_DS_PORT	0x0e
+#define GPON_OLT_DS_EXT_BURST	0x14
 
 enum gpon_olt_link {
 	GPON_OLT_LINK_FREE,
@@ -96,7 +97,8 @@ struct gpon_olt_link_rec {
 #define GPON_OLT_OWE_PORT	0x01
 #define GPON_OLT_OWE_ALLOC	0x02
 
-/* G.984.3 9.2.3.1 Upstream_Overhead, as broadcast during acquisition. */
+/* G.984.3 9.2.3.1 Upstream_Overhead and 9.2.3.20 Extended_Burst_Length, as broadcast during acquisition: the
+ * burst the OLT's receiver is set to detect. */
 struct gpon_olt_overhead {
 	u8 guard_bits;
 	u8 preamble1_bits;
@@ -105,6 +107,8 @@ struct gpon_olt_overhead {
 	u8 delimiter[3];
 	u8 options;		/* pre-assigned delay present, SN mask, power level */
 	u16 preassigned_delay;
+	u8 preamble3_unranged;	/* type 3 preamble bytes before ranging; 0: no Extended_Burst_Length sent */
+	u8 preamble3_ranged;	/* and once ranged */
 };
 
 struct gpon_olt_pon {

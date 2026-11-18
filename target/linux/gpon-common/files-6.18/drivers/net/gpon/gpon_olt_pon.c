@@ -8,6 +8,7 @@
 #include <linux/netdevice.h>
 #include <linux/workqueue.h>
 
+#include "eth_stat_table.h"
 #include "gpon_olt_mac.h"
 #include "gpon_olt_pon.h"
 
@@ -22,11 +23,8 @@ struct pon_priv {
 	struct delayed_work poll;
 };
 
-static const struct {
-	char name[ETH_GSTRING_LEN];
-	size_t off;
-} pon_stats[] = {
-#define S(f) { #f, offsetof(struct gpon_olt_mac_link, f) }
+static const struct eth_stat pon_stats[] = {
+#define S(f) ETH_STAT(struct gpon_olt_mac_link, f)
 	S(ds_ploam), S(ploam_busy), S(ploam_drop), S(us_ploam), S(ds_omci), S(omci_full), S(us_omci), S(grant_fail),
 #undef S
 };
@@ -92,28 +90,20 @@ static int pon_get_link_ksettings(struct net_device *ndev, struct ethtool_link_k
 
 static int pon_get_sset_count(struct net_device *ndev, int sset)
 {
-	return sset == ETH_SS_STATS ? ARRAY_SIZE(pon_stats) : -EOPNOTSUPP;
+	return eth_stat_count(sset, ARRAY_SIZE(pon_stats));
 }
 
 static void pon_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 {
-	unsigned int i;
-
-	if (sset != ETH_SS_STATS)
-		return;
-	for (i = 0; i < ARRAY_SIZE(pon_stats); i++)
-		ethtool_puts(&data, pon_stats[i].name);
+	eth_stat_strings(sset, data, pon_stats, ARRAY_SIZE(pon_stats));
 }
 
 static void pon_get_ethtool_stats(struct net_device *ndev, struct ethtool_stats *st, u64 *data)
 {
 	struct pon_priv *p = netdev_priv(ndev);
-	const u8 *l = (const u8 *)&p->mac->links[p->link];
-	unsigned int i;
 
 	spin_lock_bh(&p->mac->lock);
-	for (i = 0; i < ARRAY_SIZE(pon_stats); i++)
-		data[i] = *(const u64 *)(l + pon_stats[i].off);
+	eth_stat_values(data, &p->mac->links[p->link], pon_stats, ARRAY_SIZE(pon_stats));
 	spin_unlock_bh(&p->mac->lock);
 }
 

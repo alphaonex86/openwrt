@@ -11,7 +11,7 @@
 static const struct eth_tx_limits zx_tx_max = { .buf = 0x7fff, .len = 0x3fff, .offset = 0x3f };
 
 const struct eth_rx_layout zx279128_rx_layout = {
-	.prefix = ZX_BUF_OFFSET, .head = 0, .fcs = ETH_RX_FCS_NOT_IN_LEN, .buf = ZX_BUF_SIZE,
+	.prefix = ZX_RX_OFFSET, .head = 0, .fcs = ETH_RX_FCS_NOT_IN_LEN, .buf = ZX_BUF_SIZE,
 };
 
 enum zx_rx_verdict zx279128_rx_parse(const u32 w[ZX_RX_DESC_WORDS], const struct eth_rx_layout *l,

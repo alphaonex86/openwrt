@@ -29,7 +29,8 @@
 #define ZX_RXD_JUMBO		(1u << 31)	/* word 1 */
 #define ZX_BUF_SIZE		0x800
 #define ZX_GPON_FRAME_BYTES	19440	/* one 125 us downstream frame at 1.24416 Gbit/s */
-#define ZX_BUF_OFFSET		16	/* where a frame starts in its buffer, both ways, once 0x92140060 = 0x11 */
+#define ZX_BUF_OFFSET		16	/* where ours puts a frame to send in its buffer */
+#define ZX_RX_OFFSET		32	/* where the hardware puts a received one, 0x92140060 = 0 as stock */
 
 /* MEASURED on F680 unit 2, 2026-11-12: its U-Boot's receive descriptors gave 60 for the host's 42-byte ARP
  * and ICMP replies (padded to 60 on the wire): the length excludes the FCS. */

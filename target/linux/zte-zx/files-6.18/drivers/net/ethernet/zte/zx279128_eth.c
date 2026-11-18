@@ -29,6 +29,8 @@
 #include <linux/phy.h>
 #include <linux/platform_device.h>
 
+#include "eth_init_table.h"
+#include "eth_stat_table.h"
 #include "gpon_hwaddr.h"
 #include "zx279128_eth_logic.h"
 #include "zx279128_gpon.h"
@@ -57,9 +59,9 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define G_INT_PP		BIT(2)
 
 /* Packet processor. */
-#define PP_CFG0			0x140004
-#define PP_CFG1			0x140008
-#define PP_RX_OFFSET		0x140060	/* 0x11: a received frame starts 16 bytes into its buffer */
+#define PP_MAC_TABLE		0x140000	/* stock's tmglb_set_Onu_MacAddr: 8 entries of { address bytes 2-5, 0-1 } */
+#define PP_MAC_ENTRIES		8
+#define PP_RX_OFFSET		0x140060	/* 0: a received frame starts 32 bytes into its buffer (U-Boot: 0x11, 16) */
 /* the packet processor's own DDR tables (stock: ACL 4 MB at 0x46720000, OPC counters 512 KB after it). Their reset
  * values lie past our 128 MB and the DDR answers modulo 128 MB: left alone they point into kernel RAM. */
 #define PP_OPC_PM_BASE		0x144018
@@ -76,21 +78,18 @@ MODULE_PARM_DESC(mac, "the unit's base MAC (xx:xx:xx:xx:xx:xx): LAN port p = bas
 #define PP_INT_STATUS		0x144040	/* bits 1-0: receive work pending; the line is status & ~mask */
 #define PP_INT_MASK		0x144044	/* 1 = masked */
 #define PP_INT_RX		0x3
-#define PP_CLS_SEL		0x14c014
-#define PP_CLS_W1C		0x14c01c
-#define PP_CLS_W2C		0x14c02c
-#define PP_CLS_CTRL		0x14c080
-#define PP_CLS_CTRL2		0x14c088
+#define CLA_TABLES		0x14c000	/* classifier: 0 extra index, 1 extra rule, 2-6 hash, 7 CPU queue (by stock) */
+#define LIMITER_TABLES		0x150000
 #define RED_TABLES		0x154000
 #define RED_CTRL		0x154004
 #define RED_CPU_RESERVE		0x154010
 #define RED_OUT_SHARE_MAX	0x154070
-#define QMG_UP_RAM_THD		0x158000	/* stock's tm_pp_qmg_initial: 0x1580, reset 0x3e80 */
+#define QMG_UP_RAM_THD		0x158000	/* stock: threshold 0x1580 in bits 12-0, bit 13 kept from reset 0x3e80 */
 #define USCH_TABLES		0x15c000
 #define UOPC_TABLES		0x160000
+#define DOPC_TABLES		0x170000
 #define PP_RX_RELEASE_GO	0x154064	/* write 1, reads 0 when taken */
 #define PP_RX_RELEASE		0x154068	/* ring << 14 | n << 4 | 8 | queue */
-#define PP_Q_ENABLE		0x15406c
 #define RED_OUT			0x000000	/* RED table: out-queue, in-queue, buffer-queue thresholds */
 #define RED_IN			0x800000
 #define RED_BUF			0x1000000
@@ -179,6 +178,7 @@ struct zx_eth {
 	u32 *tx_area;		/* ring 0, then ring 1 */
 	dma_addr_t tx_dma;
 	u32 tables;
+	struct eth_tbl tbl;	/* the PP's table engines */
 	unsigned int rx_next[2][RX_QUEUES];
 	struct eth_tx_ring tx[2];
 	struct eth_rx_len rx_len;
@@ -283,22 +283,6 @@ static void reset_pulse(struct zx_eth *e, u32 mask)
 	wr(e, G_RESET, 0xffffffff);
 }
 
-/* One row of the table engine at @eng (+0x18 bit 0 ready, +0x14 row select, data words from +0x1c): the words high
- * to low, the first last (it commits the row). */
-static int pp_table_write(struct zx_eth *e, u32 eng, u32 sel, const u32 *w, int n)
-{
-	u32 v;
-
-	if (readl_poll_timeout(e->base + eng + 0x18, v, v & 1, 10, 100000)) {
-		dev_err(e->dev, "packet processor table 0x%x row 0x%x never ready (0x%08x)\n", eng, sel, v);
-		return -ETIMEDOUT;
-	}
-	wr(e, eng + 0x14, sel);
-	while (n--)
-		wr(e, eng + 0x1c + 4 * n, w[n]);
-	return 0;
-}
-
 /* Every queue's thresholds as the stock kernel's init leaves them: an out-queue left 0 drops what the CPU sends
  * upstream (out-queue 24 carries the OMCI, the queue manager's "up sw drop" 0x92158058 counts it). */
 static int red_queues_init(struct zx_eth *e)
@@ -309,9 +293,9 @@ static int red_queues_init(struct zx_eth *e)
 	for (q = 0; q < RED_OUT_QUEUES; q++) {
 		u32 out[4] = { q < 16 ? 0x3ff : 0x7ff040 };
 
-		if (pp_table_write(e, RED_TABLES, RED_OUT | q, out, 4) ||
-		    (q < RED_QUEUES && (pp_table_write(e, RED_TABLES, RED_IN | q, in, 4) ||
-					pp_table_write(e, RED_TABLES, RED_BUF | q, buf, 4))))
+		if (eth_tbl_write(&e->tbl, RED_TABLES, RED_OUT | q, out, 4) ||
+		    (q < RED_QUEUES && (eth_tbl_write(&e->tbl, RED_TABLES, RED_IN | q, in, 4) ||
+					eth_tbl_write(&e->tbl, RED_TABLES, RED_BUF | q, buf, 4))))
 			return -ETIMEDOUT;
 	}
 	/* enable, open-out, share mode; CPU reserve; all-out share max (stock's TM RED init) */
@@ -321,41 +305,154 @@ static int red_queues_init(struct zx_eth *e)
 	return 0;
 }
 
-/* The upstream scheduler and output processor as the stock kernel and its TM module leave them: rows of
- * { table << 22 | index, data0, data1 }; the OPC's command, modify and flow RAM chain flows 1-3 and flow 0. */
-static int upstream_tables_init(struct zx_eth *e)
+/* The upstream scheduler and both output processors as the stock kernel and its TM module leave them: rows of
+ * { table << 22 | index, data0, data1 }; an OPC's command, modify and flow RAM chain flows 1-3 and flow 0. */
+static int sched_opc_init(struct zx_eth *e)
 {
 	/* scheduler enables, its ageing time, the OPC's padding (minimum length << 1 | on) */
-	static const u32 regs[][2] = { { 0x15c000, 0x77 }, { 0x15c004, 0x0bebc200 }, { QMG_UP_RAM_THD, 0x1580 },
-				       { 0x160028, 0x20 << 1 | 1 } };
-	static const u32 usch[][2] = { { 0xc0000f, 0x30d40 }, { 0x000001, 0x80 } };
-	static const u32 uopc[][3] = {
+	static const struct eth_reg_val regs[] = { { 0x15c000, 0x77 }, { 0x15c004, 0x0bebc200 },
+						   { QMG_UP_RAM_THD, 0x3580 }, { 0x160028, 0x20 << 1 | 1 } };
+	static const u32 usch[][2] = { { 0xc0000f, 0x3fffff }, { 0x000001, 0xff } };
+	static const u32 opc[][3] = {
 		{ 0xc00000, 0x10000 },
 		{ 0xc00001, 0x20002 }, { 0xc00002, 0x30001 }, { 0xc00003, 0x10000 }, { 0x800000, 1 }, { 0x000001, 0 },
 		{ 0xc00004, 0x20002 }, { 0xc00005, 0x30002 }, { 0xc00006, 0x10000 }, { 0x800001, 4 }, { 0x000002, 1 },
 		{ 0xc00007, 0x20002 }, { 0xc00008, 0x30003 }, { 0xc00009, 0x10000 }, { 0x800002, 7 }, { 0x000003, 2 },
 		{ 0x1400000, 0xc7180000 }, { 0x800003, 0x1ff000, 0xc0716300 }, { 0x000000, 0x3fe03, 0x600000 },
 	};
+	static const u32 dopc_flow3_modify[2] = { 0x1ff000, 0x600000 };	/* the downstream OPC's own word 1 */
+
+	eth_reg_vals_write(e->base, regs, ARRAY_SIZE(regs));
+	if (eth_tbl_write_rows(&e->tbl, USCH_TABLES, usch[0], ARRAY_SIZE(usch), 1) ||
+	    eth_tbl_write_rows(&e->tbl, UOPC_TABLES, opc[0], ARRAY_SIZE(opc), 2) ||
+	    eth_tbl_write_rows(&e->tbl, DOPC_TABLES, opc[0], ARRAY_SIZE(opc), 2))
+		return -ETIMEDOUT;
+	return eth_tbl_write(&e->tbl, DOPC_TABLES, 0x800003, dopc_flow3_modify, 2);
+}
+
+/* The classifier's tables as stock's TM init leaves them (tm_acl_fast_init, the default up/downstream flows,
+ * tm_protocol_pkt_limit_map_set), read live from a stock unit, and the protocol limiter's own table. */
+static int classifier_init(struct zx_eth *e)
+{
+	/* extra index table row r: key bytes 16r..16r+15, then this word */
+	static const u32 index_word4[16] = { 0x190000, 0x190007, 0x190007, 0x190007, 0x190007, 0x190000, 0x190000,
+					     0x190000, 0x19003f, 0x150001, 0x150004, 0x190000, 0x190000, 0x190000,
+					     0x190000, 0x190000 };
+	/* extra rule table (1) and hash table (2) rows: { table << 22 | index, words } */
+	static const struct { u32 sel, w[15]; } rows[] = {
+		{ 0x400010, { [0] = 0x10100, [4] = 0xffff000, [5] = 0xff0, [14] = 0x302000 } },
+		{ 0x400011, { [0] = 0x1426, [4] = 0xffff000, [5] = 0xff0, [14] = 0x202000 } },
+		{ 0x400020, { [0] = 0x10100, [4] = 0xffff000, [5] = 0xff0, [14] = 0x302000 } },
+		{ 0x400021, { [0] = 0x1426, [4] = 0xffff000, [5] = 0xff0, [14] = 0x202000 } },
+		{ 0x400030, { [0] = 0x10100, [4] = 0xffff000, [5] = 0xff0, [14] = 0x302000 } },
+		{ 0x400031, { [0] = 0x1426, [4] = 0xffff000, [5] = 0xff0, [14] = 0x202000 } },
+		{ 0x400040, { [0] = 0x10100, [4] = 0xffff000, [5] = 0xff0, [14] = 0x302000 } },
+		{ 0x400041, { [0] = 0x1426, [4] = 0xffff000, [5] = 0xff0, [14] = 0x202000 } },
+		{ 0x400080, { [0] = 0x10100, [4] = 0xffff000, [5] = 0xff8, [14] = 0x304000 } },
+		{ 0x400081, { [0] = 0x10100, [4] = 0xffff000, [14] = 0x304000 } },
+		{ 0x400082, { [0] = 0x10100, [4] = 0x100000, [14] = 0x300000 } },
+		{ 0x400083, { [0] = 0x10100, [4] = 0xffff000, [5] = 0xff0, [14] = 0x300000 } },
+		{ 0x400084, { [0] = 0x1426, [4] = 0xffff000, [5] = 0xff0, [14] = 0x200000 } },
+		{ 0x400090, { [0] = 0x84c9111e, [1] = 0xb152, [4] = 0xf00ff000, [5] = 0xffffffff, [6] = 0xffffffff,
+		  [7] = 0xfffffff, [14] = 0x700000 } },
+		{ 0x400091, { [0] = 0x84c9111e, [1] = 0xb152, [4] = 0xf00ff000, [5] = 0xffffffff, [6] = 0xffffffff,
+		  [7] = 0xfffffff, [14] = 0x2700000 } },
+		{ 0x4000a2, { [0] = 0x44480f1c, [1] = 0x2c54a132, [2] = 0xb3464c17, [3] = 0x1f3c74e1, [4] = 0xfff00010,
+		  [5] = 0xffffffff, [6] = 0xffffffff, [7] = 0xffffffff, [8] = 0xffffffff, [9] = 0xffffffff,
+		  [10] = 0xffffffff, [11] = 0xffffffff, [12] = 0xffffffff, [13] = 0xfffffff, [14] = 0x1300000 } },
+		{ 0x4000a3, { [0] = 0x44480f1c, [1] = 0x2c54a132, [2] = 0xb3464c17, [3] = 0x1f3c74e1, [4] = 0xfff00010,
+		  [5] = 0xffffffff, [6] = 0xffffffff, [7] = 0xffffffff, [8] = 0xffffffff, [9] = 0xffffffff,
+		  [10] = 0xffffffff, [11] = 0xffffffff, [12] = 0xffffffff, [13] = 0xfffffff, [14] = 0x3300000 } },
+		{ 0x80001a, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x10000417, [4] = 0x700041 } },
+		{ 0x800024, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x10000817, [4] = 0x700042 } },
+		{ 0x80004c, { [0] = 0x100007c, [1] = 0x1f4000, [2] = 0x80000408, [3] = 0x800007, [4] = 0x8068,
+		  [5] = 0x2f } },
+		{ 0x800057, { [0] = 0x100007c, [1] = 0x1f4000, [2] = 0x80000408, [3] = 0x10800007, [4] = 0x1999e8 } },
+		{ 0x80005d, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x1017, [4] = 0xc044,
+		  [5] = 0x61 } },
+		{ 0x800071, { [0] = 0x100005d, [1] = 0x174000, [2] = 0x80000408, [3] = 0x40000017, [4] = 0x700068 } },
+		{ 0x80007c, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0xc17, [4] = 0xc043,
+		  [5] = 0x61 } },
+		{ 0x800096, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x817, [4] = 0xc042,
+		  [5] = 0x61 } },
+		{ 0x80009f, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x408, [3] = 0x20000000, [4] = 0x8068 } },
+		{ 0x8000a8, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x417, [4] = 0xc041,
+		  [5] = 0x61 } },
+		{ 0x8000ad, { [0] = 0x100005d, [1] = 0x174000, [2] = 0x80000408, [3] = 0x30000017, [4] = 0xc068,
+		  [5] = 0x61 } },
+		{ 0x8000ce, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x10000c17, [4] = 0x700043 } },
+		{ 0x8000ef, { [0] = 0x1000055, [1] = 0x154000, [2] = 0x80000408, [3] = 0x10001017, [4] = 0x700044 } },
+	};
+	/* a protocol packet's limiter, the same on every port: 4 but these { packet, limiter } */
+	static const u8 limit_map[][2] = { { 3, 3 }, { 49, 3 }, { 71, 3 }, { 73, 1 }, { 74, 0 }, { 75, 2 }, { 76, 1 },
+					   { 80, 3 }, { 81, 3 }, { 82, 3 }, { 83, 5 }, { 84, 3 }, { 86, 3 }, { 87, 3 },
+					   { 88, 3 }, { 96, 1 }, { 97, 1 } };
+	u8 limiter[128];
+	u32 w[5];
+	int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(index_word4); i++) {
+		for (j = 0; j < 4; j++)
+			w[j] = 0x03020100 + 0x04040404 * (4 * i + j);
+		w[4] = index_word4[i];
+		if (eth_tbl_write(&e->tbl, CLA_TABLES, i, w, 5))
+			return -ETIMEDOUT;
+	}
+	static_assert(sizeof(rows[0]) == sizeof(u32[16]));	/* flat rows: { select, words[15] } */
+	if (eth_tbl_write_rows(&e->tbl, CLA_TABLES, &rows[0].sel, ARRAY_SIZE(rows), 15))
+		return -ETIMEDOUT;
+	memset(limiter, 4, sizeof(limiter));
+	for (i = 0; i < ARRAY_SIZE(limit_map); i++)
+		limiter[limit_map[i][0]] = limit_map[i][1];
+	/* row port << 7 | packet; stock leaves packet 50 unwritten and sends port 0's packets 0-2 to limiter 7 */
+	for (i = 0; i < 8 * ARRAY_SIZE(limiter); i++) {
+		w[0] = i < 3 ? 7 : limiter[i % ARRAY_SIZE(limiter)];
+		if (i % ARRAY_SIZE(limiter) != 50 && eth_tbl_write(&e->tbl, CLA_TABLES, 7 << 22 | i, w, 1))
+			return -ETIMEDOUT;
+	}
+	for (i = 0; i < 16; i++) {
+		w[0] = i;
+		if (eth_tbl_write(&e->tbl, LIMITER_TABLES, 6 << 22 | i, w, 1))
+			return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+/* stock's tmglb_set_Onu_MacAddr: the unit's base + 0..5, then 00:d0:d0:00:00:07 and :08 */
+static void mac_table_init(struct zx_eth *e)
+{
+	u64 base = ether_addr_to_u64(e->mac);
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(regs); i++)
-		wr(e, regs[i][0], regs[i][1]);
-	for (i = 0; i < ARRAY_SIZE(usch); i++)
-		if (pp_table_write(e, USCH_TABLES, usch[i][0], &usch[i][1], 1))
-			return -ETIMEDOUT;
-	for (i = 0; i < ARRAY_SIZE(uopc); i++)
-		if (pp_table_write(e, UOPC_TABLES, uopc[i][0], &uopc[i][1], 2))
-			return -ETIMEDOUT;
-	return 0;
+	for (i = 0; i < PP_MAC_ENTRIES; i++) {
+		u64 a = i < 6 ? base + i : 0x00d0d0000007ULL + i - 6;
+
+		wr(e, PP_MAC_TABLE + 8 * i, lower_32_bits(a));
+		wr(e, PP_MAC_TABLE + 8 * i + 4, upper_32_bits(a) & 0xffff);
+	}
 }
 
 static int zx_hw_init(struct zx_eth *e)
 {
 	/* the packet processor's RAM-init requests, the values of stock's own TM init */
-	static const u32 ram_init[][2] = { { 0x144048, 0x7fff }, { 0x144050, 0x0fffffff }, { 0x144058, 0x7ff },
-					   { 0x144060, 0x1ffff } };
-	static const u32 dma_irq[][2] = { { 0x164028, 1 }, { 0x16402c, 1 }, { 0x164030, 100000 }, { 0x164034, 0x80 },
-					  { PP_DMA_IRQ, 0x7f }, { 0x164020, 0x40 }, { 0x164024, 0x40 } };
+	static const struct eth_reg_val ram_init[] = { { 0x144048, 0x7fff }, { 0x144050, 0x0fffffff },
+						       { 0x144058, 0x7ff }, { 0x144060, 0x1ffff } };
+	/* the rest of stock's tm_pp_initial, read live: classifier controls, the protocol limiter's enable and
+	 * rates (limiters 0 and 8 at 4000 pps), the downstream packet allocator */
+	static const struct eth_reg_val tm_regs[] = {
+		{ 0x14c080, 0x800 }, { 0x14c084, 4 }, { 0x14c088, 0x7d0 }, { 0x14c094, 8 }, { 0x14c098, 0x7fff7fff },
+		{ 0x150000, 1 }, { 0x150080, 0x00200fa0 }, { 0x1500a0, 0x00200fa0 },
+		{ 0x16c040, 0x688688 }, { 0x16c044, 0x688688 }, { 0x16c048, 0x50555555 }, { 0x16c04c, 0x51554555 },
+		{ 0x16c0f4, 0x80001aff }, { 0x16c0f8, 0x085fffbf }, { 0x16c104, 0x15151041 },
+	};
+	static const struct eth_reg_val dma_irq[] = { { 0x164028, 1 }, { 0x16402c, 1 }, { 0x164030, 100000 },
+						      { 0x164034, 0x80 }, { PP_DMA_IRQ, 0x7f }, { 0x164020, 0x40 },
+						      { 0x164024, 0x40 } };
+	static const struct eth_reg_val sw_table[] = {
+		{ 0x310004, 0x040200ff }, { 0x310340, 0xff5555ff }, { 0x310344, 0x3f }, { 0x310380, 0x3f },
+		{ 0x31063c, 0xaaaaaaaa }, { 0x3101c0, 0xff }, { 0x3101c4, 0x5555 }, { 0x310188, 0x000bf874 },
+		{ 0x3102c0, 0xff }, { 0x310300, 0xffff }, { 0x310304, 0x3f },
+	};
 	int i;
 
 	/* the stock kernel resets the GPON MAC before the network blocks: nothing its transmitter took in from the
@@ -367,22 +464,15 @@ static int zx_hw_init(struct zx_eth *e)
 		wr(e, MAC(i) + MAC_CTRL, 0);
 	reset_pulse(e, 0xffffffff);
 	/* before any table row is written */
-	for (i = 0; i < ARRAY_SIZE(ram_init); i++)
-		wr(e, ram_init[i][0], ram_init[i][1]);
-	if (red_queues_init(e) || upstream_tables_init(e))
+	eth_reg_vals_write(e->base, ram_init, ARRAY_SIZE(ram_init));
+	if (red_queues_init(e) || sched_opc_init(e) || classifier_init(e))
 		return -ETIMEDOUT;
-	wr(e, PP_Q_ENABLE, 1);
+	eth_reg_vals_write(e->base, tm_regs, ARRAY_SIZE(tm_regs));
 	wr(e, PP_DMA_CTRL, rd(e, PP_DMA_CTRL) | PP_DMA_BYTEORDER);
-	for (i = 0; i < ARRAY_SIZE(dma_irq); i++)
-		wr(e, dma_irq[i][0], dma_irq[i][1]);
+	eth_reg_vals_write(e->base, dma_irq, ARRAY_SIZE(dma_irq));
 	wr(e, PP_TX_RING(TX_PON), e->tx_dma);
 	wr(e, PP_TX_RING(TX_LAN), e->tx_dma + TX_RING_BYTES);
 	wr(e, PP_TX_SIZES, 0x00200020);
-	wr(e, PP_CLS_CTRL, 0x0000309a);
-	wr(e, PP_CLS_CTRL2, 0);
-	wr(e, PP_CLS_SEL, 1);
-	wr(e, PP_CLS_W2C, 0x00140000);
-	wr(e, PP_CLS_W1C, 0);
 
 	wr(e, PP_ACL_BASE, e->tables);
 	wr(e, PP_OPC_PM_BASE, e->tables + PP_ACL_BYTES);
@@ -407,24 +497,14 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, 0x158008, 0);
 	wr(e, 0x16c1d0, 0x400);
 	wr(e, PP_RX_RING, e->rx_dma);
-	wr(e, PP_CFG0, 0x71000050);
-	wr(e, PP_CFG1, 0x00000041);
+	mac_table_init(e);
 
 	wr(e, GREG_RAM_INIT, 0xffffffff);
 	for (i = 0; i < 7; i++)
 		wr(e, SW_PORT_EN(i), 1);
 	wr(e, SW_CPU_CFG, 0x80010000);
 	wr(e, SW_CPU_CFG1, 0x00000008);
-	{
-		static const u32 sw_table[][2] = {
-			{ 0x310004, 0x040200ff }, { 0x310340, 0xff5555ff }, { 0x310344, 0x3f }, { 0x310380, 0x3f },
-			{ 0x31063c, 0xaaaaaaaa }, { 0x3101c0, 0xff }, { 0x3101c4, 0x5555 }, { 0x310188, 0x000bf874 },
-			{ 0x3102c0, 0xff }, { 0x310300, 0xffff }, { 0x310304, 0x3f },
-		};
-
-		for (i = 0; i < ARRAY_SIZE(sw_table); i++)
-			wr(e, sw_table[i][0], sw_table[i][1]);
-	}
+	eth_reg_vals_write(e->base, sw_table, ARRAY_SIZE(sw_table));
 	for (i = 0; i < 64; i++) {
 		wr(e, SW_Q_SEL, 0x00800000 | i);
 		wr(e, SW_Q_BASE, 0x92310000);
@@ -435,7 +515,9 @@ static int zx_hw_init(struct zx_eth *e)
 	wr(e, 0x314040, 0x1000);
 	wr(e, SW_CTRL, 1);
 	wr(e, SW_INT_CFG, 0);
-	wr(e, PP_RX_OFFSET, 0x11);
+	/* U-Boot's network init sets these and no reset clears them; stock, booted without it, reads 0 */
+	wr(e, PP_RX_OFFSET, 0);
+	wr(e, 0x15406c, 0);
 	wr(e, G_PP_AUX, 0);
 	wr(e, G_PP_AUX + 4, 0xf);
 	udelay(1000);
@@ -449,16 +531,14 @@ static int zx_hw_init(struct zx_eth *e)
 /* --- port MAC, as both stock drivers program it once the PHY reports link */
 static void zx_mac_up(struct zx_eth *e, unsigned int p, int speed, int duplex)
 {
-	static const u32 init[][2] = {
+	static const struct eth_reg_val init[] = {
 		{ 0x0000, 0x00bbe003 }, { 0x0020, 0x80000001 }, { 0x0380, 0x00011200 }, { 0x3400, 0x32 },
 		{ 0x34c0, 0xa8 }, { 0x0010, 0xfffe }, { 0x01c0, 0x00300002 }, { 0x02d0, 0x4000 }, { 0x2c00, 0x0010ff11 },
 	};
 	u32 ctrl;
-	int i;
 
 	reset_pulse(e, G_RESET_PORT(p));
-	for (i = 0; i < ARRAY_SIZE(init); i++)
-		wr(e, MAC(p) + init[i][0], init[i][1]);
+	eth_reg_vals_write(e->base + MAC(p), init, ARRAY_SIZE(init));
 	ctrl = rd(e, MAC(p) + MAC_CTRL);
 	if (speed == SPEED_1000) {
 		ctrl = (ctrl & ~MAC_CTRL_NOT_GIGA) | MAC_CTRL_DUPLEX_GIGA;
@@ -705,11 +785,8 @@ static int zx_stop(struct net_device *ndev)
 }
 
 /* The driver's own counters, shared by the four ports (one packet processor). */
-static const struct {
-	char name[ETH_GSTRING_LEN];
-	size_t off;
-} zx_stats[] = {
-#define ZX_STAT(n) { #n, offsetof(struct zx_eth, n) }
+static const struct eth_stat zx_stats[] = {
+#define ZX_STAT(n) ETH_STAT(struct zx_eth, n)
 	ZX_STAT(rx_pon), ZX_STAT(rx_not_lan), ZX_STAT(rx_bad_buffer), ZX_STAT(rx_bad_frame), ZX_STAT(rx_nomem),
 	ZX_STAT(rx_unwritten), ZX_STAT(rx_resync),
 	ZX_STAT(bmu_alloc_fail), ZX_STAT(bmu_free_fail), ZX_STAT(release_fail),
@@ -720,26 +797,19 @@ static const struct {
 
 static int zx_get_sset_count(struct net_device *ndev, int sset)
 {
-	return sset == ETH_SS_STATS ? ARRAY_SIZE(zx_stats) : -EOPNOTSUPP;
+	return eth_stat_count(sset, ARRAY_SIZE(zx_stats));
 }
 
 static void zx_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 {
-	int i;
-
-	if (sset != ETH_SS_STATS)
-		return;
-	for (i = 0; i < ARRAY_SIZE(zx_stats); i++)
-		ethtool_puts(&data, zx_stats[i].name);
+	eth_stat_strings(sset, data, zx_stats, ARRAY_SIZE(zx_stats));
 }
 
 static void zx_get_stats(struct net_device *ndev, struct ethtool_stats *stats, u64 *data)
 {
 	struct zx_port *port = netdev_priv(ndev);
-	int i;
 
-	for (i = 0; i < ARRAY_SIZE(zx_stats); i++)
-		data[i] = *(u64 *)((u8 *)port->eth + zx_stats[i].off);
+	eth_stat_values(data, port->eth, zx_stats, ARRAY_SIZE(zx_stats));
 }
 
 static const struct ethtool_ops zx_ethtool_ops = {
@@ -779,7 +849,7 @@ static int zx_port_probe(struct zx_eth *e, unsigned int index)
 	snprintf(ndev->name, IFNAMSIZ, "eth%u", index);
 	ndev->netdev_ops = &zx_netdev_ops;
 	ndev->ethtool_ops = &zx_ethtool_ops;
-	ndev->max_mtu = BUF_SIZE - BUF_OFFSET - ETH_HLEN - ETH_FCS_LEN;
+	ndev->max_mtu = BUF_SIZE - ZX_RX_OFFSET - ETH_HLEN - ETH_FCS_LEN;
 	eth_hw_addr_gen(ndev, e->mac, index);
 	ret = phy ? phy_connect_direct(ndev, phy, zx_adjust_link, PHY_INTERFACE_MODE_INTERNAL) : -ENODEV;
 	if (ret) {
@@ -839,6 +909,8 @@ static int zx_probe(struct platform_device *pdev)
 	e->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(e->base))
 		return PTR_ERR(e->base);
+	/* an engine: +0x14 row select, +0x18 bit 0 ready, data words from +0x1c */
+	e->tbl = (struct eth_tbl){ .dev = dev, .base = e->base, .select = 0x14, .ready = 0x18, .data = 0x1c, .ready_bit = 1 };
 	e->mdio = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(e->mdio))
 		return PTR_ERR(e->mdio);
@@ -868,6 +940,7 @@ static int zx_probe(struct platform_device *pdev)
 		e->lists[i] = cpu_to_be16(i);
 	for (i = 0; i < JUMBO_BUFS; i++)
 		e->lists[NORMAL_BUFS + i] = cpu_to_be16(i);
+	zx_board_mac(e);
 	ret = zx_hw_init(e);
 	if (ret)
 		return ret;
@@ -896,7 +969,6 @@ static int zx_probe(struct platform_device *pdev)
 		free_netdev(e->napi_dev);
 		return dev_err_probe(dev, ret, "IRQ %d\n", irq);
 	}
-	zx_board_mac(e);
 	for (i = 0; i < ZX_ETH_PORTS && !ret; i++)
 		ret = zx_port_probe(e, i);
 	if (!ret) {

@@ -309,6 +309,7 @@ obj-$(CONFIG_GPON_OLT_ZTE) += gpon_olt_zte.o
 obj-$(CONFIG_ZX279200) += zx279200.o
 # its upstream frame length through the one RX geometry (eth-common's flowcore)
 CFLAGS_zx279200.o += -I$(srctree)/drivers/net/flowcore
+CFLAGS_gpon_olt_pon.o += -I$(srctree)/drivers/net/flowcore
 
 # gpon_flow.o -- "which flow is this", decided once for every family.
 # ⚠ NOT in the strict host-buildable subset: it uses Linux's flow-offload API

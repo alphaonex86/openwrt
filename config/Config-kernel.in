@@ -1053,13 +1053,13 @@ config KERNEL_BCM56150_SWITCH
 	  The V-SOL V1600G board's layer turns it on: the switch core brought
 	  up from the init table generated from its stock firmware.
 
-config KERNEL_VSOL_V1600G_WDT
-	bool "V-SOL V1600G board watchdog"
+config KERNEL_GPIO_FRAME_WDT
+	bool "Board supervisor fed by GPIO frames"
 	depends on TARGET_broadcom_iproc
 	default n
 	help
 	  The V1600G board's layer turns it on: the supervisor outside the SoC
-	  that resets the board unless fed.
+	  that resets the board unless fed and drives its PON lasers.
 
 config KERNEL_MEM_ALLOC_PROFILING
 	bool "Track kernel allocation sites in /proc/allocinfo"

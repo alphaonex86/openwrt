@@ -66,11 +66,24 @@
 		};
 	};
 
-	/* resets the board about 11 min after power-on unless fed (stock: userWtd through vs_gpio_cfg lines 3 and 4) */
-	board-watchdog {
-		compatible = "vsol,v1600g-wdt";
+	/*
+	 * The board supervisor (stock: userWtd through vs_gpio_cfg lines 3 and 4): resets the board about 11 min after
+	 * power-on unless fed. A 26-bit frame: bits 0-7 = 0xa5, bit 16 feeds (cleared: a reset within ~5 s), bits 18-25
+	 * disable the laser of PON 1-8 (PON 1 = bit 18 measured; 2-8 by order, INFERRED: bit 25 is not PON 1), bit 17
+	 * set by stock, 8-15 unknown. From probe: fed, every laser off (stock's boot words, without their 8-15 pattern).
+	 */
+	board_supervisor: board-watchdog {
+		compatible = "gpio-frame-watchdog";
 		clock-gpios = <&cmic_gpio 3 GPIO_ACTIVE_HIGH>;
 		data-gpios = <&cca_gpio 0 GPIO_ACTIVE_HIGH>;
+		frame-bits = <26>;
+		frame-boot = <0x3ff00a5>;
+		frame-fixed = <0x100ff>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		gpio-line-names = "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "watchdog-feed", "",
+				  "pon1-tx-disable", "pon2-tx-disable", "pon3-tx-disable", "pon4-tx-disable",
+				  "pon5-tx-disable", "pon6-tx-disable", "pon7-tx-disable", "pon8-tx-disable";
 	};
 };
 
@@ -86,6 +99,23 @@
 	compatible = "brcm,iproc-hr2-pcie";
 	ranges = <0x82000000 0 0x40000000 0x08000000 0 0x08000000>;
 	status = "okay";
+
+	pcie@0,0 {
+		device_type = "pci";
+		reg = <0x0000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		/* the PON MAC's links 0-7 = PON 1-8 */
+		pon@0,0 {
+			reg = <0x10000 0 0 0 0>;
+			tx-disable-gpios = <&board_supervisor 18 GPIO_ACTIVE_HIGH>, <&board_supervisor 19 GPIO_ACTIVE_HIGH>,
+					   <&board_supervisor 20 GPIO_ACTIVE_HIGH>, <&board_supervisor 21 GPIO_ACTIVE_HIGH>,
+					   <&board_supervisor 22 GPIO_ACTIVE_HIGH>, <&board_supervisor 23 GPIO_ACTIVE_HIGH>,
+					   <&board_supervisor 24 GPIO_ACTIVE_HIGH>, <&board_supervisor 25 GPIO_ACTIVE_HIGH>;
+		};
+	};
 };
 
 /* the UART runs on the 100 MHz APB clock: the unit's U-Boot divisor is 54 at 115200 */

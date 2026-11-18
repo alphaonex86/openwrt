@@ -5,6 +5,7 @@
 #include <linux/etherdevice.h>
 #include <linux/eth_netdev_contract.h>
 #include <linux/ethtool.h>
+#include <linux/gpio/consumer.h>
 #include <linux/netdevice.h>
 #include <linux/workqueue.h>
 
@@ -135,8 +136,25 @@ static const struct ethtool_ops pon_ethtool_ops = {
 	.get_ethtool_stats = pon_get_ethtool_stats,
 };
 
+int gpon_olt_pon_lasers_ready(struct device *dev)
+{
+	struct gpio_desc *laser = gpiod_get_index_optional(dev, "tx-disable", 0, GPIOD_ASIS);
+
+	if (IS_ERR(laser))
+		return PTR_ERR(laser);
+	if (laser)
+		gpiod_put(laser);
+	return 0;
+}
+
+static void pon_laser_off(void *laser)
+{
+	gpiod_set_value_cansleep(laser, 1);
+}
+
 int gpon_olt_pon_register(struct device *dev, struct gpon_olt_mac *mac, const struct gpon_olt_pon_chip *pc)
 {
+	struct gpio_desc *laser;
 	struct net_device *ndev;
 	struct pon_priv *p;
 	unsigned int i;
@@ -146,6 +164,14 @@ int gpon_olt_pon_register(struct device *dev, struct gpon_olt_mac *mac, const st
 		return dev_err_probe(dev, -EINVAL, "%s: a PON netdev needs the chip's link state and registers\n",
 				     mac->name);
 	for (i = 0; i < mac->n_links; i++) {
+		laser = devm_gpiod_get_index_optional(dev, "tx-disable", i, GPIOD_OUT_LOW);
+		if (IS_ERR(laser))
+			return dev_err_probe(dev, PTR_ERR(laser), "%s: link %u: laser line\n", mac->name, i);
+		if (laser) {
+			ret = devm_add_action_or_reset(dev, pon_laser_off, laser);
+			if (ret)
+				return ret;
+		}
 		ndev = devm_alloc_etherdev(dev, sizeof(*p));	/* devm_register_netdev takes only these */
 		if (!ndev)
 			return -ENOMEM;

@@ -38,6 +38,10 @@
 #define ZX_MAP_SN_OPEN		BIT(3)
 #define ZX_DS_CTRL		0x1000		/* in a link's window: bit 1 its downstream sender on */
 #define ZX_DS_ON		BIT(1)
+#define ZX_DBA_CBAC		0x1908		/* in a link's window: 0 CBA mode, 8 map switch, 16 ready (read only) */
+#define ZX_CBA_ON		BIT(0)		/* no BWmap at all before it: 0 SN requests at the ONU (unit, 2026-11-18) */
+#define ZX_CBA_SWITCH		BIT(8)
+#define ZX_CBA_READY		BIT(16)
 #define ZX_XAUI_STA		0x0005c		/* 19:16 XAUI lanes 3..0 in sync: 0 with the lanes held in reset (unit, 2026-11-16) */
 #define ZX_XAUI_LANES		0x000f0000
 /* The CPU frame pipe (the unit's firmware): two rings of {status, address} descriptors, bit 31 the chip's. */
@@ -1483,6 +1487,35 @@ static int zx_sn_window(void *chip, unsigned int link, bool open)
 	return zte_ponmac_map_write(&zx_pm, link, ZX_MAP_T_CFG, ZX_MAP_SN_ENTRY, &cfg, 1);
 }
 
+/* The allocator timer restart of stock's link DBA start, relative to the link's window (DBA_CPU_CTRL, DBA_TMRCTL). */
+static const struct gpon_regseq_op zx_dba_restart[] = {
+	GPON_WR(0x1b14, 0),
+	GPON_WR(0x1914, 0),
+	GPON_WR(0x1914, 1),
+};
+
+/* Stock's CbaModeSet: CBA mode on, the map switch bit written back as read, bit 16 written 0. */
+static void zx_cba_on(u32 w)
+{
+	zx_wr(w + ZX_DBA_CBAC, ZX_CBA_ON | (zx_rd(w + ZX_DBA_CBAC) & ZX_CBA_SWITCH));
+}
+
+/* Stock's "LINK %d DBA start" (2.1.9R in its VM, 2026-11-18): the rest of it is in zx_mac_tm_init. */
+static int zx_dba_start(void *chip, unsigned int link)
+{
+	u32 w = ZX_W(link);
+	int ret;
+
+	if (!(zx_rd(w + ZX_DBA_CBAC) & ZX_CBA_READY))
+		return -EIO;
+	zx_cba_on(w);
+	ret = gpon_regseq_run_at(&zx_io, w, zx_dba_restart, ARRAY_SIZE(zx_dba_restart));
+	if (ret)
+		return ret;
+	zx_cba_on(w);
+	return 0;
+}
+
 /* A ranging map entry for the ONU's default Alloc-ID (its ONU-ID) with PLOAMu. INFERRED: start/stop left 0. */
 static int zx_ranging_grant(void *chip, unsigned int link, u8 onu_id)
 {
@@ -1574,6 +1607,7 @@ static const struct gpon_olt_overhead zx_burst = {
 static const struct gpon_olt_mac_ops zx_ops = {
 	.ploam_tx = zx_ploam_tx, .sn_window = zx_sn_window, .ranging_grant = zx_ranging_grant,
 	.omci_tx = zx_omci_tx, .ploam_rx = zx_ploam_rx, .omci_rx = zx_omci_rx, .stop = zx_stop, .burst = &zx_burst,
+	.dba_start = zx_dba_start,
 };
 
 /* The frame pipe as the firmware sets it up: both rings, the DMA control word, both interrupts unmasked. */

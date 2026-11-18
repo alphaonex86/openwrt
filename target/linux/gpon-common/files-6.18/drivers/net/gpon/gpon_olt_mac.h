@@ -38,6 +38,9 @@ struct gpon_olt_mac_ops {
 	void (*stop)(void *chip);
 	/* the burst the chip's receiver detects, broadcast to the ONUs; NULL: the core's */
 	const struct gpon_olt_overhead *burst;
+	/* at start, before the link's first serial-number window: the chip's bandwidth allocator on (it grants
+	 * nothing before); NULL for a chip that needs none. Process context, may sleep */
+	int (*dba_start)(void *chip, unsigned int link);
 };
 
 struct gpon_olt_mac;

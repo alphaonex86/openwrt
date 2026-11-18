@@ -249,6 +249,8 @@ int gpon_olt_mac_start(struct gpon_olt_mac *mac, struct device *dev, const char 
 					     refused);
 		if (ops->burst)
 			mac->links[i].port.pon.overhead = *ops->burst;
+		if (ops->dba_start && ops->dba_start(chip, i))
+			return dev_err_probe(dev, -EIO, "%s: link %u: the bandwidth allocator did not start\n", name, i);
 	}
 	if (!proc_create_single_data(name, 0444, NULL, mac_show, mac))
 		return dev_err_probe(dev, -ENOMEM, "/proc/%s not created\n", name);

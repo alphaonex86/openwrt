@@ -1,0 +1,64 @@
+From: BRULE Herman <contact@herman-brule.com>
+Subject: [PATCH] workqueue: per-queue counters in debugfs
+
+Every pool_workqueue already counts the work items it started and
+completed, the CPU time its workers took (sampled per tick) and its
+maydays; only drgn could read them. /sys/kernel/debug/workqueue_stats
+prints their sum per workqueue, so a CPU busy in kworkers is attributed
+to its queue by two reads, on a unit without tracing.
+
+Signed-off-by: BRULE Herman <contact@herman-brule.com>
+---
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -55,6 +55,8 @@
+ #include <linux/kvm_para.h>
+ #include <linux/delay.h>
+ #include <linux/irq_work.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ 
+ #include "workqueue_internal.h"
+ 
+@@ -8136,3 +8138,41 @@
+ 	return 1;
+ }
+ __setup("workqueue.unbound_cpus=", workqueue_unbound_cpus_setup);
++
++#ifdef CONFIG_DEBUG_FS
++/*
++ * Per workqueue, the counters every pool_workqueue already keeps: work items
++ * started and completed, CPU time (us, sampled per tick) and maydays. Rates
++ * come from two reads; a busy CPU's kworkers are then named by their queue.
++ */
++static int wq_stats_show(struct seq_file *m, void *v)
++{
++	struct workqueue_struct *wq;
++	struct pool_workqueue *pwq;
++
++	seq_puts(m, "workqueue started completed cpu_us mayday\n");
++	rcu_read_lock();
++	list_for_each_entry_rcu(wq, &workqueues, list) {
++		u64 s[PWQ_NR_STATS] = {};
++		int i;
++
++		for_each_pwq(pwq, wq)
++			for (i = 0; i < PWQ_NR_STATS; i++)
++				s[i] += READ_ONCE(pwq->stats[i]);
++		if (s[PWQ_STAT_STARTED])
++			seq_printf(m, "%s %llu %llu %llu %llu\n", wq->name,
++				   s[PWQ_STAT_STARTED], s[PWQ_STAT_COMPLETED],
++				   s[PWQ_STAT_CPU_TIME], s[PWQ_STAT_MAYDAY]);
++	}
++	rcu_read_unlock();
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(wq_stats);
++
++static int __init wq_stats_debugfs_init(void)
++{
++	debugfs_create_file("workqueue_stats", 0444, NULL, NULL, &wq_stats_fops);
++	return 0;
++}
++late_initcall(wq_stats_debugfs_init);
++#endif

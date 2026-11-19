@@ -368,9 +368,9 @@ static bool ipmc_encode(struct rtl9602c_eth *ep, struct rtl9602c_ipmc *m, unsign
 	if (s)
 		l34_l3mc_encode(e->w, s->grp, key, ivl, lan, L34_NETIF_LAN);
 	else if (k->grp)
-		l34_l3mc_cpu_encode(e->w, k->grp, key, ivl, ep->swm->cpu_port);
+		l34_l3mc_cpu_encode(e->w, k->grp, key, ivl, ep->swm->cpu_port, lan);
 	else
-		l34_l2mc_cpu_encode(e->w, k->mac, key, ivl, ep->swm->cpu_port);
+		l34_l2mc_cpu_encode(e->w, k->mac, key, ivl, ep->swm->cpu_port, lan);
 	return true;
 }
 

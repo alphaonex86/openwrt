@@ -1,7 +1,5 @@
-Index: linux-6.18.31/arch/mips/Kconfig
-===================================================================
---- linux-6.18.31.orig/arch/mips/Kconfig
-+++ linux-6.18.31/arch/mips/Kconfig
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
 @@ -12,7 +12,7 @@ config MIPS
  	select ARCH_HAS_FORTIFY_SOURCE
  	select ARCH_HAS_KCOV
@@ -11,7 +9,7 @@ Index: linux-6.18.31/arch/mips/Kconfig
  	select ARCH_HAS_STRNCPY_FROM_USER
  	select ARCH_HAS_STRNLEN_USER
  	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
-@@ -2526,13 +2526,13 @@ config CPU_R4X00_BUGS64
+@@ -2530,13 +2530,13 @@ config CPU_R4X00_BUGS64
  
  config MIPS_ASID_SHIFT
  	int
@@ -27,10 +25,8 @@ Index: linux-6.18.31/arch/mips/Kconfig
  	default 8
  
  config MIPS_ASID_BITS_VARIABLE
-Index: linux-6.18.31/arch/mips/include/asm/cpu-features.h
-===================================================================
---- linux-6.18.31.orig/arch/mips/include/asm/cpu-features.h
-+++ linux-6.18.31/arch/mips/include/asm/cpu-features.h
+--- a/arch/mips/include/asm/cpu-features.h
++++ b/arch/mips/include/asm/cpu-features.h
 @@ -103,6 +103,23 @@
  #endif
  
@@ -55,10 +51,8 @@ Index: linux-6.18.31/arch/mips/include/asm/cpu-features.h
   * For the moment we don't consider R6000 and R8000 so we can assume that
   * anything that doesn't support R4000-style exceptions and interrupts is
   * R3000-like.  Users should still treat these two macro definitions as
-Index: linux-6.18.31/arch/mips/include/asm/isadep.h
-===================================================================
---- linux-6.18.31.orig/arch/mips/include/asm/isadep.h
-+++ linux-6.18.31/arch/mips/include/asm/isadep.h
+--- a/arch/mips/include/asm/isadep.h
++++ b/arch/mips/include/asm/isadep.h
 @@ -10,9 +10,10 @@
  #ifndef __ASM_ISADEP_H
  #define __ASM_ISADEP_H
@@ -72,10 +66,8 @@ Index: linux-6.18.31/arch/mips/include/asm/isadep.h
   */
  
  /*
-Index: linux-6.18.31/arch/mips/include/asm/mipsregs.h
-===================================================================
---- linux-6.18.31.orig/arch/mips/include/asm/mipsregs.h
-+++ linux-6.18.31/arch/mips/include/asm/mipsregs.h
+--- a/arch/mips/include/asm/mipsregs.h
++++ b/arch/mips/include/asm/mipsregs.h
 @@ -1837,8 +1837,37 @@ do {									\
  #define read_c0_contextconfig()		__read_32bit_c0_register($4, 1)
  #define write_c0_contextconfig(val)	__write_32bit_c0_register($4, 1, val)
@@ -114,10 +106,8 @@ Index: linux-6.18.31/arch/mips/include/asm/mipsregs.h
  
  #define read_c0_xcontextconfig()	__read_ulong_c0_register($4, 3)
  #define write_c0_xcontextconfig(val)	__write_ulong_c0_register($4, 3, val)
-Index: linux-6.18.31/arch/mips/kernel/Makefile
-===================================================================
---- linux-6.18.31.orig/arch/mips/kernel/Makefile
-+++ linux-6.18.31/arch/mips/kernel/Makefile
+--- a/arch/mips/kernel/Makefile
++++ b/arch/mips/kernel/Makefile
 @@ -11,7 +11,14 @@ obj-y		+= head.o branch.o cmpxchg.o elf.
  		   vdso.o cacheinfo.o
  
@@ -133,10 +123,8 @@ Index: linux-6.18.31/arch/mips/kernel/Makefile
  else
  obj-y		+= cpu-probe.o
  endif
-Index: linux-6.18.31/arch/mips/kernel/cpu-probe.c
-===================================================================
---- linux-6.18.31.orig/arch/mips/kernel/cpu-probe.c
-+++ linux-6.18.31/arch/mips/kernel/cpu-probe.c
+--- a/arch/mips/kernel/cpu-probe.c
++++ b/arch/mips/kernel/cpu-probe.c
 @@ -1052,7 +1052,8 @@ static inline void cpu_probe_legacy(stru
  		c->cputype = CPU_RLX_TAROKO;
  		__cpu_name[cpu] = "Realtek Taroko (RLX)";
@@ -147,10 +135,8 @@ Index: linux-6.18.31/arch/mips/kernel/cpu-probe.c
  		c->tlbsize = 64;
  		set_isa(c, MIPS_CPU_ISA_M32R1);
  		break;
-Index: linux-6.18.31/arch/mips/kernel/process.c
-===================================================================
---- linux-6.18.31.orig/arch/mips/kernel/process.c
-+++ linux-6.18.31/arch/mips/kernel/process.c
+--- a/arch/mips/kernel/process.c
++++ b/arch/mips/kernel/process.c
 @@ -142,7 +142,12 @@ int copy_thread(struct task_struct *p, c
  		p->thread.reg17 = (unsigned long)args->fn_arg;
  		p->thread.reg29 = childksp;
@@ -165,11 +151,9 @@ Index: linux-6.18.31/arch/mips/kernel/process.c
  		status = (status & ~(ST0_KUP | ST0_IEP | ST0_IEC)) |
  			 ((status & (ST0_KUC | ST0_IEC)) << 2);
  #else
-Index: linux-6.18.31/arch/mips/kernel/traps.c
-===================================================================
---- linux-6.18.31.orig/arch/mips/kernel/traps.c
-+++ linux-6.18.31/arch/mips/kernel/traps.c
-@@ -1150,6 +1150,135 @@ out_sigsegv:
+--- a/arch/mips/kernel/traps.c
++++ b/arch/mips/kernel/traps.c
+@@ -1170,6 +1170,135 @@ out_sigsegv:
  	goto out;
  }
  
@@ -305,7 +289,7 @@ Index: linux-6.18.31/arch/mips/kernel/traps.c
  asmlinkage void do_ri(struct pt_regs *regs)
  {
  	unsigned int __user *epc = (unsigned int __user *)exception_epc(regs);
-@@ -1159,6 +1288,20 @@ asmlinkage void do_ri(struct pt_regs *re
+@@ -1179,6 +1308,20 @@ asmlinkage void do_ri(struct pt_regs *re
  	unsigned int opcode = 0;
  	int status = -1;
  
@@ -326,10 +310,8 @@ Index: linux-6.18.31/arch/mips/kernel/traps.c
  	/*
  	 * Avoid any kernel code. Just emulate the R2 instruction
  	 * as quickly as possible.
-Index: linux-6.18.31/arch/mips/mm/Makefile
-===================================================================
---- linux-6.18.31.orig/arch/mips/mm/Makefile
-+++ linux-6.18.31/arch/mips/mm/Makefile
+--- a/arch/mips/mm/Makefile
++++ b/arch/mips/mm/Makefile
 @@ -33,7 +33,13 @@ obj-$(CONFIG_HUGETLB_PAGE)	+= hugetlbpag
  obj-$(CONFIG_DMA_NONCOHERENT)	+= dma-noncoherent.o
  
@@ -345,10 +327,8 @@ Index: linux-6.18.31/arch/mips/mm/Makefile
  obj-$(CONFIG_CPU_R3000)		+= c-r3k.o
  obj-$(CONFIG_CPU_SB1)		+= c-r4k.o cerr-sb1.o cex-sb1.o tlb-r4k.o
  obj-$(CONFIG_CPU_CAVIUM_OCTEON) += c-octeon.o cex-oct.o tlb-r4k.o
-Index: linux-6.18.31/arch/mips/mm/c-r4k.c
-===================================================================
---- linux-6.18.31.orig/arch/mips/mm/c-r4k.c
-+++ linux-6.18.31/arch/mips/mm/c-r4k.c
+--- a/arch/mips/mm/c-r4k.c
++++ b/arch/mips/mm/c-r4k.c
 @@ -628,6 +628,12 @@ static void r4k_flush_cache_page(struct
  static inline void local_r4k_flush_data_cache_page(void * addr)
  {
@@ -505,10 +485,8 @@ Index: linux-6.18.31/arch/mips/mm/c-r4k.c
  
  	coherency_setup();
  	board_cache_error_setup = r4k_cache_error_setup;
-Index: linux-6.18.31/arch/mips/mm/tlbex.c
-===================================================================
---- linux-6.18.31.orig/arch/mips/mm/tlbex.c
-+++ linux-6.18.31/arch/mips/mm/tlbex.c
+--- a/arch/mips/mm/tlbex.c
++++ b/arch/mips/mm/tlbex.c
 @@ -1867,10 +1867,25 @@ build_r3000_tlbchange_handler_head(u32 *
  	uasm_i_srl(p, pte, pte, 22); /* load delay */
  	uasm_i_sll(p, pte, pte, 2);
@@ -535,10 +513,8 @@ Index: linux-6.18.31/arch/mips/mm/tlbex.c
  	uasm_i_lw(p, pte, 0, ptr);
  	uasm_i_tlbp(p); /* load delay */
  }
-Index: linux-6.18.31/arch/mips/vdso/Makefile
-===================================================================
---- linux-6.18.31.orig/arch/mips/vdso/Makefile
-+++ linux-6.18.31/arch/mips/vdso/Makefile
+--- a/arch/mips/vdso/Makefile
++++ b/arch/mips/vdso/Makefile
 @@ -14,6 +14,7 @@ ccflags-vdso := \
  	$(filter -march=%,$(KBUILD_CFLAGS)) \
  	$(filter -m%-float,$(KBUILD_CFLAGS)) \
@@ -547,10 +523,8 @@ Index: linux-6.18.31/arch/mips/vdso/Makefile
  	$(CLANG_FLAGS) \
  	-D__VDSO__
  
-Index: linux-6.18.31/arch/mips/include/asm/pgtable-bits.h
-===================================================================
---- linux-6.18.31.orig/arch/mips/include/asm/pgtable-bits.h
-+++ linux-6.18.31/arch/mips/include/asm/pgtable-bits.h
+--- a/arch/mips/include/asm/pgtable-bits.h
++++ b/arch/mips/include/asm/pgtable-bits.h
 @@ -102,14 +102,14 @@ enum pgtable_bits {
  	_PAGE_WRITE_SHIFT,
  	_PAGE_ACCESSED_SHIFT,

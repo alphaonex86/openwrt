@@ -1,4 +1,4 @@
-From fa3d7a66da76abbe91cd070f55fd17d8628b9888 Mon Sep 17 00:00:00 2001
+From d609ee3c522d5bed771b41d4752757d838ed1c1d Mon Sep 17 00:00:00 2001
 From: popcornmix <popcornmix@gmail.com>
 Date: Wed, 1 May 2013 19:46:17 +0100
 Subject: [PATCH] Add dwc_otg driver
@@ -1053,6 +1053,41 @@ of DMA addresses.
 Also remove a pointless fiq_state initialisation loop.
 
 Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
+
+drivers: dwc_otg: move FIQ locking functions to header file
+
+Also declare as static inline, as they should be.
+
+Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
+
+drivers: dwc_otg: add ticket-based spinlock for ARM64
+
+The ARM64 architecture uses qspinlock which has a fast and slow path.
+This isn't ideal for all claimers of a lock operating in interrupt
+context. Add a ticket-based lock similar to the armv6/7 implementation.
+
+Based on an upstream patch that was abandoned in favour of qspinlock.
+
+Link: https://patchwork.kernel.org/project/linux-arm-kernel/patch/1381330468-32625-2-git-send-email-will.deacon@arm.com/
+
+Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
+
+drivers: dwc_otg: reduce loglevel for probe messages
+
+Warning on normal behaviour isn't sensible and is spammy. Demote to info.
+
+Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
+
+drivers: dwc_otg: don't call disable_irq on the fake FIQ
+
+The local spinlock protects the handlers from racing against each other
+on separate cores, hard IRQs don't preempt each other, and
+disabling/enabling the interrupt is more expensive than letting the fake
+FIQ contend the spinlock.
+
+So turn local_fiq_en/disable into no-ops.
+
+Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 ---
  arch/arm/include/asm/irqflags.h               |   16 +-
  arch/arm/kernel/fiqasm.S                      |    4 +
@@ -1103,15 +1138,15 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
  drivers/usb/host/dwc_otg/dwc_otg_dbg.h        |  117 +
  drivers/usb/host/dwc_otg/dwc_otg_driver.c     | 1725 ++++
  drivers/usb/host/dwc_otg/dwc_otg_driver.h     |   86 +
- drivers/usb/host/dwc_otg/dwc_otg_fiq_fsm.c    | 1434 ++++
- drivers/usb/host/dwc_otg/dwc_otg_fiq_fsm.h    |  395 +
+ drivers/usb/host/dwc_otg/dwc_otg_fiq_fsm.c    | 1370 ++++
+ drivers/usb/host/dwc_otg/dwc_otg_fiq_fsm.h    |  476 ++
  drivers/usb/host/dwc_otg/dwc_otg_fiq_stub.S   |   80 +
- drivers/usb/host/dwc_otg/dwc_otg_hcd.c        | 4366 ++++++++++
+ drivers/usb/host/dwc_otg/dwc_otg_hcd.c        | 4362 ++++++++++
  drivers/usb/host/dwc_otg/dwc_otg_hcd.h        |  870 ++
  drivers/usb/host/dwc_otg/dwc_otg_hcd_ddma.c   | 1135 +++
  drivers/usb/host/dwc_otg/dwc_otg_hcd_if.h     |  441 +
  drivers/usb/host/dwc_otg/dwc_otg_hcd_intr.c   | 2757 +++++++
- drivers/usb/host/dwc_otg/dwc_otg_hcd_linux.c  | 1084 +++
+ drivers/usb/host/dwc_otg/dwc_otg_hcd_linux.c  | 1081 +++
  drivers/usb/host/dwc_otg/dwc_otg_hcd_queue.c  |  974 +++
  drivers/usb/host/dwc_otg/dwc_otg_os_dep.h     |  200 +
  drivers/usb/host/dwc_otg/dwc_otg_pcd.c        | 2723 +++++++
@@ -1124,7 +1159,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
  drivers/usb/host/dwc_otg/test/dwc_otg_test.pm |  337 +
  .../usb/host/dwc_otg/test/test_mod_param.pl   |  133 +
  drivers/usb/host/dwc_otg/test/test_sysfs.pl   |  193 +
- 70 files changed, 59515 insertions(+), 16 deletions(-)
+ 70 files changed, 59525 insertions(+), 16 deletions(-)
  create mode 100644 drivers/usb/gadget/file_storage.c
  create mode 100644 drivers/usb/host/dwc_common_port/Makefile
  create mode 100644 drivers/usb/host/dwc_common_port/Makefile.fbsd
@@ -1238,17 +1273,17 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
  obj-$(CONFIG_USB_ISP1760)	+= isp1760/
 --- a/drivers/usb/core/generic.c
 +++ b/drivers/usb/core/generic.c
-@@ -206,6 +206,7 @@ int usb_choose_configuration(struct usb_
+@@ -202,6 +202,7 @@ int usb_choose_configuration(struct usb_
  		dev_warn(&udev->dev,
  			"no configuration chosen from %d choice%s\n",
- 			num_configs, plural(num_configs));
+ 			num_configs, str_plural(num_configs));
 +		dev_warn(&udev->dev, "No support over %dmA\n", udev->bus_mA);
  	}
  	return i;
  }
 --- a/drivers/usb/core/hub.c
 +++ b/drivers/usb/core/hub.c
-@@ -5786,7 +5786,7 @@ static void port_event(struct usb_hub *h
+@@ -5798,7 +5798,7 @@ static void port_event(struct usb_hub *h
  		port_dev->over_current_count++;
  		port_over_current_notify(port_dev);
  
@@ -1259,7 +1294,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
  				USB_PORT_FEAT_C_OVER_CURRENT);
 --- a/drivers/usb/core/message.c
 +++ b/drivers/usb/core/message.c
-@@ -2238,6 +2238,85 @@ free_interfaces:
+@@ -2244,6 +2244,85 @@ free_interfaces:
  	if (cp->string == NULL &&
  			!(dev->quirks & USB_QUIRK_CONFIG_INTF_STRINGS))
  		cp->string = usb_cache_string(dev, cp->desc.iConfiguration);
@@ -5181,7 +5216,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +module_exit(fsg_cleanup);
 --- a/drivers/usb/host/Kconfig
 +++ b/drivers/usb/host/Kconfig
-@@ -678,6 +678,16 @@ config USB_RENESAS_USBHS_HCD
+@@ -687,6 +687,16 @@ config USB_RENESAS_USBHS_HCD
  	  To compile this driver as a module, choose M here: the
  	  module will be called renesas-usbhs.
  
@@ -5200,7 +5235,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
  	depends on BCMA
 --- a/drivers/usb/host/Makefile
 +++ b/drivers/usb/host/Makefile
-@@ -77,6 +77,7 @@ obj-$(CONFIG_USB_XHCI_TEGRA)	+= xhci-teg
+@@ -81,6 +81,7 @@ obj-$(CONFIG_USB_XHCI_TEGRA)	+= xhci-teg
  obj-$(CONFIG_USB_SL811_HCD)	+= sl811-hcd.o
  obj-$(CONFIG_USB_SL811_CS)	+= sl811_cs.o
  obj-$(CONFIG_USB_R8A66597_HCD)	+= r8a66597-hcd.o
@@ -8583,7 +8618,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +
 +static void timer_callback(struct timer_list *tt)
 +{
-+	dwc_timer_t *timer = from_timer(timer, tt, t);
++	dwc_timer_t *timer = timer_container_of(timer, tt, t);
 +	dwc_irqflags_t flags;
 +
 +	DWC_SPINLOCK_IRQSAVE(timer->lock, &flags);
@@ -8641,7 +8676,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +	DWC_SPINLOCK_IRQSAVE(timer->lock, &flags);
 +
 +	if (timer->scheduled) {
-+		del_timer(&timer->t);
++		timer_delete(&timer->t);
 +		timer->scheduled = 0;
 +	}
 +
@@ -8672,7 +8707,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +
 +void DWC_TIMER_CANCEL(dwc_timer_t *timer)
 +{
-+	del_timer(&timer->t);
++	timer_delete(&timer->t);
 +}
 +
 +
@@ -16128,7 +16163,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		dev->out_ep = NULL;
 +	}
 +	dev->config = 0;
-+	del_timer (&dev->resume);
++	timer_delete (&dev->resume);
 +}
 +
 +#define _write(f, buf, sz) (f->f_op->write(f, buf, sz, &f->f_pos))
@@ -16582,7 +16617,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +	/* we've already been disconnected ... no i/o is active */
 +	if (dev->req)
 +		free_ep_req (gadget->ep0, dev->req);
-+	del_timer_sync (&dev->resume);
++	timer_delete_sync (&dev->resume);
 +	kfree (dev);
 +	set_gadget_data (gadget, NULL);
 +}
@@ -16679,7 +16714,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +	struct zero_dev		*dev = get_gadget_data (gadget);
 +
 +	DBG (dev, "resume\n");
-+	del_timer (&dev->resume);
++	timer_delete (&dev->resume);
 +}
 +
 +
@@ -34198,7 +34233,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +#endif
 --- /dev/null
 +++ b/drivers/usb/host/dwc_otg/dwc_otg_fiq_fsm.c
-@@ -0,0 +1,1434 @@
+@@ -0,0 +1,1370 @@
 +/*
 + * dwc_otg_fiq_fsm.c - The finite state machine FIQ
 + *
@@ -34265,7 +34300,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +
 +	if((dbg_lvl & dbg_lvl_req) || dbg_lvl == FIQDBG_ERR)
 +	{
-+		snprintf(text, 9, " %4d:%1u  ", hfnum.b.frnum/8, hfnum.b.frnum & 7);
++		snprintf(text, 9, " %4d:%1u ", hfnum.b.frnum/8, hfnum.b.frnum & 7);
 +		va_start(args, fmt);
 +		vsnprintf(text+8, 9, fmt, args);
 +		va_end(args);
@@ -34274,70 +34309,6 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		wptr = (wptr + 16) % sizeof(buffer);
 +	}
 +}
-+
-+
-+#ifdef CONFIG_ARM64
-+
-+inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
-+{
-+	spin_lock((spinlock_t *)lock);
-+}
-+
-+inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
-+{
-+	spin_unlock((spinlock_t *)lock);
-+}
-+
-+#else
-+
-+/**
-+ * fiq_fsm_spin_lock() - ARMv6+ bare bones spinlock
-+ * Must be called with local interrupts and FIQ disabled.
-+ */
-+#if defined(CONFIG_ARCH_BCM2835) && defined(CONFIG_SMP)
-+inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
-+{
-+	unsigned long tmp;
-+	uint32_t newval;
-+	fiq_lock_t lockval;
-+	/* Nested locking, yay. If we are on the same CPU as the fiq, then the disable
-+	 * will be sufficient. If we are on a different CPU, then the lock protects us. */
-+	prefetchw(&lock->slock);
-+	asm volatile (
-+	"1:     ldrex   %0, [%3]\n"
-+	"       add     %1, %0, %4\n"
-+	"       strex   %2, %1, [%3]\n"
-+	"       teq     %2, #0\n"
-+	"       bne     1b"
-+	: "=&r" (lockval), "=&r" (newval), "=&r" (tmp)
-+	: "r" (&lock->slock), "I" (1 << 16)
-+	: "cc");
-+
-+	while (lockval.tickets.next != lockval.tickets.owner) {
-+		wfe();
-+		lockval.tickets.owner = READ_ONCE(lock->tickets.owner);
-+	}
-+	smp_mb();
-+}
-+#else
-+inline void fiq_fsm_spin_lock(fiq_lock_t *lock) { }
-+#endif
-+
-+/**
-+ * fiq_fsm_spin_unlock() - ARMv6+ bare bones spinunlock
-+ */
-+#if defined(CONFIG_ARCH_BCM2835) && defined(CONFIG_SMP)
-+inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
-+{
-+	smp_mb();
-+	lock->tickets.owner++;
-+	dsb_sev();
-+}
-+#else
-+inline void fiq_fsm_spin_unlock(fiq_lock_t *lock) { }
-+#endif
-+
-+#endif
 +
 +/**
 + * fiq_fsm_restart_channel() - Poke channel enable bit for a split transaction
@@ -35635,7 +35606,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +}
 --- /dev/null
 +++ b/drivers/usb/host/dwc_otg/dwc_otg_fiq_fsm.h
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,476 @@
 +/*
 + * dwc_otg_fiq_fsm.h - Finite state machine FIQ header definitions
 + *
@@ -35767,12 +35738,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +	FIQDBG_PORTHUB = (1 << 3),
 +};
 +
-+#ifdef CONFIG_ARM64
-+
-+typedef spinlock_t fiq_lock_t;
-+
-+#else
-+
++#define TICKET_SHIFT 16
 +typedef struct {
 +	union {
 +		uint32_t slock;
@@ -35781,7 +35747,97 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +			uint16_t next;
 +		} tickets;
 +	};
-+} fiq_lock_t;
++} __aligned(4) fiq_lock_t;
++
++#if defined(CONFIG_ARM64)
++static inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
++{
++	unsigned int tmp;
++	fiq_lock_t lockval, newval;
++
++	asm volatile(
++	/* Atomically increment the next ticket. */
++	"	prfm	pstl1strm, %3\n"
++	"1:	ldaxr	%w0, %3\n"
++	"	add	%w1, %w0, %w5\n"
++	"	stxr	%w2, %w1, %3\n"
++	"	cbnz	%w2, 1b\n"
++	/* Did we get the lock? */
++	"	eor	%w1, %w0, %w0, ror #16\n"
++	"	cbz	%w1, 3f\n"
++	/*
++	 * No: spin on the owner. Send a local event to avoid missing an
++	 * unlock before the exclusive load.
++	 */
++	"	sevl\n"
++	"2:	wfe\n"
++	"	ldaxrh	%w2, %4\n"
++	"	eor	%w1, %w2, %w0, lsr #16\n"
++	"	cbnz	%w1, 2b\n"
++	/* We got the lock. Critical section starts here. */
++	"3:"
++	: "=&r" (lockval), "=&r" (newval), "=&r" (tmp), "+Q" (*lock)
++	: "Q" (lock->tickets.owner), "I" (1 << TICKET_SHIFT)
++	: "memory");
++}
++
++static inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
++{
++	asm volatile(
++	"	stlrh	%w1, %0\n"
++	: "=Q" (lock->tickets.owner)
++	: "r" (lock->tickets.owner + 1)
++	: "memory");
++}
++
++#else
++
++/**
++ * fiq_fsm_spin_lock() - ARMv6+ bare bones spinlock
++ * Must be called with local interrupts and FIQ disabled.
++ */
++#if defined(CONFIG_ARCH_BCM2835) && defined(CONFIG_SMP)
++static inline void fiq_fsm_spin_lock(fiq_lock_t *lock)
++{
++	unsigned long tmp;
++	uint32_t newval;
++	fiq_lock_t lockval;
++	/* Nested locking, yay. If we are on the same CPU as the fiq, then the disable
++	 * will be sufficient. If we are on a different CPU, then the lock protects us. */
++	prefetchw(&lock->slock);
++	asm volatile (
++	"1:     ldrex   %0, [%3]\n"
++	"       add     %1, %0, %4\n"
++	"       strex   %2, %1, [%3]\n"
++	"       teq     %2, #0\n"
++	"       bne     1b"
++	: "=&r" (lockval), "=&r" (newval), "=&r" (tmp)
++	: "r" (&lock->slock), "I" (1 << TICKET_SHIFT)
++	: "cc");
++
++	while (lockval.tickets.next != lockval.tickets.owner) {
++		wfe();
++		lockval.tickets.owner = READ_ONCE(lock->tickets.owner);
++	}
++	smp_mb();
++}
++#else
++static inline void fiq_fsm_spin_lock(fiq_lock_t *lock) { }
++#endif
++
++/**
++ * fiq_fsm_spin_unlock() - ARMv6+ bare bones spinunlock
++ */
++#if defined(CONFIG_ARCH_BCM2835) && defined(CONFIG_SMP)
++static inline void fiq_fsm_spin_unlock(fiq_lock_t *lock)
++{
++	smp_mb();
++	lock->tickets.owner++;
++	dsb_sev();
++}
++#else
++static inline void fiq_fsm_spin_unlock(fiq_lock_t *lock) { }
++#endif
 +
 +#endif
 +
@@ -36018,10 +36074,6 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +
 +#endif
 +
-+extern void fiq_fsm_spin_lock(fiq_lock_t *lock);
-+
-+extern void fiq_fsm_spin_unlock(fiq_lock_t *lock);
-+
 +extern int fiq_fsm_too_late(struct fiq_state *st, int n);
 +
 +extern int fiq_fsm_tt_in_use(struct fiq_state *st, int num_channels, int n);
@@ -36116,7 +36168,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +END(_dwc_otg_fiq_stub)
 --- /dev/null
 +++ b/drivers/usb/host/dwc_otg/dwc_otg_hcd.c
-@@ -0,0 +1,4366 @@
+@@ -0,0 +1,4362 @@
 +
 +/* ==========================================================================
 + * $File: //dwh/usb_iip/dev/software/otg/linux/drivers/dwc_otg_hcd.c $
@@ -37163,10 +37215,6 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		}
 +		DWC_MEMSET(hcd->fiq_state, 0, (sizeof(struct fiq_state) + (sizeof(struct fiq_channel_state) * num_channels)));
 +
-+#ifdef CONFIG_ARM64
-+		spin_lock_init(&hcd->fiq_state->lock);
-+#endif
-+
 +		hcd->fiq_state->dummy_send = DWC_DMA_ALLOC_ATOMIC(dev, 16,
 +							 &hcd->fiq_state->dummy_send_dma);
 +
@@ -37188,7 +37236,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		 * moderately readable array casts.
 +		 */
 +		hcd->fiq_dmab = DWC_DMA_ALLOC(dev, (sizeof(struct fiq_dma_channel) * num_channels), &hcd->fiq_state->dma_base);
-+		DWC_WARN("FIQ DMA bounce buffers: virt = %px dma = %pad len=%zu",
++		DWC_INFO("FIQ DMA bounce buffers: virt = %px dma = %pad len=%zu",
 +				hcd->fiq_dmab, &hcd->fiq_state->dma_base,
 +				sizeof(struct fiq_dma_channel) * num_channels);
 +
@@ -45583,7 +45631,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		break;
 +
 +	default:
-+		DWC_WARN("Unexpected state received on hc=%d fsm=%d on transfer to device %d ep 0x%x",
++		DWC_WARN("Unexpected state received on hc=%d fsm=%d on transfer to device %d ep 0x%x", 
 +					hc->hc_num, st->fsm, hc->dev_addr, hc->ep_num);
 +		qtd->error_count++;
 +		release_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_NO_HALT_STATUS);
@@ -45700,7 +45748,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +#endif /* DWC_DEVICE_ONLY */
 --- /dev/null
 +++ b/drivers/usb/host/dwc_otg/dwc_otg_hcd_linux.c
-@@ -0,0 +1,1084 @@
+@@ -0,0 +1,1081 @@
 +
 +/* ==========================================================================
 + * $File: //dwh/usb_iip/dev/software/otg/linux/drivers/dwc_otg_hcd_linux.c $
@@ -46109,19 +46157,17 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +
 +#ifdef CONFIG_ARM64
 +
-+static int simfiq_irq = -1;
++/*
++ * With no FIQ support on AARCH64, the "FIQ handler" is demoted to a
++ * regular IRQ handler. With a nested spinlock preventing the two
++ * handlers from racing against each other, and a HCD lock preventing
++ * thread context from racing against the "bottom half" IRQ, there's no
++ * point manipulating global IRQ enable/disable state - so these two
++ * functions are no-ops.
++ */
++void local_fiq_enable(void) { }
 +
-+void local_fiq_enable(void)
-+{
-+	if (simfiq_irq >= 0)
-+		enable_irq(simfiq_irq);
-+}
-+
-+void local_fiq_disable(void)
-+{
-+	if (simfiq_irq >= 0)
-+		disable_irq(simfiq_irq);
-+}
++void local_fiq_disable(void) { }
 +
 +static irqreturn_t fiq_irq_handler(int irq, void *dev_id)
 +{
@@ -46157,8 +46203,8 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		DWC_ERROR("Can't claim FIQ");
 +		BUG();
 +	}
-+	DWC_WARN("FIQ on core %d", smp_processor_id());
-+	DWC_WARN("FIQ ASM at %px length %d", &_dwc_otg_fiq_stub, (int)(&_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub));
++	DWC_INFO("FIQ on core %d", smp_processor_id());
++	DWC_INFO("FIQ ASM at %px length %d", &_dwc_otg_fiq_stub, (int)(&_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub));
 +	set_fiq_handler((void *) &_dwc_otg_fiq_stub, &_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub);
 +	memset(&regs,0,sizeof(regs));
 +
@@ -46185,7 +46231,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +			otg_dev->os_dep.mphi_base + 0x1f0;
 +		dwc_otg_hcd->fiq_state->mphi_regs.swirq_clr =
 +			otg_dev->os_dep.mphi_base + 0x1f4;
-+		DWC_WARN("Fake MPHI regs_base at %px",
++		DWC_INFO("Fake MPHI regs_base at %px",
 +			 dwc_otg_hcd->fiq_state->mphi_regs.base);
 +	} else {
 +		dwc_otg_hcd->fiq_state->mphi_regs.ctrl =
@@ -46196,16 +46242,16 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +			= otg_dev->os_dep.mphi_base + 0x2c;
 +		dwc_otg_hcd->fiq_state->mphi_regs.intstat
 +			= otg_dev->os_dep.mphi_base + 0x50;
-+		DWC_WARN("MPHI regs_base at %px",
++		DWC_INFO("MPHI regs_base at %px",
 +			 dwc_otg_hcd->fiq_state->mphi_regs.base);
 +
 +		//Enable mphi peripheral
 +		writel((1<<31),dwc_otg_hcd->fiq_state->mphi_regs.ctrl);
 +#ifdef DEBUG
 +		if (readl(dwc_otg_hcd->fiq_state->mphi_regs.ctrl) & 0x80000000)
-+			DWC_WARN("MPHI periph has been enabled");
++			DWC_INFO("MPHI periph has been enabled");
 +		else
-+			DWC_WARN("MPHI periph has NOT been enabled");
++			DWC_INFO("MPHI periph has NOT been enabled");
 +#endif
 +	}
 +	// Enable FIQ interrupt from USB peripheral
@@ -46224,7 +46270,6 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 +		return;
 +	}
 +
-+	simfiq_irq = irq;
 +#else
 +#ifdef CONFIG_GENERIC_IRQ_MULTI_HANDLER
 +	irq = otg_dev->os_dep.fiq_num;

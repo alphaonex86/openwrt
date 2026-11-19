@@ -1,4 +1,4 @@
-From 80e3f219959d02bd32e18e23de376012b5896c92 Mon Sep 17 00:00:00 2001
+From 83e04472d2b45b7eb01a80470b5bf3ad4fc9ee66 Mon Sep 17 00:00:00 2001
 From: popcornmix <popcornmix@gmail.com>
 Date: Wed, 1 Apr 2020 11:22:44 +0100
 Subject: [PATCH] bcmgenet: Disable skip_umac_reset by default
@@ -12,7 +12,7 @@ Signed-off-by: popcornmix <popcornmix@gmail.com>
 
 --- a/drivers/net/ethernet/broadcom/genet/bcmgenet.c
 +++ b/drivers/net/ethernet/broadcom/genet/bcmgenet.c
-@@ -67,7 +67,7 @@
+@@ -73,7 +73,7 @@
  
  /* Forward declarations */
  static void bcmgenet_set_rx_mode(struct net_device *dev);

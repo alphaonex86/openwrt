@@ -1,4 +1,4 @@
-From b3578c5bc6c75ea98aebe249813a58fed6afa9e3 Mon Sep 17 00:00:00 2001
+From b066db2815df9dad42e85628761d2f8793649941 Mon Sep 17 00:00:00 2001
 From: Jonathan Bell <jonathan@raspberrypi.org>
 Date: Thu, 1 Aug 2019 16:41:20 +0100
 Subject: [PATCH] hid: usb: Add device quirks for Freeway Airmouse T3 and MX3
@@ -22,7 +22,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.org>
 
 --- a/drivers/hid/hid-ids.h
 +++ b/drivers/hid/hid-ids.h
-@@ -258,6 +258,9 @@
+@@ -262,6 +262,9 @@
  #define USB_VENDOR_ID_BAANTO		0x2453
  #define USB_DEVICE_ID_BAANTO_MT_190W2	0x0100
  
@@ -32,7 +32,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.org>
  #define USB_VENDOR_ID_BELKIN		0x050d
  #define USB_DEVICE_ID_FLIP_KVM		0x3201
  
-@@ -1484,6 +1487,9 @@
+@@ -1505,6 +1508,9 @@
  #define USB_VENDOR_ID_XIAOMI		0x2717
  #define USB_DEVICE_ID_MI_SILENT_MOUSE	0x5014
  
@@ -52,7 +52,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.org>
  	{ HID_USB_DEVICE(USB_VENDOR_ID_CHICONY, USB_DEVICE_ID_CHICONY_MULTI_TOUCH), HID_QUIRK_MULTI_INPUT },
  	{ HID_USB_DEVICE(USB_VENDOR_ID_CHICONY, USB_DEVICE_ID_CHICONY_PIXART_USB_OPTICAL_MOUSE), HID_QUIRK_ALWAYS_POLL },
  	{ HID_USB_DEVICE(USB_VENDOR_ID_CHICONY, USB_DEVICE_ID_CHICONY_PIXART_USB_OPTICAL_MOUSE2), HID_QUIRK_ALWAYS_POLL },
-@@ -217,6 +218,7 @@ static const struct hid_device_id hid_qu
+@@ -219,6 +220,7 @@ static const struct hid_device_id hid_qu
  	{ HID_USB_DEVICE(USB_VENDOR_ID_WISEGROUP, USB_DEVICE_ID_QUAD_USB_JOYPAD), HID_QUIRK_NOGET | HID_QUIRK_MULTI_INPUT },
  	{ HID_USB_DEVICE(USB_VENDOR_ID_XIN_MO, USB_DEVICE_ID_XIN_MO_DUAL_ARCADE), HID_QUIRK_MULTI_INPUT },
  	{ HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_GROUP_AUDIO), HID_QUIRK_NOGET },

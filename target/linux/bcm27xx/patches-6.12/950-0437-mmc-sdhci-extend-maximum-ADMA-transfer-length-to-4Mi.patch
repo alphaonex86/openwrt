@@ -1,4 +1,4 @@
-From c0b9523ee9a6c3f2cc42529f18b33b0606413abc Mon Sep 17 00:00:00 2001
+From f04dc98eb4ee6692f505f5d203ee440c88756070 Mon Sep 17 00:00:00 2001
 From: Jonathan Bell <jonathan@raspberrypi.com>
 Date: Tue, 4 Jun 2024 13:45:37 +0100
 Subject: [PATCH] mmc: sdhci: extend maximum ADMA transfer length to 4MiB
@@ -14,7 +14,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 
 --- a/drivers/mmc/host/sdhci.c
 +++ b/drivers/mmc/host/sdhci.c
-@@ -1081,7 +1081,7 @@ static void sdhci_initialize_data(struct
+@@ -1084,7 +1084,7 @@ void sdhci_initialize_data(struct sdhci_
  	WARN_ON(host->data);
  
  	/* Sanity checks */
@@ -23,7 +23,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
  	BUG_ON(data->blksz > host->mmc->max_blk_size);
  	BUG_ON(data->blocks > 65535);
  
-@@ -4716,11 +4716,16 @@ int sdhci_setup_host(struct sdhci_host *
+@@ -4786,11 +4786,16 @@ int sdhci_setup_host(struct sdhci_host *
  	spin_lock_init(&host->lock);
  
  	/*

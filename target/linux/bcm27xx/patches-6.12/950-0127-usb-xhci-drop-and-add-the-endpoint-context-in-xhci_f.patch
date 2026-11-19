@@ -1,4 +1,4 @@
-From 86351d416b37cbeeccd96b24bac9fab9feadef0c Mon Sep 17 00:00:00 2001
+From 3160b7815e6796e95194567ab0a874e24bbc6085 Mon Sep 17 00:00:00 2001
 From: Jonathan Bell <jonathan@raspberrypi.com>
 Date: Fri, 10 Mar 2023 14:21:42 +0000
 Subject: [PATCH] usb: xhci: drop and add the endpoint context in
@@ -19,7 +19,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.com>
 
 --- a/drivers/usb/host/xhci.c
 +++ b/drivers/usb/host/xhci.c
-@@ -1604,7 +1604,7 @@ static void xhci_fixup_endpoint(struct u
+@@ -1712,7 +1712,7 @@ static void xhci_fixup_endpoint(struct u
  		return;
  	}
  	ctrl_ctx->add_flags = xhci_get_endpoint_flag_from_index(ep_index);

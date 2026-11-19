@@ -1,4 +1,4 @@
-From fdcc587a966119260fb7f29406001f0ae2bda34e Mon Sep 17 00:00:00 2001
+From b931ef6d6dbc133d7620a8240ccde2f935dcd378 Mon Sep 17 00:00:00 2001
 From: Dave Stevenson <dave.stevenson@raspberrypi.com>
 Date: Thu, 22 Dec 2022 14:08:35 +0000
 Subject: [PATCH] dtbindings: media: i2c: Add IMX708 CMOS sensor binding
@@ -137,7 +137,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +...
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -21612,6 +21612,14 @@ T:	git git://linuxtv.org/media_tree.git
+@@ -24093,6 +24093,14 @@ T:	git git://linuxtv.org/media_tree.git
  F:	Documentation/devicetree/bindings/media/i2c/imx519.yaml
  F:	drivers/media/i2c/imx519.c
  

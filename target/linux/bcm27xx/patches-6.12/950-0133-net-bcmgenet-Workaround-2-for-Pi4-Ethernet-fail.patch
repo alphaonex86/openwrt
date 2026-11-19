@@ -1,4 +1,4 @@
-From 8d428b0009134f7bc9779d5cb966944cf4790221 Mon Sep 17 00:00:00 2001
+From 6f2dea0830276e2665b4531c4e5eaf489f5cc69d Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.org>
 Date: Fri, 9 Aug 2019 08:51:43 +0100
 Subject: [PATCH] net: bcmgenet: Workaround #2 for Pi4 Ethernet fail
@@ -27,7 +27,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.org>
 
 --- a/drivers/net/ethernet/broadcom/genet/bcmgenet.c
 +++ b/drivers/net/ethernet/broadcom/genet/bcmgenet.c
-@@ -67,6 +67,9 @@
+@@ -73,6 +73,9 @@
  
  /* Forward declarations */
  static void bcmgenet_set_rx_mode(struct net_device *dev);
@@ -37,7 +37,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.org>
  
  static inline void bcmgenet_writel(u32 value, void __iomem *offset)
  {
-@@ -2486,6 +2489,11 @@ static void reset_umac(struct bcmgenet_p
+@@ -2592,6 +2595,11 @@ static void reset_umac(struct bcmgenet_p
  	bcmgenet_rbuf_ctrl_set(priv, 0);
  	udelay(10);
  

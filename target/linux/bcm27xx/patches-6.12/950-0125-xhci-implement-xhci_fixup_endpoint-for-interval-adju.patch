@@ -1,4 +1,4 @@
-From 0735c2177b95550b4464158b325c399f556a846d Mon Sep 17 00:00:00 2001
+From b4b52fabf7f5289de819e7ec1cdd40b99e8c92ed Mon Sep 17 00:00:00 2001
 From: Jonathan Bell <jonathan@raspberrypi.org>
 Date: Tue, 11 Jun 2019 11:33:39 +0100
 Subject: [PATCH] xhci: implement xhci_fixup_endpoint for interval adjustments
@@ -14,7 +14,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.org>
 
 --- a/drivers/usb/host/xhci.c
 +++ b/drivers/usb/host/xhci.c
-@@ -1515,6 +1515,109 @@ static int xhci_check_ep0_maxpacket(stru
+@@ -1623,6 +1623,109 @@ static int xhci_check_ep0_maxpacket(stru
  }
  
  /*
@@ -124,7 +124,7 @@ Signed-off-by: Jonathan Bell <jonathan@raspberrypi.org>
   * non-error returns are a promise to giveback() the urb later
   * we drop ownership so next owner (or urb unlink) can get it
   */
-@@ -5386,6 +5489,7 @@ static const struct hc_driver xhci_hc_dr
+@@ -5624,6 +5727,7 @@ static const struct hc_driver xhci_hc_dr
  	.endpoint_reset =	xhci_endpoint_reset,
  	.check_bandwidth =	xhci_check_bandwidth,
  	.reset_bandwidth =	xhci_reset_bandwidth,

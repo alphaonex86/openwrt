@@ -1,4 +1,4 @@
-From 4f5baf76ca33c76b97a4d310d5ca13395ba2110c Mon Sep 17 00:00:00 2001
+From dc7227696fe646e42088289f50743e0567f2e732 Mon Sep 17 00:00:00 2001
 From: Lee Jackson <info@arducam.com>
 Date: Fri, 27 Aug 2021 14:36:55 +0800
 Subject: [PATCH] media: i2c: imx519: Support for the Sony IMX519 sensor
@@ -193,7 +193,7 @@ media: i2c: imx519: Squash fixes
 +...
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -21571,6 +21571,14 @@ T:	git git://linuxtv.org/media_tree.git
+@@ -24052,6 +24052,14 @@ T:	git git://linuxtv.org/media_tree.git
  F:	Documentation/devicetree/bindings/media/i2c/imx477.yaml
  F:	drivers/media/i2c/imx477.c
  
@@ -210,9 +210,9 @@ media: i2c: imx519: Squash fixes
  M:	Alex Dubov <oakad@yahoo.com>
 --- a/drivers/media/i2c/Kconfig
 +++ b/drivers/media/i2c/Kconfig
-@@ -265,6 +265,17 @@ config VIDEO_IMX415
+@@ -291,6 +291,17 @@ config VIDEO_IMX477
  	  To compile this driver as a module, choose M here: the
- 	  module will be called imx415.
+ 	  module will be called imx477.
  
 +config VIDEO_IMX519
 +	tristate "Arducam IMX519 sensor support"
@@ -230,7 +230,7 @@ media: i2c: imx519: Squash fixes
  
 --- a/drivers/media/i2c/Makefile
 +++ b/drivers/media/i2c/Makefile
-@@ -60,6 +60,7 @@ obj-$(CONFIG_VIDEO_IMX355) += imx355.o
+@@ -61,6 +61,7 @@ obj-$(CONFIG_VIDEO_IMX355) += imx355.o
  obj-$(CONFIG_VIDEO_IMX412) += imx412.o
  obj-$(CONFIG_VIDEO_IMX415) += imx415.o
  obj-$(CONFIG_VIDEO_IMX477) += imx477.o

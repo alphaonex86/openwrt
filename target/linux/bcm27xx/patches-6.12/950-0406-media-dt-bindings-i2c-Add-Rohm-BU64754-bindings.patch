@@ -1,4 +1,4 @@
-From 591e8c53fb4d9b4766ff3f5ef21f133e28613e48 Mon Sep 17 00:00:00 2001
+From 90ba05c4337cf60ea750f2cfb21cf4bba18be195 Mon Sep 17 00:00:00 2001
 From: Kieran Bingham <kieran.bingham@ideasonboard.com>
 Date: Thu, 14 Sep 2023 17:03:24 +0100
 Subject: [PATCH] media: dt-bindings: i2c: Add Rohm BU64754 bindings
@@ -67,8 +67,8 @@ Signed-off-by: Jacopo Mondi <jacopo.mondi@ideasonboard.com>
 +...
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -20075,6 +20075,13 @@ S:	Supported
- F:	drivers/iio/light/rohm-bu27008.c
+@@ -22427,6 +22427,13 @@ L:	linux-iio@vger.kernel.org
+ S:	Supported
  F:	drivers/iio/light/rohm-bu27034.c
  
 +ROHM BU64754 MOTOR DRIVER FOR CAMERA AUTOFOCUS

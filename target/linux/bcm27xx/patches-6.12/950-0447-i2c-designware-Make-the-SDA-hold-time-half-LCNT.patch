@@ -1,4 +1,4 @@
-From d8ea27e70802e9cc37eada66a9ef0c3bd396dc55 Mon Sep 17 00:00:00 2001
+From b74c3e122726e6ddfabd324288025d0e2931fbda Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.com>
 Date: Thu, 4 Apr 2024 17:03:33 +0100
 Subject: [PATCH] i2c: designware: Make the SDA hold time half LCNT
@@ -13,7 +13,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
 
 --- a/drivers/i2c/busses/i2c-designware-master.c
 +++ b/drivers/i2c/busses/i2c-designware-master.c
-@@ -213,6 +213,9 @@ static int i2c_dw_set_timings_master(str
+@@ -230,6 +230,9 @@ static int i2c_dw_set_timings_master(str
  			dev->hs_hcnt, dev->hs_lcnt);
  	}
  

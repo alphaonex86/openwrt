@@ -1,4 +1,4 @@
-From 874076d64b470ea10d0528c0459e375d131367a8 Mon Sep 17 00:00:00 2001
+From 2217c850317bc09619cfa7f8607f1ad6c9ea21b1 Mon Sep 17 00:00:00 2001
 From: David Plowman <david.plowman@raspberrypi.com>
 Date: Tue, 29 Jun 2021 14:38:23 +0100
 Subject: [PATCH] Documentation: devicetree: Add documentation for imx378
@@ -132,7 +132,7 @@ Signed-off-by: David Plowman <david.plowman@raspberrypi.com>
 +...
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -21568,6 +21568,7 @@ M:	Raspberry Pi Kernel Maintenance <kern
+@@ -24049,6 +24049,7 @@ M:	Raspberry Pi Kernel Maintenance <kern
  L:	linux-media@vger.kernel.org
  S:	Maintained
  T:	git git://linuxtv.org/media_tree.git

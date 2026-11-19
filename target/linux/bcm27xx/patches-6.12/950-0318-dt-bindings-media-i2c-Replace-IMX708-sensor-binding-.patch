@@ -1,4 +1,4 @@
-From 67c52821831931b2917f32dc4f1f0eabb37585a2 Mon Sep 17 00:00:00 2001
+From 604977db65660199cf1688d6e17b9aa788be036d Mon Sep 17 00:00:00 2001
 From: Naushir Patuck <naush@raspberrypi.com>
 Date: Fri, 31 Mar 2023 11:52:25 +0100
 Subject: [PATCH] dt-bindings: media: i2c: Replace IMX708 sensor binding
@@ -271,7 +271,7 @@ Signed-off-by: Naushir Patuck <naush@raspberrypi.com>
 +...
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -21617,7 +21617,7 @@ M:	Raspberry Pi Kernel Maintenance <kern
+@@ -24098,7 +24098,7 @@ M:	Raspberry Pi Kernel Maintenance <kern
  L:	linux-media@vger.kernel.org
  S:	Maintained
  T:	git git://linuxtv.org/media_tree.git

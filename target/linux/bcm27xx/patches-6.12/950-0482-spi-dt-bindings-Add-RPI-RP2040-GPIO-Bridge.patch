@@ -1,4 +1,4 @@
-From efccf28e481f39bb3e0ddadbe80c13822ebe64f7 Mon Sep 17 00:00:00 2001
+From 5de6c14e8a87c656e2f6d6aed691ebde50a3f0b6 Mon Sep 17 00:00:00 2001
 From: Richard Oliver <richard.oliver@raspberrypi.com>
 Date: Fri, 24 May 2024 10:34:45 +0100
 Subject: [PATCH] spi: dt-bindings: Add RPI RP2040 GPIO Bridge
@@ -94,7 +94,7 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -19368,6 +19368,11 @@ L:	linux-edac@vger.kernel.org
+@@ -21542,6 +21542,11 @@ L:	linux-edac@vger.kernel.org
  S:	Maintained
  F:	drivers/ras/amd/fmpm.c
  
@@ -105,4 +105,4 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +
  RASPBERRY PI PISP BACK END
  M:	Jacopo Mondi <jacopo.mondi@ideasonboard.com>
- L:	Raspberry Pi Kernel Maintenance <kernel-list@raspberrypi.com>
+ R:	Raspberry Pi Kernel Maintenance <kernel-list@raspberrypi.com>

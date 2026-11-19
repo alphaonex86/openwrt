@@ -1,4 +1,4 @@
-From fe24eda35d31bb9e603590be89ccde3093ba79cc Mon Sep 17 00:00:00 2001
+From 8917d44422df24d8f0108c4d0ff95b3a81e9895a Mon Sep 17 00:00:00 2001
 From: Richard Oliver <richard.oliver@raspberrypi.com>
 Date: Tue, 21 May 2024 13:47:23 +0100
 Subject: [PATCH] spi: Add a driver for the RPI RP2040 GPIO bridge
@@ -32,17 +32,33 @@ Declare a soft 'pre' dependency on md5 to ensure that it is included and
 loaded before rp2040-gpio-bridge.
 
 Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
+
+spi: rp2040-gpio-bridge: fix gpiod error handling
+
+In some circumstances, devm_gpiod_get_array_optional() can return
+PTR_ERR rather than NULL to indicate failure. Handle these cases.
+
+Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
+
+spi: rp2040-gpio-bridge: probe: Cfg fast_xfer clk
+
+Fast transfer mode requires that the first bit of data is clocked with a
+rising edge. This can cause extra bits of data to be clocked on hardware
+where the clock signal uses a pull-up. This change ensures that clk is
+driven low before fast data transfer mode is entered.
+
+Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 ---
  MAINTAINERS                          |    1 +
  drivers/spi/Kconfig                  |   12 +
  drivers/spi/Makefile                 |    1 +
- drivers/spi/spi-rp2040-gpio-bridge.c | 1244 ++++++++++++++++++++++++++
- 4 files changed, 1258 insertions(+)
+ drivers/spi/spi-rp2040-gpio-bridge.c | 1250 ++++++++++++++++++++++++++
+ 4 files changed, 1264 insertions(+)
  create mode 100644 drivers/spi/spi-rp2040-gpio-bridge.c
 
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -19372,6 +19372,7 @@ RASPBERRY PI RP2040 GPIO BRIDGE DRIVER
+@@ -21546,6 +21546,7 @@ RASPBERRY PI RP2040 GPIO BRIDGE DRIVER
  M:	Raspberry Pi Kernel Maintenance <kernel-list@raspberrypi.com>
  S:	Maintained
  F:	Documentation/devicetree/bindings/spi/raspberrypi,rp2040-gpio-bridge.yaml
@@ -52,7 +68,7 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
  M:	Jacopo Mondi <jacopo.mondi@ideasonboard.com>
 --- a/drivers/spi/Kconfig
 +++ b/drivers/spi/Kconfig
-@@ -873,6 +873,18 @@ config SPI_RB4XX
+@@ -932,6 +932,18 @@ config SPI_RB4XX
  	help
  	  SPI controller driver for the Mikrotik RB4xx series boards.
  
@@ -73,17 +89,17 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
  	depends on RENESAS_RPCIF
 --- a/drivers/spi/Makefile
 +++ b/drivers/spi/Makefile
-@@ -120,6 +120,7 @@ obj-$(CONFIG_SPI_ROCKCHIP)		+= spi-rockc
- obj-$(CONFIG_SPI_ROCKCHIP_SFC)		+= spi-rockchip-sfc.o
+@@ -126,6 +126,7 @@ obj-$(CONFIG_SPI_ROCKCHIP_SFC)		+= spi-r
  obj-$(CONFIG_SPI_RB4XX)			+= spi-rb4xx.o
  obj-$(CONFIG_MACH_REALTEK_RTL)		+= spi-realtek-rtl.o
+ obj-$(CONFIG_SPI_REALTEK_SNAND)		+= spi-realtek-rtl-snand.o
 +obj-$(CONFIG_SPI_RP2040_GPIO_BRIDGE)	+= spi-rp2040-gpio-bridge.o
  obj-$(CONFIG_SPI_RPCIF)			+= spi-rpc-if.o
  obj-$(CONFIG_SPI_RSPI)			+= spi-rspi.o
- obj-$(CONFIG_SPI_RZV2M_CSI)		+= spi-rzv2m-csi.o
+ obj-$(CONFIG_SPI_RZV2H_RSPI)		+= spi-rzv2h-rspi.o
 --- /dev/null
 +++ b/drivers/spi/spi-rp2040-gpio-bridge.c
-@@ -0,0 +1,1244 @@
+@@ -0,0 +1,1250 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * RP2040 GPIO Bridge
@@ -207,7 +223,7 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +};
 +
 +static int rp2040_gbdg_gpio_dir_in(struct gpio_chip *gc, unsigned int offset);
-+static void rp2040_gbdg_gpio_set(struct gpio_chip *gc, unsigned int offset,
++static int rp2040_gbdg_gpio_set(struct gpio_chip *gc, unsigned int offset,
 +				 int value);
 +static int rp2040_gbdg_fast_xfer(struct rp2040_gbdg *priv_data, const u8 *data,
 +				 size_t len);
@@ -703,7 +719,6 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +				 &clock_mux);
 +
 +	gpiod_direction_output(priv_data->fast_xfer_gpios->desc[0], 1);
-+	gpiod_direction_output(priv_data->fast_xfer_gpios->desc[1], 0);
 +
 +	rp2040_gbdg_rp1_calc_offsets(priv_data->fast_xfer_data_index,
 +				     &data_bank, &data_offset);
@@ -970,7 +985,7 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +	return info.status & (1 << (offset + 8)) ? 1 : 0;
 +}
 +
-+static void rp2040_gbdg_gpio_set(struct gpio_chip *gc, unsigned int offset,
++static int rp2040_gbdg_gpio_set(struct gpio_chip *gc, unsigned int offset,
 +				 int value)
 +{
 +	struct rp2040_gbdg *priv_data = gpiochip_get_data(gc);
@@ -978,11 +993,12 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +	u32 pattern;
 +
 +	if (offset >= NUM_GPIO)
-+		return;
++		return -EINVAL;
 +
 +	pattern = (1 << (offset + 8));
 +	rp2040_gbdg_10byte_cmd(client, CMD_GPIO_ST_CL, value ? pattern : 0,
 +			       !value ? pattern : 0);
++	return 0;
 +}
 +
 +static int rp2040_gbdg_get_regulator(struct device *dev,
@@ -1042,7 +1058,8 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +
 +	rp2040_gbdg->fast_xfer_gpios =
 +		devm_gpiod_get_array_optional(dev, "fast_xfer", GPIOD_ASIS);
-+	if (!rp2040_gbdg->fast_xfer_gpios) {
++	if (IS_ERR_OR_NULL(rp2040_gbdg->fast_xfer_gpios)) {
++		rp2040_gbdg->fast_xfer_gpios = NULL;
 +		dev_info(dev, "Could not acquire fast_xfer-gpios\n");
 +		goto node_put;
 +	}
@@ -1074,6 +1091,11 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +		goto node_put;
 +	}
 +
++	/*
++	 * fast_xfer mode requires first data bit to be clocked on a rising
++	 * edge. Configure as output-low here before fast_xfer mode is entered.
++	 */
++	gpiod_direction_output(rp2040_gbdg->fast_xfer_gpios->desc[1], 0);
 +node_put:
 +	if (of_args[0].np)
 +		of_node_put(of_args[0].np);
@@ -1131,7 +1153,7 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +
 +	np = dev->of_node;
 +
-+	controller = devm_spi_alloc_master(dev, sizeof(struct rp2040_gbdg));
++	controller = devm_spi_alloc_host(dev, sizeof(struct rp2040_gbdg));
 +	if (!controller)
 +		return dev_err_probe(dev, ENOMEM,
 +				     "could not alloc spi controller\n");

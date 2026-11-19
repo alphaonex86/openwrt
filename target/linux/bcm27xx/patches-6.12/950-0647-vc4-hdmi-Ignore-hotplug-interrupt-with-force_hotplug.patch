@@ -1,4 +1,4 @@
-From d375fb2b01bd670c760da14db221cc11d9e7f9cd Mon Sep 17 00:00:00 2001
+From cb7db28b9e17749af56c5960144a501b89b12cf3 Mon Sep 17 00:00:00 2001
 From: Dom Cobley <popcornmix@gmail.com>
 Date: Tue, 23 Apr 2024 17:30:56 +0100
 Subject: [PATCH] vc4/hdmi: Ignore hotplug interrupt with force_hotplug
@@ -30,7 +30,7 @@ Signed-off-by: Dom Cobley <popcornmix@gmail.com>
 
 --- a/drivers/gpu/drm/vc4/vc4_hdmi.c
 +++ b/drivers/gpu/drm/vc4/vc4_hdmi.c
-@@ -2476,7 +2476,7 @@ static irqreturn_t vc4_hdmi_hpd_irq_thre
+@@ -2363,7 +2363,7 @@ static irqreturn_t vc4_hdmi_hpd_irq_thre
  	struct drm_connector *connector = &vc4_hdmi->connector;
  	struct drm_device *dev = connector->dev;
  

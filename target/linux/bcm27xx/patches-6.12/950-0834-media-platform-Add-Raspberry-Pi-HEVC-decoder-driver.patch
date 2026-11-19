@@ -1,4 +1,4 @@
-From 038efbab4ef95fd22ee6b25027cb6cf25248ea3d Mon Sep 17 00:00:00 2001
+From 66e83cf601256eac83dcec0b52c3a81469ac78ab Mon Sep 17 00:00:00 2001
 From: John Cox <john.cox@raspberrypi.com>
 Date: Thu, 6 Feb 2025 18:02:37 +0000
 Subject: [PATCH] media: platform: Add Raspberry Pi HEVC decoder driver
@@ -8,21 +8,36 @@ Pi 5 boards include an HEVC decoder block. Add a driver for it.
 
 Signed-off-by: John Cox <john.cox@raspberrypi.com>
 Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
+
+media: hevc_dec: Add in downstream single planar SAND variant
+
+Upstream will take the multi-planar SAND format, but add back
+in the downstream single planar variant for backwards compatibility
+
+Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
+
+media: hevc_dec: Add module parameter for video_nr
+
+To avoid user complaints that /dev/video0 isn't their USB
+webcam, add downstream patch that allows setting the preferred
+video device number.
+
+Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 ---
  MAINTAINERS                                   |   10 +
  drivers/media/platform/raspberrypi/Kconfig    |    1 +
  drivers/media/platform/raspberrypi/Makefile   |    1 +
  .../platform/raspberrypi/hevc_dec/Kconfig     |   17 +
  .../platform/raspberrypi/hevc_dec/Makefile    |    5 +
- .../platform/raspberrypi/hevc_dec/hevc_d.c    |  450 +++
+ .../platform/raspberrypi/hevc_dec/hevc_d.c    |  459 +++
  .../platform/raspberrypi/hevc_dec/hevc_d.h    |  189 ++
- .../raspberrypi/hevc_dec/hevc_d_h265.c        | 2542 +++++++++++++++++
+ .../raspberrypi/hevc_dec/hevc_d_h265.c        | 2585 +++++++++++++++++
  .../raspberrypi/hevc_dec/hevc_d_h265.h        |   23 +
  .../platform/raspberrypi/hevc_dec/hevc_d_hw.c |  376 +++
  .../platform/raspberrypi/hevc_dec/hevc_d_hw.h |  303 ++
- .../raspberrypi/hevc_dec/hevc_d_video.c       |  688 +++++
+ .../raspberrypi/hevc_dec/hevc_d_video.c       |  749 +++++
  .../raspberrypi/hevc_dec/hevc_d_video.h       |   38 +
- 13 files changed, 4643 insertions(+)
+ 13 files changed, 4756 insertions(+)
  create mode 100644 drivers/media/platform/raspberrypi/hevc_dec/Kconfig
  create mode 100644 drivers/media/platform/raspberrypi/hevc_dec/Makefile
  create mode 100644 drivers/media/platform/raspberrypi/hevc_dec/hevc_d.c
@@ -36,7 +51,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -19374,6 +19374,16 @@ S:	Maintained
+@@ -21548,6 +21548,16 @@ S:	Maintained
  F:	Documentation/devicetree/bindings/spi/raspberrypi,rp2040-gpio-bridge.yaml
  F:	drivers/spi/spi-rp2040-gpio-bridge.c
  
@@ -52,23 +67,25 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +
  RASPBERRY PI PISP BACK END
  M:	Jacopo Mondi <jacopo.mondi@ideasonboard.com>
- L:	Raspberry Pi Kernel Maintenance <kernel-list@raspberrypi.com>
+ R:	Raspberry Pi Kernel Maintenance <kernel-list@raspberrypi.com>
 --- a/drivers/media/platform/raspberrypi/Kconfig
 +++ b/drivers/media/platform/raspberrypi/Kconfig
-@@ -2,5 +2,6 @@
+@@ -2,6 +2,7 @@
  
  comment "Raspberry Pi media platform drivers"
  
 +source "drivers/media/platform/raspberrypi/hevc_dec/Kconfig"
  source "drivers/media/platform/raspberrypi/pisp_be/Kconfig"
+ source "drivers/media/platform/raspberrypi/rp1-cfe/Kconfig"
  source "drivers/media/platform/raspberrypi/rp1_cfe/Kconfig"
 --- a/drivers/media/platform/raspberrypi/Makefile
 +++ b/drivers/media/platform/raspberrypi/Makefile
-@@ -1,4 +1,5 @@
+@@ -1,5 +1,6 @@
  # SPDX-License-Identifier: GPL-2.0
  
 +obj-y += hevc_dec/
  obj-y += pisp_be/
+ obj-y += rp1-cfe/
  obj-y += rp1_cfe/
 --- /dev/null
 +++ b/drivers/media/platform/raspberrypi/hevc_dec/Kconfig
@@ -100,7 +117,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +		 hevc_d_h265.o
 --- /dev/null
 +++ b/drivers/media/platform/raspberrypi/hevc_dec/hevc_d.c
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,459 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Raspberry Pi HEVC driver
@@ -127,6 +144,15 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +#include "hevc_d_h265.h"
 +#include "hevc_d_video.h"
 +#include "hevc_d_hw.h"
++
++/*
++ * Default /dev/videoN node number.
++ * Deliberately avoid the very low numbers as these are often taken by webcams
++ * etc, and simple apps tend to only go for /dev/video0.
++ */
++static int video_nr = 19;
++module_param(video_nr, int, 0644);
++MODULE_PARM_DESC(video_nr, "decoder video device number");
 +
 +static const struct hevc_d_control hevc_d_ctrls[] = {
 +	{
@@ -339,7 +365,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +	 */
 +	hevc_d_prepare_src_format(&ctx->src_fmt);
 +
-+	v4l2_fh_add(&ctx->fh);
++	v4l2_fh_add(&ctx->fh, file);
 +
 +	mutex_unlock(&dev->dev_mutex);
 +
@@ -365,7 +391,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +
 +	mutex_lock(&dev->dev_mutex);
 +
-+	v4l2_fh_del(&ctx->fh);
++	v4l2_fh_del(&ctx->fh, file);
 +	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 +
 +	v4l2_ctrl_handler_free(&ctx->hdl);
@@ -476,7 +502,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +	dev->mdev.ops = &hevc_d_m2m_media_ops;
 +	dev->v4l2_dev.mdev = &dev->mdev;
 +
-+	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
++	ret = video_register_device(vfd, VFL_TYPE_VIDEO, video_nr);
 +	if (ret) {
 +		v4l2_err(&dev->v4l2_dev, "Failed to register video device\n");
 +		goto err_m2m;
@@ -745,7 +771,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +#endif
 --- /dev/null
 +++ b/drivers/media/platform/raspberrypi/hevc_dec/hevc_d_h265.c
-@@ -0,0 +1,2542 @@
+@@ -0,0 +1,2585 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Raspberry Pi HEVC driver
@@ -2400,12 +2426,27 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +	de->cmd_len = 0;
 +	de->dpbno_col = ~0U;
 +
-+	de->luma_stride = ctx->dst_fmt.height * 128;
-+	de->frame_luma_addr =
-+		vb2_dma_contig_plane_dma_addr(&run->dst->vb2_buf, 0);
-+	de->chroma_stride = de->luma_stride / 2;
-+	de->frame_chroma_addr =
-+		vb2_dma_contig_plane_dma_addr(&run->dst->vb2_buf, 1);
++	switch (ctx->dst_fmt.pixelformat) {
++	case V4L2_PIX_FMT_NV12MT_COL128:
++	case V4L2_PIX_FMT_NV12MT_10_COL128:
++		de->luma_stride = ctx->dst_fmt.height * 128;
++		de->frame_luma_addr =
++			vb2_dma_contig_plane_dma_addr(&run->dst->vb2_buf, 0);
++		de->chroma_stride = de->luma_stride / 2;
++		de->frame_chroma_addr =
++			vb2_dma_contig_plane_dma_addr(&run->dst->vb2_buf, 1);
++		break;
++	case V4L2_PIX_FMT_NV12_COL128:
++	case V4L2_PIX_FMT_NV12_10_COL128:
++		de->luma_stride = ctx->dst_fmt.plane_fmt[0].bytesperline * 128;
++		de->frame_luma_addr =
++			vb2_dma_contig_plane_dma_addr(&run->dst->vb2_buf, 0);
++		de->chroma_stride = de->luma_stride;
++		de->frame_chroma_addr = de->frame_luma_addr +
++					(ctx->dst_fmt.height * 128);
++		break;
++	}
++
 +	de->frame_aux = NULL;
 +
 +	if (s->sps.bit_depth_luma_minus8 !=
@@ -2417,15 +2458,16 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +		goto fail;
 +	}
 +	if (s->sps.bit_depth_luma_minus8 == 0) {
-+		if (ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_COL128) {
++		if (ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_COL128 &&
++		    ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12_COL128) {
 +			v4l2_err(&dev->v4l2_dev,
 +				 "Pixel format %#x != NV12MT_COL128 for 8-bit output",
 +				 ctx->dst_fmt.pixelformat);
 +			goto fail;
 +		}
 +	} else if (s->sps.bit_depth_luma_minus8 == 2) {
-+		if (ctx->dst_fmt.pixelformat !=
-+					V4L2_PIX_FMT_NV12MT_10_COL128) {
++		if (ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_10_COL128 &&
++		    ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12_10_COL128) {
 +			v4l2_err(&dev->v4l2_dev,
 +				 "Pixel format %#x != NV12MT_10_COL128 for 10-bit output",
 +				 ctx->dst_fmt.pixelformat);
@@ -2436,20 +2478,40 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +			  s->sps.bit_depth_luma_minus8 + 8);
 +		goto fail;
 +	}
-+	if (run->dst->vb2_buf.num_planes != 2) {
-+		v4l2_warn(&dev->v4l2_dev, "Capture planes (%d) != 2\n",
-+			  run->dst->vb2_buf.num_planes);
-+		goto fail;
-+	}
-+	if (run->dst->planes[0].length < ctx->dst_fmt.plane_fmt[0].sizeimage ||
-+	    run->dst->planes[1].length < ctx->dst_fmt.plane_fmt[1].sizeimage) {
-+		v4l2_warn(&dev->v4l2_dev,
-+			  "Capture planes length (%d/%d) < sizeimage (%d/%d)\n",
-+			  run->dst->planes[0].length,
-+			  run->dst->planes[1].length,
-+			  ctx->dst_fmt.plane_fmt[0].sizeimage,
-+			  ctx->dst_fmt.plane_fmt[1].sizeimage);
-+		goto fail;
++	switch (ctx->dst_fmt.pixelformat) {
++	case V4L2_PIX_FMT_NV12MT_COL128:
++	case V4L2_PIX_FMT_NV12MT_10_COL128:
++		if (run->dst->vb2_buf.num_planes != 2) {
++			v4l2_warn(&dev->v4l2_dev, "Capture planes (%d) != 2\n",
++				  run->dst->vb2_buf.num_planes);
++			goto fail;
++		}
++		if (run->dst->planes[0].length < ctx->dst_fmt.plane_fmt[0].sizeimage ||
++		    run->dst->planes[1].length < ctx->dst_fmt.plane_fmt[1].sizeimage) {
++			v4l2_warn(&dev->v4l2_dev,
++				  "Capture planes length (%d/%d) < sizeimage (%d/%d)\n",
++				  run->dst->planes[0].length,
++				  run->dst->planes[1].length,
++				  ctx->dst_fmt.plane_fmt[0].sizeimage,
++				  ctx->dst_fmt.plane_fmt[1].sizeimage);
++			goto fail;
++		}
++		break;
++	case V4L2_PIX_FMT_NV12_COL128:
++	case V4L2_PIX_FMT_NV12_10_COL128:
++		if (run->dst->vb2_buf.num_planes != 1) {
++			v4l2_warn(&dev->v4l2_dev, "Capture planes (%d) != 1\n",
++				  run->dst->vb2_buf.num_planes);
++			goto fail;
++		}
++		if (run->dst->planes[0].length < ctx->dst_fmt.plane_fmt[0].sizeimage) {
++			v4l2_warn(&dev->v4l2_dev,
++				  "Capture planes length (%d) < sizeimage (%d)\n",
++				  run->dst->planes[0].length,
++				  ctx->dst_fmt.plane_fmt[0].sizeimage);
++			goto fail;
++		}
++		break;
 +	}
 +
 +	/*
@@ -2609,8 +2671,13 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +
 +		de->ref_addrs[i][0] =
 +			vb2_dma_contig_plane_dma_addr(buf, 0);
-+		de->ref_addrs[i][1] =
-+			vb2_dma_contig_plane_dma_addr(buf, 1);
++		if (ctx->dst_fmt.pixelformat == V4L2_PIX_FMT_NV12MT_COL128 ||
++		    ctx->dst_fmt.pixelformat == V4L2_PIX_FMT_NV12MT_10_COL128)
++			de->ref_addrs[i][1] =
++				vb2_dma_contig_plane_dma_addr(buf, 1);
++		else
++			de->ref_addrs[i][1] = de->ref_addrs[i][0] +
++				(ctx->dst_fmt.height * 128);
 +	}
 +
 +	/* Move DPB from temp */
@@ -3162,9 +3229,11 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +		return 0;
 +
 +	if ((sps->bit_depth_luma_minus8 == 0 &&
-+	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_COL128) ||
++	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_COL128 &&
++	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12_COL128) ||
 +	    (sps->bit_depth_luma_minus8 == 2 &&
-+	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_10_COL128)) {
++	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12MT_10_COL128 &&
++	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12_10_COL128)) {
 +		v4l2_warn(&dev->v4l2_dev,
 +			  "SPS luma depth %d does not match capture format\n",
 +			  sps->bit_depth_luma_minus8 + 8);
@@ -4001,7 +4070,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +#endif
 --- /dev/null
 +++ b/drivers/media/platform/raspberrypi/hevc_dec/hevc_d_video.c
-@@ -0,0 +1,688 @@
+@@ -0,0 +1,749 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Raspberry Pi HEVC driver
@@ -4154,17 +4223,55 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +		bytesperline = width * 4 / 3;
 +		sizeimage = bytesperline * height;
 +		break;
++
++	case V4L2_PIX_FMT_NV12_COL128:
++		/* Width rounds up to columns */
++		width = ALIGN(width, 128);
++		height = ALIGN(height, 8);
++
++		/* column height
++		 * Accept suggested shape if at least min & < 2 * min
++		 */
++		bytesperline = constrain2x(bytesperline, height * 3 / 2);
++		sizeimage = bytesperline * width;
++		break;
++
++	case V4L2_PIX_FMT_NV12_10_COL128:
++		/* width in pixels (3 pels = 4 bytes) rounded to 128 byte
++		 * columns
++		 */
++		width = ALIGN(((width + 2) / 3), 32) * 3;
++		height = ALIGN(height, 8);
++
++		/* column height
++		 * Accept suggested shape if at least min & < 2 * min
++		 */
++		bytesperline = constrain2x(bytesperline, height * 3 / 2);
++		sizeimage = bytesperline * width * 4 / 3;
++		break;
 +	}
 +
 +	pix_fmt->width = width;
 +	pix_fmt->height = height;
 +
 +	pix_fmt->field = V4L2_FIELD_NONE;
-+	pix_fmt->plane_fmt[0].bytesperline = bytesperline;
-+	pix_fmt->plane_fmt[0].sizeimage = sizeimage;
-+	pix_fmt->plane_fmt[1].bytesperline = bytesperline;
-+	pix_fmt->plane_fmt[1].sizeimage = sizeimage / 2;
-+	pix_fmt->num_planes = 2;
++	switch (pix_fmt->pixelformat) {
++	default:
++	case V4L2_PIX_FMT_NV12MT_COL128:
++	case V4L2_PIX_FMT_NV12MT_10_COL128:
++		pix_fmt->plane_fmt[0].bytesperline = bytesperline;
++		pix_fmt->plane_fmt[0].sizeimage = sizeimage;
++		pix_fmt->plane_fmt[1].bytesperline = bytesperline;
++		pix_fmt->plane_fmt[1].sizeimage = sizeimage / 2;
++		pix_fmt->num_planes = 2;
++		break;
++	case V4L2_PIX_FMT_NV12_COL128:
++	case V4L2_PIX_FMT_NV12_10_COL128:
++		pix_fmt->plane_fmt[0].bytesperline = bytesperline;
++		pix_fmt->plane_fmt[0].sizeimage = sizeimage;
++		pix_fmt->num_planes = 1;
++		break;
++	}
 +}
 +
 +static int hevc_d_querycap(struct file *file, void *priv,
@@ -4249,19 +4356,31 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +static u32 pixelformat_from_sps(const struct v4l2_ctrl_hevc_sps * const sps,
 +				const int index)
 +{
++	static const u32 all_formats[] = {
++		V4L2_PIX_FMT_NV12MT_COL128,
++		V4L2_PIX_FMT_NV12MT_10_COL128,
++		V4L2_PIX_FMT_NV12_COL128,
++		V4L2_PIX_FMT_NV12_10_COL128,
++	};
 +	u32 pf = 0;
 +
 +	if (!is_sps_set(sps) || !hevc_d_hevc_validate_sps(sps)) {
 +		/* Treat this as an error? For now return both */
-+		if (index == 0)
-+			pf = V4L2_PIX_FMT_NV12MT_COL128;
-+		else if (index == 1)
-+			pf = V4L2_PIX_FMT_NV12MT_10_COL128;
-+	} else if (index == 0) {
-+		if (sps->bit_depth_luma_minus8 == 0)
-+			pf = V4L2_PIX_FMT_NV12MT_COL128;
-+		else if (sps->bit_depth_luma_minus8 == 2)
-+			pf = V4L2_PIX_FMT_NV12MT_10_COL128;
++
++		if (index < ARRAY_SIZE(all_formats))
++			pf = all_formats[index];
++	} else {
++		if (index == 0) {
++			if (sps->bit_depth_luma_minus8 == 0)
++				pf = V4L2_PIX_FMT_NV12MT_COL128;
++			else if (sps->bit_depth_luma_minus8 == 2)
++				pf = V4L2_PIX_FMT_NV12MT_10_COL128;
++		} else if (index == 1) {
++			if (sps->bit_depth_luma_minus8 == 0)
++				pf = V4L2_PIX_FMT_NV12_COL128;
++			else if (sps->bit_depth_luma_minus8 == 2)
++				pf = V4L2_PIX_FMT_NV12_10_COL128;
++		}
 +	}
 +
 +	return pf;
@@ -4473,17 +4592,28 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 +	}
 +
 +	if (*nplanes) {
-+		if (*nplanes != expected_nplanes ||
-+		    sizes[0] < pix_fmt->plane_fmt[0].sizeimage ||
-+		    sizes[1] < pix_fmt->plane_fmt[1].sizeimage)
-+			return -EINVAL;
++		if (pix_fmt->pixelformat == V4L2_PIX_FMT_NV12MT_COL128 ||
++		    pix_fmt->pixelformat == V4L2_PIX_FMT_NV12MT_10_COL128) {
++			if (*nplanes != expected_nplanes ||
++			    sizes[0] < pix_fmt->plane_fmt[0].sizeimage ||
++			    sizes[1] < pix_fmt->plane_fmt[1].sizeimage)
++				return -EINVAL;
++		} else {
++			if (sizes[0] < pix_fmt->plane_fmt[0].sizeimage)
++				return -EINVAL;
++		}
 +	} else {
 +		sizes[0] = pix_fmt->plane_fmt[0].sizeimage;
 +		if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
 +			*nplanes = 1;
 +		} else {
-+			sizes[1] = pix_fmt->plane_fmt[1].sizeimage;
-+			*nplanes = 2;
++			if (pix_fmt->pixelformat == V4L2_PIX_FMT_NV12MT_COL128 ||
++			    pix_fmt->pixelformat == V4L2_PIX_FMT_NV12MT_10_COL128) {
++				sizes[1] = pix_fmt->plane_fmt[1].sizeimage;
++				*nplanes = 2;
++			} else {
++				*nplanes = 1;
++			}
 +		}
 +	}
 +

@@ -1,4 +1,4 @@
-From 70a98ef8898d216ab6788b23057cc34ad91e2bc0 Mon Sep 17 00:00:00 2001
+From ab520ab14d64f9a9d65cbed7d2087e8f166b16bc Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.com>
 Date: Mon, 9 Dec 2024 14:38:17 +0000
 Subject: [PATCH] cgroup: Add cgroup_enable option
@@ -17,7 +17,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
 
 --- a/kernel/cgroup/cgroup.c
 +++ b/kernel/cgroup/cgroup.c
-@@ -6933,6 +6933,39 @@ static int __init cgroup_disable(char *s
+@@ -7098,6 +7098,39 @@ static int __init cgroup_disable(char *s
  }
  __setup("cgroup_disable=", cgroup_disable);
  

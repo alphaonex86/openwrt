@@ -1,4 +1,4 @@
-From e404519d9f3e5e7d661cb105d3766d87e37e4ef5 Mon Sep 17 00:00:00 2001
+From c03b5a514b319c03a1883142694afa5deb69af6f Mon Sep 17 00:00:00 2001
 From: Lei Wei <quic_leiwei@quicinc.com>
 Date: Fri, 7 Feb 2025 23:53:13 +0800
 Subject: [PATCH] net: pcs: Add PCS driver for Qualcomm IPQ9574 SoC
@@ -26,9 +26,9 @@ Signed-off-by: Lei Wei <quic_leiwei@quicinc.com>
 
 --- a/drivers/net/pcs/Kconfig
 +++ b/drivers/net/pcs/Kconfig
-@@ -43,6 +43,15 @@ config PCS_MTK_USXGMII
+@@ -45,6 +45,15 @@ config PCS_MTK_USXGMII
  	  1000Base-X, 2500Base-X and Cisco SGMII are supported on the same
- 	  differential pairs via an embedded LynxI PHY.
+ 	  differential pairs via an embedded LynxI PCS.
  
 +config PCS_QCOM_IPQ9574
 +	tristate "Qualcomm IPQ9574 PCS"
@@ -40,17 +40,15 @@ Signed-off-by: Lei Wei <quic_leiwei@quicinc.com>
 +	  to support different interface modes for MAC to PHY connections.
 +
  config PCS_RZN1_MIIC
- 	tristate "Renesas RZ/N1 MII converter"
- 	depends on OF && (ARCH_RZN1 || COMPILE_TEST)
+ 	tristate "Renesas RZ/N1, RZ/N2H, RZ/T2H MII converter"
+ 	depends on OF
 --- a/drivers/net/pcs/Makefile
 +++ b/drivers/net/pcs/Makefile
-@@ -8,5 +8,6 @@ pcs_xpcs-$(CONFIG_PCS_XPCS)	:= pcs-xpcs.
- obj-$(CONFIG_PCS_XPCS)		+= pcs_xpcs.o
- obj-$(CONFIG_PCS_LYNX)		+= pcs-lynx.o
+@@ -10,3 +10,4 @@ obj-$(CONFIG_PCS_LYNX)		+= pcs-lynx.o
  obj-$(CONFIG_PCS_MTK_LYNXI)	+= pcs-mtk-lynxi.o
-+obj-$(CONFIG_PCS_QCOM_IPQ9574)	+= pcs-qcom-ipq9574.o
- obj-$(CONFIG_PCS_RZN1_MIIC)	+= pcs-rzn1-miic.o
  obj-$(CONFIG_PCS_MTK_USXGMII)	+= pcs-mtk-usxgmii.o
+ obj-$(CONFIG_PCS_RZN1_MIIC)	+= pcs-rzn1-miic.o
++obj-$(CONFIG_PCS_QCOM_IPQ9574)	+= pcs-qcom-ipq9574.o
 --- /dev/null
 +++ b/drivers/net/pcs/pcs-qcom-ipq9574.c
 @@ -0,0 +1,245 @@

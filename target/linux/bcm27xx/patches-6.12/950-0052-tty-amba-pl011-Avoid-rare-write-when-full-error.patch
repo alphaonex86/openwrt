@@ -1,4 +1,4 @@
-From 86d0c450ca0d3c6fcc4e93b7f1af398e9cc35b9f Mon Sep 17 00:00:00 2001
+From 770557c7374bb653b57bbdf7747de834788aa5ad Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.org>
 Date: Wed, 29 Jan 2020 09:35:19 +0000
 Subject: [PATCH] tty: amba-pl011: Avoid rare write-when-full error
@@ -29,7 +29,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.org>
 
 --- a/drivers/tty/serial/amba-pl011.c
 +++ b/drivers/tty/serial/amba-pl011.c
-@@ -1466,6 +1466,10 @@ static bool pl011_tx_chars(struct uart_a
+@@ -1539,6 +1539,10 @@ static bool pl011_tx_chars(struct uart_a
  		if (likely(from_irq) && count-- == 0)
  			break;
  

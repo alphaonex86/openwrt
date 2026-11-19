@@ -8,7 +8,7 @@ Signed-off-by: Confiared <contact@confiared.com>
 ---
 --- a/drivers/net/ethernet/broadcom/Kconfig
 +++ b/drivers/net/ethernet/broadcom/Kconfig
-@@ -274,4 +274,18 @@
+@@ -275,4 +275,18 @@ config BCMASP
  	  This configuration enables the Broadcom ASP 2.0 Ethernet controller
  	  driver which is present in Broadcom STB SoCs such as 72165.
  
@@ -29,7 +29,7 @@ Signed-off-by: Confiared <contact@confiared.com>
  endif # NET_VENDOR_BROADCOM
 --- a/drivers/net/ethernet/broadcom/Makefile
 +++ b/drivers/net/ethernet/broadcom/Makefile
-@@ -15,6 +15,8 @@
+@@ -15,6 +15,8 @@ obj-$(CONFIG_TIGON3) += tg3.o
  obj-$(CONFIG_BGMAC) += bgmac.o
  obj-$(CONFIG_BGMAC_BCMA) += bgmac-bcma.o bgmac-bcma-mdio.o
  obj-$(CONFIG_BGMAC_PLATFORM) += bgmac-platform.o

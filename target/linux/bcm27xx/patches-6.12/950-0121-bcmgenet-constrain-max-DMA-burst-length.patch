@@ -1,4 +1,4 @@
-From afca8606708a7d649add3f3620b43e009475bc7f Mon Sep 17 00:00:00 2001
+From fd2e5044b7d8764e443150a107f8e9253f8012d8 Mon Sep 17 00:00:00 2001
 From: Jonathan Bell <jonathan@raspberrypi.org>
 Date: Wed, 12 Sep 2018 14:44:53 +0100
 Subject: [PATCH] bcmgenet: constrain max DMA burst length
@@ -9,7 +9,7 @@ Subject: [PATCH] bcmgenet: constrain max DMA burst length
 
 --- a/drivers/net/ethernet/broadcom/genet/bcmgenet.h
 +++ b/drivers/net/ethernet/broadcom/genet/bcmgenet.h
-@@ -31,7 +31,7 @@
+@@ -35,7 +35,7 @@
  #define ENET_PAD		8
  #define ENET_MAX_MTU_SIZE	(ETH_DATA_LEN + ETH_HLEN + VLAN_HLEN + \
  				 ENET_BRCM_TAG_LEN + ETH_FCS_LEN + ENET_PAD)

@@ -1,8 +1,9 @@
 --- a/Makefile
 +++ b/Makefile
-@@ -871,7 +871,15 @@
+@@ -872,6 +872,14 @@ endif # need-config
+ 
  KBUILD_CFLAGS	+= -fno-delete-null-pointer-checks
-
+ 
 +# RTL9602C (Lexra RLX, 4KC-scheduled) MDU erratum: a load scheduled into the
 +# shadow of an integer div/mult (between it and its mflo/mfhi) silently corrupts
 +# HI/LO on this core. gcc's post-reload scheduler fills that shadow with loads at
@@ -14,5 +15,3 @@
  ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
  KBUILD_CFLAGS += -O2
  KBUILD_RUSTFLAGS += -Copt-level=2
- else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
- KBUILD_CFLAGS += -Os

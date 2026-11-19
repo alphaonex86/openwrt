@@ -1,4 +1,4 @@
-From 25fbd4059f8c87dc07b0d72ee591af2b1d2aeea5 Mon Sep 17 00:00:00 2001
+From 8d8eed0946c9b0a1e91d796c766d11f613a8d2eb Mon Sep 17 00:00:00 2001
 From: Dave Stevenson <dave.stevenson@raspberrypi.com>
 Date: Wed, 26 Jan 2022 16:02:31 +0000
 Subject: [PATCH] drm/panel: Add panel driver for TDO Y17B based panels
@@ -19,7 +19,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 
 --- a/drivers/gpu/drm/panel/Kconfig
 +++ b/drivers/gpu/drm/panel/Kconfig
-@@ -909,6 +909,17 @@ config DRM_PANEL_TDO_TL070WSH30
+@@ -1070,6 +1070,17 @@ config DRM_PANEL_TDO_TL070WSH30
  	  24 bit RGB per pixel. It provides a MIPI DSI interface to
  	  the host, a built-in LED backlight and touch controller.
  
@@ -39,7 +39,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
  	depends on OF && SPI
 --- a/drivers/gpu/drm/panel/Makefile
 +++ b/drivers/gpu/drm/panel/Makefile
-@@ -91,6 +91,7 @@ obj-$(CONFIG_DRM_PANEL_SONY_TD4353_JDI)
+@@ -105,6 +105,7 @@ obj-$(CONFIG_DRM_PANEL_SONY_TD4353_JDI)
  obj-$(CONFIG_DRM_PANEL_SONY_TULIP_TRULY_NT35521) += panel-sony-tulip-truly-nt35521.o
  obj-$(CONFIG_DRM_PANEL_STARTEK_KD070FHFID015) += panel-startek-kd070fhfid015.o
  obj-$(CONFIG_DRM_PANEL_TDO_TL070WSH30) += panel-tdo-tl070wsh30.o

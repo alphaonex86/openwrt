@@ -1,4 +1,4 @@
-From 77c99eba357c028c1c390c4f8f3b3c7ba6cbf3cf Mon Sep 17 00:00:00 2001
+From 69de04afd679fb5df8ce9094fef13f2b028a8075 Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.com>
 Date: Wed, 14 Dec 2022 15:00:51 +0000
 Subject: [PATCH] net: bcmgenet: Add 'eee' module parameter
@@ -16,7 +16,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
 
 --- a/drivers/net/ethernet/broadcom/genet/bcmgenet.c
 +++ b/drivers/net/ethernet/broadcom/genet/bcmgenet.c
-@@ -70,6 +70,9 @@ static void bcmgenet_set_rx_mode(struct
+@@ -76,6 +76,9 @@ static void bcmgenet_set_rx_mode(struct
  static bool skip_umac_reset = false;
  module_param(skip_umac_reset, bool, 0444);
  MODULE_PARM_DESC(skip_umac_reset, "Skip UMAC reset step");
@@ -26,7 +26,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
  
  static inline void bcmgenet_writel(u32 value, void __iomem *offset)
  {
-@@ -3423,6 +3426,17 @@ static int bcmgenet_open(struct net_devi
+@@ -3449,6 +3452,17 @@ static int bcmgenet_open(struct net_devi
  
  	bcmgenet_phy_pause_set(dev, priv->rx_pause, priv->tx_pause);
  

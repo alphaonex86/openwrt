@@ -22,7 +22,7 @@ backtrace (show_backtrace) keeps walking into the interrupted code.
  #include <asm/stacktrace.h>
  
  /*
-@@ -51,6 +52,9 @@
+@@ -51,6 +52,9 @@ static void save_context_stack(struct st
  		return;
  	}
  	do {
@@ -32,7 +32,7 @@ backtrace (show_backtrace) keeps walking into the interrupted code.
  		if (savesched || !in_sched_functions(pc)) {
  			if (trace->skip > 0)
  				trace->skip--;
-@@ -60,6 +64,9 @@
+@@ -60,6 +64,9 @@ static void save_context_stack(struct st
  				break;
  		}
  		pc = unwind_stack(tsk, &sp, pc, &ra);

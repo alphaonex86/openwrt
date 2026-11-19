@@ -7,7 +7,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
 
 --- a/arch/mips/Makefile
 +++ b/arch/mips/Makefile
-@@ -158,7 +158,20 @@
+@@ -158,7 +158,20 @@ cflags-$(CONFIG_CPU_R3000)	+= $(call cc-
  cflags-$(CONFIG_CPU_R4300)	+= $(call cc-option,-march=r4300,-march=mips3) -Wa,--trap
  cflags-$(CONFIG_CPU_R4X00)	+= $(call cc-option,-march=r4600,-march=mips3) -Wa,--trap
  cflags-$(CONFIG_CPU_TX49XX)	+= $(call cc-option,-march=r4600,-march=mips3) -Wa,--trap
@@ -30,7 +30,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  cflags-$(CONFIG_CPU_MIPS32_R6)	+= -march=mips32r6 -Wa,--trap -modd-spreg
 --- a/arch/mips/include/asm/bug.h
 +++ b/arch/mips/include/asm/bug.h
-@@ -17,7 +17,15 @@
+@@ -17,7 +17,15 @@ static inline void __noreturn BUG(void)
  
  #define HAVE_ARCH_BUG
  
@@ -49,7 +49,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  {
 --- a/arch/mips/include/asm/cpu-type.h
 +++ b/arch/mips/include/asm/cpu-type.h
-@@ -32,6 +32,13 @@
+@@ -32,6 +32,13 @@ static inline int __pure __get_cpu_type(
  	case CPU_4KC:
  	case CPU_ALCHEMY:
  	case CPU_PR4450:
@@ -94,7 +94,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  		or	t0, t2
 --- a/arch/mips/kernel/entry.S
 +++ b/arch/mips/kernel/entry.S
-@@ -100,7 +100,7 @@
+@@ -100,7 +100,7 @@ restore_partial:		# restore partial fram
  	SAVE_AT
  	SAVE_TEMP
  	LONG_L	v0, PT_STATUS(sp)
@@ -105,7 +105,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  	and	v0, ST0_IE
 --- a/arch/mips/kernel/genex.S
 +++ b/arch/mips/kernel/genex.S
-@@ -173,7 +173,7 @@
+@@ -173,7 +173,7 @@ NESTED(handle_int, PT_SIZE, sp)
  	.set	push
  	.set	noat
  	mfc0	k0, CP0_STATUS
@@ -114,7 +114,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  	and	k0, ST0_IEP
  	bnez	k0, 1f
  
-@@ -655,7 +655,7 @@
+@@ -655,7 +655,7 @@ isrdhwr:
  	get_saved_sp	/* k1 := current_thread_info */
  	.set	noreorder
  	MFC0	k0, CP0_EPC
@@ -125,7 +125,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  	LONG_L	v1, TI_TP_VALUE(k1)
 --- a/arch/mips/mm/c-r4k.c
 +++ b/arch/mips/mm/c-r4k.c
-@@ -1185,6 +1185,49 @@ static void probe_pcache(void)
+@@ -1191,6 +1191,49 @@ static void probe_pcache(void)
  		c->options |= MIPS_CPU_PREFETCH;
  		break;
  
@@ -175,7 +175,7 @@ branch-to-break, cache-flush barriers, module-reloc / kexec / r4kcache support.
  	default:
  		if (!(config & MIPS_CONF_M))
  			panic("Don't know how to probe P-caches on this cpu.");
-@@ -1562,6 +1605,14 @@ static void setup_scache(void)
+@@ -1568,6 +1611,14 @@ static void setup_scache(void)
  		/* don't need to worry about L2, fully coherent */
  		return;
  

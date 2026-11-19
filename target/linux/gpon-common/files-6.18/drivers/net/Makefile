@@ -5,7 +5,7 @@
 #
 # OpenWrt/realtek GPON ONU port -- WHOLE-FILE OVERLAY, NOT a patch.
 #
-# This is Linux 6.18.31's own file, unmodified, plus the change fenced
+# This is Linux 6.18.64's own file, unmodified, plus the change fenced
 # below as "GPON common layer".  It lives in the SHARED files- tree
 # target/linux/gpon-common/files-6.18/ and is therefore authored ONCE
 # for BOTH GPON targets:

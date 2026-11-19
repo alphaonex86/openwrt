@@ -1,4 +1,4 @@
-From 8d53a07ee6031596466a02169712ed2324e8a077 Mon Sep 17 00:00:00 2001
+From 50f9aa23453ff0e04be40a69e8b16329ce1d8c16 Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.com>
 Date: Thu, 20 Mar 2025 16:41:14 +0000
 Subject: [PATCH] dmaengine: dw-axi-dmac: Fix alignment checks
@@ -16,7 +16,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
 
 --- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
 +++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
-@@ -750,11 +750,6 @@ static int dw_axi_dma_set_hw_desc(struct
+@@ -753,11 +753,6 @@ static int dw_axi_dma_set_hw_desc(struct
  
  	mem_width = __ffs(data_width | mem_addr | len);
  
@@ -28,7 +28,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
  	/* Use a reasonable upper limit otherwise residue reporting granularity grows large */
  	mem_burst_msize = axi_dma_encode_msize(16);
  
-@@ -799,6 +794,11 @@ static int dw_axi_dma_set_hw_desc(struct
+@@ -802,6 +797,11 @@ static int dw_axi_dma_set_hw_desc(struct
  		return -EINVAL;
  	}
  

@@ -5,7 +5,7 @@
 #
 # OpenWrt/realtek-luna -- WHOLE-FILE OVERLAY, migrated out of a patch.
 #
-# This is Linux 6.18.31's own file plus the realtek-luna GPON/ETH wiring
+# This is Linux 6.18.64's own file plus the realtek-luna GPON/ETH wiring
 # that used to live in patches-6.18/103-realtek-luna-gpon.patch.  The patch
 # and this file are mutually exclusive: files- overlays are copied into the
 # kernel tree BEFORE patches are applied (include/quilt.mk:93-107), so with

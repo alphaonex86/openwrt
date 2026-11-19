@@ -1,4 +1,4 @@
-From 532fc50f78c39fc56c1256ba1b11ec7d45adf214 Mon Sep 17 00:00:00 2001
+From aaf6a06c37413dd6379bce8d0923e40ed76521bf Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.com>
 Date: Thu, 12 Sep 2024 10:06:50 +0100
 Subject: [PATCH] mm/vmscan: Maintain TLB coherency in LRU code
@@ -16,7 +16,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
 
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
-@@ -4136,7 +4136,7 @@ bool lru_gen_look_around(struct page_vma
+@@ -4301,7 +4301,7 @@ bool lru_gen_look_around(struct page_vma
  		if (!folio)
  			continue;
  
@@ -24,4 +24,4 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.com>
 +		if (!ptep_clear_flush_young_notify(vma, addr, pte + i))
  			continue;
  
- 		young++;
+ 		if (last != folio) {

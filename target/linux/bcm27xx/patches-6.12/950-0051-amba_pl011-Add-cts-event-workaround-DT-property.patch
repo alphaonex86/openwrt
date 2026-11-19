@@ -1,4 +1,4 @@
-From 3abf00b64b48967a3de8bc009ed09e710f3d2eff Mon Sep 17 00:00:00 2001
+From 3179ce3b165020602b115357291ab97a067de688 Mon Sep 17 00:00:00 2001
 From: Phil Elwell <phil@raspberrypi.org>
 Date: Fri, 29 Sep 2017 10:32:19 +0100
 Subject: [PATCH] amba_pl011: Add cts-event-workaround DT property
@@ -21,7 +21,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.org>
 
 --- a/Documentation/devicetree/bindings/serial/pl011.yaml
 +++ b/Documentation/devicetree/bindings/serial/pl011.yaml
-@@ -101,6 +101,12 @@ properties:
+@@ -104,6 +104,12 @@ properties:
        on the device.
      enum: [1, 4]
  
@@ -36,7 +36,7 @@ Signed-off-by: Phil Elwell <phil@raspberrypi.org>
    - reg
 --- a/drivers/tty/serial/amba-pl011.c
 +++ b/drivers/tty/serial/amba-pl011.c
-@@ -2783,6 +2783,11 @@ static int pl011_probe(struct amba_devic
+@@ -2917,6 +2917,11 @@ static int pl011_probe(struct amba_devic
  	if (IS_ERR(uap->clk))
  		return PTR_ERR(uap->clk);
  

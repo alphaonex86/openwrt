@@ -1,4 +1,4 @@
-From ad9b328af259972c687adbe4596766cdff7ea603 Mon Sep 17 00:00:00 2001
+From dd2cf16e60612c081741b06182c56151345e948e Mon Sep 17 00:00:00 2001
 From: Richard Oliver <richard.oliver@raspberrypi.com>
 Date: Fri, 24 May 2024 11:43:07 +0100
 Subject: [PATCH] media: dt-bindings: i2c: Add Sony IMX500
@@ -150,7 +150,7 @@ Signed-off-by: Richard Oliver <richard.oliver@raspberrypi.com>
 +
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -21617,6 +21617,13 @@ F:	Documentation/devicetree/bindings/med
+@@ -24098,6 +24098,13 @@ F:	Documentation/devicetree/bindings/med
  F:	Documentation/devicetree/bindings/media/i2c/imx477.yaml
  F:	drivers/media/i2c/imx477.c
  

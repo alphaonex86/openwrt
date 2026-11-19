@@ -1,4 +1,4 @@
-From cef4ba037209392aa6437357c27ba7c450936e36 Mon Sep 17 00:00:00 2001
+From 2f14ef7e4b32de087358fa15d369bb324efb9d8a Mon Sep 17 00:00:00 2001
 From: Ram Chandrasekar <rkumbako@codeaurora.org>
 Date: Mon, 7 May 2018 11:54:08 -0600
 Subject: [PATCH] drivers: thermal: step_wise: add support for hysteresis
@@ -31,8 +31,8 @@ optional and, now, unimplemented function.
 
 Signed-off-by: Jürgen Kreileder <jk@blackdown.de>
 ---
- drivers/thermal/gov_step_wise.c | 24 ++++++++++++++++++++----
- 1 file changed, 20 insertions(+), 4 deletions(-)
+ drivers/thermal/gov_step_wise.c | 25 ++++++++++++++++++++-----
+ 1 file changed, 20 insertions(+), 5 deletions(-)
 
 --- a/drivers/thermal/gov_step_wise.c
 +++ b/drivers/thermal/gov_step_wise.c
@@ -50,23 +50,25 @@ Signed-off-by: Jürgen Kreileder <jk@blackdown.de>
 - * If the temperature is lower than a trip point,
 + * If the temperature is lower than a hysteresis temperature,
   *    a. if the trend is THERMAL_TREND_RAISING, do nothing
-  *    b. if the trend is THERMAL_TREND_DROPPING, use lower cooling
-  *       state for this trip point, if the cooling state already
-@@ -87,19 +87,35 @@ static void thermal_zone_trip_update(str
+  *    b. if the trend is THERMAL_TREND_DROPPING, use the minimum applicable
+  *       cooling state for this trip point, or if the cooling state already
+@@ -80,8 +80,9 @@ static void thermal_zone_trip_update(str
+ 				     const struct thermal_trip_desc *td,
+ 				     int trip_threshold)
+ {
+-	bool throttle = tz->temperature >= trip_threshold;
+ 	const struct thermal_trip *trip = &td->trip;
++	int hyst_temp = trip->temperature - trip->hysteresis;
++	bool throttle = tz->temperature >= hyst_temp;
+ 	enum thermal_trend trend = get_tz_trend(tz, trip);
  	int trip_id = thermal_zone_trip_id(tz, trip);
  	struct thermal_instance *instance;
- 	bool throttle = false;
-+	int hyst_temp;
- 
- 	if (tz->temperature >= trip_threshold) {
- 		throttle = true;
+@@ -89,13 +90,27 @@ static void thermal_zone_trip_update(str
+ 	if (throttle)
  		trace_thermal_zone_trip(tz, trip_id, trip->type);
- 	}
  
 -	dev_dbg(&tz->device, "Trip%d[type=%d,temp=%d]:trend=%d,throttle=%d\n",
 -		trip_id, trip->type, trip_threshold, trend, throttle);
-+	hyst_temp = trip->temperature - trip->hysteresis;
-+
 +	dev_dbg(&tz->device,
 +		"Trip%d[type=%d,temp=%d,hyst=%d]:trend=%d,throttle=%d\n",
 +		trip_id, trip->type, trip->temperature, hyst_temp, trend, throttle);
@@ -76,6 +78,7 @@ Signed-off-by: Jürgen Kreileder <jk@blackdown.de>
  
  		old_target = instance->target;
 +		throttle = false;
++
 +		/*
 +		 * Lower the mitigation only if the temperature
 +		 * goes below the hysteresis temperature.

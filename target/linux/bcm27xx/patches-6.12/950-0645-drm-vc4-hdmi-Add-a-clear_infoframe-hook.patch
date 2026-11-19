@@ -1,4 +1,4 @@
-From dcc81b085f4bfb88985a78ced17b98bc7bfa0f73 Mon Sep 17 00:00:00 2001
+From deb144647f76ab2e8bc66972562dfdbac67c0745 Mon Sep 17 00:00:00 2001
 From: Dave Stevenson <dave.stevenson@raspberrypi.com>
 Date: Thu, 21 Nov 2024 18:28:22 +0000
 Subject: [PATCH] drm/vc4: hdmi: Add a clear_infoframe hook
@@ -14,7 +14,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
 
 --- a/drivers/gpu/drm/vc4/vc4_hdmi.c
 +++ b/drivers/gpu/drm/vc4/vc4_hdmi.c
-@@ -764,6 +764,24 @@ out:
+@@ -709,6 +709,24 @@ out:
  	return ret;
  }
  
@@ -39,7 +39,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
  #define SCRAMBLING_POLLING_DELAY_MS	1000
  
  static void vc4_hdmi_enable_scrambling(struct drm_encoder *encoder)
-@@ -1722,6 +1740,7 @@ vc4_hdmi_connector_clock_valid(const str
+@@ -1661,6 +1679,7 @@ vc4_hdmi_connector_clock_valid(const str
  static const struct drm_connector_hdmi_funcs vc4_hdmi_hdmi_connector_funcs = {
  	.tmds_char_rate_valid	= vc4_hdmi_connector_clock_valid,
  	.write_infoframe	= vc4_hdmi_write_infoframe,

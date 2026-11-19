@@ -1,4 +1,4 @@
-From c16518bcacebbb292956251a6a5f8291d99c384d Mon Sep 17 00:00:00 2001
+From fa6164a3a498c1e2a237d61e784d5104b4ef54e4 Mon Sep 17 00:00:00 2001
 From: Dave Stevenson <dave.stevenson@raspberrypi.com>
 Date: Tue, 23 Jul 2024 11:27:16 +0100
 Subject: [PATCH] media: platform: Move bcm2835-unicam compatible to downstream
@@ -48,7 +48,7 @@ Signed-off-by: Dave Stevenson <dave.stevenson@raspberrypi.com>
  MODULE_DEVICE_TABLE(of, unicam_of_match);
 --- a/drivers/media/platform/broadcom/bcm2835-unicam.c
 +++ b/drivers/media/platform/broadcom/bcm2835-unicam.c
-@@ -2711,7 +2711,7 @@ static void unicam_remove(struct platfor
+@@ -2737,7 +2737,7 @@ static void unicam_remove(struct platfor
  }
  
  static const struct of_device_id unicam_of_match[] = {

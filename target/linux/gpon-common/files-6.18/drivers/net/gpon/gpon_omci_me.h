@@ -129,10 +129,11 @@ struct omci_capacity {
 	u8	usq_per[OMCI_TCONT_MAX];	/* upstream queues per T-CONT, 0 = 8 */
 	u8	ctc[4];			/* ME 65529 #2..#5 */
 	u8	wifi_radios;
+	u8	wifi_ssids;		/* SSIDs each radio serves, 1..OMCI_WIFI_SSIDS */
 };
 
 #define OMCI_WIFI_RADIOS_MAX 3
-#define OMCI_WIFI_SSIDS 4	/* per radio, as stock holds them */
+#define OMCI_WIFI_SSIDS 4	/* per radio, as stock numbers them: radio r's SSID k is instance 4r+k */
 
 /* The one VEIP every board's model carries. */
 #define OMCI_VEIP_INST 0x0601
@@ -647,6 +648,12 @@ enum omci_uni_decl omci_onu_declare_ctc_be(struct omci_onu *o, const void *be,
 enum omci_uni_decl omci_onu_declare_wifi_be(struct omci_onu *o, const void *radios,
 					    int len, const char **why);
 
+/* Declare how many SSIDs each radio really serves, one byte in 1..OMCI_WIFI_SSIDS: the OLT is
+ * announced only the SSID instances the unit can bring up (operator, 2026-11-18).  Absent, each
+ * radio serves OMCI_WIFI_SSIDS.  Refused, nothing changed, on any other length or count. */
+enum omci_uni_decl omci_onu_declare_wifi_ssids_be(struct omci_onu *o, const void *ssids,
+						  int len, const char **why);
+
 /* Declare the board's ME 53 PPTP POTS UNI instances (big-endian 16-bit list).
  * Refused, nothing changed, on an empty, oversized, zero or duplicate list. */
 enum omci_uni_decl omci_onu_declare_pots_be(struct omci_onu *o, const void *be,
@@ -676,8 +683,8 @@ typedef const void *(*omci_prop_fn)(void *ctx, const char *name, int *len);
 
 /* Declare everything of the board's equipment beside its UNIs: circuit-packs,
  * ip-host-instances/ip-host-wan-mac, pots-uni-instances, onu-capacity,
- * downstream-queue-ports, upstream-queues-per-tcont, ctc-onu-capability, wifi-radios
- * and extra-me-instances.  Each is applied on its own; -> the first property
+ * downstream-queue-ports, upstream-queues-per-tcont, ctc-onu-capability, wifi-radios,
+ * wifi-ssids-per-radio and extra-me-instances.  Each is applied on its own; -> the first property
  * refused (its reason in @why), or NULL when none was. */
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why);

@@ -1533,6 +1533,13 @@ int omci_acs_fmt(struct omci_onu *o, char *out, size_t sz)
 	return pos + omci_shell_line(out + pos, sz - pos, "acs", "password", s);
 }
 
+/* The instance of the @i-th SSID the unit serves: radio i / wifi_ssids, its SSID i % wifi_ssids, in
+ * stock's numbering of OMCI_WIFI_SSIDS per radio. */
+static u16 omci_wifi_inst(const struct omci_onu *o, u16 i)
+{
+	return (u16)(i / o->cap.wifi_ssids * OMCI_WIFI_SSIDS + i % o->cap.wifi_ssids);
+}
+
 #ifdef CONFIG_OLT_HSGQ
 enum omci_wifi_kind { OMCI_WIFI_TEXT, OMCI_WIFI_FLAG, OMCI_WIFI_SECURITY };
 #define OMCI_WIFI_TEXT_LEN 24	/* an SSID or a key, as these MEs hold it */
@@ -1588,14 +1595,15 @@ static int omci_wifi_line(char *out, size_t sz, u16 ssid, const struct omci_wifi
  * the shell that applies it: only what it wrote.  It holds the keys: only a root-only file may show it. */
 int omci_wifi_fmt(struct omci_onu *o, char *out, size_t sz)
 {
-	u16 ssid, n = (u16)(OMCI_WIFI_SSIDS * o->cap.wifi_radios);
+	u16 i, n = (u16)(o->cap.wifi_ssids * o->cap.wifi_radios);
 	const struct omci_wifi_field *f;
 	int pos = 0;
 
-	for (ssid = 0; ssid < n; ssid++)
+	for (i = 0; i < n; i++) {
+		u16 ssid = omci_wifi_inst(o, i), band = ssid / OMCI_WIFI_SSIDS;
+
 		for (f = omci_wifi_fields; f < omci_wifi_fields + ARRAY_SIZE(omci_wifi_fields); f++) {
 			const struct omci_pool_attr *p = omci_pool_find(o, f->cls, ssid, f->attr);
-			u16 band = ssid / OMCI_WIFI_SSIDS;
 			bool profile = false;
 
 			if (!p && !(ssid % OMCI_WIFI_SSIDS) && band < 2 && f->profile[band]) {
@@ -1605,6 +1613,7 @@ int omci_wifi_fmt(struct omci_onu *o, char *out, size_t sz)
 			if (p)
 				pos += omci_wifi_line(out + pos, sz - pos, ssid, f, p->v, profile);
 		}
+	}
 	return pos;
 }
 #else
@@ -2510,7 +2519,7 @@ static u16 omci_mi_count(const struct omci_onu *o, u8 from)
 	case OMCI_MI_WIFI:
 		return o->cap.wifi_radios ? 1 : 0;
 	case OMCI_MI_WIFI_SSID:
-		return (u16)(OMCI_WIFI_SSIDS * o->cap.wifi_radios);
+		return (u16)(o->cap.wifi_ssids * o->cap.wifi_radios);
 	case OMCI_MI_EXTRA:
 		return o->extra_me_n;
 	case OMCI_MI_FAREND:
@@ -2541,7 +2550,7 @@ static u16 omci_mi_inst(const struct omci_onu *o, u8 from, u16 inst, u16 i)
 	case OMCI_MI_QUEUE:
 		return i < ds_q ? i : (u16)(0x8000 + i - ds_q);
 	case OMCI_MI_WIFI_SSID:
-		return i;
+		return omci_wifi_inst(o, i);
 	case OMCI_MI_EXTRA:
 		return o->extra_me[i][1];
 	case OMCI_MI_FAREND:
@@ -3185,6 +3194,25 @@ enum omci_uni_decl omci_onu_declare_wifi_be(struct omci_onu *o, const void *radi
 	return OMCI_UNI_DECL_OK;
 }
 
+enum omci_uni_decl omci_onu_declare_wifi_ssids_be(struct omci_onu *o, const void *ssids,
+						  int len, const char **why)
+{
+	const u8 *n = ssids;
+
+	if (len < 0) {
+		*why = "each radio serves the SSIDs stock numbers";
+		return OMCI_UNI_DECL_ABSENT;
+	}
+	if (!n || len != 1 || !n[0] || n[0] > OMCI_WIFI_SSIDS) {
+		*why = "the SSID count is not one byte in 1..4";
+		return OMCI_UNI_DECL_BAD;
+	}
+	o->cap.wifi_ssids = n[0];
+	omci_build_mib(o);
+	*why = "declared";
+	return OMCI_UNI_DECL_OK;
+}
+
 const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 				       void *ctx, const char **why)
 {
@@ -3219,6 +3247,8 @@ const char *omci_onu_declare_equipment(struct omci_onu *o, omci_prop_fn prop,
 		      "ctc-onu-capability");
 	a = prop(ctx, "wifi-radios", &alen);
 	OMCI_DECLARED(omci_onu_declare_wifi_be(o, a, alen, &reason), "wifi-radios");
+	a = prop(ctx, "wifi-ssids-per-radio", &alen);
+	OMCI_DECLARED(omci_onu_declare_wifi_ssids_be(o, a, alen, &reason), "wifi-ssids-per-radio");
 	a = prop(ctx, "extra-me-instances", &alen);
 	OMCI_DECLARED(omci_onu_declare_extra_me_be(o, a, alen, &reason),
 		      "extra-me-instances");
@@ -3296,6 +3326,7 @@ void omci_onu_init(struct omci_onu *o, const u8 sn[8], u8 mds_seed)
 	o->slots_n = 1;
 	o->cap.tcont_n = OMCI_TCONT_COUNT;
 	o->cap.sched_n = OMCI_TCONT_COUNT;
+	o->cap.wifi_ssids = OMCI_WIFI_SSIDS;
 	o->cap.onu2g_pq = 0x0060;
 	o->cap.gem_ports = 0x0040;
 	memcpy(o->cap.ctc, omci_ctc_default, sizeof(o->cap.ctc));

@@ -398,7 +398,7 @@ static int vid_slot(struct vid_count *c, int *n, const char *parent, int vid, in
 			return i;
 	if (*n == MAX_VIDS)
 		return -1;
-	snprintf(c[*n].parent, IFNAMSIZ, "%s", parent);
+	snprintf(c[*n].parent, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, parent);
 	c[*n].vid = vid;
 	c[*n].kind = kind;
 	c[*n].claimed = claimed;

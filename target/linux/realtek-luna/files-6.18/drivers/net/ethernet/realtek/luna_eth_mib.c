@@ -58,6 +58,7 @@ static const struct luna_mib_field luna_mib_rx[] = {
 /* ── STAT_PORT_TX_MIB, base 0x32000 on every Luna die ...
  * dev/MEASURED-luna_eth_mib.c.md sec 3. */
 #define LUNA_MIB_TX_OCTETS	0x28	/* its low word is the fibre port's progress witness, below */
+#define LUNA_MIB_TX_PAUSE	0x48	/* the switch pausing the NIC: its ring holds by right, below */
 static const struct luna_mib_field luna_mib_tx[] = {
 	{ "tx_multicast_ethstat", 0x00 },	/* etherStatsMulticastPkts	*/
 	{ "tx_broadcast_ethstat", 0x04 },	/* etherStatsBroadcastPkts	*/
@@ -76,7 +77,7 @@ static const struct luna_mib_field luna_mib_tx[] = {
 	{ "tx_late_collision",	0x3c },		/* dot3StatsLateCollisions	*/
 	{ "tx_collisions",	0x40 },		/* etherStatsCollisions		*/
 	{ "tx_excess_collision", 0x44 },	/* dot3StatsExcessiveCollisions	*/
-	{ "tx_pause",		0x48 },		/* dot3OutPauseFrames		*/
+	{ "tx_pause",		LUNA_MIB_TX_PAUSE },	/* dot3OutPauseFrames		*/
 	{ "tx_discards",	0x4c },		/* ifOutDiscards		*/
 	{ "tx_1519_to_max_frames", 0x50 },
 	{ "tx_bridge_discards",	0x58 },		/* dot1dTpPortInDiscards	*/
@@ -213,6 +214,19 @@ bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered)
 }
 EXPORT_SYMBOL_GPL(luna_mib_pon_egress_sample);
 
+/* The NIC's own transmit ring into the CPU port, in frames; the switch pausing the NIC holds it by right. */
+static struct eth_port_egress luna_nic_tx;
+
+bool luna_mib_nic_tx_sample(struct net_device *ndev, bool ready, u32 queued, u32 sent)
+{
+	struct luna_mib_state *s = &luna_mib;
+	u32 paused = s->sw ? ioread32(s->sw + SW_STAT_PORT_TX_MIB + s->map->cpu_port * SW_STAT_PORT_MIB_STRIDE +
+				      LUNA_MIB_TX_PAUSE) : 0;
+
+	return eth_ring_egress_judge(ndev, &luna_nic_tx, ready, paused, queued, sent);
+}
+EXPORT_SYMBOL_GPL(luna_mib_nic_tx_sample);
+
 /* The CPU port and each copper port as an egress: the pages its queues hold against the octets it counted out.
  * A port whose link is down or whose partner pauses it is not judged, nor the CPU port while its ring waits on us.
  * The fibre port is judged above: its queue also waits on the grants of the far end. */
@@ -264,7 +278,7 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 
 /* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map;
  * then the received-frame length witnesses and the ring watch. */
-#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 4)
+#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 5)
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
@@ -313,6 +327,7 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 		ethtool_puts(&data, luna_rx_len_names[i]);
 	eth_ring_watch_strings(&data);
 	ethtool_puts(&data, "pon_egress_stalls");
+	ethtool_puts(&data, "nic_tx_stalls");
 	ethtool_puts(&data, "pon_us_stalls");
 	ethtool_puts(&data, "pon_us_grantless");
 	ethtool_puts(&data, "switch_core_resets");
@@ -344,6 +359,7 @@ static void luna_mib_get_stats(struct net_device *ndev,
 	*data++ = luna_rx_len.short_wan;
 	data = eth_ring_watch_stats(&luna_ring_watch, data);
 	*data++ = READ_ONCE(luna_pon_egress.stalls);
+	*data++ = READ_ONCE(luna_nic_tx.watch.stalls);
 	*data++ = IS_ENABLED(CONFIG_LUNA_GPON) ? luna_gpon_us_stalls() : 0;
 	*data++ = IS_ENABLED(CONFIG_LUNA_GPON) ? luna_gpon_us_grantless() : 0;
 	*data++ = READ_ONCE(luna_core_resets);

@@ -139,6 +139,15 @@ static inline enum eth_watch eth_port_egress_sample(struct eth_port_egress *p, b
 	p->paused = paused;
 	return eth_egress_held_sample(&p->watch, judged ? queued : 0, held ? p->watch.sent : sent, now_ms);
 }
+
+/* A NIC's own transmit ring as an egress, in frames: a DMA engine sends thousands a second, so a ring that does not
+ * send its standing queue within a whole second holds it, whether it sends nothing or a trickle. `sent` never
+ * counts the frames a recovery dropped: only a send cures. */
+static inline enum eth_watch eth_ring_egress_sample(struct eth_port_egress *p, bool ready, u32 paused, u32 queued,
+						    u32 sent, u64 now_ms)
+{
+	return eth_port_egress_sample(p, ready, paused, queued, queued, sent, now_ms);
+}
 #ifdef __KERNEL__
 #include <linux/ethtool.h>
 #include <linux/jiffies.h>
@@ -203,6 +212,15 @@ static inline bool eth_port_egress_judge(struct net_device *ndev, struct eth_por
 						  jiffies64_to_msecs(get_jiffies_64()));
 
 	eth_egress_watch_act(ndev, &p->watch, v, name);
+	return v == ETH_WATCH_RECOVER;
+}
+/* -> true when the caller must recover its NIC (one reset, the ring realigned). */
+static inline bool eth_ring_egress_judge(struct net_device *ndev, struct eth_port_egress *p, bool ready, u32 paused,
+					 u32 queued, u32 sent)
+{
+	enum eth_watch v = eth_ring_egress_sample(p, ready, paused, queued, sent, jiffies64_to_msecs(get_jiffies_64()));
+
+	eth_egress_watch_act(ndev, &p->watch, v, "NIC TX");
 	return v == ETH_WATCH_RECOVER;
 }
 /* -> true when the caller should recover (schedule its NAPI). */

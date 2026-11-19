@@ -60,6 +60,14 @@ static inline bool luna_gmac_tx_ring_full(unsigned int head, unsigned int dirty,
 	return (head - dirty) >= size - 1 - reserve;
 }
 
+/* The rotation that puts the driver's oldest unsent descriptor (free-running counter @consumer) at the slot the
+ * engine fetches next (@cdo). An engine restarted at slot 0 under a non-zero counter otherwise sends from slots the
+ * driver never reclaims: every skb stays pinned and the ring fills (lab X111W 2026-11-19, after a GMAC reset). */
+static inline unsigned int luna_gmac_ring_rot(unsigned int cdo, unsigned int consumer, unsigned int size)
+{
+	return (cdo % size + size - consumer % size) % size;
+}
+
 /* Is @slot the ring's wrap descriptor -- the one that carries ...
  * dev/MEASURED-luna_gmac_logic.h.md sec 6. */
 static inline bool luna_gmac_slot_is_eor(unsigned int slot, unsigned int size)

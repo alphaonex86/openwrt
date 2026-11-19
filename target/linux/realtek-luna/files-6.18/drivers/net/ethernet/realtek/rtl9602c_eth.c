@@ -112,11 +112,6 @@ static unsigned int gmac_reset = 1;	/* now safe to reset: rtl9602c_uboot_swcore_
 module_param(gmac_reset, uint, 0644);	/* sampled at open(): ifdown/ifup re-applies */
 MODULE_PARM_DESC(gmac_reset, "1=cold GMAC bring-up (IP-block reset + stock IO_CMD edge), 0=legacy inherited");
 
-/* TX-DMA stall watchdog: a ring with published OWN ... -- dev/MEASURED-rtl9602c_eth.c.md sec 6. */
-static unsigned int tx_recover;
-module_param(tx_recover, uint, 0644);
-MODULE_PARM_DESC(tx_recover, "1=escalate a persistent TX-DMA park to a full GMAC reset (kills switch egress on this board!)");
-
 /* The stock device pokes the network-engine GO (0x18001038[31] + poll-clear) on
  * EVERY submit, not just OMCI injects; mirror it on the LAN xmit path too. */
 static unsigned int txgo_xmit = 1;
@@ -393,13 +388,12 @@ struct rtl9602c_eth {
 	 * numbering is unchanged; only the EOR placement and the TxCDO->slot
 	 * translation depend on rot. */
 	unsigned int	tx_rot, otx_rot;
-	/* TX-DMA park watchdog (see tx_recover). stall_since = jiffies of the
-	 * first tick that saw OWN stuck at the HW cursor with no dirty progress;
-	 * 0 = healthy. recover_work runs the IP-block power-cycle + re-arm. */
+	/* stall_since = jiffies of the first tick that saw OWN stuck at the HW
+	 * cursor with no dirty progress, 0 = healthy (ethdump stall_ms). The
+	 * recovery is the family ring watch's (luna_mib_nic_tx_sample). */
 	unsigned long	stall_since;
 	unsigned int	stall_lastdirty;
-	unsigned int	stall_level;	/* 0: next escalation = soft re-arm;
-					 * 1: soft re-arm failed -> IP cycle */
+	u32		tx_dropped;	/* frames a recovery dropped: never "sent" to the watch */
 	u32		dbg_rearm;	/* soft TxFDP re-arms (publish + watchdog) */
 	struct work_struct recover_work;
 	struct eth_core_recovery sw_recovery;	/* the switch core reset and its re-init */
@@ -616,12 +610,12 @@ static inline unsigned int otx_eor_slot(struct rtl9602c_eth *ep)
  * dev/MEASURED-rtl9602c_eth.c.md sec 27. */
 static void rtl9602c_tx_align(struct rtl9602c_eth *ep)
 {
-	ep->tx_rot = ioread16(ep->base + R_TxCDO1) % TX_RING_SIZE;
-	ep->otx_rot = 0;
+	ep->tx_rot = luna_gmac_ring_rot(ioread16(ep->base + R_TxCDO1), ep->tx_dirty, TX_RING_SIZE);
+	ep->otx_rot = luna_gmac_ring_rot(0, ep->otx_dirty, OTX_RING_SIZE);
 	if (omci_tx_ring) {
 		unsigned int h = rtl9602c_omci_hwring(omci_tx_ring);
 
-		ep->otx_rot = ioread16(ep->base + R_TxCDO(h)) % OTX_RING_SIZE;
+		ep->otx_rot = luna_gmac_ring_rot(ioread16(ep->base + R_TxCDO(h)), ep->otx_dirty, OTX_RING_SIZE);
 	}
 	ep->dbg_rearm++;
 }
@@ -1678,26 +1672,12 @@ static void rtl9602c_eth_tx_rekick(struct rtl9602c_eth *ep)
 
 	/* Park watchdog. A briefly-parked ring is normal (the ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 78. */
-	if ((!tx_recover && !tx_softrearm) || ep->closing) {
+	if (!parked || ep->closing) {
 		ep->stall_since = 0;
-	} else if (!parked) {
-		ep->stall_since = 0;
-		ep->stall_level = 0;
 	} else if (!ep->stall_since ||
 		   ep->tx_dirty + ep->otx_dirty != ep->stall_lastdirty) {
-		if (ep->stall_since)
-			ep->stall_level = 0;	/* progress: restart the ladder */
 		ep->stall_since = jiffies;
 		ep->stall_lastdirty = ep->tx_dirty + ep->otx_dirty;
-	} else if (time_after(jiffies,
-			      ep->stall_since + msecs_to_jiffies(60))) {
-		if (tx_recover) {
-			/* Level 1: full GMAC reset + reprogram (CMD.RST by
-			 * default; BSP_IP_SEL power-cycle if recover_rst=0). */
-			ep->stall_since = 0;
-			ep->stall_level = 0;
-			schedule_work(&ep->recover_work);
-		}
 	}
 }
 
@@ -1747,12 +1727,17 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 {
 	struct rtl9602c_eth *ep = timer_container_of(ep, t, poll_timer);
 	unsigned long flags;
+	u32 queued, sent;
 
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);
 	rtl9602c_eth_omci_reclaim(ep);
 	rtl9602c_eth_tx_rekick(ep);
+	queued = ep->tx_head - ep->tx_dirty + ep->otx_head - ep->otx_dirty;
+	sent = ep->tx_dirty + ep->otx_dirty - ep->tx_dropped;
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
+	if (luna_mib_nic_tx_sample(ep->ndev, !ep->closing, queued, sent))
+		schedule_work(&ep->recover_work);	/* one GMAC reset, the ring realigned */
 	if (eth_ring_watch_rx(&luna_ring_watch, ep->ndev, rtl9602c_eth_rx_waiting(ep), ep->dbg_filled))
 		napi_schedule(&ep->napi);
 	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
@@ -1760,10 +1745,7 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 	if (!eth_core_recovery_busy(&ep->sw_recovery) &&
 	    luna_mib_port_egress_sample(ep->ndev, !rtl9602c_eth_rx_waiting(ep)))
 		eth_core_recovery_ask(&ep->sw_recovery);
-	/* While a park is pending, tighten the cadence so the 60ms escalation
-	 * ladder is not quantised by the 100ms backstop interval. */
-	mod_timer(&ep->poll_timer, jiffies +
-		  (ep->stall_since ? msecs_to_jiffies(20) : REKICK_INTERVAL));
+	mod_timer(&ep->poll_timer, jiffies + REKICK_INTERVAL);
 }
 
 /* Legacy pure-poll fallback (ep->irq <= 0): the original 2ms ...
@@ -2032,11 +2014,11 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 	luna_gpon_nic_reset_begin();
 	ep->in_recovery = true;
 	netdev_warn(ndev,
-		    "TX-DMA parked (head=%u dirty=%u otx=%u/%u cdo0=%u txok=%u IO_CMD=%08x ISR1=%08x): IP-block power-cycle recovery #%u\n",
+		    "TX-DMA parked (head=%u dirty=%u otx=%u/%u cdo0=%u txok=%u IO_CMD=%08x ISR1=%08x): GMAC %s recovery #%u\n",
 		    ep->tx_head, ep->tx_dirty, ep->otx_head, ep->otx_dirty,
 		    ioread16(ep->base + R_TxCDO(0)), ep_rd(ep, R_TXOKCNT) >> 16,
 		    ep_rd(ep, R_IO_CMD), ep_rd(ep, R_ISR1),
-		    ep->dbg_tx_recover + 1);
+		    use_rst ? "reset" : "IP-block power-cycle", ep->dbg_tx_recover + 1);
 
 	netif_stop_queue(ndev);
 	napi_disable(&ep->napi);
@@ -2063,9 +2045,9 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 	}
 
 	spin_lock_irqsave(&ep->tx_lock, flags);
-	/* Last-resort path (off by default — resets kill the switch egress on
-	 * this board): drop everything in flight, re-arm both rings from
-	 * scratch (engine stopped => CDO genuinely resets), align at 0. */
+	/* Drop everything in flight and re-arm both rings from scratch; the engine restarts at CDO 0, which
+	 * rtl9602c_tx_align() maps onto the driver's counters. */
+	ep->tx_dropped += ep->tx_head - ep->tx_dirty + ep->otx_head - ep->otx_dirty;
 	while (ep->tx_dirty != ep->tx_head) {
 		i = tx_slot(ep, ep->tx_dirty);
 		if (ep->tx_skb[i]) {
@@ -2099,7 +2081,7 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 	}
 	wmb();				/* ring state before the engine restart */
 	rtl9602c_hw_program(ep);
-	rtl9602c_tx_align(ep);		/* CDO=0 post-reset -> rot 0 */
+	rtl9602c_tx_align(ep);		/* the engine's slot 0 = the driver's next counter */
 	ep->dbg_tx_recover++;
 	ep->stall_since = 0;
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
@@ -2357,7 +2339,7 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 		 * dev/MEASURED-rtl9602c_eth.c.md sec 135. */
 		rtl9602c_datapath_tables_init();
 		rtl9602c_hw_program(ep);
-		rtl9602c_tx_align(ep);	/* fresh engine: CDO=0 -> rot 0 */
+		rtl9602c_tx_align(ep);	/* fresh engine: its slot 0 = the driver's next counter */
 		if (ep->txgo)	/* stock's value of this one bit; the boot loader's training stays */
 			iowrite32(ioread32(ep->txgo + MEMCTL_MCR) | BIT(19), ep->txgo + MEMCTL_MCR);
 		/* Re-establish the FULL PON US/DS-NIC datapath against the ...

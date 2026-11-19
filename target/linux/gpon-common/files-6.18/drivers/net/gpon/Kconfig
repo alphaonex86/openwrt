@@ -249,6 +249,7 @@ config ZX279200
 
 config ETH_WATCH_SPENT_STAY_UP
 	bool "A spent recovery budget keeps the unit up (diagnosis image)"
+	depends on GPON_CORE
 	default n
 	help
 	  What a watch (fibre, CPU port, copper, PON upstream, NIC ring) does

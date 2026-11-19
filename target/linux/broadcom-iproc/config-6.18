@@ -3,6 +3,7 @@
 # CONFIG_BCM_CYGNUS_PHY is not set
 # CONFIG_CLK_BCM_NS2 is not set
 # CONFIG_CLK_BCM_SR is not set
+# CONFIG_ETH_WATCH_SPENT_STAY_UP is not set
 # CONFIG_GPON_GEM_DIAG is not set
 # CONFIG_GPON_OLT_DIAG is not set
 # CONFIG_GPON_OMCI_DIAG is not set

@@ -2007,6 +2007,24 @@ config LUNA_WDT
 	  To compile this driver as a module, choose M here: the module will
 	  be called luna_wdt.
 
+config BUS_TIMEOUT_MONITOR
+	bool "Bus timeout monitors: a bus slave that never answers is logged and counted"
+	depends on HAS_IOMEM && OF
+	help
+	  Arms the SoC's bus timeout monitors that its device tree describes
+	  ("bus-timeout-monitor"), which the boot loader leaves off. Off, an
+	  access no slave answers stops the CPU with interrupts never served,
+	  until the watchdog resets the unit with no text. On, the monitor ends
+	  the access; the driver logs the monitor, the address and the
+	  interrupted code (rate-limited), counts it in sysfs (trips,
+	  last_address), acknowledges it, and the unit goes on. A value that
+	  differs from stock, kept for diagnosis and survival (operator,
+	  2026-11-19: every image). Only a chip whose margin against its slow
+	  legitimate slaves is measured carries the node.
+	  MEASURED 2026-11-19 (X111W, gcc 14.3): the object 2.1 KiB of text,
+	  the lzma kernel +0.5 KiB, the raw image unchanged; at run time one
+	  interrupt and 24 words written at probe.
+
 config GXP_WATCHDOG
 	tristate "HPE GXP watchdog support"
 	depends on ARCH_HPE_GXP || COMPILE_TEST

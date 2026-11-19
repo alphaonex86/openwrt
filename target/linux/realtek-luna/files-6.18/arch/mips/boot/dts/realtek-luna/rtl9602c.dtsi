@@ -91,6 +91,30 @@
 		interrupts = <43>;
 	};
 
+	bus-timeout@18005100 {
+		/*
+		 * The bus timeout monitors, which the boot loader leaves off:
+		 * OCP0, then the 11 Lexra ones (peripheral slave, LX0-2 master
+		 * and slave, the PON buffer's four), 0x10 apart. Control: bit 31
+		 * enable, [30:28] the timeout (7 the longest); +4 status, bit 31
+		 * write 1 to clear; +8 the address of the access it ended.
+		 * Lab X111W 2026-11-19: a trip of the peripheral slave monitor
+		 * (the switch region) raised input 31, no bus error; legitimate
+		 * slaves tripped at timeout 1, never at 3.
+		 */
+		compatible = "realtek,luna-bus-timeout", "bus-timeout-monitor";
+		reg = <0x18005100 0x0c>, <0x18005200 0xb0>;
+		monitor-control = <0x80000000 0x70000000 0x70000000>;
+		monitor-status = <0x04 0x80000000>;
+		monitor-address = <0x08>;
+		monitor-stride = <0x10>;
+		monitor-names = "OCP0", "LX peripheral slave", "LX0 master", "LX0 slave",
+				"LX1 master", "LX1 slave", "LX2 master", "LX2 slave",
+				"PON US write", "PON US read", "PON DS write", "PON DS read";
+		interrupt-parent = <&intc>;
+		interrupts = <31>;
+	};
+
 	watchdog@18003260 {
 		/*
 		 * The SoC watchdog, at the top of the same TC block (TC_BASE +

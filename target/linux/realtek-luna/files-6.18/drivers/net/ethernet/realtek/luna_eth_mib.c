@@ -197,6 +197,8 @@ bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered)
 	enum eth_watch v;
 	u32 sent;
 
+	if (IS_ENABLED(CONFIG_LUNA_GPON))
+		luna_gpon_us_sample(wan);	/* the next stage: what the PON-IP took, sent upstream */
 	if (!s->sw)
 		return false;
 	sent = ioread32(s->sw + SW_STAT_PORT_TX_MIB + s->map->pon_port * SW_STAT_PORT_MIB_STRIDE + LUNA_MIB_TX_OCTETS);
@@ -260,7 +262,7 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 
 /* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map;
  * then the received-frame length witnesses and the ring watch. */
-#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 2)
+#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 3)
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
@@ -309,6 +311,7 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 		ethtool_puts(&data, luna_rx_len_names[i]);
 	eth_ring_watch_strings(&data);
 	ethtool_puts(&data, "pon_egress_stalls");
+	ethtool_puts(&data, "pon_us_stalls");
 	ethtool_puts(&data, "switch_core_resets");
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
@@ -338,6 +341,7 @@ static void luna_mib_get_stats(struct net_device *ndev,
 	*data++ = luna_rx_len.short_wan;
 	data = eth_ring_watch_stats(&luna_ring_watch, data);
 	*data++ = READ_ONCE(luna_pon_egress.stalls);
+	*data++ = IS_ENABLED(CONFIG_LUNA_GPON) ? luna_gpon_us_stalls() : 0;
 	*data++ = READ_ONCE(luna_core_resets);
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))

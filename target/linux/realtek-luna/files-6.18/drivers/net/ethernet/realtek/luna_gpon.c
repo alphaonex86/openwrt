@@ -24,6 +24,7 @@
 #include "luna_gpon_logic.h"	/* hoisted logic */
 #include <gpon_ddm.h>	/* the common SFF-8472 A2h decode and the ANI-G unit */
 #include "hwio.h"	/* flowcore: the ONE canonical field-mask RMW */
+#include "gpon_us_watch.h"	/* the core: the PON upstream judged past the switch */
 #include "gpon_gtc_ploam.h"	/* the core: the DS PLOAM buffer unpack, fed this shell's gpon_io */
 #include <linux/init.h>
 #include <linux/io.h>
@@ -5073,6 +5074,31 @@ void luna_gpon_stall_dump(struct net_device *ndev)
 		eth_regs_log(ndev, "stall pon", pidump_ranges, ARRAY_SIZE(pidump_ranges), pidump_rd, NULL);
 }
 EXPORT_SYMBOL_GPL(luna_gpon_stall_dump);
+
+/* gpon_us_watch.h; the frames counted in SID counter group 4, where every SID not enrolled in CNT_MASK_US counts (the
+ * OMCC is group 0): lab X111W 2026-11-19, 20 WAN pings moved it by 22 taken and 22 sent, gpon0's tx_packets by 22. */
+#define LUNA_US_SID_GRP_ALL	(4u * PI_SID_CNT_GROUP_STRIDE)
+static struct eth_egress_watch luna_us_watch;
+
+void luna_gpon_us_sample(struct net_device *wan)
+{
+	enum eth_watch v = gpon_us_watch_sample(&luna_us_watch, READ_ONCE(luna_activation_ready) && gpon_fsm_state == 5 &&
+						luna_ploam.omcc_installed, pi_rd(PI_RX_SID_CNT_US + LUNA_US_SID_GRP_ALL),
+						pi_rd(PI_TX_SID_CNT_US + LUNA_US_SID_GRP_ALL), jiffies64_to_msecs(get_jiffies_64()));
+
+	if (v != ETH_WATCH_OK && luna_us_watch.stalls == 1)
+		luna_gpon_stall_dump(wan);
+	eth_egress_watch_act(wan, &luna_us_watch, v, "PON upstream");
+	if (v == ETH_WATCH_RECOVER)
+		gpon_us_feed_rearm_light();
+}
+EXPORT_SYMBOL_GPL(luna_gpon_us_sample);
+
+u32 luna_gpon_us_stalls(void)
+{
+	return READ_ONCE(luna_us_watch.stalls);
+}
+EXPORT_SYMBOL_GPL(luna_gpon_us_stalls);
 
 static int pidump_proc_show(struct seq_file *s, void *v)
 {

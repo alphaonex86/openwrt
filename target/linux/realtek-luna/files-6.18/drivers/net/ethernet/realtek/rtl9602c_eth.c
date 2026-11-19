@@ -2607,16 +2607,17 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
  * What the reset moves (lab X111W 2026-11-19, under traffic, flows offloaded): none of the words below that our
  * code writes, and no table row. It moves status only: CHIP_DEBUG_OUT 0xa0, 0x1c098, the low byte of 0x20808 and
  * 0x20c08, the buffer accounting 0x23100-0x23118 and the queue occupancy, all moving on their own on an idle unit;
- * 0x15000-0x15004 reload by themselves before the re-init. In the NIC, its counters and the interrupt masks that
- * NAPI holds while it is stopped. Those are "status", compared and never judged. */
+ * 0x15000-0x15004, which the chip reloads itself (idle: before the re-init; after a CPU-port stall: later). In the
+ * NIC, its counters and the interrupt masks that NAPI holds while it is stopped. Those are "status", compared and
+ * never judged. */
 static const struct eth_reg_range rtl9602c_state_regs[] = {
-	{ 0x00000, 40 }, { 0x000a4, 23 }, { 0x00100, 128 }, { 0x11000, 128 }, { 0x13000, 16 }, { 0x15000, 24 },
+	{ 0x00000, 40 }, { 0x000a4, 23 }, { 0x00100, 128 }, { 0x11000, 128 }, { 0x13000, 16 }, { 0x15008, 22 },
 	{ 0x16000, 8 }, { 0x17000, 4 }, { 0x1c000, 38 }, { 0x1c09c, 153 }, { 0x1e000, 24 }, { 0x20000, 256 },
 	{ 0x20800, 2 }, { 0x2080c, 13 }, { 0x20c00, 2 }, { 0x20c0c, 13 }, { 0x23000, 64 }, { 0x2311c, 57 },
 	{ 0x25000, 4 }, { 0x27000, 16 }, { 0x2a000, 10 }, { 0x2d800, 64 }, { 0, 0 } };
 static const struct eth_reg_range rtl9602c_state_status[] = {
-	{ 0x000a0, 1 }, { 0x1c098, 1 }, { 0x20808, 1 }, { 0x20c08, 1 }, { 0x23100, 7 }, { 0x2d018, 3 }, { 0x2d028, 4 },
-	{ 0x2d058, 32 }, { 0, 0 } };
+	{ 0x000a0, 1 }, { 0x15000, 2 }, { 0x1c098, 1 }, { 0x20808, 1 }, { 0x20c08, 1 }, { 0x23100, 7 }, { 0x2d018, 3 },
+	{ 0x2d028, 4 }, { 0x2d058, 32 }, { 0, 0 } };
 static const struct eth_reg_range rtl9602c_state_mib[] = { { SW_STAT_PORT_TX_MIB, 128 },
 							   { SW_STAT_PORT_RX_MIB_RTL9602C, 128 }, { 0, 0 } };
 static const struct eth_reg_range rtl9602c_state_nic[] = {

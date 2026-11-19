@@ -4,6 +4,7 @@
 #include "wifi.h"
 #include "core.h"
 #include "pci.h"
+#include "eth_rx_geom.h"
 #include "base.h"
 #include "ps.h"
 #include "efuse.h"
@@ -94,6 +95,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	unsigned int rows[RTL_PCI_MAX_TX_QUEUE_COUNT][6];
 	u64 addresses[RTL_PCI_MAX_TX_QUEUE_COUNT];
 	u32 bcn_irq, bcn_tasklet, bcn_late, txdma_err, txdma_status, hang_resets;
+	u32 rx_partial = rtlpci->rx_partial, rx_oversize = rtlpci->rx_oversize;
 	unsigned long flags;
 	int q;
 
@@ -130,6 +132,7 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	seq_printf(m, "bcn_irq %u bcn_tasklet %u bcn_late %u txdma_err %u txdma_status %08x hang_resets %u\n",
 		   bcn_irq, bcn_tasklet, bcn_late, txdma_err, txdma_status,
 		   hang_resets);
+	seq_printf(m, "rx_partial %u rx_oversize %u\n", rx_partial, rx_oversize);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rtl_pci_tx_queues);
@@ -686,62 +689,125 @@ tx_status_ok:
 		rtl_lps_leave(hw, false);
 }
 
-static struct sk_buff *_rtl_pci_alloc_rx_skb(struct ieee80211_hw *hw)
+/* One order covers the buffer: order 0 (one 4 KB page, as stock's) for the 4042-byte request. */
+#define RTL_PCI_RX_ORDER	get_order(RTL_PCI_RX_BUFFER_SIZE)
+
+static int _rtl_pci_rx_buf_alloc(struct ieee80211_hw *hw, struct rtl_rx_buf *rb)
 {
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-	struct sk_buff *skb = dev_alloc_skb(rtlpci->rxbuffersize);
+	struct page *page = alloc_pages(GFP_KERNEL, RTL_PCI_RX_ORDER);
 	dma_addr_t dma;
 
-	if (!skb)
-		return NULL;
-	dma = dma_map_single(&rtlpci->pdev->dev, skb_tail_pointer(skb),
-			     rtlpci->rxbuffersize, DMA_FROM_DEVICE);
+	if (!page)
+		return -ENOMEM;
+	dma = dma_map_page(&rtlpci->pdev->dev, page, 0, rtlpci->rxbuffersize,
+			   DMA_FROM_DEVICE);
 	if (dma_mapping_error(&rtlpci->pdev->dev, dma)) {
-		kfree_skb(skb);
-		return NULL;
+		__free_pages(page, RTL_PCI_RX_ORDER);
+		return -ENOMEM;
 	}
-	*((dma_addr_t *)skb->cb) = dma;
-	return skb;
+	rb->page = page;
+	rb->dma = dma;
+	return 0;
 }
 
-/* Supplied buffers already carry a live DMA mapping. */
-static void _rtl_pci_prepare_rxdesc(struct ieee80211_hw *hw,
-				    struct sk_buff *skb, u8 *entry,
-				    int rxring_idx, int desc_idx)
+static void _rtl_pci_rx_buf_free(struct ieee80211_hw *hw, struct rtl_rx_buf *rb)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+
+	if (!rb->page)
+		return;
+	dma_unmap_page(&rtlpci->pdev->dev, rb->dma, rtlpci->rxbuffersize,
+		       DMA_FROM_DEVICE);
+	__free_pages(rb->page, RTL_PCI_RX_ORDER);
+	rb->page = NULL;
+}
+
+/* A descriptor handed back to the chip with the mapped buffer `dma`. */
+static void _rtl_pci_prepare_rxdesc(struct ieee80211_hw *hw, u8 *entry,
+				    dma_addr_t dma)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-	u32 bufferaddress;
+	u32 bufferaddress = dma;
 	u8 tmp_one = 1;
-	bufferaddress = *((dma_addr_t *)skb->cb);
-	rtlpci->rx_ring[rxring_idx].rx_buf[desc_idx] = skb;
+
 	if (rtlpriv->use_new_trx_flow) {
-		/* skb->cb may be 64 bit address */
-		rtlpriv->cfg->ops->set_desc(hw, (u8 *)entry, false,
-					    HW_DESC_RX_PREPARE,
-					    (u8 *)(dma_addr_t *)skb->cb);
+		rtlpriv->cfg->ops->set_desc(hw, entry, false,
+					    HW_DESC_RX_PREPARE, (u8 *)&dma);
 	} else {
-		rtlpriv->cfg->ops->set_desc(hw, (u8 *)entry, false,
+		rtlpriv->cfg->ops->set_desc(hw, entry, false,
 					    HW_DESC_RXBUFF_ADDR,
 					    (u8 *)&bufferaddress);
-		rtlpriv->cfg->ops->set_desc(hw, (u8 *)entry, false,
+		rtlpriv->cfg->ops->set_desc(hw, entry, false,
 					    HW_DESC_RXPKT_LEN,
 					    (u8 *)&rtlpci->rxbuffersize);
-		rtlpriv->cfg->ops->set_desc(hw, (u8 *)entry, false,
+		rtlpriv->cfg->ops->set_desc(hw, entry, false,
 					    HW_DESC_RXOWN,
 					    (u8 *)&tmp_one);
 	}
 }
 
-static int _rtl_pci_init_one_rxdesc(struct ieee80211_hw *hw, u8 *entry,
-				  int rxring_idx, int desc_idx)
+/* Every descriptor at its own buffer while the ring is armed, else at the sink: the chip can
+ * only ever reach memory mapped for it. */
+static void _rtl_pci_rx_point(struct ieee80211_hw *hw, int rxring_idx)
 {
-	struct sk_buff *skb = _rtl_pci_alloc_rx_skb(hw);
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[rxring_idx];
+	u8 *entry = NULL;
+	u8 tmp_one = 1;
+	int i;
 
-	if (!skb)
+	for (i = 0; i < rtlpci->rxringcount; i++) {
+		entry = rtlpriv->use_new_trx_flow ? (u8 *)&ring->buffer_desc[i] :
+						    (u8 *)&ring->desc[i];
+		_rtl_pci_prepare_rxdesc(hw, entry, ring->armed ?
+					ring->rx_buf[i].dma : ring->sink.dma);
+	}
+	if (!rtlpriv->use_new_trx_flow)
+		rtlpriv->cfg->ops->set_desc(hw, entry, false, HW_DESC_RXERO,
+					    &tmp_one);
+}
+
+/* ifup: the ring's buffers, all or none. The descriptors leave the sink only once every slot
+ * holds its buffer, so a failure leaves nothing the chip or the RX pass can reach. */
+static int _rtl_pci_rx_arm(struct ieee80211_hw *hw)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+	int i;
+
+	if (ring->armed)
 		return 0;
-	_rtl_pci_prepare_rxdesc(hw, skb, entry, rxring_idx, desc_idx);
-	return 1;
+	for (i = 0; i < rtlpci->rxringcount; i++)
+		if (_rtl_pci_rx_buf_alloc(hw, &ring->rx_buf[i]))
+			goto unwind;
+	ring->armed = true;
+	_rtl_pci_rx_point(hw, RTL_PCI_RX_MPDU_QUEUE);
+	return 0;
+
+unwind:
+	pr_err("rtlwifi: no memory for RX buffer %d of %d: the interface stays down\n",
+	       i + 1, rtlpci->rxringcount);
+	while (i--)
+		_rtl_pci_rx_buf_free(hw, &ring->rx_buf[i]);
+	return -ENOMEM;
+}
+
+/* ifdown, with the chip's DMA already off: the descriptors back at the sink, then the buffers. */
+static void _rtl_pci_rx_release(struct ieee80211_hw *hw, int rxring_idx)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[rxring_idx];
+	int i;
+
+	if (ring->armed) {
+		ring->armed = false;
+		_rtl_pci_rx_point(hw, rxring_idx);
+	}
+	for (i = 0; i < rtlpci->rxringcount; i++)
+		_rtl_pci_rx_buf_free(hw, &ring->rx_buf[i]);
 }
 
 /*hsisr interrupt handler*/
@@ -775,19 +841,22 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 		.rate = 0,
 	};
 
+	/* no buffer behind the descriptors: whatever the chip reports went to the sink */
+	if (unlikely(!rtlpci->rx_ring[rxring_idx].armed))
+		return 0;
 	/*RX NORMAL PKT */
 	while (done < budget) {
 		struct ieee80211_hdr *hdr;
 		__le16 fc;
-		u32 len, off;
+		u32 len, off, used;
 		/*rx buffer descriptor */
 		struct rtl_rx_buffer_desc *buffer_desc = NULL;
 		/*if use new trx flow, it means wifi info */
 		struct rtl_rx_desc *pdesc = NULL;
-		struct sk_buff *buf = rtlpci->rx_ring[rxring_idx].rx_buf[
-				      rtlpci->rx_ring[rxring_idx].idx];
-		dma_addr_t dma = *((dma_addr_t *)buf->cb);
+		struct rtl_rx_buf *rb;
 		struct sk_buff *skb;
+		bool whole = true;
+		u8 *buf;
 
 		if (rtlpriv->use_new_trx_flow) {
 			if (rx_remained_cnt == 0)
@@ -798,7 +867,6 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 				return done;
 			buffer_desc = &rtlpci->rx_ring[rxring_idx].buffer_desc[
 				rtlpci->rx_ring[rxring_idx].idx];
-			pdesc = (struct rtl_rx_desc *)buf->data;
 		} else {	/* rx descriptor */
 			pdesc = &rtlpci->rx_ring[rxring_idx].desc[
 				rtlpci->rx_ring[rxring_idx].idx];
@@ -810,33 +878,52 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 				return done;
 		}
 
-		dma_sync_single_for_cpu(&rtlpci->pdev->dev, dma,
+		/* the chip filled this slot, so the ring is armed */
+		rb = &rtlpci->rx_ring[rxring_idx].rx_buf[rtlpci->rx_ring[rxring_idx].idx];
+		buf = page_address(rb->page);
+		if (rtlpriv->use_new_trx_flow)
+			pdesc = (struct rtl_rx_desc *)buf;
+		used = rtlpci->rxbuffersize;
+		dma_sync_single_for_cpu(&rtlpci->pdev->dev, rb->dma,
 					rtlpci->rxbuffersize, DMA_FROM_DEVICE);
+
+		if (rtlpriv->use_new_trx_flow)
+			whole = rtlpriv->cfg->ops->rx_check_dma_ok(hw,
+								   (u8 *)buffer_desc,
+								   hw_queue);
+		/* A frame over several buffers is never read: a later buffer starts with frame
+		 * bytes, which a peer's payload could shape into a descriptor. A buffer holds
+		 * the 3839-byte A-MSDU we advertise, so only a frame past it spans. */
+		if (unlikely(!whole)) {
+			rtlpci->rx_partial++;
+			pr_warn_once("rtlwifi: a received frame spans several buffers: dropped (rx_partial)\n");
+			goto new_trx_end;
+		}
 
 		memset(&rx_status, 0, sizeof(rx_status));
 		rtlpriv->cfg->ops->query_rx_desc(hw, &stats,
 						 &rx_status, (u8 *)pdesc, buf);
 
-		if (rtlpriv->use_new_trx_flow)
-			rtlpriv->cfg->ops->rx_check_dma_ok(hw,
-							   (u8 *)buffer_desc,
-							   hw_queue);
-
 		len = rtlpriv->cfg->ops->get_desc(hw, (u8 *)pdesc, false,
 						  HW_DESC_RXPKT_LEN);
 		off = stats.rx_drvinfo_size + stats.rx_bufshift +
 		      (rtlpriv->use_new_trx_flow ? 24 : 0);
-		/* The frame leaves as a copy of its own size: the ring buffer stays
-		 * mapped in its slot, no 4 KB buffer is allocated per frame. */
-		skb = off + len <= rtlpci->rxbuffersize ?
-		      dev_alloc_skb(len + 128) : NULL;
-		if (unlikely(!skb)) {
-			rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
-				"RX frame %u+%u dropped: no memory or past the buffer\n",
-				off, len);
+		if (unlikely(!eth_rx_fits(off, len, rtlpci->rxbuffersize))) {
+			rtlpci->rx_oversize++;
+			pr_warn_once("rtlwifi: a received length %u+%u is past the %u-byte buffer: dropped (rx_oversize)\n",
+				     off, len, rtlpci->rxbuffersize);
 			goto new_trx_end;
 		}
-		skb_put_data(skb, buf->data + off, len);
+		used = off + len;
+		/* The frame leaves as a copy of its own size: the ring buffer stays
+		 * mapped in its slot, nothing is allocated per buffer. */
+		skb = dev_alloc_skb(len + 128);
+		if (unlikely(!skb)) {
+			rtl_dbg(rtlpriv, COMP_ERR, DBG_WARNING,
+				"RX frame %u+%u dropped: no memory\n", off, len);
+			goto new_trx_end;
+		}
+		skb_put_data(skb, buf + off, len);
 		/* handle command packet here */
 		if (stats.packet_report_type == C2H_PACKET) {
 			rtl_c2hcmd_enqueue(hw, skb);
@@ -895,8 +982,7 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 		}
 new_trx_end:
 		/* only what was read can be stale in the cache when the slot refills */
-		dma_sync_single_for_device(&rtlpci->pdev->dev, dma,
-					   min_t(u32, off + len, rtlpci->rxbuffersize),
+		dma_sync_single_for_device(&rtlpci->pdev->dev, rb->dma, used,
 					   DMA_FROM_DEVICE);
 		if (rtlpriv->use_new_trx_flow) {
 			rtlpci->rx_ring[hw_queue].next_rx_rp += 1;
@@ -910,9 +996,7 @@ new_trx_end:
 		      rtlpriv->link_info.num_rx_inperiod > 2)
 			_rtl_pci_lps_leave(hw);
 		if (rtlpriv->use_new_trx_flow) {
-			_rtl_pci_prepare_rxdesc(hw, buf, (u8 *)buffer_desc,
-					       rxring_idx,
-					       rtlpci->rx_ring[rxring_idx].idx);
+			_rtl_pci_prepare_rxdesc(hw, (u8 *)buffer_desc, rb->dma);
 			/* ★ THE SLOT IS HANDED BACK ONLY ONCE IT HOLDS ITS NEW, MAPPED
 			 * BUFFER (Codex, 2026-09-28): the host index at 0x3B4 used to be
 			 * published BEFORE this refill, so the device was given a slot
@@ -925,9 +1009,7 @@ new_trx_end:
 			rtlpriv->io.write16(rtlpriv, 0x3B4,
 					    rtlpci->rx_ring[hw_queue].next_rx_rp);
 		} else {
-			_rtl_pci_prepare_rxdesc(hw, buf, (u8 *)pdesc,
-					       rxring_idx,
-					       rtlpci->rx_ring[rxring_idx].idx);
+			_rtl_pci_prepare_rxdesc(hw, (u8 *)pdesc, rb->dma);
 			if (rtlpci->rx_ring[rxring_idx].idx ==
 			    rtlpci->rxringcount - 1)
 				rtlpriv->cfg->ops->set_desc(hw, (u8 *)pdesc,
@@ -1422,69 +1504,37 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 
 static void _rtl_pci_free_rx_ring(struct ieee80211_hw *hw, int rxring_idx);
 
-/* A ring that fails part-way frees what it prepared (buffers, mappings, the coherent
- * ring): the probe's failure path never reaches the deinit (Codex, 2026-09-28). */
+/* Probe: the descriptor ring and its sink, every descriptor at the sink; the buffers come at ifup. */
 static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 {
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	int i;
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[rxring_idx];
+	void *descs;
 
 	if (rtlpriv->use_new_trx_flow) {
-		struct rtl_rx_buffer_desc *entry = NULL;
-		/* alloc dma for this ring */
-		rtlpci->rx_ring[rxring_idx].buffer_desc =
+		descs = ring->buffer_desc =
 		    dma_alloc_coherent(&rtlpci->pdev->dev,
-				       sizeof(*rtlpci->rx_ring[rxring_idx].buffer_desc) *
-				       rtlpci->rxringcount,
-				       &rtlpci->rx_ring[rxring_idx].dma, GFP_KERNEL);
-		if (!rtlpci->rx_ring[rxring_idx].buffer_desc ||
-		    (ulong)rtlpci->rx_ring[rxring_idx].buffer_desc & 0xFF) {
-			pr_err("Cannot allocate RX ring\n");
-			return -ENOMEM;
-		}
-
-		/* init every desc in this ring */
-		rtlpci->rx_ring[rxring_idx].idx = 0;
-		for (i = 0; i < rtlpci->rxringcount; i++) {
-			entry = &rtlpci->rx_ring[rxring_idx].buffer_desc[i];
-			if (!_rtl_pci_init_one_rxdesc(hw, (u8 *)entry,
-						      rxring_idx, i))
-				goto err_unwind;
-		}
+				       sizeof(*ring->buffer_desc) * rtlpci->rxringcount,
+				       &ring->dma, GFP_KERNEL);
 	} else {
-		struct rtl_rx_desc *entry = NULL;
-		u8 tmp_one = 1;
-		/* alloc dma for this ring */
-		rtlpci->rx_ring[rxring_idx].desc =
+		descs = ring->desc =
 		    dma_alloc_coherent(&rtlpci->pdev->dev,
-				       sizeof(*rtlpci->rx_ring[rxring_idx].desc) *
-				       rtlpci->rxringcount,
-				       &rtlpci->rx_ring[rxring_idx].dma, GFP_KERNEL);
-		if (!rtlpci->rx_ring[rxring_idx].desc ||
-		    (unsigned long)rtlpci->rx_ring[rxring_idx].desc & 0xFF) {
-			pr_err("Cannot allocate RX ring\n");
-			return -ENOMEM;
-		}
-
-		/* init every desc in this ring */
-		rtlpci->rx_ring[rxring_idx].idx = 0;
-
-		for (i = 0; i < rtlpci->rxringcount; i++) {
-			entry = &rtlpci->rx_ring[rxring_idx].desc[i];
-			if (!_rtl_pci_init_one_rxdesc(hw, (u8 *)entry,
-						      rxring_idx, i))
-				goto err_unwind;
-		}
-
-		rtlpriv->cfg->ops->set_desc(hw, (u8 *)entry, false,
-					    HW_DESC_RXERO, &tmp_one);
+				       sizeof(*ring->desc) * rtlpci->rxringcount,
+				       &ring->dma, GFP_KERNEL);
 	}
+	if (!descs || (ulong)descs & 0xFF) {
+		pr_err("Cannot allocate RX ring\n");
+		return -ENOMEM;
+	}
+	ring->idx = 0;
+	if (_rtl_pci_rx_buf_alloc(hw, &ring->sink)) {
+		pr_err("Cannot allocate the RX sink buffer\n");
+		_rtl_pci_free_rx_ring(hw, rxring_idx);
+		return -ENOMEM;
+	}
+	_rtl_pci_rx_point(hw, rxring_idx);
 	return 0;
-
-err_unwind:
-	_rtl_pci_free_rx_ring(hw, rxring_idx);
-	return -ENOMEM;
 }
 
 /* The mapping to retire with a queued TX skb: a beacon published from the fixed copy keeps
@@ -1551,35 +1601,20 @@ static void _rtl_pci_free_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-	int i;
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[rxring_idx];
 
-	/* free every desc in this ring */
-	for (i = 0; i < rtlpci->rxringcount; i++) {
-		struct sk_buff *skb = rtlpci->rx_ring[rxring_idx].rx_buf[i];
-
-		if (!skb)
-			continue;
-		dma_unmap_single(&rtlpci->pdev->dev, *((dma_addr_t *)skb->cb),
-				 rtlpci->rxbuffersize, DMA_FROM_DEVICE);
-		kfree_skb(skb);
-		rtlpci->rx_ring[rxring_idx].rx_buf[i] = NULL;
-	}
-
-	/* free dma of this ring */
+	_rtl_pci_rx_release(hw, rxring_idx);
+	_rtl_pci_rx_buf_free(hw, &ring->sink);
 	if (rtlpriv->use_new_trx_flow) {
 		dma_free_coherent(&rtlpci->pdev->dev,
-				  sizeof(*rtlpci->rx_ring[rxring_idx].buffer_desc) *
-				  rtlpci->rxringcount,
-				  rtlpci->rx_ring[rxring_idx].buffer_desc,
-				  rtlpci->rx_ring[rxring_idx].dma);
-		rtlpci->rx_ring[rxring_idx].buffer_desc = NULL;
+				  sizeof(*ring->buffer_desc) * rtlpci->rxringcount,
+				  ring->buffer_desc, ring->dma);
+		ring->buffer_desc = NULL;
 	} else {
 		dma_free_coherent(&rtlpci->pdev->dev,
-				  sizeof(*rtlpci->rx_ring[rxring_idx].desc) *
-				  rtlpci->rxringcount,
-				  rtlpci->rx_ring[rxring_idx].desc,
-				  rtlpci->rx_ring[rxring_idx].dma);
-		rtlpci->rx_ring[rxring_idx].desc = NULL;
+				  sizeof(*ring->desc) * rtlpci->rxringcount,
+				  ring->desc, ring->dma);
+		ring->desc = NULL;
 	}
 }
 
@@ -2100,6 +2135,13 @@ static int rtl_pci_start(struct ieee80211_hw *hw)
 
 	/* no RX pass between the ring reset and hw_init's index clear */
 	tasklet_disable(&rtlpci->rx_tasklet);
+	/* The receive buffers exist while the interface is up. A failed hw_init keeps them: the
+	 * chip may be part way up, so only a stop's power-off may free them. */
+	err = _rtl_pci_rx_arm(hw);
+	if (err) {
+		tasklet_enable(&rtlpci->rx_tasklet);
+		return err;
+	}
 	rtl_pci_reset_trx_ring(hw);
 
 	rtlpci->driver_is_goingto_unload = false;
@@ -2182,6 +2224,10 @@ static void rtl_pci_stop(struct ieee80211_hw *hw)
 	spin_unlock_irqrestore(&rtlpriv->locks.rf_ps_lock, flags);
 
 	rtlpriv->cfg->ops->hw_disable(hw);
+	/* the chip's DMA is off: only now may its receive buffers go, with no RX pass meanwhile */
+	tasklet_disable(&rtlpci->rx_tasklet);
+	_rtl_pci_rx_release(hw, RTL_PCI_RX_MPDU_QUEUE);
+	tasklet_enable(&rtlpci->rx_tasklet);
 	/* some things are not needed if firmware not available */
 	if (!rtlpriv->max_fw_size)
 		return;

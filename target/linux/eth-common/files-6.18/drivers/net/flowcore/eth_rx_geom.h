@@ -58,6 +58,13 @@ static inline struct eth_rx_dlen eth_rx_dlen(u64 word, u64 mask)
 	return d;
 }
 
+/* `len` bytes after `prefix`, all inside a buffer of `buf`: THE bound of every RX reader, written so no
+ * sum can wrap (Ethernet's layouts below, the WiFi ring's per-frame prefix). */
+static inline bool eth_rx_fits(u32 prefix, u32 len, u32 buf)
+{
+	return prefix <= buf && len <= buf - prefix;
+}
+
 static inline u32 eth_rx_fcs_bytes(const struct eth_rx_layout *l)
 {
 	return l->fcs == ETH_RX_FCS_IN_LEN ? ETH_RX_FCS_LEN : 0;
@@ -74,7 +81,7 @@ static inline enum eth_rx_verdict eth_rx_frame_geom(const struct eth_rx_layout *
 		return ETH_RX_PARTIAL;
 	if (d.unopened < l->head + fcs + ETH_RX_HLEN)
 		return ETH_RX_RUNT;
-	if (d.unopened > l->buf || l->prefix + d.unopened > l->buf)
+	if (!eth_rx_fits(l->prefix, d.unopened, l->buf))
 		return ETH_RX_OVERSIZE;
 	fr->off = l->prefix + l->head;
 	d.unopened -= l->head;

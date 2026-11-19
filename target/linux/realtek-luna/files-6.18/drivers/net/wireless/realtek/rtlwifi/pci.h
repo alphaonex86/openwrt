@@ -159,11 +159,21 @@ struct rtl8192_tx_ring {
 	u16 cur_tx_rp; /* current_tx_read_point */
 };
 
+/* One receive buffer: whole pages, mapped for the chip. */
+struct rtl_rx_buf {
+	struct page *page;
+	dma_addr_t dma;
+};
+
+/* The descriptor ring lives from probe to remove; its buffers only while the interface is up
+ * (armed): until then every descriptor points at the one sink buffer. */
 struct rtl8192_rx_ring {
 	struct rtl_rx_desc *desc;
 	dma_addr_t dma;
 	unsigned int idx;
-	struct sk_buff *rx_buf[RTL_PCI_MAX_RX_COUNT];
+	bool armed;
+	struct rtl_rx_buf rx_buf[RTL_PCI_MAX_RX_COUNT];
+	struct rtl_rx_buf sink;
 	/*add for new trx flow*/
 	struct rtl_rx_buffer_desc *buffer_desc; /*rx buffer descriptor*/
 	u16 next_rx_rp; /* next_rx_read_point */
@@ -196,6 +206,7 @@ struct rtl_pci {
 	struct tasklet_struct rx_tasklet;	/* drains the RX ring, pci.c */
 	struct sk_buff_head rx_inject;		/* driver-made frames for mac80211 */
 	bool rx_deferred;			/* RX sources masked until the ring drains */
+	u32 rx_partial, rx_oversize;		/* buffers dropped: part of a frame, a length past the buffer */
 	u32 sys_irq_mask;
 
 	/*Bcn control register setting */

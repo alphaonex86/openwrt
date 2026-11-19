@@ -135,7 +135,7 @@ static bool _rtl92fe_query_rxphystatus(struct ieee80211_hw *hw,
 }
 
 static bool _rtl92fe_translate_rx_signal_stuff(struct ieee80211_hw *hw,
-					       struct sk_buff *skb,
+					       u8 *buf,
 					       struct rtl_stats *pstatus,
 					       u8 *pdesc,
 					       struct rx_fwinfo *p_drvinfo)
@@ -149,7 +149,7 @@ static bool _rtl92fe_translate_rx_signal_stuff(struct ieee80211_hw *hw,
 	__le16 fc;
 	bool packet_matchbssid, packet_toself, packet_beacon;
 
-	tmp_buf = skb->data + pstatus->rx_drvinfo_size +
+	tmp_buf = buf + pstatus->rx_drvinfo_size +
 		  pstatus->rx_bufshift + 24;
 
 	hdr = (struct ieee80211_hdr *)tmp_buf;
@@ -371,7 +371,7 @@ static void rtl92f_spy(const char *dir, struct ieee80211_hdr *hdr, u32 len,
 bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 			   struct rtl_stats *status,
 			   struct ieee80211_rx_status *rx_status,
-			   u8 *pdesc8, struct sk_buff *skb)
+			   u8 *pdesc8, u8 *buf)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rx_fwinfo *p_drvinfo;
@@ -418,7 +418,7 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 	rx_status->freq = hw->conf.chandef.chan->center_freq;
 	rx_status->band = hw->conf.chandef.chan->band;
 
-	hdr = (struct ieee80211_hdr *)(skb->data + status->rx_drvinfo_size +
+	hdr = (struct ieee80211_hdr *)(buf + status->rx_drvinfo_size +
 				       status->rx_bufshift + 24);
 
 	rtl92f_spy("RX", hdr, status->length, status->rate,
@@ -451,9 +451,9 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 	rx_status->mactime = status->timestamp_low;
 	if (phystatus && status->rx_drvinfo_size >= 28) {
 		/* SHIFT pads the frame after driver info, not the PHY report. */
-		p_drvinfo = (struct rx_fwinfo *)(skb->data + 24);
+		p_drvinfo = (struct rx_fwinfo *)(buf + 24);
 
-		level = _rtl92fe_translate_rx_signal_stuff(hw, skb, status,
+		level = _rtl92fe_translate_rx_signal_stuff(hw, buf, status,
 							   pdesc8, p_drvinfo);
 	}
 	/* the paged report is dBm already (PWDB - 110); the legacy +10 went with
@@ -471,35 +471,22 @@ bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 	return true;
 }
 
-void rtl92fe_rx_check_dma_ok(struct ieee80211_hw *hw, u8 *header_desc8,
+/* -> the buffer holds one whole frame: its first and last segment. The BD's fields may reach
+ * the host after the interrupt, so a bounded spin waits for them; a BD still empty is not whole. */
+bool rtl92fe_rx_check_dma_ok(struct ieee80211_hw *hw, u8 *header_desc8,
 			     u8 queue_index)
 {
-	u8 first_seg = 0;
-	u8 last_seg = 0;
-	u16 total_len = 0;
-	u16 read_cnt = 0;
 	__le32 *header_desc = (__le32 *)header_desc8;
+	unsigned int read_cnt = 0;
+	__le32 w;
 
 	if (!header_desc)
-		return;
-
-	total_len = (u16)get_rx_buffer_desc_total_length(header_desc);
-	first_seg = (u8)get_rx_buffer_desc_fs(header_desc);
-	last_seg = (u8)get_rx_buffer_desc_ls(header_desc);
-
-	/* The buffer descriptor may not yet be visible to the host the
-	 * instant the RX interrupt is taken; spin a bounded number of times
-	 * waiting for the segment fields to populate, then give up.
-	 */
-	while (total_len == 0 && first_seg == 0 && last_seg == 0) {
-		read_cnt++;
-		total_len = (u16)get_rx_buffer_desc_total_length(header_desc);
-		first_seg = (u8)get_rx_buffer_desc_fs(header_desc);
-		last_seg = (u8)get_rx_buffer_desc_ls(header_desc);
-
-		if (read_cnt > 20)
-			break;
-	}
+		return false;
+	do {
+		w = READ_ONCE(*header_desc);
+	} while (!get_rx_buffer_desc_total_length(&w) && !get_rx_buffer_desc_fs(&w) &&
+		 !get_rx_buffer_desc_ls(&w) && ++read_cnt <= 20);
+	return get_rx_buffer_desc_fs(&w) && get_rx_buffer_desc_ls(&w);
 }
 
 u16 rtl92fe_rx_desc_buff_remained_cnt(struct ieee80211_hw *hw, u8 queue_index)

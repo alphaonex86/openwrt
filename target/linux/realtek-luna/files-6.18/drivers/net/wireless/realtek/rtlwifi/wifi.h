@@ -2195,7 +2195,8 @@ struct rtl_hal_ops {
 	void (*update_rate_mask)(struct ieee80211_hw *hw, u8 rssi_level);
 	u16 (*rx_desc_buff_remained_cnt)(struct ieee80211_hw *hw,
 					 u8 queue_index);
-	void (*rx_check_dma_ok)(struct ieee80211_hw *hw, u8 *header_desc,
+	/* -> the buffer holds one whole frame: first and last segment */
+	bool (*rx_check_dma_ok)(struct ieee80211_hw *hw, u8 *header_desc,
 				u8 queue_index);
 	void (*fill_tx_desc)(struct ieee80211_hw *hw,
 			     struct ieee80211_hdr *hdr, u8 *pdesc_tx,
@@ -2212,7 +2213,7 @@ struct rtl_hal_ops {
 	bool (*query_rx_desc)(struct ieee80211_hw *hw,
 			      struct rtl_stats *stats,
 			      struct ieee80211_rx_status *rx_status,
-			      u8 *pdesc, struct sk_buff *skb);
+			      u8 *pdesc, u8 *buf);
 	void (*set_channel_access)(struct ieee80211_hw *hw);
 	bool (*radio_onoff_checking)(struct ieee80211_hw *hw, u8 *valid);
 	void (*dm_watchdog)(struct ieee80211_hw *hw);

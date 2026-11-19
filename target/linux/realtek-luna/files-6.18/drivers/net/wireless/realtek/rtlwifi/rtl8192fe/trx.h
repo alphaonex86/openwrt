@@ -341,6 +341,8 @@ static inline void set_tx_buff_desc_addr_high_0(__le32 *pdesc, u32 val,
 }
 
 /* ---- RX buffer descriptor (BD ring entry) ---------------------------- */
+/* Dword 0: buffer size 13:0, LS 14, FS 15, total frame size 31:16 -- stock's layout; upstream read
+ * LS and FS one bit high, so FS was the size's low bit. */
 
 static inline void set_rx_buffer_desc_data_length(__le32 *__status, u32 __val)
 {
@@ -349,32 +351,32 @@ static inline void set_rx_buffer_desc_data_length(__le32 *__status, u32 __val)
 
 static inline void set_rx_buffer_desc_ls(__le32 *__status, u32 __val)
 {
-	le32p_replace_bits(__status, __val, BIT(15));
+	le32p_replace_bits(__status, __val, BIT(14));
 }
 
 static inline void set_rx_buffer_desc_fs(__le32 *__status, u32 __val)
 {
-	le32p_replace_bits(__status, __val, BIT(16));
+	le32p_replace_bits(__status, __val, BIT(15));
 }
 
 static inline void set_rx_buffer_desc_total_length(__le32 *__status, u32 __val)
 {
-	le32p_replace_bits(__status, __val, GENMASK(30, 16));
+	le32p_replace_bits(__status, __val, GENMASK(31, 16));
 }
 
 static inline int get_rx_buffer_desc_ls(__le32 *__status)
 {
-	return le32_get_bits(*(__status), BIT(15));
+	return le32_get_bits(*(__status), BIT(14));
 }
 
 static inline int get_rx_buffer_desc_fs(__le32 *__status)
 {
-	return le32_get_bits(*(__status), BIT(16));
+	return le32_get_bits(*(__status), BIT(15));
 }
 
 static inline int get_rx_buffer_desc_total_length(__le32 *__status)
 {
-	return le32_get_bits(*(__status), GENMASK(30, 16));
+	return le32_get_bits(*(__status), GENMASK(31, 16));
 }
 
 static inline void set_rx_buffer_physical_low(__le32 *__status, u32 __val)
@@ -583,7 +585,7 @@ struct rx_fwinfo {
 	u8 reserve:4;
 } __packed;
 
-void rtl92fe_rx_check_dma_ok(struct ieee80211_hw *hw, u8 *header_desc,
+bool rtl92fe_rx_check_dma_ok(struct ieee80211_hw *hw, u8 *header_desc,
 			    u8 queue_index);
 u16 rtl92fe_rx_desc_buff_remained_cnt(struct ieee80211_hw *hw,
 				      u8 queue_index);
@@ -599,7 +601,7 @@ void rtl92fe_tx_fill_desc(struct ieee80211_hw *hw,
 bool rtl92fe_rx_query_desc(struct ieee80211_hw *hw,
 			   struct rtl_stats *status,
 			   struct ieee80211_rx_status *rx_status,
-			   u8 *pdesc, struct sk_buff *skb);
+			   u8 *pdesc, u8 *buf);
 void rtl92fe_set_desc(struct ieee80211_hw *hw, u8 *pdesc, bool istx,
 		      u8 desc_name, u8 *val);
 u64 rtl92fe_get_desc(struct ieee80211_hw *hw,

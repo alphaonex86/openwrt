@@ -2021,9 +2021,9 @@ config BUS_TIMEOUT_MONITOR
 	  differs from stock, kept for diagnosis and survival (operator,
 	  2026-11-19: every image). Only a chip whose margin against its slow
 	  legitimate slaves is measured carries the node.
-	  MEASURED 2026-11-19 (X111W, gcc 14.3): the object 2.1 KiB of text,
-	  the lzma kernel +0.5 KiB, the raw image unchanged; at run time one
-	  interrupt and 24 words written at probe.
+	  MEASURED 2026-11-19 (X111W, gcc 14.3): vmlinux text+data +6512 B
+	  (diag_cost.py --whole-image), the lzma kernel +0.5 KiB; at run time
+	  one interrupt and 24 words written at probe.
 
 config GXP_WATCHDOG
 	tristate "HPE GXP watchdog support"

@@ -47,6 +47,6 @@ extern struct eth_ring_watch luna_ring_watch;
  * -> true when the fibre path was recovered: the driver then puts its own NIC programming back. */
 bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered);
 /* From the same timer: every other switch port; `cpu_ready` = the receive ring holds nothing the driver owes. */
-void luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready);
+bool luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready);
 
 #endif /* _LUNA_ETH_MIB_H */

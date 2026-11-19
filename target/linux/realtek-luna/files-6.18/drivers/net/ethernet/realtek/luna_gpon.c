@@ -1626,7 +1626,7 @@ static inline void gpon_wr(u32 off, u32 v) { iowrite32(v, gpon_base + off); }
  * total, and each reader takes its own delta, so none reads another's grants as its own. */
 static atomic_t gpon_bwm_acpt_total = ATOMIC_INIT(0);
 static u32 gpon_bwm_acpt_ds_cntr_last, gpon_bwm_acpt_us_tx_last, gpon_bwm_acpt_diag_last;
-static u32 gpon_bwm_acpt_watch_last;
+static u32 gpon_bwm_acpt_watch_last, gpon_bwm_acpt_us_watch_last;
 
 static u32 gpon_bwm_acpt_since(u32 *last)
 {
@@ -5078,27 +5078,52 @@ EXPORT_SYMBOL_GPL(luna_gpon_stall_dump);
 /* gpon_us_watch.h; the frames counted in SID counter group 4, where every SID not enrolled in CNT_MASK_US counts (the
  * OMCC is group 0): lab X111W 2026-11-19, 20 WAN pings moved it by 22 taken and 22 sent, gpon0's tx_packets by 22. */
 #define LUNA_US_SID_GRP_ALL	(4u * PI_SID_CNT_GROUP_STRIDE)
-static struct eth_egress_watch luna_us_watch;
+static struct gpon_us_watch luna_us_watch;
 
 void luna_gpon_us_sample(struct net_device *wan)
 {
-	enum eth_watch v = gpon_us_watch_sample(&luna_us_watch, READ_ONCE(luna_activation_ready) && gpon_fsm_state == 5 &&
-						luna_ploam.omcc_installed, pi_rd(PI_RX_SID_CNT_US + LUNA_US_SID_GRP_ALL),
-						pi_rd(PI_TX_SID_CNT_US + LUNA_US_SID_GRP_ALL), jiffies64_to_msecs(get_jiffies_64()));
+	struct eth_egress_watch *e = &luna_us_watch.e;
+	enum gpon_us v = gpon_us_watch_sample(&luna_us_watch, READ_ONCE(luna_activation_ready) && gpon_fsm_state == 5 &&
+					      luna_ploam.omcc_installed,
+					      gpon_base ? gpon_bwm_acpt_since(&gpon_bwm_acpt_us_watch_last) : GPON_US_GRANTS_UNKNOWN,
+					      pi_rd(PI_RX_SID_CNT_US + LUNA_US_SID_GRP_ALL),
+					      pi_rd(PI_TX_SID_CNT_US + LUNA_US_SID_GRP_ALL), jiffies64_to_msecs(get_jiffies_64()));
 
-	if (v != ETH_WATCH_OK && luna_us_watch.stalls == 1)
+	if (v != GPON_US_OK && e->stalls == 1)
 		luna_gpon_stall_dump(wan);
-	eth_egress_watch_act(wan, &luna_us_watch, v, "PON upstream");
-	if (v == ETH_WATCH_RECOVER)
-		gpon_us_feed_rearm_light();
+	switch (v) {
+	case GPON_US_OK:
+		return;
+	case GPON_US_GRANTLESS:
+		netdev_err(wan, "PON upstream: frames waited %u s and the OLT granted nothing (#%u): not recovered\n",
+			   ETH_EGRESS_STALL_MS / 1000, luna_us_watch.grantless);
+		return;
+	case GPON_US_UNASKED:
+		netdev_err(wan, "PON upstream: none sent for %u s, grants COULD NOT ASK (#%u): re-armed\n",
+			   ETH_EGRESS_STALL_MS / 1000, luna_us_watch.unasked);
+		break;
+	case GPON_US_SPENT:
+		eth_egress_watch_act(wan, e, ETH_WATCH_REBOOT, "PON upstream");
+		return;
+	case GPON_US_WEDGE:
+		eth_egress_watch_act(wan, e, ETH_WATCH_RECOVER, "PON upstream");
+		break;
+	}
+	gpon_us_feed_rearm_light();
 }
 EXPORT_SYMBOL_GPL(luna_gpon_us_sample);
 
 u32 luna_gpon_us_stalls(void)
 {
-	return READ_ONCE(luna_us_watch.stalls);
+	return READ_ONCE(luna_us_watch.e.stalls);
 }
 EXPORT_SYMBOL_GPL(luna_gpon_us_stalls);
+
+u32 luna_gpon_us_grantless(void)
+{
+	return READ_ONCE(luna_us_watch.grantless);
+}
+EXPORT_SYMBOL_GPL(luna_gpon_us_grantless);
 
 static int pidump_proc_show(struct seq_file *s, void *v)
 {

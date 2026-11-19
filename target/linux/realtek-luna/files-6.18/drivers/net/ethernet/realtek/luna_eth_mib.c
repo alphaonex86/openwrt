@@ -168,7 +168,9 @@ static void luna_mib_stall_state(struct net_device *ndev)
 
 static u32 luna_core_resets;
 
-/* A stalled egress is recovered by the switch core reset (tables and fibre kept). Nothing on this CPU touches the
+/* A stalled CPU or copper egress is recovered by the switch core reset (tables and fibre kept): field X111W 11-15, three
+ * CPU-port stalls and a copper hang that a link bounce, an eth0 down/up and the stock scheduler mode left held. It is
+ * no fibre recovery: lab X111W 11-19, the fibre stall it followed left the LAN dead. Nothing on this CPU touches the
  * core until the vendor's 10 ms settle has passed: its caller reads the next port, and a read of a block in reset
  * never completes on a bus whose timeout monitors the boot loader disabled. Only the RTL9602C (one CPU) has sw_rst. */
 #define LUNA_CORE_RST_SETTLE_MS	10
@@ -188,7 +190,8 @@ static void luna_mib_core_reset(struct net_device *ndev, unsigned int port)
 	luna_core_resets++;
 }
 
-/* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it. */
+/* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it.
+ * -> true when the caller recovers its own side (the NIC); the switch core is left alone. */
 static struct eth_egress_watch luna_pon_egress;
 
 bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered)
@@ -206,10 +209,7 @@ bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered)
 	if (v != ETH_WATCH_OK)
 		luna_mib_stall_state(wan);
 	eth_egress_watch_act(wan, &luna_pon_egress, v, "fibre");
-	if (v != ETH_WATCH_RECOVER)
-		return false;
-	luna_mib_core_reset(wan, s->map->pon_port);
-	return true;
+	return v == ETH_WATCH_RECOVER;
 }
 EXPORT_SYMBOL_GPL(luna_mib_pon_egress_sample);
 
@@ -218,13 +218,14 @@ EXPORT_SYMBOL_GPL(luna_mib_pon_egress_sample);
  * The fibre port is judged above: its queue also waits on the grants of the far end. */
 static struct eth_port_egress luna_port_egress[LUNA_LINK_PORTS];
 
-void luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready)
+bool luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready)
 {
 	struct luna_mib_state *s = &luna_mib;
 	unsigned int port;
+	bool reset = false;
 
 	if (!s->sw || !s->map->pe_used || !s->map->sw_rst || !s->map->rx_mib)
-		return;
+		return false;
 	for (port = 0; port < s->map->n_mib_ports && port < LUNA_LINK_PORTS; port++) {
 		u32 at = port * SW_STAT_PORT_MIB_STRIDE;
 		bool cpu = port == s->map->cpu_port;
@@ -240,7 +241,9 @@ void luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready)
 			continue;
 		luna_mib_stall_state(ndev);
 		luna_mib_core_reset(ndev, port);
+		reset = true;
 	}
+	return reset;
 }
 EXPORT_SYMBOL_GPL(luna_mib_port_egress_sample);
 
@@ -262,7 +265,7 @@ static unsigned int luna_mib_per_port(const struct luna_mib_state *s)
 
 /* The two role rows first: a reader tells the PON and CPU ports from the LAN ones without a port map;
  * then the received-frame length witnesses and the ring watch. */
-#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 3)
+#define LUNA_MIB_ROLES	(2 + ARRAY_SIZE(luna_rx_len_names) + ETH_RING_WATCH_STATS + 4)
 
 static int luna_mib_count(const struct luna_mib_state *s)
 {
@@ -312,6 +315,7 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 	eth_ring_watch_strings(&data);
 	ethtool_puts(&data, "pon_egress_stalls");
 	ethtool_puts(&data, "pon_us_stalls");
+	ethtool_puts(&data, "pon_us_grantless");
 	ethtool_puts(&data, "switch_core_resets");
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))
@@ -342,6 +346,7 @@ static void luna_mib_get_stats(struct net_device *ndev,
 	data = eth_ring_watch_stats(&luna_ring_watch, data);
 	*data++ = READ_ONCE(luna_pon_egress.stalls);
 	*data++ = IS_ENABLED(CONFIG_LUNA_GPON) ? luna_gpon_us_stalls() : 0;
+	*data++ = IS_ENABLED(CONFIG_LUNA_GPON) ? luna_gpon_us_grantless() : 0;
 	*data++ = READ_ONCE(luna_core_resets);
 	for (port = 0; port < n; port++) {
 		if (luna_mib_has_rx(s))

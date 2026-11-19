@@ -101,6 +101,7 @@ void luna_gpon_stall_dump(struct net_device *ndev);
 /* The PON upstream past the switch, judged and recovered at O5 (the luna_eth_mib backstop samples it). */
 void luna_gpon_us_sample(struct net_device *wan);
 u32 luna_gpon_us_stalls(void);
+u32 luna_gpon_us_grantless(void);
 
 /* Faithful port of the stock rtk_all_module_init() GPON datapath bring-up,
  * run on the quiescent switch in the eth reset path (after the GMAC reset + swcore

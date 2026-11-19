@@ -2330,9 +2330,9 @@ static void eth_backstop(struct timer_list *t)
 
 	napi_schedule(&ep->napi);	/* already the recovery: the watch only counts and escalates */
 	eth_ring_watch_rx(&luna_ring_watch, ep->ndev, eth_rx_waiting(ep), ep->rx_taken);
-	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
+	if ((ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets)) |
+	    luna_mib_port_egress_sample(ep->ndev, !eth_rx_waiting(ep)))
 		luna_eth_msr_apply(ep, true);
-	luna_mib_port_egress_sample(ep->ndev, !eth_rx_waiting(ep));
 	mod_timer(&ep->backstop, jiffies + msecs_to_jiffies(backstop_ms));
 }
 

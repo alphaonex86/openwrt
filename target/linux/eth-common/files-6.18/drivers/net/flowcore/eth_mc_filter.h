@@ -46,10 +46,18 @@ static inline void eth_mc_key_add(struct eth_mc_keys *s, u32 grp, const u8 *mac,
 		s->k[s->n++] = k;
 }
 
-/* The miss action: dropped only while every join has its entry and nothing captures the WAN. */
-static inline bool eth_mc_miss_drop(bool watching, bool complete, bool promisc)
+/* Who wants every frame of the WAN: its promiscuity holders (a capture, a bridge port), less the one a
+ * secondary unicast address takes on a device with no unicast filter (a VLAN or macvlan upper with its own
+ * MAC): that one asks for an address, never for every multicast group. */
+static inline unsigned int eth_mc_capturers(unsigned int promiscuity, bool uc_promisc)
 {
-	return watching && complete && !promisc;
+	return promiscuity - (uc_promisc && promiscuity);
+}
+
+/* The miss action: dropped only while every join has its entry and nothing captures the WAN. */
+static inline bool eth_mc_miss_drop(bool watching, bool complete, unsigned int capturers)
+{
+	return watching && complete && !capturers;
 }
 
 /* next[*n] was just encoded: keep it unless an earlier entry has its key. */

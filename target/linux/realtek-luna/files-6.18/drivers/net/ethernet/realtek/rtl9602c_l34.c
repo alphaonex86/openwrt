@@ -1353,7 +1353,10 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	seq_printf(sf, "wan multicast joins %u to_cpu %u fibre_unjoined %s\n", l->ipmc.cpu.n, l->ipmc.n_cpu_hw,
 		   !READ_ONCE(l->ipmc.watching) ? "to the CPU (not followed)" :
 		   READ_ONCE(l->ipmc.overflow) ? "to the CPU (a join has no entry)" :
-		   READ_ONCE(l->ipmc.promisc) ? "to the CPU (the WAN is promiscuous)" : "dropped");
+		   READ_ONCE(l->ipmc.capturers) ? "to the CPU (a capture or a bridge port holds the WAN promiscuous)" :
+		   "dropped");
+	seq_printf(sf, "wan promiscuity %u captures %u (the rest: its uppers' own unicast MACs)\n",
+		   READ_ONCE(l->ipmc.promiscuity), READ_ONCE(l->ipmc.capturers));
 	for (i = 0; i < l->ipmc.n_hw; i++)
 		seq_printf(sf, "  ipmc %pI4h at %u: %08x %08x %08x\n", &l->ipmc.hw[i].grp,
 			   l->ipmc.hw[i].idx, l->ipmc.hw[i].w[0], l->ipmc.hw[i].w[1], l->ipmc.hw[i].w[2]);

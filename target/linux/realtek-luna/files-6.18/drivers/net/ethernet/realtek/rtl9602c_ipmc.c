@@ -444,7 +444,10 @@ static void rtl9602c_ipmc_sync(struct work_struct *work)
 	all = ipmc_apply(ep, m, n_want);
 	m->n_want = n_want;
 	mutex_unlock(&ep->l34.lock);
-	WRITE_ONCE(m->promisc, ep->wan_ndev && (READ_ONCE(ep->wan_ndev->flags) & IFF_PROMISC));	/* a capture sees everything */
+	if (ep->wan_ndev) {
+		WRITE_ONCE(m->promiscuity, READ_ONCE(ep->wan_ndev->promiscuity));
+		WRITE_ONCE(m->capturers, eth_mc_capturers(m->promiscuity, READ_ONCE(ep->wan_ndev->uc_promisc)));
+	}
 	WRITE_ONCE(m->overflow, !all || m->sg_lost);
 	rtl9602c_pon_mc_policy(ep);
 }

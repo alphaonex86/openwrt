@@ -235,7 +235,8 @@ struct rtl9602c_ipmc {
 	struct eth_mc_keys	cpu;		/* the joins toward the CPU, keys in cpu_key */
 	unsigned int		n_cpu_hw;
 	bool			overflow;	/* a join without its entry: the CPU gets every multicast */
-	bool			promisc;	/* the WAN is promiscuous: so is the fibre's multicast */
+	u32			capturers;	/* eth_mc_capturers() of the WAN: the fibre's multicast goes to the CPU */
+	u32			promiscuity;	/* the WAN's, as read with it */
 	struct eth_mc_entry	next[MC_ENTRIES];
 	struct eth_mc_entry	hw[MC_ENTRIES];	/* under rtl9602c_l34.lock */
 	unsigned int		n_hw;

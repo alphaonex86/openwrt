@@ -724,7 +724,8 @@ static void rtl9602c_pon_mc_policy(struct rtl9602c_eth *ep)
 {
 	const struct rtl9602c_ipmc *m = &ep->l34.ipmc;
 
-	luna_pon_mc_admit(ep->sw, ep->swm, READ_ONCE(m->watching) && !READ_ONCE(m->overflow) && !READ_ONCE(m->promisc));
+	luna_pon_mc_admit(ep->sw, ep->swm, eth_mc_miss_drop(READ_ONCE(m->watching), !READ_ONCE(m->overflow),
+							     READ_ONCE(m->capturers)));
 }
 
 static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)

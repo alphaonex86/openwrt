@@ -15,7 +15,7 @@
 #include "eth_core_recover.h"
 #include "eth_regs_dump.h"
 
-#define ETH_STATE_BLOCKS	16
+#define ETH_STATE_BLOCKS	20
 
 struct eth_core_recovery {
 	struct work_struct work;

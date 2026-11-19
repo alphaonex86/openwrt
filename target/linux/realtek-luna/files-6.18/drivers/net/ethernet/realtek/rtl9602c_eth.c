@@ -2603,16 +2603,26 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
 /* The switch core reset as a recovery (eth_core_recovery.h): the watch timer or sw_core_reset only asks.
  * LOCK ORDER: rtnl (VLAN uppers, open/stop) -> rtl9602c_l34_tc_mutex (flow installs) -> ep->l34.lock (L34 and IPMC
  * table rows) -> rtl9602c_gphy_lock (inside the PHY steps). Every table writer of this switch holds one of them,
- * so none writes a row between the reset and the step that puts its table back. */
+ * so no row changes while the state is compared.
+ * What the reset moves (lab X111W 2026-11-19, under traffic, flows offloaded): none of the words below that our
+ * code writes, and no table row. It moves status only: CHIP_DEBUG_OUT 0xa0, 0x1c098, the low byte of 0x20808 and
+ * 0x20c08, the buffer accounting 0x23100-0x23118 and the queue occupancy, all moving on their own on an idle unit;
+ * 0x15000-0x15004 reload by themselves before the re-init. In the NIC, its counters and the interrupt masks that
+ * NAPI holds while it is stopped. Those are "status", compared and never judged. */
 static const struct eth_reg_range rtl9602c_state_regs[] = {
-	{ 0x00000, 64 }, { 0x00100, 128 }, { 0x11000, 128 }, { 0x13000, 16 }, { 0x15000, 24 }, { 0x16000, 8 },
-	{ 0x17000, 4 }, { 0x1c000, 192 }, { 0x1e000, 24 }, { 0x20000, 256 }, { 0x20800, 16 }, { 0x20c00, 16 },
-	{ 0x23000, 128 }, { 0x25000, 4 }, { 0x27000, 16 }, { 0x2a000, 10 }, { 0x2d800, 64 }, { 0, 0 } };
-static const struct eth_reg_range rtl9602c_state_queues[] = { { 0x2d018, 3 }, { 0x2d028, 4 }, { 0x2d058, 32 },
-							      { 0, 0 } };
+	{ 0x00000, 40 }, { 0x000a4, 23 }, { 0x00100, 128 }, { 0x11000, 128 }, { 0x13000, 16 }, { 0x15000, 24 },
+	{ 0x16000, 8 }, { 0x17000, 4 }, { 0x1c000, 38 }, { 0x1c09c, 153 }, { 0x1e000, 24 }, { 0x20000, 256 },
+	{ 0x20800, 2 }, { 0x2080c, 13 }, { 0x20c00, 2 }, { 0x20c0c, 13 }, { 0x23000, 64 }, { 0x2311c, 57 },
+	{ 0x25000, 4 }, { 0x27000, 16 }, { 0x2a000, 10 }, { 0x2d800, 64 }, { 0, 0 } };
+static const struct eth_reg_range rtl9602c_state_status[] = {
+	{ 0x000a0, 1 }, { 0x1c098, 1 }, { 0x20808, 1 }, { 0x20c08, 1 }, { 0x23100, 7 }, { 0x2d018, 3 }, { 0x2d028, 4 },
+	{ 0x2d058, 32 }, { 0, 0 } };
 static const struct eth_reg_range rtl9602c_state_mib[] = { { SW_STAT_PORT_TX_MIB, 128 },
 							   { SW_STAT_PORT_RX_MIB_RTL9602C, 128 }, { 0, 0 } };
-static const struct eth_reg_range rtl9602c_state_nic[] = { { 0x00000, 64 }, { 0, 0 } };
+static const struct eth_reg_range rtl9602c_state_nic[] = {
+	{ 0x00, 4 }, { 0x14, 3 }, { 0x24, 6 }, { 0x40, 36 }, { 0xd4, 11 }, { 0, 0 } };
+static const struct eth_reg_range rtl9602c_state_nic_status[] = {
+	{ 0x10, 1 }, { 0x20, 1 }, { 0x3c, 1 }, { 0xd0, 1 }, { 0, 0 } };
 static const struct { const char *name; u8 type, words; u16 rows; bool learned; } rtl9602c_state_l34[] = {
 	{ "l34 route", L34_TBL_L3ROUTE, L34_WORDS_L3ROUTE, 16 }, { "l34 pppoe", L34_TBL_PPPOE, L34_WORDS_PPPOE, 8 },
 	{ "l34 nexthop", L34_TBL_NEXTHOP, L34_WORDS_NEXTHOP, 16 }, { "l34 netif", L34_TBL_NETIF, L34_WORDS_NETIF, 16 },
@@ -2629,11 +2639,12 @@ static unsigned int rtl9602c_sw_blocks(void *ctx, struct eth_state_block *b)
 	struct eth_reg_range (*rg)[3] = ep->sw_rg;
 	unsigned int i, n = 0;
 
-	BUILD_BUG_ON(4 + 4 + ARRAY_SIZE(rtl9602c_state_l34) > ETH_STATE_BLOCKS);
+	BUILD_BUG_ON(5 + 4 + ARRAY_SIZE(rtl9602c_state_l34) > ETH_STATE_BLOCKS);
 	eth_state_add(b, &n, "registers", false, luna_state_reg_rd, ep->sw, rtl9602c_state_regs, 32, NULL);
-	eth_state_add(b, &n, "queues", true, luna_state_reg_rd, ep->sw, rtl9602c_state_queues, 4, NULL);
+	eth_state_add(b, &n, "status", true, luna_state_reg_rd, ep->sw, rtl9602c_state_status, 16, NULL);
 	eth_state_add(b, &n, "mib", true, luna_state_reg_rd, ep->sw, rtl9602c_state_mib, 3, NULL);
-	eth_state_add(b, &n, "nic", false, luna_state_reg_rd, ep->base, rtl9602c_state_nic, 2, NULL);
+	eth_state_add(b, &n, "nic", false, luna_state_reg_rd, ep->base, rtl9602c_state_nic, 8, NULL);
+	eth_state_add(b, &n, "nic status", true, luna_state_reg_rd, ep->base, rtl9602c_state_nic_status, 8, NULL);
 	*t = (struct luna_state_rd){ .base = ep->sw, .cmd = SW_TBL_VLAN_WR(0) & ~BIT(3), .addr_shift = 9 };
 	luna_state_tbl(b, &n, "vlan", false, t, *rg++, luna_state_tbl_row, 2, 4096, 0);
 	if (acl) {
@@ -2694,7 +2705,15 @@ static void rtl9602c_sw_quiesce(void *ctx)
 
 static void rtl9602c_sw_reset(void *ctx)
 {
-	luna_mib_core_reset(((struct rtl9602c_eth *)ctx)->ndev);
+	struct rtl9602c_eth *ep = ctx;
+
+	ASSERT_RTNL();	/* the order rtl9602c_sw_begin() took */
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+	lockdep_assert_held(&rtl9602c_l34_tc_mutex);
+#endif
+	if (ep->l34.ready)
+		lockdep_assert_held(&ep->l34.lock);
+	luna_mib_core_reset(ep->ndev);
 }
 
 static void rtl9602c_sw_resume(void *ctx)

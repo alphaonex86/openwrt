@@ -235,6 +235,14 @@ int l34_l2uc_sts_index(u32 sts);
 #define SW_VLAN_IVL_LSP		10
 
 void l34_l3mc_encode(u32 *w, u32 group, u16 key, bool ivl, u8 ports, u8 tran);
+
+/* A group (IPv4, by its address) or an address (IPv6 and L2, by MAC) the CPU joined: its frames reach the CPU port
+ * and its extension port 0 as they arrived -- WAN_SA clear is no L3 rewrite, the vendor's SSDP entry. Same key and
+ * flag positions in both kinds; the L2 kind has L3LOOKUP clear and the MAC at [47:0]. */
+#define L3MC_EXTMBR_LSP		70
+#define L3MC_EXTMBR_W		7
+void l34_l3mc_cpu_encode(u32 *w, u32 group, u16 key, bool ivl, u8 cpu_port);
+void l34_l2mc_cpu_encode(u32 *w, const u8 *mac, u16 key, bool ivl, u8 cpu_port);
 u32 l34_ipmc_tran_encode(u8 untag_ports, u8 netif);
 u16 l34_vlan_lut_key(u32 vlan_entry, u16 vid, bool *ivl);
 

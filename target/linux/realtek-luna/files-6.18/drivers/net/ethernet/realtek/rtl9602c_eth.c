@@ -718,15 +718,13 @@ static int rtl9602c_wan_vids_admit(struct rtl9602c_eth *ep)
 	return 0;
 }
 
-/* Unknown IPv4 multicast from the fibre is wanted by a multicast router alone (its first frame makes the
- * route); with none the switch drops it, as stock does, instead of handing every frame to the CPU. */
+/* Multicast from the fibre reaches the CPU only through the LUT entry of a group the unit joined
+ * (rtl9602c_ipmc.c); until those entries are kept, or when they do not fit, the CPU alone gets the rest. */
 static void rtl9602c_pon_mc_policy(struct rtl9602c_eth *ep)
 {
-	void __iomem *w = ep->sw + sw_packed_off(ep->swm->unkn_ip4_mc, ep->swm->pon_port, SW_DA_ACT_BITS);
 	const struct rtl9602c_ipmc *m = &ep->l34.ipmc;
-	u32 act = !READ_ONCE(m->watching) || READ_ONCE(m->n_vif) ? LUT_MISS_FLOOD : LUT_MISS_DROP;
 
-	iowrite32(sw_packed_ins(ioread32(w), ep->swm->pon_port, SW_DA_ACT_BITS, act), w);
+	luna_pon_mc_admit(ep->sw, ep->swm, READ_ONCE(m->watching) && !READ_ONCE(m->overflow) && !READ_ONCE(m->promisc));
 }
 
 static void rtl9602c_sw_min_init(struct rtl9602c_eth *ep)
@@ -1263,9 +1261,20 @@ static void rtl9602c_eth_wan_tx_timeout(struct net_device *ndev, unsigned int tx
 	rtl9602c_eth_ring_timeout(*(struct rtl9602c_eth **)netdev_priv(ndev), ndev);
 }
 
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+static void rtl9602c_ipmc_kick(struct rtl9602c_eth *ep);
+
+/* Every multicast join or leave of the host on the WAN (or a VLAN of it) lands here: the switch follows it. */
+static void rtl9602c_eth_wan_rx_mode(struct net_device *ndev)
+{
+	rtl9602c_ipmc_kick(*(struct rtl9602c_eth **)netdev_priv(ndev));
+}
+#endif
+
 static const struct net_device_ops rtl9602c_eth_wan_ops = {
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	.ndo_setup_tc		= rtl9602c_l34_setup_tc,
+	.ndo_set_rx_mode	= rtl9602c_eth_wan_rx_mode,
 #endif
 	.ndo_open		= rtl9602c_eth_wan_open,
 	.ndo_stop		= rtl9602c_eth_wan_stop,

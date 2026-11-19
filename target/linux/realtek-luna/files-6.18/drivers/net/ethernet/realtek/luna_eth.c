@@ -1716,9 +1716,7 @@ static void eth_pon_miss_to_cpu(struct luna_eth *ep)
 	const struct luna_sw_map *m = ep->c->sw_map;
 
 	sw_port_act(ep, m->lut_unkn_uc_da, m->pon_port, LUT_MISS_TRAP);
-	sw_port_act(ep, m->unkn_l2_mc, m->pon_port, LUT_MISS_TRAP);
-	sw_port_act(ep, m->unkn_ip4_mc, m->pon_port, LUT_MISS_TRAP);
-	sw_port_act(ep, m->unkn_ip6_mc, m->pon_port, LUT_MISS_TRAP);
+	luna_pon_mc_admit(ep->sw, m, false);	/* no LUT entry per joined group on these dies yet */
 	if (m->bc_behave)
 		sw_port_act(ep, m->bc_behave, m->pon_port, LUT_BC_TRAP);
 }

@@ -332,6 +332,10 @@ static inline u32 sw_packed_ins(u32 word, unsigned int port, unsigned int bits,
 	return (word & ~mask) | ((val << lsb) & mask);
 }
 
+#define LUNA_IGMP_OPS_MASK	0x3ffu	/* IGMPv1, v2, v3, MLDv1, v2: 2 bits each */
+#define LUNA_IGMP_OPS_TRAP	0x2aau	/* every one trapped to the CPU, as stock */
+#define LUNA_MC_RSV_IP4		(3u << 3)	/* 224.0.0.x: 0 = an unknown group like any other, as stock */
+
 /* SoC glue that is at the same physical address on every Luna part seen here. */
 #define SWCORE_PHYS		0x1B000000UL
 #define SOC_IP_SEL		((void __iomem *)0xb8000600ul)	/* per-engine clock/reset */
@@ -457,6 +461,8 @@ struct luna_sw_map {
 	u32 unkn_l2_mc;
 	u32 unkn_ip4_mc;
 	u32 unkn_ip6_mc;
+	u32 igmp_p_ctrl;	/* + 4*port: IGMPv1-3/MLDv1-2 actions, 2 bits each at [9:0]; 0 = not established */
+	u32 unkn_mc_cfg;	/* [4:3] = the action of 224.0.0.x; 0 = not established */
 	/* ★★ CFG_UNHIOL, and it is IN THE TABLE for a measured reason: on the
 	 * RTL9602C this address is CFG_UNHIOL (bit0 = IPG_COMPENSATION), and on
 	 * the RTL9603CVD the SAME address is CPU_TAG_AWARE -- two different
@@ -538,6 +544,29 @@ struct luna_sw_map {
 	u32 switch_mac;		/* the switch's own address: the engine's probe source */
 };
 
+/* Multicast from the fibre nobody asked for: `filtered` (the shell keeps a LUT entry toward the CPU for every
+ * group the unit joined on the WAN) drops it in the switch as stock does, else it goes to the CPU alone. IGMP and
+ * MLD reach the CPU from every other port, so a report to a group the switch routes still refreshes its membership;
+ * the CPU's own reports must leave. */
+static inline void luna_pon_mc_admit(void __iomem *sw, const struct luna_sw_map *m, bool filtered)
+{
+	const u32 regs[] = { m->unkn_l2_mc, m->unkn_ip4_mc, m->unkn_ip6_mc };
+	u32 act = filtered ? LUT_MISS_DROP : LUT_MISS_TRAP;
+	unsigned int i, p;
+	void __iomem *w;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		w = sw + sw_packed_off(regs[i], m->pon_port, SW_DA_ACT_BITS);
+		writel(sw_packed_ins(readl(w), m->pon_port, SW_DA_ACT_BITS, act), w);
+	}
+	for (p = 0; m->igmp_p_ctrl && p < 32; p++)
+		if ((m->port_mask & BIT(p)) && p != m->cpu_port)
+			writel((readl(sw + m->igmp_p_ctrl + 4 * p) & ~LUNA_IGMP_OPS_MASK) | LUNA_IGMP_OPS_TRAP,
+			       sw + m->igmp_p_ctrl + 4 * p);
+	if (m->unkn_mc_cfg)
+		writel(readl(sw + m->unkn_mc_cfg) & ~LUNA_MC_RSV_IP4, sw + m->unkn_mc_cfg);
+}
+
 static const struct luna_sw_map rtl9602c_sw_map = {
 	.force_ablty	= 0x00180,
 	.p_ablty	= 0x00198,
@@ -560,6 +589,8 @@ static const struct luna_sw_map rtl9602c_sw_map = {
 	.unkn_l2_mc	= 0x1C010,
 	.unkn_ip4_mc	= 0x1C014,
 	.unkn_ip6_mc	= 0x1C018,
+	.igmp_p_ctrl	= 0x1105C,	/* IGMP_P_CTRL [tier 3, its register map; stock 0x6aa on every port] */
+	.unkn_mc_cfg	= 0x1C01C,	/* UNKN_MC_CFG [tier 3, its register map; stock 0x20] */
 	.bc_flood	= 0x1C020,
 	.unkn_mc_flood	= 0x1C024,
 	.unkn_uc_flood	= 0x1C028,

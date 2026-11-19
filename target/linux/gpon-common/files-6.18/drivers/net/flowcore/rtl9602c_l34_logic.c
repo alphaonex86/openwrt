@@ -321,6 +321,31 @@ void l34_l3mc_encode(u32 *w, u32 group, u16 key, bool ivl, u8 ports, u8 tran)
 	l34_field_set(w, L3MC_VALID_LSP, 1, 1);
 }
 
+static void l34_mc_to_cpu(u32 *w, u16 key, bool ivl, u8 cpu_port)
+{
+	l34_field_set(w, L3MC_KEY_LSP, L3MC_KEY_W, key);
+	l34_field_set(w, L3MC_NOSALEARN_LSP, 1, 1);
+	l34_field_set(w, L3MC_IVL_LSP, 1, ivl);
+	l34_field_set(w, L3MC_MBR_LSP, L3MC_MBR_W, 1u << cpu_port);
+	l34_field_set(w, L3MC_EXTMBR_LSP, L3MC_EXTMBR_W, 1);
+	l34_field_set(w, L3MC_VALID_LSP, 1, 1);
+}
+
+void l34_l3mc_cpu_encode(u32 *w, u32 group, u16 key, bool ivl, u8 cpu_port)
+{
+	w[0] = w[1] = w[2] = 0;
+	l34_field_set(w, L3MC_GIP_LSP, L3MC_GIP_W, group);
+	l34_field_set(w, L3MC_L3LOOKUP_LSP, 1, 1);
+	l34_mc_to_cpu(w, key, ivl, cpu_port);
+}
+
+void l34_l2mc_cpu_encode(u32 *w, const u8 *mac, u16 key, bool ivl, u8 cpu_port)
+{
+	w[0] = w[1] = w[2] = 0;
+	l34_mac48_set(w, 0, mac);
+	l34_mc_to_cpu(w, key, ivl, cpu_port);
+}
+
 u32 l34_ipmc_tran_encode(u8 untag_ports, u8 netif)
 {
 	u32 w = 0;

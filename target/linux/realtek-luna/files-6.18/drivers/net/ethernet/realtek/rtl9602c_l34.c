@@ -1350,6 +1350,10 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	seq_printf(sf, "ipmc routes %u wanted %u kept_for_cpu %u in_switch %u installs %u removals %u failures %u why %s\n",
 		   l->ipmc.n_sg, l->ipmc.n_want, l->ipmc.n_keep, l->ipmc.n_hw, l->ipmc.installs,
 		   l->ipmc.removals, l->ipmc.failures, l->ipmc.why ?: "-");
+	seq_printf(sf, "wan multicast joins %u to_cpu %u fibre_unjoined %s\n", l->ipmc.cpu.n, l->ipmc.n_cpu_hw,
+		   !READ_ONCE(l->ipmc.watching) ? "to the CPU (not followed)" :
+		   READ_ONCE(l->ipmc.overflow) ? "to the CPU (a join has no entry)" :
+		   READ_ONCE(l->ipmc.promisc) ? "to the CPU (the WAN is promiscuous)" : "dropped");
 	for (i = 0; i < l->ipmc.n_hw; i++)
 		seq_printf(sf, "  ipmc %pI4h at %u: %08x %08x %08x\n", &l->ipmc.hw[i].grp,
 			   l->ipmc.hw[i].idx, l->ipmc.hw[i].w[0], l->ipmc.hw[i].w[1], l->ipmc.hw[i].w[2]);

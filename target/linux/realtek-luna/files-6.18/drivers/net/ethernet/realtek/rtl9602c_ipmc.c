@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* TIER: CHIP */
-/* RTL9602C routed IPv4 multicast in the switch: WAN -> the wired LAN ports.
+/* RTL9602C routed IPv4 multicast in the switch: WAN -> the wired LAN ports; and the WAN's
+ * multicast filter: the fibre's multicast nobody joined is dropped in the switch.
  *
  * ipmr's routes (the standard fib notifier) say which groups the router forwards
  * from the WAN to the LAN bridge; the bridge MDB (IGMP snooping) says which of them
@@ -8,7 +9,11 @@
  * path to that port. The switch routes the rest: an L3 group entry in the L2 table
  * whose LAN ports rewrite through IPMC_TRAN[L34_NETIF_LAN] (the LAN interface's
  * MAC, untagged). Measured on the X111W 2026-11-01: 1900/1900 pps delivered, CPU
- * 65 % -> 12 %. Included by rtl9602c_eth.c after rtl9602c_l34_tc.c.
+ * 65 % -> 12 %. Every other group or address the host joined on the WAN or a VLAN of it
+ * (igmpproxy's upstream joins, ff02::1, a solicited-node address; ndo_set_rx_mode says when),
+ * and every routed group the switch does not route, has an entry toward the CPU; the rest of
+ * the fibre's multicast is dropped (stock drops it too). Included by rtl9602c_eth.c after
+ * rtl9602c_l34_tc.c.
  *
  * Copyright (C) 2026 Confiared <contact@confiared.com>
  */
@@ -151,21 +156,14 @@ static unsigned int ipmc_snapshot(struct rtl9602c_eth *ep, struct rtl9602c_ipmc 
 
 	m->n_keep = 0;
 	rtnl_lock();
+	m->cpu.n = 0;
+	if (ep->wan_ndev)
+		eth_mc_wan_joins(ep->wan_ndev, &m->cpu);
 	br = netdev_master_upper_dev_get(ep->ndev);
-	if (!br || !netif_is_bridge_master(br) || !br_multicast_enabled(br)) {
-		m->why = "the LAN port is in no bridge running IGMP snooping";
-		goto out;
-	}
 	spin_lock_bh(&m->lock);
-	if (m->lost) {
-		spin_unlock_bh(&m->lock);
-		m->why = "more (S,G) routes than tracked";
-		goto out;
-	}
-	n_sg = m->n_sg;
+	m->sg_lost = m->lost;
+	n_sg = m->n_snap = m->lost ? 0 : m->n_sg;
 	memcpy(m->snap, m->sg, n_sg * sizeof(*m->sg));
-	if (!n_sg)
-		m->why = "no multicast route";
 	memcpy(ifindex, m->vif_ifindex, sizeof(ifindex));
 	spin_unlock_bh(&m->lock);
 
@@ -183,6 +181,17 @@ static unsigned int ipmc_snapshot(struct rtl9602c_eth *ep, struct rtl9602c_ipmc 
 		} else {
 			m->vif_kind[v] = IPMC_VIF_OTHER;
 		}
+	}
+	if (m->sg_lost) {
+		m->why = "more (S,G) routes than tracked";
+		goto out;
+	}
+	if (!n_sg)
+		m->why = "no multicast route";
+	if (!br || !netif_is_bridge_master(br) || !br_multicast_enabled(br)) {
+		m->why = "the LAN port is in no bridge running IGMP snooping";
+		n_sg = 0;
+		goto out;
 	}
 	for (v = 0; v < n_sg; v++)
 		m->snap[v].via_wan = ipmc_src_via_wan(ep, m->snap[v].src);
@@ -239,9 +248,27 @@ static int sw_vlan_read(struct rtl9602c_l34 *l, u16 vid, u32 *entry)
 	return ret;
 }
 
+/* The same LUT key: an IPv4 group by its address, an L2 entry by its MAC, both in the same VLAN key. */
+static bool mc_same_key(const u32 *a, const u32 *b)
+{
+	u32 l3 = l34_field_get(a, L3MC_L3LOOKUP_LSP, 1);
+
+	if (l3 != l34_field_get(b, L3MC_L3LOOKUP_LSP, 1) ||
+	    l34_field_get(a, L3MC_KEY_LSP, L3MC_KEY_W) != l34_field_get(b, L3MC_KEY_LSP, L3MC_KEY_W))
+		return false;
+	if (l3)
+		return l34_field_get(a, L3MC_GIP_LSP, L3MC_GIP_W) == l34_field_get(b, L3MC_GIP_LSP, L3MC_GIP_W);
+	return a[0] == b[0] && l34_field_get(a, 32, 16) == l34_field_get(b, 32, 16);
+}
+
+static bool mc_to_cpu(const u32 *w)
+{
+	return !l34_field_get(w, L3MC_WANSA_LSP, 1);
+}
+
 /* Clear VALID only and rewrite by hash, so the write finds this entry's own way;
  * the read by address then proves it gone. */
-static int ipmc_lut_del(struct rtl9602c_l34 *l, const struct ipmc_hw *h)
+static int ipmc_lut_del(struct rtl9602c_l34 *l, const struct eth_mc_entry *h)
 {
 	u32 w[3];
 	int ret;
@@ -256,12 +283,10 @@ static int ipmc_lut_del(struct rtl9602c_l34 *l, const struct ipmc_hw *h)
 		return 0;
 	if (ret < 0)
 		return ret;
-	return l34_field_get(w, L3MC_VALID_LSP, 1) &&
-	       l34_field_get(w, L3MC_GIP_LSP, L3MC_GIP_W) ==
-	       l34_field_get(h->w, L3MC_GIP_LSP, L3MC_GIP_W) ? -EIO : 0;
+	return l34_field_get(w, L3MC_VALID_LSP, 1) && mc_same_key(w, h->w) ? -EIO : 0;
 }
 
-static int ipmc_lut_add(struct rtl9602c_l34 *l, struct ipmc_hw *h)
+static int ipmc_lut_add(struct rtl9602c_l34 *l, struct eth_mc_entry *h)
 {
 	u32 rd[3];
 	int ret;
@@ -281,77 +306,113 @@ static int ipmc_lut_add(struct rtl9602c_l34 *l, struct ipmc_hw *h)
 	return 0;
 }
 
-/* Under l34.lock: the LUT holds exactly the n_want groups of m->want. */
-static void ipmc_apply(struct rtl9602c_eth *ep, struct rtl9602c_ipmc *m, unsigned int n_want)
+/* eth_mc_reconcile's table access: the log and counters of one entry. */
+static int ipmc_del_cb(void *ctx, const struct eth_mc_entry *e)
+{
+	struct rtl9602c_eth *ep = ctx;
+	struct rtl9602c_ipmc *m = &ep->l34.ipmc;
+	int ret = ipmc_lut_del(&ep->l34, e);
+
+	if (ret) {
+		m->failures++;
+		pr_warn_ratelimited("rtl9602c-ipmc: %pI4h at %u would not clear (%d); still in the switch\n",
+				    &e->grp, e->idx, ret);
+		return ret;
+	}
+	m->removals++;
+	if (!mc_to_cpu(e->w))
+		pr_info("rtl9602c-ipmc: %pI4h back to the CPU (LUT %u)\n", &e->grp, e->idx);
+	return 0;
+}
+
+static int ipmc_add_cb(void *ctx, struct eth_mc_entry *e)
+{
+	struct rtl9602c_eth *ep = ctx;
+	struct rtl9602c_ipmc *m = &ep->l34.ipmc;
+	int ret = ipmc_lut_add(&ep->l34, e);
+
+	if (ret == -EIO && ipmc_lut_del(&ep->l34, e))
+		ret = 0;	/* written and not clearable: track it so a later sync retries */
+	if (ret) {
+		m->failures++;
+		pr_warn_ratelimited("rtl9602c-ipmc: %pI4h %08x %08x not installed (%d): the CPU gets the fibre's multicast\n",
+				    &e->grp, e->w[0], e->w[1], ret);
+		return ret;
+	}
+	m->installs++;
+	if (!mc_to_cpu(e->w))
+		pr_info("rtl9602c-ipmc: %pI4h routed by the switch (LUT %u)\n", &e->grp, e->idx);
+	return 0;
+}
+
+/* Encode next[*n]: the routed group `s` toward the LAN ports, else the join `k` toward the CPU.
+ * -> false when its VLAN cannot be read. */
+static bool ipmc_encode(struct rtl9602c_eth *ep, struct rtl9602c_ipmc *m, unsigned int n,
+			const struct ipmc_sg *s, const struct eth_mc_key *k)
+{
+	u16 vid = s ? (s->parent < IPMC_VIFS ? m->vif_vid[s->parent] : 0) : k->vid, key;
+	struct eth_mc_entry *e = &m->next[n];
+	u8 lan = BIT(ep->swm->n_copper) - 1;
+	u32 vlan;
+	bool ivl;
+
+	vid = vid ?: SW_WAN_PVID;
+	if (sw_vlan_read(&ep->l34, vid, &vlan)) {
+		m->failures++;
+		pr_warn_ratelimited("rtl9602c-ipmc: VLAN %u unreadable: its group has no entry\n", vid);
+		return false;
+	}
+	key = l34_vlan_lut_key(vlan, vid, &ivl);
+	memset(e, 0, sizeof(*e));
+	e->grp = s ? s->grp : k->grp;
+	if (s)
+		l34_l3mc_encode(e->w, s->grp, key, ivl, lan, L34_NETIF_LAN);
+	else if (k->grp)
+		l34_l3mc_cpu_encode(e->w, k->grp, key, ivl, ep->swm->cpu_port);
+	else
+		l34_l2mc_cpu_encode(e->w, k->mac, key, ivl, ep->swm->cpu_port);
+	return true;
+}
+
+/* Under l34.lock: the LUT holds exactly the n_want routed groups of m->want, and an entry toward
+ * the CPU for every other group the host joined on the WAN or ipmr routes from it.
+ * -> false when one of them is not in the LUT: the fibre's multicast must then reach the CPU. */
+static bool ipmc_apply(struct rtl9602c_eth *ep, struct rtl9602c_ipmc *m, unsigned int n_want)
 {
 	struct rtl9602c_l34 *l = &ep->l34;
 	u8 lan = BIT(ep->swm->n_copper) - 1;
-	unsigned int i, j;
-	struct ipmc_hw want;
-	u32 vlan;
-	u16 vid, key;
-	bool ivl;
-	int ret;
+	unsigned int i, n = 0;
+	bool all = true;
 
-	if (n_want) {
+	if (n_want)
 		l34_wr(l, IPMC_TRAN(L34_NETIF_LAN), l34_ipmc_tran_encode(lan, L34_NETIF_LAN));
-		l34_wr(l, SW_LUT_CFG, l34_rd(l, SW_LUT_CFG) | LUT_CFG_IPMC_DIP_HASH);
-	}
-	for (j = 0; j < n_want; j++) {
-		const struct ipmc_sg *s = &m->snap[m->want[j]];
+	l34_wr(l, SW_LUT_CFG, l34_rd(l, SW_LUT_CFG) | LUT_CFG_IPMC_DIP_HASH);
+	for (i = 0; i < n_want; i++)
+		if (ipmc_encode(ep, m, n, &m->snap[m->want[i]], NULL))
+			n++;
+	/* a group ipmr routes from the WAN, not by the switch: the CPU needs its frames */
+	for (i = 0; i < m->n_snap; i++)
+		if (m->snap[i].parent < IPMC_VIFS && m->vif_kind[m->snap[i].parent] == IPMC_VIF_WAN)
+			eth_mc_key_add(&m->cpu, m->snap[i].grp, NULL, m->vif_vid[m->snap[i].parent]);
+	for (i = 0; i < m->cpu.n && n < MC_ENTRIES; i++)
+		if (ipmc_encode(ep, m, n, NULL, &m->cpu.k[i]))
+			eth_mc_next_keep(m->next, &n, mc_same_key);
+		else
+			all = false;
+	all &= i == m->cpu.n && !m->cpu.lost;
+	all &= !eth_mc_reconcile(m->hw, &m->n_hw, MC_ENTRIES, m->next, n, ipmc_del_cb, ipmc_add_cb, ep);
+	for (i = m->n_cpu_hw = 0; i < m->n_hw; i++)
+		m->n_cpu_hw += mc_to_cpu(m->hw[i].w);
+	return all;
+}
 
-		vid = m->vif_vid[s->parent] ?: SW_WAN_PVID;
-		ret = sw_vlan_read(l, vid, &vlan);
-		if (ret) {
-			m->failures++;
-			pr_warn_ratelimited("rtl9602c-ipmc: VLAN %u unreadable (%d): %pI4h stays on the CPU\n",
-					    vid, ret, &s->grp);
-			m->want[j--] = m->want[--n_want];
-			continue;
-		}
-		key = l34_vlan_lut_key(vlan, vid, &ivl);
-		l34_l3mc_encode(m->hw_next[j], s->grp, key, ivl, lan, L34_NETIF_LAN);
-	}
-	/* retire what is no longer wanted, or wanted with other words */
-	for (i = 0; i < m->n_hw; ) {
-		for (j = 0; j < n_want && memcmp(m->hw_next[j], m->hw[i].w, sizeof(m->hw[i].w)); j++)
-			;
-		if (j < n_want) {
-			i++;
-			continue;
-		}
-		ret = ipmc_lut_del(l, &m->hw[i]);
-		if (ret) {
-			m->failures++;
-			pr_warn_ratelimited("rtl9602c-ipmc: %pI4h at %u would not clear (%d); still routed\n",
-					    &m->hw[i].grp, m->hw[i].idx, ret);
-			i++;
-			continue;
-		}
-		m->removals++;
-		pr_info("rtl9602c-ipmc: %pI4h back to the CPU (LUT %u)\n", &m->hw[i].grp, m->hw[i].idx);
-		m->hw[i] = m->hw[--m->n_hw];
-	}
-	for (j = 0; j < n_want && m->n_hw < IPMC_GROUPS; j++) {
-		for (i = 0; i < m->n_hw && memcmp(m->hw_next[j], m->hw[i].w, sizeof(m->hw[i].w)); i++)
-			;
-		if (i < m->n_hw)
-			continue;
-		want.grp = m->snap[m->want[j]].grp;
-		memcpy(want.w, m->hw_next[j], sizeof(want.w));
-		ret = ipmc_lut_add(l, &want);
-		if (ret == -EIO && ipmc_lut_del(l, &want))
-			ret = 0;	/* written and not clearable: track it so a later sync retries */
-		if (ret) {
-			m->failures++;
-			pr_warn_ratelimited("rtl9602c-ipmc: %pI4h not installed (%d); the CPU routes it\n",
-					    &want.grp, ret);
-			continue;
-		}
-		m->hw[m->n_hw++] = want;
-		m->installs++;
-		pr_info("rtl9602c-ipmc: %pI4h routed by the switch (LUT %u)\n", &want.grp, want.idx);
-	}
+/* ndo_set_rx_mode of the WAN, atomic: the host joined or left a group there. */
+static void rtl9602c_ipmc_kick(struct rtl9602c_eth *ep)
+{
+	struct rtl9602c_ipmc *m = &ep->l34.ipmc;
+
+	if (READ_ONCE(m->watching))
+		mod_delayed_work(system_wq, &m->sync, 0);
 }
 
 static void rtl9602c_ipmc_sync(struct work_struct *work)
@@ -359,9 +420,11 @@ static void rtl9602c_ipmc_sync(struct work_struct *work)
 	struct rtl9602c_ipmc *m = container_of(to_delayed_work(work), struct rtl9602c_ipmc, sync);
 	struct rtl9602c_eth *ep = container_of(m, struct rtl9602c_eth, l34.ipmc);
 	unsigned int n_sg, n_want = 0;
+	bool all;
 	int ret;
 
-	rtl9602c_pon_mc_policy(ep);
+	if (!READ_ONCE(m->watching))
+		return;
 	n_sg = ipmc_snapshot(ep, m);
 	if (n_sg) {
 		n_want = l34_ipmc_wanted(m->snap, n_sg, m->vif_kind, m->keep_cpu, m->n_keep,
@@ -378,9 +441,12 @@ static void rtl9602c_ipmc_sync(struct work_struct *work)
 			n_want = 0;
 	}
 	mutex_lock(&ep->l34.lock);
-	ipmc_apply(ep, m, n_want);
+	all = ipmc_apply(ep, m, n_want);
 	m->n_want = n_want;
 	mutex_unlock(&ep->l34.lock);
+	WRITE_ONCE(m->promisc, ep->wan_ndev && (READ_ONCE(ep->wan_ndev->flags) & IFF_PROMISC));	/* a capture sees everything */
+	WRITE_ONCE(m->overflow, !all || m->sg_lost);
+	rtl9602c_pon_mc_policy(ep);
 }
 
 static void rtl9602c_ipmc_stop(void *data)
@@ -388,11 +454,12 @@ static void rtl9602c_ipmc_stop(void *data)
 	struct rtl9602c_eth *ep = data;
 	struct rtl9602c_ipmc *m = &ep->l34.ipmc;
 
+	WRITE_ONCE(m->watching, false);
 	unregister_fib_notifier(&init_net, &m->fib_nb);
 	unregister_switchdev_blocking_notifier(&m->mdb_nb);
 	cancel_delayed_work_sync(&m->sync);
-	WRITE_ONCE(m->watching, false);
 	rtl9602c_pon_mc_policy(ep);
+	m->n_snap = m->cpu.n = 0;
 	mutex_lock(&ep->l34.lock);
 	ipmc_apply(ep, m, 0);
 	mutex_unlock(&ep->l34.lock);
@@ -407,6 +474,8 @@ static int rtl9602c_ipmc_start(struct rtl9602c_eth *ep)
 
 	spin_lock_init(&m->lock);
 	INIT_DELAYED_WORK(&m->sync, rtl9602c_ipmc_sync);
+	m->cpu.k = m->cpu_key;
+	m->cpu.max = MC_CPU_KEYS;
 	m->why = "no multicast route yet";
 	m->mdb_nb.notifier_call = rtl9602c_ipmc_mdb_event;
 	ret = register_switchdev_blocking_notifier(&m->mdb_nb);
@@ -419,10 +488,14 @@ static int rtl9602c_ipmc_start(struct rtl9602c_eth *ep)
 		return ret;
 	}
 	WRITE_ONCE(m->watching, true);
-	rtl9602c_pon_mc_policy(ep);
+	mod_delayed_work(system_wq, &m->sync, 0);	/* the joins made before this moment */
 	return 0;
 }
 #else
+static void rtl9602c_ipmc_kick(struct rtl9602c_eth *ep)
+{
+}
+
 static void rtl9602c_ipmc_stop(void *data)
 {
 }

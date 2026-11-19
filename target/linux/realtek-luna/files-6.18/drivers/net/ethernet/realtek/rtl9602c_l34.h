@@ -26,6 +26,7 @@
 
 #include "gpon_edge.h"	/* core: the router edge, read from the live kernel */
 #include "rtl9602c_l34_logic.h"	/* struct ipmc_sg, IPMC_VIFS */
+#include "eth_mc_filter.h"	/* core: the WAN's joins, the entry table kept equal to a list */
 
 /* Indirect table-access block (byte offsets within the ...
  * dev/MEASURED-rtl9602c_l34.h.md sec 7. */
@@ -205,8 +206,11 @@ struct l34_neigh {
 };
 
 /* Routed IPv4 multicast in the switch (rtl9602c_ipmc.c): what ipmr and the bridge
- * said, copied in atomic context, and the groups the LUT holds. */
+ * said, copied in atomic context, and the groups the LUT holds: the routed ones and
+ * the ones the CPU joined on the WAN (every other multicast from the fibre is dropped). */
 #define IPMC_GROUPS	32
+#define MC_CPU_KEYS	48	/* groups or addresses the host joined on the WAN, every VLAN of it */
+#define MC_ENTRIES	(IPMC_GROUPS + MC_CPU_KEYS)
 struct rtl9602c_ipmc {
 	struct notifier_block	fib_nb, mdb_nb;
 	struct delayed_work	sync;
@@ -225,12 +229,15 @@ struct rtl9602c_ipmc {
 	unsigned int		n_keep;
 	unsigned int		want[IPMC_GROUPS];
 	unsigned int		n_want;
-	u32			hw_next[IPMC_GROUPS][3];
-	struct ipmc_hw {
-		u32	grp;
-		u16	idx;
-		u32	w[3];
-	}			hw[IPMC_GROUPS];	/* under rtl9602c_l34.lock */
+	unsigned int		n_snap;		/* snap[] holds every (S,G), routed or not */
+	bool			sg_lost;
+	struct eth_mc_key	cpu_key[MC_CPU_KEYS];
+	struct eth_mc_keys	cpu;		/* the joins toward the CPU, keys in cpu_key */
+	unsigned int		n_cpu_hw;
+	bool			overflow;	/* a join without its entry: the CPU gets every multicast */
+	bool			promisc;	/* the WAN is promiscuous: so is the fibre's multicast */
+	struct eth_mc_entry	next[MC_ENTRIES];
+	struct eth_mc_entry	hw[MC_ENTRIES];	/* under rtl9602c_l34.lock */
 	unsigned int		n_hw;
 	u32			installs, removals, failures;
 	const char		*why;		/* the last reason nothing is routed */

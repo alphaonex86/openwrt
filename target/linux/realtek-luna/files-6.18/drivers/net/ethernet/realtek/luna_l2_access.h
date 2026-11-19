@@ -70,27 +70,45 @@ static inline int luna_l2_access(void __iomem *sw,
 }
 
 
-/* One entry of a table behind the same port (ACL, its actions), written then read back. */
-static inline int luna_tbl_write(void __iomem *sw, u8 addr_shift, u8 type, u16 addr,
-				 const u32 *words, unsigned int n)
+/* One row of a table behind the same port: `cmd` names the table and the row, its write bit clear. */
+static inline int luna_tbl_read(void __iomem *sw, u32 cmd, u32 *words, unsigned int n)
 {
 	unsigned int i;
 	int ret = luna_l2_wait(sw);
 
 	if (ret)
 		return ret;
+	writel(cmd, sw + 0x12000);
+	ret = luna_l2_wait(sw);
+	if (ret)
+		return ret;
+	for (i = 0; i < n; i++)
+		words[i] = readl(sw + 0x1201c + 4 * i);
+	return 0;
+}
+
+#define LUNA_TBL_WORDS_MAX	8
+
+/* One entry of a table behind the same port (ACL, its actions), written then read back. */
+static inline int luna_tbl_write(void __iomem *sw, u8 addr_shift, u8 type, u16 addr,
+				 const u32 *words, unsigned int n)
+{
+	u32 got[LUNA_TBL_WORDS_MAX];
+	unsigned int i;
+	int ret = luna_l2_wait(sw);
+
+	if (n > LUNA_TBL_WORDS_MAX)
+		return -EINVAL;
+	if (ret)
+		return ret;
 	for (i = 0; i < n; i++)
 		writel(words[i], sw + 0x12008 + 4 * i);
 	writel(((u32)addr << addr_shift) | (1u << 3) | type, sw + 0x12000);
-	ret = luna_l2_wait(sw);
-	if (ret)
-		return ret;
-	writel(((u32)addr << addr_shift) | type, sw + 0x12000);
-	ret = luna_l2_wait(sw);
+	ret = luna_tbl_read(sw, ((u32)addr << addr_shift) | type, got, n);
 	if (ret)
 		return ret;
 	for (i = 0; i < n; i++)
-		if (readl(sw + 0x1201c + 4 * i) != words[i])
+		if (got[i] != words[i])
 			return -EIO;
 	return 0;
 }

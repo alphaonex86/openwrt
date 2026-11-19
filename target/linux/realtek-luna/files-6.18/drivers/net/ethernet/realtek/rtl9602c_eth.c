@@ -33,6 +33,9 @@
 #include "luna_loop.h"		/* LAN loop detection, the switch engine on this die */
 #include "luna_gmac_logic.h"	/* family GMAC ring packings (flowcore) */
 #include "gpon_hwaddr.h"	/* the ONE station-address ladder (drivers/net/gpon) */
+#include "eth_core_recovery.h"
+#include "luna_sw_state.h"
+#include <linux/rtnetlink.h>
 
 /* US-OMCI TX tuning knobs (see rtl9602c_eth_omci_xmit): the ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 2. */
@@ -399,6 +402,9 @@ struct rtl9602c_eth {
 					 * 1: soft re-arm failed -> IP cycle */
 	u32		dbg_rearm;	/* soft TxFDP re-arms (publish + watchdog) */
 	struct work_struct recover_work;
+	struct eth_core_recovery sw_recovery;	/* the switch core reset and its re-init */
+	struct luna_state_rd sw_rd[ETH_STATE_BLOCKS];
+	struct eth_reg_range sw_rg[ETH_STATE_BLOCKS][3];
 	bool		closing;	/* gate recover_work vs ndo_stop teardown */
 	bool		hw_up;		/* rings + DMA live from the first open on: the OMCC
 					 * and gpon0 ride them whatever eth0's state */
@@ -1749,9 +1755,11 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 	if (eth_ring_watch_rx(&luna_ring_watch, ep->ndev, rtl9602c_eth_rx_waiting(ep), ep->dbg_filled))
 		napi_schedule(&ep->napi);
-	if ((ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets)) |
-	    luna_mib_port_egress_sample(ep->ndev, !rtl9602c_eth_rx_waiting(ep)))
+	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
 		rtl9602c_eth_msr_apply(ep, true);
+	if (!eth_core_recovery_busy(&ep->sw_recovery) &&
+	    luna_mib_port_egress_sample(ep->ndev, !rtl9602c_eth_rx_waiting(ep)))
+		eth_core_recovery_ask(&ep->sw_recovery);
 	/* While a park is pending, tighten the cadence so the 60ms escalation
 	 * ladder is not quantised by the 100ms backstop interval. */
 	mod_timer(&ep->poll_timer, jiffies +
@@ -2592,6 +2600,158 @@ static netdev_tx_t rtl9602c_eth_xmit(struct sk_buff *skb,
 #include "rtl9602c_ipmc.c"
 #endif
 
+/* The switch core reset as a recovery (eth_core_recovery.h): the watch timer or sw_core_reset only asks.
+ * LOCK ORDER: rtnl (VLAN uppers, open/stop) -> rtl9602c_l34_tc_mutex (flow installs) -> ep->l34.lock (L34 and IPMC
+ * table rows) -> rtl9602c_gphy_lock (inside the PHY steps). Every table writer of this switch holds one of them,
+ * so none writes a row between the reset and the step that puts its table back. */
+static const struct eth_reg_range rtl9602c_state_regs[] = {
+	{ 0x00000, 64 }, { 0x00100, 128 }, { 0x11000, 128 }, { 0x13000, 16 }, { 0x15000, 24 }, { 0x16000, 8 },
+	{ 0x17000, 4 }, { 0x1c000, 192 }, { 0x1e000, 24 }, { 0x20000, 256 }, { 0x20800, 16 }, { 0x20c00, 16 },
+	{ 0x23000, 128 }, { 0x25000, 4 }, { 0x27000, 16 }, { 0x2a000, 10 }, { 0x2d800, 64 }, { 0, 0 } };
+static const struct eth_reg_range rtl9602c_state_queues[] = { { 0x2d018, 3 }, { 0x2d028, 4 }, { 0x2d058, 32 },
+							      { 0, 0 } };
+static const struct eth_reg_range rtl9602c_state_mib[] = { { SW_STAT_PORT_TX_MIB, 128 },
+							   { SW_STAT_PORT_RX_MIB_RTL9602C, 128 }, { 0, 0 } };
+static const struct eth_reg_range rtl9602c_state_nic[] = { { 0x00000, 64 }, { 0, 0 } };
+static const struct { const char *name; u8 type, words; u16 rows; bool learned; } rtl9602c_state_l34[] = {
+	{ "l34 route", L34_TBL_L3ROUTE, L34_WORDS_L3ROUTE, 16 }, { "l34 pppoe", L34_TBL_PPPOE, L34_WORDS_PPPOE, 8 },
+	{ "l34 nexthop", L34_TBL_NEXTHOP, L34_WORDS_NEXTHOP, 16 }, { "l34 netif", L34_TBL_NETIF, L34_WORDS_NETIF, 16 },
+	{ "l34 extip", L34_TBL_EXTIP, L34_WORDS_EXTIP, 8 }, { "l34 arp", L34_TBL_ARP, L34_WORDS_ARP, 128, true },
+	{ "l34 napt in", L34_TBL_NAPTR_IN, L34_WORDS_NAPTR_IN, L34_NAPT_ENTRIES, true },
+	{ "l34 napt out", L34_TBL_NAPT_OUT, L34_WORDS_NAPT_OUT, L34_NAPT_ENTRIES, true },
+};
+
+static unsigned int rtl9602c_sw_blocks(void *ctx, struct eth_state_block *b)
+{
+	struct rtl9602c_eth *ep = ctx;
+	const struct luna_ctl_acl *acl = ep->swm->ctl_acl;
+	struct luna_state_rd *t = ep->sw_rd;
+	struct eth_reg_range (*rg)[3] = ep->sw_rg;
+	unsigned int i, n = 0;
+
+	BUILD_BUG_ON(4 + 4 + ARRAY_SIZE(rtl9602c_state_l34) > ETH_STATE_BLOCKS);
+	eth_state_add(b, &n, "registers", false, luna_state_reg_rd, ep->sw, rtl9602c_state_regs, 32, NULL);
+	eth_state_add(b, &n, "queues", true, luna_state_reg_rd, ep->sw, rtl9602c_state_queues, 4, NULL);
+	eth_state_add(b, &n, "mib", true, luna_state_reg_rd, ep->sw, rtl9602c_state_mib, 3, NULL);
+	eth_state_add(b, &n, "nic", false, luna_state_reg_rd, ep->base, rtl9602c_state_nic, 2, NULL);
+	*t = (struct luna_state_rd){ .base = ep->sw, .cmd = SW_TBL_VLAN_WR(0) & ~BIT(3), .addr_shift = 9 };
+	luna_state_tbl(b, &n, "vlan", false, t, *rg++, luna_state_tbl_row, 2, 4096, 0);
+	if (acl) {
+		*++t = (struct luna_state_rd){ .base = ep->sw, .cmd = acl->rule_tbl, .addr_shift = acl->addr_shift };
+		luna_state_tbl(b, &n, "acl rules", false, t, *rg++, luna_state_tbl_row, LUNA_ACL_WORDS, acl->rules,
+			       acl->data_base);
+		*++t = (struct luna_state_rd){ .base = ep->sw, .cmd = acl->act_tbl, .addr_shift = acl->addr_shift };
+		luna_state_tbl(b, &n, "acl actions", false, t, *rg++, luna_state_tbl_row, acl->act_words, acl->rules, 0);
+	}
+	*++t = (struct luna_state_rd){ .base = ep->sw, .l2 = &luna_l2_rtl9602c };
+	luna_state_tbl(b, &n, "l2", true, t, *rg++, luna_state_l2_row, 3, 1088, 0);
+	for (i = 0; ep->l34.ready && i < ARRAY_SIZE(rtl9602c_state_l34); i++) {
+		*++t = (struct luna_state_rd){ .base = ep->l34.sw, .type = rtl9602c_state_l34[i].type,
+					       .l34 = &luna_l34_acc_rtl9602c };
+		luna_state_tbl(b, &n, rtl9602c_state_l34[i].name, rtl9602c_state_l34[i].learned, t, *rg++,
+			       luna_state_l34_row, rtl9602c_state_l34[i].words, rtl9602c_state_l34[i].rows, 0);
+	}
+	return n;
+}
+
+static bool rtl9602c_sw_begin(void *ctx)
+{
+	struct rtl9602c_eth *ep = ctx;
+
+	rtnl_lock();
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+	mutex_lock(&rtl9602c_l34_tc_mutex);
+#endif
+	if (ep->l34.ready)
+		mutex_lock(&ep->l34.lock);
+	if (ep->hw_up && ep->swm->sw_rst)
+		return true;
+	ep->sw_recovery.end(ctx);
+	return false;
+}
+
+static void rtl9602c_sw_end(void *ctx)
+{
+	struct rtl9602c_eth *ep = ctx;
+
+	if (ep->l34.ready)
+		mutex_unlock(&ep->l34.lock);
+#ifdef CONFIG_GPON_FLOW_OFFLOAD
+	mutex_unlock(&rtl9602c_l34_tc_mutex);
+#endif
+	rtnl_unlock();
+}
+
+static void rtl9602c_sw_quiesce(void *ctx)
+{
+	struct rtl9602c_eth *ep = ctx;
+
+	netif_tx_disable(ep->ndev);
+	if (ep->wan_ndev)
+		netif_tx_disable(ep->wan_ndev);
+	napi_disable(&ep->napi);
+}
+
+static void rtl9602c_sw_reset(void *ctx)
+{
+	luna_mib_core_reset(((struct rtl9602c_eth *)ctx)->ndev);
+}
+
+static void rtl9602c_sw_resume(void *ctx)
+{
+	struct rtl9602c_eth *ep = ctx;
+
+	napi_enable(&ep->napi);
+	napi_schedule(&ep->napi);
+	if (netif_running(ep->ndev))
+		netif_wake_queue(ep->ndev);
+	if (ep->wan_ndev && netif_running(ep->wan_ndev))
+		netif_wake_queue(ep->wan_ndev);
+}
+
+static int rtl9602c_reinit_msr(void *ctx)
+{
+	rtl9602c_eth_msr_apply(ctx, true);
+	return 0;
+}
+
+static const struct eth_init_step rtl9602c_sw_reinit_steps[] = {
+	{ "nic flow control", rtl9602c_reinit_msr },
+};
+
+static const struct eth_core_recover_ops rtl9602c_sw_recover_ops = {
+	.quiesce = rtl9602c_sw_quiesce,
+	.reset = rtl9602c_sw_reset,
+	.resume = rtl9602c_sw_resume,
+	.steps = rtl9602c_sw_reinit_steps,
+	.n_steps = ARRAY_SIZE(rtl9602c_sw_reinit_steps),
+};
+
+/* The recovery on demand: the work a stalled port asks for (a lab check, or a field unit by hand). */
+static int rtl9602c_sw_core_reset_set(const char *val, const struct kernel_param *kp)
+{
+	bool go;
+	int ret = kstrtobool(val, &go);
+
+	if (ret || !go)
+		return ret;
+	if (!g_ep || !g_ep->hw_up || !g_ep->swm->sw_rst)
+		return -ENODEV;
+	return eth_core_recovery_ask(&g_ep->sw_recovery) ? 0 : -EBUSY;
+}
+
+static int rtl9602c_sw_core_reset_get(char *buf, const struct kernel_param *kp)
+{
+	return sysfs_emit(buf, "%u\n", g_ep ? g_ep->sw_recovery.runs : 0);
+}
+
+static const struct kernel_param_ops rtl9602c_sw_core_reset_ops = {
+	.set = rtl9602c_sw_core_reset_set,
+	.get = rtl9602c_sw_core_reset_get,
+};
+module_param_cb(sw_core_reset, &rtl9602c_sw_core_reset_ops, NULL, 0644);
+MODULE_PARM_DESC(sw_core_reset, "write 1: reset the switch core and re-init it, as a stalled port does; read: how many ran");
+
 static void rtl9602c_eth_tx_timeout(struct net_device *ndev, unsigned int txqueue)
 {
 	rtl9602c_eth_ring_timeout(netdev_priv(ndev), ndev);
@@ -2656,6 +2816,8 @@ static int rtl9602c_ethdump_show(struct seq_file *m, void *v)
 			   ep->dbg_tx_recover);
 		return 0;
 	}
+	seq_printf(m, "sw_core_reset: runs %u, failed steps %#x, words not restored %u\n", ep->sw_recovery.runs,
+		   ep->sw_recovery.failed, ep->sw_recovery.unrestored);
 
 	for (i = 0; i < ep->rxq[0].n; i++) {
 		if (ep->rxq[0].ring[i].opts1 & D_OWN)
@@ -3027,6 +3189,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->dev = dev;
 	spin_lock_init(&ep->tx_lock);
 	INIT_WORK(&ep->recover_work, rtl9602c_eth_recover_work);
+	eth_core_recovery_init(&ep->sw_recovery, ndev, ep, &rtl9602c_sw_recover_ops, rtl9602c_sw_begin, rtl9602c_sw_end,
+			       rtl9602c_sw_blocks);
 
 	ep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ep->base))

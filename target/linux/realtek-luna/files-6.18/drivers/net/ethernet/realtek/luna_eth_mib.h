@@ -46,7 +46,10 @@ extern struct eth_ring_watch luna_ring_watch;
 /* From the driver's watch timer: `offered` = frames it put on the ring for the fibre port so far.
  * -> true when the fibre path was recovered: the driver then puts its own NIC programming back. */
 bool luna_mib_pon_egress_sample(struct net_device *wan, u32 offered);
-/* From the same timer: every other switch port; `cpu_ready` = the receive ring holds nothing the driver owes. */
+/* From the same timer: every other switch port; `cpu_ready` = the receive ring holds nothing the driver owes.
+ * -> true when a port stalled and the switch core must be reset (the driver's recovery, in process context). */
 bool luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready);
+/* The switch core reset alone, settled; IRQs off on this one CPU while it settles. */
+void luna_mib_core_reset(struct net_device *ndev);
 
 #endif /* _LUNA_ETH_MIB_H */

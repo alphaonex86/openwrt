@@ -168,27 +168,27 @@ static void luna_mib_stall_state(struct net_device *ndev)
 
 static u32 luna_core_resets;
 
-/* A stalled CPU or copper egress is recovered by the switch core reset (tables and fibre kept): field X111W 11-15, three
- * CPU-port stalls and a copper hang that a link bounce, an eth0 down/up and the stock scheduler mode left held. It is
- * no fibre recovery: lab X111W 11-19, the fibre stall it followed left the LAN dead. Nothing on this CPU touches the
- * core until the vendor's 10 ms settle has passed: its caller reads the next port, and a read of a block in reset
- * never completes on a bus whose timeout monitors the boot loader disabled. Only the RTL9602C (one CPU) has sw_rst. */
+/* A stalled CPU or copper egress is recovered by the switch core reset: field X111W 11-15, three CPU-port stalls and
+ * a copper hang that a link bounce, an eth0 down/up and the stock scheduler mode left held. It is no fibre recovery:
+ * lab X111W 11-19, the fibre stall it followed left the LAN dead. The driver runs it from process context, followed
+ * by its own init (eth_core_recover.h). Nothing on this CPU touches the core until the vendor's 10 ms settle has
+ * passed: a read of a block in reset never completes. Only the RTL9602C (one CPU) has sw_rst. */
 #define LUNA_CORE_RST_SETTLE_MS	10
 
-static void luna_mib_core_reset(struct net_device *ndev, unsigned int port)
+void luna_mib_core_reset(struct net_device *ndev)
 {
 	struct luna_mib_state *s = &luna_mib;
 	unsigned long flags;
 
-	if (!s->map->sw_rst)
+	if (!s->sw || !s->map->sw_rst)
 		return;
-	netdev_err(ndev, "port %u: resetting the switch core\n", port);
 	local_irq_save(flags);
 	iowrite32(ioread32(s->sw + s->map->sw_rst) | SW_RST_CORE, s->sw + s->map->sw_rst);
 	mdelay(LUNA_CORE_RST_SETTLE_MS);
 	local_irq_restore(flags);
 	luna_core_resets++;
 }
+EXPORT_SYMBOL_GPL(luna_mib_core_reset);
 
 /* The fibre port as an egress: what the driver handed it against the octets the switch counted out of it.
  * -> true when the caller recovers its own side (the NIC); the switch core is left alone. */
@@ -240,7 +240,6 @@ bool luna_mib_port_egress_sample(struct net_device *ndev, bool cpu_ready)
 					   ioread32(s->sw + SW_STAT_PORT_TX_MIB + at + LUNA_MIB_TX_OCTETS)))
 			continue;
 		luna_mib_stall_state(ndev);
-		luna_mib_core_reset(ndev, port);
 		reset = true;
 	}
 	return reset;

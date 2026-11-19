@@ -10,8 +10,9 @@
  * carrier kept (pages staged, the underflow latched, grants still accepted); re-arming the feed brought it back in
  * 6 s. Stock counts the underflow and recovers nothing.
  * An OLT that grants this ONU nothing gives the same shape and is not ours to recover: a stall is a wedge only while
- * grants arrive (re-armed under the restart budget, never a reboot); without grants it is named and counted, nothing
- * spent; a chip that cannot count grants says so and is re-armed at most once per stall, the budget never asked.
+ * grants arrive (re-armed under the restart budget, a spent one is eth_watch_spent.h's); without grants it is named
+ * and counted, nothing spent; a chip that cannot count grants says so and is re-armed at most once per stall, the
+ * budget never asked.
  */
 #ifndef GPON_US_WATCH_H
 #define GPON_US_WATCH_H

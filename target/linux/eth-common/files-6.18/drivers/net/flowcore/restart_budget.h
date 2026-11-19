@@ -3,7 +3,7 @@
 /* restart_budget.h -- ONE budget for every self-restart of our code (a ring, a port, the fibre path, a radio).
  * A restart after which the subsystem worked again cured it and spends nothing; RESTART_TRIES in a row that
  * did not are the last until it asks for none during RESTART_CURED_MS. What a spent budget means is the
- * caller's: a radio stays off and says so, the fibre path reboots the unit (nothing else brings the WAN back).
+ * caller's: a radio stays off and says so, a watch follows eth_watch_spent.h.
  * PURE: time is an input, in ms.
  */
 #ifndef _RESTART_BUDGET_H

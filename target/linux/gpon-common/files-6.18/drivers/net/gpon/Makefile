@@ -278,6 +278,10 @@ obj-$(CONFIG_GPON_OLT_DIAG) += gpon_olt_diag.o
 # it, freeze the duplicate, migrate when the X111W boots.
 obj-y += gpon_ploam.o
 
+# the spent recovery budget's policy, for every watch
+obj-y += gpon_watch_spent.o
+CFLAGS_gpon_watch_spent.o += -I$(srctree)/drivers/net/flowcore
+
 # ─────────────────────────────────────────────────────────────────────────────
 # gpon_regseq.o -- a bring-up expressed as DATA, and the interpreter that runs it.
 #

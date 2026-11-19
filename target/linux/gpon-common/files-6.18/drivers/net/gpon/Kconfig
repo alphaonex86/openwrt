@@ -247,6 +247,17 @@ config ZX279200
 	  The 8-port GPON OLT PON MAC of the V-SOL V1600G, on PCIe (its source
 	  lives in target/linux/broadcom-iproc, the one host it has).
 
+config ETH_WATCH_SPENT_STAY_UP
+	bool "A spent recovery budget keeps the unit up (diagnosis image)"
+	default n
+	help
+	  What a watch (fibre, CPU port, copper, PON upstream, NIC ring) does
+	  once its recovery budget is spent.  y: it stops recovering and the
+	  unit stays up, the fault state kept as evidence (the lab and the
+	  detector variants of build-openwrt.py).  n: it restarts the unit, so
+	  a customer's unit comes back by itself (the production image).
+	  eth_watch.spent_stay_up overrides it at run time.  No code cost.
+
 config GPON_FLOW_DIAG
 	bool "GPON accelerator diagnostics (why a flow was NOT offloaded)"
 	depends on GPON_FLOW_OFFLOAD

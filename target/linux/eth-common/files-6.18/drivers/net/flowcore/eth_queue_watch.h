@@ -28,7 +28,7 @@ struct eth_queue_watch {
 	u32 recoveries;		/* ethtool -S ring_recoveries */
 };
 
-/* Every recovery, RX or TX, spends its direction's restart budget; a spent one reboots, the report in pstore.
+/* Every recovery, RX or TX, spends its direction's restart budget; a spent one is eth_watch_spent.h's.
  * RX traffic never cures a TX hang. */
 static inline enum eth_watch eth_watch_recovering(struct eth_queue_watch *w, struct restart_budget *b, u64 now_ms)
 {
@@ -67,8 +67,7 @@ static inline enum eth_watch eth_tx_watch_timeout(struct eth_queue_watch *w, u64
 
 /* An egress port that sends NOTHING of what it is handed is not congested (a congested port still sends):
  * it is a black hole, and the link above it stays up. 8 frames over 10 s is one stall; each is recovered through
- * the restart budget. Once it is spent (ETH_WATCH_REBOOT here) recovery stops and the unit stays up: a reboot cut
- * the LAN with the stalled port (coordinator's choice 2026-11-19, the operator to confirm). */
+ * the restart budget; a spent one (ETH_WATCH_REBOOT here) is eth_watch_spent.h's. */
 #define ETH_EGRESS_STALL_MS	10000
 #define ETH_EGRESS_STALL_FRAMES	8
 struct eth_egress_watch {
@@ -146,6 +145,7 @@ static inline enum eth_watch eth_port_egress_sample(struct eth_port_egress *p, b
 #include <linux/netdevice.h>
 #include <linux/panic.h>
 #include <linux/spinlock.h>
+#include "eth_watch_spent.h"
 
 /* A driver's watch: sampled from its timer, a TX timeout from the kernel's; the lock keeps them apart on SMP.
  * Its `w` is the rx_watch of the netdev contract. */
@@ -172,26 +172,25 @@ static inline u64 *eth_ring_watch_stats(const struct eth_ring_watch *rw, u64 *da
 	return data;
 }
 
-/* REBOOT: the line names the ring and what it needed, then the unit restarts with it in pstore. */
 static inline void eth_watch_act(struct net_device *ndev, const struct eth_queue_watch *w, enum eth_watch v,
 				 const char *what)
 {
 	if (v == ETH_WATCH_REBOOT)
-		panic("%s: %s: %u ring recoveries in a row did not cure it (rx stalls %u, tx timeouts %u): rebooting\n",
-		      netdev_name(ndev), what, RESTART_TRIES, w->rx_stalls, w->tx_timeouts);
+		eth_watch_spent(ndev, "%s: %u ring recoveries in a row did not cure it (rx stalls %u, tx timeouts %u)",
+				what, RESTART_TRIES, w->rx_stalls, w->tx_timeouts);
 	if (v == ETH_WATCH_RECOVER)
 		netdev_err(ndev, "%s: ring recovery #%u (rx stalls %u, tx timeouts %u)\n", what, w->recoveries,
 			   w->rx_stalls, w->tx_timeouts);
 }
 
 /* A stall is logged and is the driver's to recover; once RESTART_TRIES recoveries in a row did not make the port
- * send, each stall is logged and counted, nothing more, until the budget's quiet time renews it. */
+ * send, eth_watch_spent.h decides. */
 static inline void eth_egress_watch_act(struct net_device *ndev, const struct eth_egress_watch *e, enum eth_watch v,
 					const char *port)
 {
 	if (v == ETH_WATCH_REBOOT)
-		netdev_err(ndev, "the %s port sent none of the frames handed to it after %u recoveries (stall #%u): not recovered, the unit stays up\n",
-			   port, RESTART_TRIES, e->stalls);
+		eth_watch_spent(ndev, "the %s port sent none of the frames handed to it after %u recoveries (stall #%u)",
+				port, RESTART_TRIES, e->stalls);
 	if (v == ETH_WATCH_RECOVER)
 		netdev_err(ndev, "the %s port sent none of the frames handed to it for %u s (stall #%u, recovery %u of %u)\n",
 			   port, ETH_EGRESS_STALL_MS / 1000, e->stalls, e->budget.in_row, RESTART_TRIES);

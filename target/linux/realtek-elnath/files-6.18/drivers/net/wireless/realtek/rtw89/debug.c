@@ -88,6 +88,7 @@ struct rtw89_debugfs {
 	struct rtw89_debugfs_priv mlo_mode;
 	struct rtw89_debugfs_priv beacon_info;
 	struct rtw89_debugfs_priv diag_mac;
+	struct rtw89_debugfs_priv xtal_cap;
 };
 
 struct rtw89_debugfs_iter_data {
@@ -4674,6 +4675,75 @@ rtw89_debug_priv_diag_mac_get(struct rtw89_dev *rtwdev,
 	return rtw89_mac_diag_iter_all(rtwdev, buf, bufsz);
 }
 
+/* The crystal trim (XTAL SI SC_XI/SC_XO) and the CFO tracker built on it.
+ * A write sets the default trim the way an efuse value does at init. */
+static ssize_t
+rtw89_debug_priv_xtal_cap_get(struct rtw89_dev *rtwdev,
+			      struct rtw89_debugfs_priv *debugfs_priv,
+			      char *buf, size_t bufsz)
+{
+	struct rtw89_cfo_tracking_info *cfo = &rtwdev->cfo_tracking;
+	char *p = buf, *end = buf + bufsz;
+	u8 sc_xi = 0, sc_xo = 0;
+	int ret_xi, ret_xo;
+
+	lockdep_assert_wiphy(rtwdev->hw->wiphy);
+
+	rtw89_leave_ps_mode(rtwdev);
+	ret_xi = rtw89_mac_read_xtal_si(rtwdev, XTAL_SI_XTAL_SC_XI, &sc_xi);
+	ret_xo = rtw89_mac_read_xtal_si(rtwdev, XTAL_SI_XTAL_SC_XO, &sc_xo);
+	if (ret_xi || ret_xo)
+		return scnprintf(buf, bufsz, "xtal_si read failed: xi=%d xo=%d\n",
+				 ret_xi, ret_xo);
+
+	p += scnprintf(p, end - p, "sc_xi=0x%02x sc_xo=0x%02x efuse=0x%02x\n",
+		       sc_xi, sc_xo, rtwdev->efuse.xtal_cap);
+	p += scnprintf(p, end - p,
+		       "default=0x%02x tracked=0x%02x lb=0x%02x ub=0x%02x ofst=%d divergence_lock=%d\n",
+		       cfo->crystal_cap_default, cfo->crystal_cap, cfo->x_cap_lb,
+		       cfo->x_cap_ub, cfo->x_cap_ofst, cfo->divergence_lock_en);
+	p += scnprintf(p, end - p,
+		       "sta_assoc=%u cfo_avg_pre=%d dcfo_avg_pre=%d packet_count=%u\n",
+		       rtwdev->total_sta_assoc, cfo->cfo_avg_pre, cfo->dcfo_avg_pre,
+		       cfo->packet_count);
+	return p - buf;
+}
+
+static ssize_t
+rtw89_debug_priv_xtal_cap_set(struct rtw89_dev *rtwdev,
+			      struct rtw89_debugfs_priv *debugfs_priv,
+			      const char *buf, size_t count)
+{
+	struct rtw89_cfo_tracking_info *cfo = &rtwdev->cfo_tracking;
+	u8 cap;
+	int ret;
+
+	lockdep_assert_wiphy(rtwdev->hw->wiphy);
+
+	ret = kstrtou8(buf, 0, &cap);
+	if (ret || cap > B_AX_XTAL_SC_MASK)
+		return -EINVAL;
+
+	rtw89_leave_ps_mode(rtwdev);
+	ret = rtw89_mac_write_xtal_si(rtwdev, XTAL_SI_XTAL_SC_XO, cap, XTAL_SC_XO_MASK);
+	if (!ret)
+		ret = rtw89_mac_write_xtal_si(rtwdev, XTAL_SI_XTAL_SC_XI, cap,
+					      XTAL_SC_XI_MASK);
+	if (ret)
+		return ret;
+
+	rtwdev->efuse.xtal_cap = cap;
+	cfo->crystal_cap_default = cap;
+	cfo->crystal_cap = cap;
+	cfo->def_x_cap = cap;
+	cfo->x_cap_ub = min_t(int, cap + CFO_BOUND, 0x7f);
+	cfo->x_cap_lb = max_t(int, cap - CFO_BOUND, 0x1);
+	cfo->x_cap_ofst = 0;
+	cfo->divergence_lock_en = false;
+	cfo->lock_cnt = 0;
+	return count;
+}
+
 static int rtw89_get_beacon_info(struct rtw89_dev *rtwdev, struct rtw89_bb_ctx *bb,
 				 char *buf, size_t bufsz)
 {
@@ -4805,6 +4875,7 @@ static const struct rtw89_debugfs rtw89_debugfs_templ = {
 	.mlo_mode = rtw89_debug_priv_set_and_get(mlo_mode, RWLOCK),
 	.beacon_info = rtw89_debug_priv_get(beacon_info),
 	.diag_mac = rtw89_debug_priv_get(diag_mac, RSIZE_16K, RLOCK),
+	.xtal_cap = rtw89_debug_priv_set_and_get(xtal_cap, RWLOCK),
 };
 
 #define rtw89_debugfs_add(name, mode, fopname, parent)				\
@@ -4852,6 +4923,7 @@ void rtw89_debugfs_add_sec1(struct rtw89_dev *rtwdev, struct dentry *debugfs_top
 	rtw89_debugfs_add_rw(mlo_mode);
 	rtw89_debugfs_add_r(beacon_info);
 	rtw89_debugfs_add_r(diag_mac);
+	rtw89_debugfs_add_rw(xtal_cap);
 }
 
 void rtw89_debugfs_init(struct rtw89_dev *rtwdev)

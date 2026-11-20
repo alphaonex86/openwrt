@@ -258,6 +258,7 @@ struct rtl9602c_l34 {
 	DECLARE_BITMAP(in_reserved, L34_NAPT_ENTRIES);
 	struct eth_arp_row lan_neigh[L34_ARP_WAN_BASE];	/* ARP slot = index */
 	struct eth_arp_rows arp;
+	struct eth_l2_taken gw_row;	/* the gateway's L2 row, static and ARP-marked while wan_setup() holds it */
 	/* the routed block's hosts the engine could not take, by reason (l34_block_why) */
 	u32		block_refused[4];
 	u32		installs;	/* flows programmed into the engine	*/

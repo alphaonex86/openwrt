@@ -173,7 +173,8 @@ static inline int eth_arp_row_take(struct eth_arp_rows *r, u32 ip, const u8 *mac
 
 /* A flow takes @ip's row (shared with every flow and the neighbour holding it), moved to @mac if it changed.
  * -> 0, *owned true and *slot set whenever the flow now owns a row (also on an error: its removal clears it);
- * -EBUSY a row of @ip whose last write failed, -ENOSPC every row taken, or bind's error. */
+ * -EBUSY a row of @ip whose last write failed or whose neighbour is invalid, -ENOSPC every row taken, or bind's
+ * error. */
 static inline int eth_arp_row_get(struct eth_arp_rows *r, u32 ip, const u8 *mac, unsigned int *slot, bool *owned)
 {
 	int i = eth_arp_rows_find(r, ip), ret;
@@ -244,21 +245,29 @@ static inline int eth_arp_row_unhold_one(struct eth_arp_rows *r, unsigned int sl
 	return ret;
 }
 
-/* The kernel neighbour of @ip: @mac its address, NULL once it is no longer valid. The held row follows it. */
-static inline int eth_arp_row_follow(struct eth_arp_rows *r, u32 ip, const u8 *mac)
+/* The kernel neighbour of @ip: @mac its address, NULL once it is no longer valid (deleted, failed). @hold: it owns
+ * a row (a block host), taken when none. Any row of @ip follows it: ARP row and mark cleared while the neighbour is
+ * invalid (its flows keep the slot, unbound), bound again when it is valid. */
+static inline int eth_arp_row_follow(struct eth_arp_rows *r, u32 ip, const u8 *mac, bool hold)
 {
-	int i = eth_arp_rows_find(r, ip);
+	int i = eth_arp_rows_find(r, ip), ret;
+	struct eth_arp_row *a;
 	unsigned int slot;
+	bool held;
 
-	if (!mac) {
-		if (i < 0 || !r->row[i].held)
-			return 0;
-		return eth_arp_row_unhold_one(r, i);
-	}
 	if (i < 0)
-		return eth_arp_row_take(r, ip, mac, true, &slot);
-	r->row[i].held = true;
-	return eth_arp_row_bind(r, i, ip, mac);
+		return mac && hold ? eth_arp_row_take(r, ip, mac, true, &slot) : 0;
+	a = &r->row[i];
+	if (mac) {
+		a->held |= hold;
+		return eth_arp_row_bind(r, i, ip, mac);
+	}
+	held = a->held;
+	a->held = false;
+	ret = a->users ? eth_arp_row_unbind(r, i) : eth_arp_row_drop(r, i);
+	if (ret)
+		a->held = held;
+	return ret;
 }
 
 /* Every held row released (flows keep theirs). -> 0 or the first clear's error. */
@@ -275,4 +284,54 @@ static inline int eth_arp_rows_unhold(struct eth_arp_rows *r)
 	return 0;
 }
 
+/* An L2 row the engine takes in its own form (e.g. a gateway's: static, marked) and gives back as it found it: the
+ * row learnt before word for word, else none. */
+#define ETH_L2_WORDS 4
+struct eth_l2_taken {
+	u32	before[ETH_L2_WORDS];
+	u8	mac[6];
+	bool	taken, had;
+};
+struct eth_l2_own_hw {
+	int (*read)(void *ctx, const u8 *mac, u32 *w);	/* -> 1 and *w: @mac's row, 0 none, or the read's error */
+	int (*take)(void *ctx, const u8 *mac, u8 port);	/* writes the engine's form -> the row index */
+	int (*put)(void *ctx, const u8 *mac, const u32 *w);	/* @w NULL: delete */
+	bool (*ours)(const u32 *w);				/* the engine's form */
+};
+
+static inline int eth_l2_take(const struct eth_l2_own_hw *hw, void *ctx, struct eth_l2_taken *t, const u8 *mac,
+			      u8 port)
+{
+	u32 w[ETH_L2_WORDS] = {};
+	int ret = hw->read(ctx, mac, w);
+
+	if (ret < 0)
+		return ret;
+	memcpy(t->before, w, sizeof(w));
+	memcpy(t->mac, mac, 6);
+	t->had = ret;
+	t->taken = true;	/* before the write: a timed-out insert may land */
+	return hw->take(ctx, mac, port);
+}
+
+/* -> 0, or -EIO the engine's form is still there (a learnt row may be back at once: only that form must go). A
+ * failure keeps it taken, for a retry. */
+static inline int eth_l2_give(const struct eth_l2_own_hw *hw, void *ctx, struct eth_l2_taken *t)
+{
+	u32 w[ETH_L2_WORDS] = {};
+	int ret;
+
+	if (!t->taken)
+		return 0;
+	ret = hw->put(ctx, t->mac, t->had ? t->before : NULL);
+	if (ret)
+		return ret;
+	ret = hw->read(ctx, t->mac, w);
+	if (ret < 0)
+		return ret;
+	if ((ret && hw->ours(w)) != (t->had && hw->ours(t->before)))
+		return -EIO;
+	t->taken = false;
+	return 0;
+}
 #endif

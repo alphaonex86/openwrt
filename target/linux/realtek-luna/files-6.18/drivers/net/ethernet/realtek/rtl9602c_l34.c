@@ -406,8 +406,9 @@ static int l2_busy_wait(struct rtl9602c_l34 *l)
 
 /* Insert a static unicast MAC by the MAC-hash method; the engine picks a free
  * way and reports the entry index (used as NEXTHOP/ARP nhIdx). */
-static int l2uc_add_static(struct rtl9602c_l34 *l, const u8 *mac, u8 port)
+static int l2uc_add_static(void *ctx, const u8 *mac, u8 port)
 {
+	struct rtl9602c_l34 *l = ctx;
 	u32 w[L34_WORDS_L2UC] = { 0 };
 	int ret;
 
@@ -503,6 +504,36 @@ static int l34_arp_l2_mark(void *ctx, u16 l2idx, const u8 *mac, bool on, bool *w
 	ret = l2uc_access(ctx, l2idx, w, false, true);
 	return ret < 0 ? ret : 0;
 }
+
+static int l34_l2_read(void *ctx, const u8 *mac, u32 *w)
+{
+	int ret;
+
+	l34_mac48_set(w, L2UC_MAC_LSP, mac);
+	ret = l2uc_access(ctx, 0, w, true, false);
+	return ret == -ENOENT ? 0 : ret < 0 ? ret : l2uc_matches(w, mac);
+}
+
+static int l34_l2_put(void *ctx, const u8 *mac, const u32 *w)
+{
+	u32 d[L34_WORDS_L2UC] = {};	/* delete: the key alone, VALID 0 */
+	int ret;
+
+	if (w)
+		memcpy(d, w, sizeof(d));
+	else
+		l34_mac48_set(d, L2UC_MAC_LSP, mac);
+	ret = l2uc_access(ctx, 0, d, false, true);
+	return ret < 0 && ret != -ENOENT ? ret : 0;
+}
+
+static bool l34_l2_ours(const u32 *w)
+{
+	return l34_field_get(w, L2UC_STATIC_LSP, L2UC_STATIC_W) && l34_field_get(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W);
+}
+
+static_assert(L34_WORDS_L2UC <= ETH_L2_WORDS);
+static const struct eth_l2_own_hw l34_l2_own = { l34_l2_read, l2uc_add_static, l34_l2_put, l34_l2_ours };
 
 static int l34_arp_write(void *ctx, unsigned int slot, u32 ip, u16 l2idx)
 {
@@ -641,8 +672,12 @@ int rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 		l34_engine_on(l);
 
 	/* gateway dst MAC -> L2 unicast table; capture the assigned index. It
-	 * is an ALLOCATION, so it precedes the program rather than joining it. */
-	l2idx = l2uc_add_static(l, gw_mac, wan_port);
+	 * is an ALLOCATION, so it precedes the program rather than joining it;
+	 * a previous setup's row is given back first. */
+	ret = eth_l2_give(&l34_l2_own, l, &l->gw_row);
+	if (ret)
+		goto out;
+	l2idx = eth_l2_take(&l34_l2_own, l, &l->gw_row, gw_mac, wan_port);
 	if (l2idx < 0) {
 		ret = l2idx;
 		goto out;
@@ -865,6 +900,9 @@ int rtl9602c_l34_wan_release(struct rtl9602c_l34 *l, bool core_empty)
 	if (!ret) {
 		l->block_on = false;
 		l->provisioned = false;
+		ret = eth_l2_give(&l34_l2_own, l, &l->gw_row);	/* nothing names it now; retried by the next setup */
+		if (ret)
+			pr_err("rtl9602c-l34: gateway L2 row %pM not given back (%d)\n", l->gw_row.mac, ret);
 	}
 out:
 	mutex_unlock(&l->lock);
@@ -901,29 +939,26 @@ static int l34_block_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e
 static const char * const l34_block_why[] = { "arp-rows-full", "no-l2-row", "l2-row-on-wan", "write-failed" };
 
 /* LAN neighbour @ip as the kernel holds it now: @mac, NULL once it is not valid. A block host's row follows it; a
- * flow's row follows its MAC (the flows release it). A block host the engine cannot take is counted and stays on
- * the CPU path (its WAN frames miss the ARP table and trap). */
+ * flow's row too, unbound while it is invalid (the flows release it). A block host the engine cannot take is
+ * counted and stays on the CPU path (its WAN frames miss the ARP table and trap). */
 void rtl9602c_l34_lan_neigh(struct rtl9602c_l34 *l, u32 ip, const u8 *mac)
 {
 	unsigned int why;
-	int ret = 0, i;
+	bool block;
+	int ret;
 
 	mutex_lock(&l->lock);
-	if (l->block_on && l->edge.lan2_prefix &&
-	    (ip & (~0u << (32 - l->edge.lan2_prefix))) == l->edge.lan2_net) {
-		ret = eth_arp_row_follow(&l->arp, ip, mac);
-	} else if (mac) {
-		i = eth_arp_rows_find(&l->arp, ip);
-		if (i >= 0 && memcmp(l->lan_neigh[i].mac, mac, 6))
-			ret = eth_arp_row_bind(&l->arp, i, ip, mac);
-	}
+	block = l->block_on && l->edge.lan2_prefix &&
+		(ip & (~0u << (32 - l->edge.lan2_prefix))) == l->edge.lan2_net;
+	ret = eth_arp_row_follow(&l->arp, ip, mac, block);
 	mutex_unlock(&l->lock);
 	if (!ret)
 		return;
 	why = ret == -ENOSPC ? 0 : ret == -ENOENT ? 1 : ret == -EOPNOTSUPP ? 2 : 3;
-	l->block_refused[why]++;
-	pr_info_ratelimited("rtl9602c-l34: block host %pI4h %pM stays on the CPU path: %s (%d)\n", &ip, mac,
-			    l34_block_why[why], ret);
+	if (block)
+		l->block_refused[why]++;
+	pr_info_ratelimited("rtl9602c-l34: %s host %pI4h %pM stays on the CPU path: %s (%d)\n", block ? "block" : "LAN",
+			    &ip, mac, l34_block_why[why], ret);
 }
 
 int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)

@@ -20,9 +20,9 @@
 
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "gpon_flow."
-/* NO firewall on that hardware path (no conntrack, no nft): correct only while the block's forward policy is an
- * unconditional ACCEPT, hence default 0 and nothing turns it on. */
-bool gpon_flow_ipv4_routed;
+/* NO firewall on that hardware path (no conntrack, no nft): correct because FORWARD is ACCEPT ALL by design (the end
+ * host owns its security), so it is on whenever a routed block is configured; 0 = diagnostic software arm only. */
+bool gpon_flow_ipv4_routed = true;
 EXPORT_SYMBOL_GPL(gpon_flow_ipv4_routed);
 BLOCKING_NOTIFIER_HEAD(gpon_flow_routed_chain);
 EXPORT_SYMBOL_GPL(gpon_flow_routed_chain);
@@ -40,7 +40,7 @@ static int gpon_flow_routed_set(const char *val, const struct kernel_param *kp)
 
 static const struct kernel_param_ops gpon_flow_routed_ops = { .set = gpon_flow_routed_set, .get = param_get_bool };
 module_param_cb(ipv4_routed, &gpon_flow_routed_ops, &gpon_flow_ipv4_routed, 0644);
-MODULE_PARM_DESC(ipv4_routed, "1: an engine that routes an ISP block on the LAN without NAT does it in hardware; 0: the block stays in software");
+MODULE_PARM_DESC(ipv4_routed, "1 (default): an engine that routes an ISP block on the LAN without NAT does it in hardware; 0: diagnostic, the block stays in software");
 
 struct gpon_flow_entry {
 	struct rhash_head	node;

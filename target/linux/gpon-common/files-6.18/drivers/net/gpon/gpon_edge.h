@@ -38,6 +38,9 @@ struct gpon_edge {
 	u16	wan_vlan;		/* 0 = untagged				*/
 	u16	lan_vlan;
 	u8	lan_prefix;		/* LAN prefix length, 1..32		*/
+	/* A second LAN subnet (an ISP's routed block on the same bridge), 0/0 = none. */
+	u32	lan2_net;
+	u8	lan2_prefix;
 	/* The LIVE negotiated PPPoE session, 0 when the WAN is not PPPoE. It is
 	 * NOT read from the netdevice here: the routing layer has no portable
 	 * way to ask a ppp device for its session, while the flowtable already
@@ -48,6 +51,14 @@ struct gpon_edge {
 	 * session the far end has forgotten. */
 	u16	wan_pppoe_sid;
 };
+
+/* Is @ip (host order) on one of the edge's LAN subnets? A routed row is only ever for a LAN host. PURE. */
+static inline bool gpon_edge_on_lan(const struct gpon_edge *e, u32 ip)
+{
+	if (e->lan_prefix && (ip & (~0u << (32 - e->lan_prefix))) == e->lan_net)
+		return true;
+	return e->lan2_prefix && (ip & (~0u << (32 - e->lan2_prefix))) == e->lan2_net;
+}
 
 /* Fill *e from the live kernel state. @lan and @wan are the ...
  * dev/MEASURED-gpon_edge.h.md sec 1. */
@@ -71,7 +82,7 @@ int gpon_edge_read_v6(struct net_device *lan, struct net_device *wan,
 		      const u32 sa[4], const u32 da[4], struct net_device *odev,
 		      struct gpon_edge *e, const char **why);
 bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b);
-/* The IPv4 addresses the LAN interface (its bridge) holds: an edge describes the first one alone. */
+/* The IPv4 addresses the LAN interface (its bridge) holds: an edge describes the first two (lan_*, lan2_*). */
 unsigned int gpon_edge_lan_addrs(struct net_device *lan);
 
 #endif /* GPON_EDGE_H */

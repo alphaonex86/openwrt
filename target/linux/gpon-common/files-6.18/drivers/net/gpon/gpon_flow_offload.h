@@ -38,6 +38,10 @@ struct gpon_flow_ctx {
 	bool ds_leg;			/* the WAN->LAN reply leg	*/
 };
 
+/* Routed IPv4 on an engine that declares it, at run time: gpon_flow.ipv4_routed=0|1 on the command line or
+ * /sys/module/gpon_flow/parameters/ipv4_routed. Off by default until proven on silicon. */
+extern bool gpon_flow_ipv4_routed;
+
 /* ⚠ `install` OWNS THE INDEX IT RETURNS. The core stores it ...
  * dev/MEASURED-gpon_flow_offload.h.md sec 4. */
 struct gpon_flow_ops {
@@ -81,7 +85,8 @@ struct gpon_flow_ops {
 	bool ipv6;
 
 	/* The engine forwards IPv4 flows that carry no NAT (a public subnet behind
-	 * the unit); false = refused as routed-v4. */
+	 * the unit); false = refused as routed-v4. Offered only while
+	 * gpon_flow.ipv4_routed is set too. */
 	bool ipv4_routed;
 
 	/* Bytes of per-entry family state, appended to the core's ...

@@ -36,6 +36,8 @@ enum gpon_flow_refusal {
 					 * an engine failure -- measured on the
 					 * X111W: 14504 of 28988.             */
 	GPON_FLOW_REF_TABLE_INSERT,	/* the cookie map refused the entry     */
+	GPON_FLOW_REF_LOCAL,		/* to or from the unit's own address    */
+	GPON_FLOW_REF_FULL,		/* the engine has no free row for it    */
 	GPON_FLOW_REF__COUNT
 };
 

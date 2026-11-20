@@ -137,12 +137,16 @@ static void l34_engine_on(struct rtl9602c_l34 *l)
 	l->engine_on = true;
 }
 
+static const struct eth_flow_rows_hw l34_flrt_hw;
+
 int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw)
 {
 	if (!sw)
 		return -EINVAL;
 	l->sw = sw;
 	mutex_init(&l->lock);
+	l->flrt = (struct eth_flow_rows){ .hw = &l34_flrt_hw, .ctx = l, .n = L34_FLRT_ROWS,
+					  .owned = l->flrt_map[0], .hit = l->flrt_map[1] };
 	l->ready = true;	/* table-access ready; the engine is enabled lazily */
 
 	/* ⚠ DRAIN THE HIT BITMAP ONCE, AND DISCARD IT.  MEASURED 2026-09-16 on the
@@ -179,7 +183,7 @@ static bool l34_has_owners(struct rtl9602c_l34 *l)
 		if (l->lan_neigh[i].users)
 			return true;
 	return !bitmap_empty(l->out_reserved, L34_NAPT_ENTRIES) ||
-	       !bitmap_empty(l->in_reserved, L34_NAPT_ENTRIES);
+	       !bitmap_empty(l->in_reserved, L34_NAPT_ENTRIES) || l->flrt.live;
 }
 
 /* Caller holds the table mutex. WHICH ownership is live -- the answer to a
@@ -244,7 +248,7 @@ int rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f)
 
 	if (!l->ready)
 		return -ENODEV;
-	if (f->out_owned || f->in_owned || f->neigh_owned)
+	if (f->out_owned || f->in_owned || f->neigh_owned || f->flrt_owned)
 		return -EBUSY;	/* installing over a live owner loses its indices */
 	if (f->l4proto != IPPROTO_TCP && f->l4proto != IPPROTO_UDP)
 		return -EOPNOTSUPP;
@@ -298,16 +302,99 @@ out:
 	return ret;
 }
 
+/* The FLOW ROUTE rows (eth_flow_rows decides): the lookup is on only while a row is live, so NAPT runs as
+ * before when no routed flow exists. Callers hold the table mutex. */
+static int l34_flrt_write(void *l, unsigned int row, const u32 *words)
+{
+	u32 w[L34_WORDS_FLRT] = { 0 };
+
+	if (words)
+		memcpy(w, words, sizeof(w));
+	return l34_tbl_write(l, L34_TBL_FLRT, row, w, L34_WORDS_FLRT);
+}
+
+static void l34_flrt_lookup(void *l, bool on)
+{
+	u32 v = l34_rd(l, L34_SWTCR0);
+
+	l34_wr(l, L34_SWTCR0, on ? v | L34_SWTCR0_V4FLRT_EN : v & ~L34_SWTCR0_V4FLRT_EN);
+}
+
+static u32 l34_flrt_hit_word(void *l, unsigned int i)
+{
+	return l34_rd(l, L34_FT_TRF + 4 * i);
+}
+
+static const struct eth_flow_rows_hw l34_flrt_hw = {
+	.write = l34_flrt_write, .lookup = l34_flrt_lookup, .hit_word = l34_flrt_hit_word,
+};
+
+/* A routed leg, no address rewritten: upstream through the WAN next hop, downstream to the LAN netif, whose
+ * ARP row the caller already holds (l34_neigh_add). */
+int rtl9602c_l34_route_add(struct rtl9602c_l34 *l, struct l34_flow *f, bool ds)
+{
+	u32 w[L34_WORDS_FLRT] = { 0 };
+	unsigned int row;
+	int ret;
+
+	if (!l->ready)
+		return -ENODEV;
+	if (f->flrt_owned || f->out_owned || f->in_owned)
+		return -EBUSY;
+	if (f->l4proto != IPPROTO_TCP && f->l4proto != IPPROTO_UDP)
+		return -EOPNOTSUPP;
+	ret = l34_flrt_encode(w, f->orig_sip, f->orig_dip, f->orig_sport, f->orig_dport,
+			      f->l4proto == IPPROTO_TCP, ds ? L34_FLRT_LOCAL : L34_FLRT_GLOBAL,
+			      ds ? L34_NETIF_LAN : f->nexthop);
+	if (ret)
+		return ret;
+	mutex_lock(&l->lock);
+	if (!l->engine_on)
+		l34_engine_on(l);
+	ret = eth_flow_rows_add(&l->flrt, w, &row);
+	if (ret != -ENOSPC) {
+		f->flrt_index = row;
+		f->flrt_owned = true;
+	}
+	if (!ret) {
+		f->installed = true;
+		l->installs++;
+	}
+	mutex_unlock(&l->lock);
+	return ret;
+}
+
+int rtl9602c_l34_route_hit(struct rtl9602c_l34 *l, u16 row, bool *active)
+{
+	if (!l->ready)
+		return -ENODEV;
+	mutex_lock(&l->lock);
+	*active = eth_flow_rows_hit(&l->flrt, row, jiffies);
+	mutex_unlock(&l->lock);
+	return 0;
+}
+
 int rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f)
 {
 	u32 zero[L34_WORDS_NAPTR_IN] = { 0 };
 	int ret = 0;
 
-	if (!f->out_owned && !f->in_owned && !f->neigh_owned)
+	if (!f->out_owned && !f->in_owned && !f->neigh_owned && !f->flrt_owned)
 		return 0;	/* nothing was ever claimed for this flow */
 	if (!l->ready)
 		return -ENODEV;
 	mutex_lock(&l->lock);
+	/* the routed row first: it is what the lookup matches, the ARP row only resolves it */
+	if (f->flrt_owned) {
+		ret = eth_flow_rows_del(&l->flrt, f->flrt_index);
+		if (ret)
+			goto out;
+		f->flrt_owned = false;
+		if (f->installed) {
+			l->removals++;
+			f->installed = false;
+		}
+	}
 	if (f->neigh_owned) {
 		ret = l34_neigh_del(l, f);
 		goto out;
@@ -862,6 +949,9 @@ static int l34_sweep_orphans(struct rtl9602c_l34 *l, unsigned int *swept)
 		__clear_bit(i, l->in_reserved);
 		(*swept)++;
 	}
+	ret = eth_flow_rows_flush(&l->flrt, swept);
+	if (ret)
+		return ret;
 	/* ...and a LAN neighbour nobody owns (measured the next sitting: neigh=1
 	 * with the core empty) */
 	for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++) {
@@ -924,6 +1014,23 @@ out:
 
 /* Program BOTH interface slots from one reading of the live ...
  * dev/MEASURED-rtl9602c_l34.c.md sec 7. */
+/* The second LAN subnet as a LAN route, so the engine resolves its hosts as it does the first one's;
+ * no second subnet writes the row empty. */
+static int l34_lan2_route(struct rtl9602c_l34 *l, u32 net, u8 prefix)
+{
+	u32 w[L34_WORDS_L3ROUTE] = { 0 };
+	int ret;
+
+	if (prefix)
+		l34_rt_lan_encode(w, net, prefix, L34_NETIF_LAN);
+	mutex_lock(&l->lock);
+	ret = l34_tbl_write(l, L34_TBL_L3ROUTE, L34_RT_LAN2_SLOT, w, L34_WORDS_L3ROUTE);
+	mutex_unlock(&l->lock);
+	if (ret)
+		pr_err("rtl9602c-l34: second LAN route write failed (%d)\n", ret);
+	return ret;
+}
+
 int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
 {
 	int ret;
@@ -936,6 +1043,9 @@ int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
 		return ret;
 	ret = rtl9602c_l34_lan_setup(l, L34_NETIF_LAN, e->lan_ip, e->lan_mac,
 				     e->lan_net, e->lan_prefix, e->lan_vlan);
+	if (ret)
+		return ret;
+	ret = l34_lan2_route(l, e->lan2_net, e->lan2_prefix);
 	if (ret)
 		return ret;
 
@@ -1315,6 +1425,9 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 	seq_printf(sf, "binds %u\noffered %u\ninstalls %u\nremovals %u\nrefusals %u\nds_legs %u\n",
 		   l->binds, l->offered, l->installs,
 		   l->removals, l->refusals, l->ds_legs);
+	seq_printf(sf, "flow_route live %u of %u lookup %s lan2 %pI4h/%u\n", l->flrt.live, L34_FLRT_ROWS,
+		   l34_rd(l, L34_SWTCR0) & L34_SWTCR0_V4FLRT_EN ? "on" : "off", &l->edge.lan2_net,
+		   l->edge.lan2_prefix);
 	/* ★ THE FEW LINES THAT DECIDE, ON DEMAND -- not a log flood. ...
 	 * dev/MEASURED-rtl9602c_l34.c.md sec 15. */
 	if (l->vlan_refused)

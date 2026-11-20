@@ -105,6 +105,33 @@ static bool gpon_edge_gw_mac(struct net_device *dev, __be32 gw, u8 *mac)
  */
 /* The LAN half of an edge: an ordinary router enslaves the LAN port to a
  * bridge and the address lives on that master upper. */
+static u32 gpon_edge_mask(u32 ip, u8 prefix)
+{
+	return prefix ? ip & (~0u << (32 - prefix)) : 0;
+}
+
+/* The first universe address outside the primary subnet: the second LAN subnet. */
+static void gpon_edge_lan2(struct net_device *dev, struct gpon_edge *e)
+{
+	struct in_device *in = __in_dev_get_rcu(dev);
+	const struct in_ifaddr *ifa;
+
+	e->lan2_net = 0;
+	e->lan2_prefix = 0;
+	if (!in)
+		return;
+	in_dev_for_each_ifa_rcu(ifa, in) {
+		u32 ip = ntohl(ifa->ifa_local);
+
+		if (ifa->ifa_scope != RT_SCOPE_UNIVERSE || !ifa->ifa_prefixlen ||
+		    gpon_edge_mask(ip, e->lan_prefix) == e->lan_net)
+			continue;
+		e->lan2_net = gpon_edge_mask(ip, ifa->ifa_prefixlen);
+		e->lan2_prefix = ifa->ifa_prefixlen;
+		return;
+	}
+}
+
 static int gpon_edge_lan(struct net_device *lan, struct gpon_edge *e,
 			 const char **why)
 {
@@ -114,8 +141,8 @@ static int gpon_edge_lan(struct net_device *lan, struct gpon_edge *e,
 		*why = "the LAN interface carries no IPv4 address yet";
 		return -EAGAIN;
 	}
-	e->lan_net = e->lan_ip & (e->lan_prefix == 32
-				  ? ~0u : ~0u << (32 - e->lan_prefix));
+	e->lan_net = gpon_edge_mask(e->lan_ip, e->lan_prefix);
+	gpon_edge_lan2(lan_l3, e);
 	e->lan_vlan = gpon_edge_vlan(lan_l3);
 	ether_addr_copy(e->lan_mac, lan_l3->dev_addr);
 	return 0;
@@ -268,6 +295,7 @@ bool gpon_edge_same_iface(const struct gpon_edge *a, const struct gpon_edge *b)
 	return a->wan_ip == b->wan_ip && a->lan_ip == b->lan_ip &&
 	       a->lan_net == b->lan_net && a->wan_vlan == b->wan_vlan &&
 	       a->lan_vlan == b->lan_vlan && a->lan_prefix == b->lan_prefix &&
+	       a->lan2_net == b->lan2_net && a->lan2_prefix == b->lan2_prefix &&
 	       a->wan_pppoe_sid == b->wan_pppoe_sid &&
 	       ether_addr_equal(a->wan_mac, b->wan_mac) &&
 	       ether_addr_equal(a->lan_mac, b->lan_mac);

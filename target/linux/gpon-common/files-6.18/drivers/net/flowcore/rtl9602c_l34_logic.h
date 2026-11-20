@@ -6,14 +6,15 @@
 #define _RTL9602C_L34_LOGIC_H
 
 #include <linux/types.h>
+#include "eth_row_bits.h"
 
 struct luna_rx_layout;
 
 void l34_cf_wan_encode(u32 rule[2], u32 mask[2], u32 action[3],
 		       u8 netif, u8 sid);
 
-void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val);
-u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width);
+#define l34_field_set eth_row_set
+#define l34_field_get eth_row_get
 u16 l34_hash_out(bool is_tcp, u32 sip, u16 sport, u32 dip, u16 dport);
 u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 
@@ -161,6 +162,24 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_RT_PROCESS_ARP	2
 #define L34_RT_PROCESS_NH	3
 
+/* FLOW ROUTE, IPv4 (type 12, 4 words, 256 rows): one routed 5-tuple, no address rewritten. PROCESS GLOBAL
+ * egresses through NEXTHOP[nh]; LOCAL resolves the destination in the ARP table on NETIF[nh]. */
+#define L34_FLRT_ROWS		256
+#define L34_WORDS_FLRT		4
+#define L34_FLRT_VALID_LSP	0
+#define L34_FLRT_IPV4_LSP	1
+#define L34_FLRT_SIP_LSP	2
+#define L34_FLRT_DIP_LSP	34
+#define L34_FLRT_SP_LSP		66
+#define L34_FLRT_DP_LSP		82
+#define L34_FLRT_TCP_LSP	98
+#define L34_FLRT_NH_LSP		99
+#define L34_FLRT_NH_W		4
+#define L34_FLRT_PROCESS_LSP	103
+#define L34_FLRT_PROCESS_W	2
+#define L34_FLRT_LOCAL		2
+#define L34_FLRT_GLOBAL		3
+
 /* L2_UC entry (3 words). The 48-bit MAC is packed octet[0] at the field MSB. */
 #define L2UC_MAC_LSP		0
 #define L2UC_STATIC_LSP		62	/* no-source-learn => static (not aged out) */
@@ -198,6 +217,8 @@ void l34_pppoe_encode(u32 *w, u16 sid);
 void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx);
 void l34_arp_encode(u32 *w, u32 dst_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);
+int l34_flrt_encode(u32 *w, u32 sip, u32 dip, u16 sport, u16 dport, bool is_tcp,
+		    u8 process, u8 nh);
 int l34_l2uc_sts_index(u32 sts);
 
 /* L3 multicast route: the L2 table's IPv4 group entry (3 words, LSW-first). The

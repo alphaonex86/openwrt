@@ -26,6 +26,7 @@
 
 #include "gpon_edge.h"	/* core: the router edge, read from the live kernel */
 #include "rtl9602c_l34_logic.h"	/* struct ipmc_sg, IPMC_VIFS */
+#include "eth_flow_rows.h"	/* core: the routed rows' owners and hit shadow */
 #include "eth_mc_filter.h"	/* core: the WAN's joins, the entry table kept equal to a list */
 
 /* Indirect table-access block (byte offsets within the ...
@@ -107,6 +108,7 @@ enum l34_tbl {
 	L34_TBL_EXTIP		= 4,	/* 8 entries,  3 words: external (WAN) IP -> nexthop */
 	L34_TBL_NAPTR_IN	= 9,	/* 4096 entries, 3 words: inbound rewrite (NAT tuple) */
 	L34_TBL_NAPT_OUT	= 10,	/* 4096 entries, 1 word:  outbound hash slot */
+	L34_TBL_FLRT		= 12,	/* 256 entries, 4 words: one routed IPv4 5-tuple */
 	L34_TBL_ARP		= 13,	/* 128 entries, 2 words: IP -> L2 (next-hop MAC) index */
 };
 
@@ -119,6 +121,7 @@ enum l34_tbl {
 #define L34_WORDS_NAPTR_IN	3
 #define L34_WORDS_NAPT_OUT	1
 #define L34_WORDS_ARP		2
+#define L34_FT_TRF		0x800030	/* FLOW ROUTE hit bits, row/32 words */
 
 #define L34_NAPT_ENTRIES	4096
 #define L34_NAPT_WAYS		4		/* 4-way bucket: index = (hash << 2) + way */
@@ -145,6 +148,7 @@ enum l34_tbl {
  * so l34_rt_pool_slot() refuses an index the pool cannot hold. */
 #define L34_RT_POOL_BASE	2
 #define L34_RT_POOL_N		6
+#define L34_RT_LAN2_SLOT	(L34_RT_POOL_BASE + L34_NETIF_LAN)	/* the second LAN subnet */
 #define L34_ARP_WAN_BASE	64	/* the WAN half of the 128-entry ARP table */
 
 /* L2 unicast table (the gateway/peer destination MAC). ...
@@ -196,6 +200,8 @@ struct l34_flow {
 	bool	out_owned, in_owned;	/* index zero is valid; writes may time out */
 	bool	installed;		/* this flow's contribution to `installs` */
 	bool	neigh_owned;		/* downstream ARP reference at hw_index */
+	u16	flrt_index;		/* FLOW ROUTE row of a routed (no NAT) leg */
+	bool	flrt_owned;
 };
 
 struct l34_neigh {
@@ -258,6 +264,8 @@ struct rtl9602c_l34 {
 	 * knows the difference. */
 	DECLARE_BITMAP(out_reserved, L34_NAPT_ENTRIES);
 	DECLARE_BITMAP(in_reserved, L34_NAPT_ENTRIES);
+	struct eth_flow_rows flrt;	/* FLOW ROUTE rows: the lookup is on while one is live */
+	u32		flrt_map[2][ETH_FLOW_ROWS_WORDS(L34_FLRT_ROWS)];
 	struct l34_neigh lan_neigh[L34_ARP_WAN_BASE];
 	u32		installs;	/* flows programmed into the engine	*/
 	u32		removals;
@@ -273,7 +281,7 @@ struct rtl9602c_l34 {
 	 * a control path needs. */
 	u32		hit_shadow[L34_NAPT_ENTRIES / 32];
 	unsigned long	hit_swept;	/* jiffies of the last sweep */
-#define L34_REFUSE_REASONS 9	/* distinct refusal sites; a 10th is COUNTED as other */
+#define L34_REFUSE_REASONS 14	/* distinct refusal sites; one more is COUNTED as other */
 	u32		refusals;	/* flows left on the software path	*/
 	u32		ds_legs;	/* downstream neighbour requests */
 	/* The last few NAPT indexes this driver INSTALLED, so the dump can read
@@ -339,6 +347,8 @@ bool rtl9602c_l34_has_owners(struct rtl9602c_l34 *l);
 int  rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f);
 int  rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f);
 int  rtl9602c_l34_flow_hit(struct rtl9602c_l34 *l, u16 hw_index, bool *active);
+int  rtl9602c_l34_route_add(struct rtl9602c_l34 *l, struct l34_flow *f, bool ds);
+int  rtl9602c_l34_route_hit(struct rtl9602c_l34 *l, u16 row, bool *active);
 void rtl9602c_l34_proc_init(struct rtl9602c_l34 *l);	/* bring-up test harness */
 
 #endif /* _RTL9602C_L34_H */

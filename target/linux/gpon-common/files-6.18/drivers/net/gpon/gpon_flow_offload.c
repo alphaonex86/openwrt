@@ -3,17 +3,27 @@
 /* gpon_flow_offload -- the TC hardware-offload lifecycle, ...
  * dev/MEASURED-gpon_flow_offload.c.md sec 1. */
 #include <linux/errno.h>
+#include <linux/export.h>
 #include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/jiffies.h>
 #include <linux/list.h>
+#include <linux/moduleparam.h>
 #include <linux/netdevice.h>
 #include <linux/rhashtable.h>
 #include <linux/slab.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
+#include <net/route.h>
 
 #include "gpon_flow_offload.h"
+
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "gpon_flow."
+bool gpon_flow_ipv4_routed;
+EXPORT_SYMBOL_GPL(gpon_flow_ipv4_routed);
+module_param_named(ipv4_routed, gpon_flow_ipv4_routed, bool, 0644);
+MODULE_PARM_DESC(ipv4_routed, "1: an engine that declares routed IPv4 (no NAT) is offered those flows; 0: they stay in software");
 
 struct gpon_flow_entry {
 	struct rhash_head	node;
@@ -298,7 +308,7 @@ static int gpon_flow_install_entry(struct gpon_flow_offload *fo,
 	if (!err)
 		return 0;
 	entry->failed = true;
-	*why = gpon_flow_install_cause(err);
+	*why = err == -ENOSPC ? GPON_FLOW_REF_FULL : gpon_flow_install_cause(err);
 	cleanup = gpon_flow_entry_retire(fo, entry);
 	if (cleanup)
 		pr_err_ratelimited("gpon-flow: cookie %lx rollback failed (%d); retaining its owner\n",
@@ -366,8 +376,17 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	err = gpon_flow_act_from_tc(fo, rule, ctx.ds_leg, &act, &ctx.odev, &why);
 	if (err)
 		goto out_put;
-	if (act.routed && key.ip_ver != 6 && !fo->ops->ipv4_routed) {
+	if (act.routed && key.ip_ver != 6 && !(fo->ops->ipv4_routed && READ_ONCE(gpon_flow_ipv4_routed))) {
 		why = GPON_FLOW_REF_ROUTED_V4;
+		err = -EOPNOTSUPP;
+		goto out_put;
+	}
+	/* The flowtable offers forwarded flows only; a routed row naming one of
+	 * the unit's own addresses would take its management traffic away. */
+	if (act.routed && key.ip_ver != 6 &&
+	    (inet_addr_type(dev_net(blockdev), htonl(key.ip_sa)) == RTN_LOCAL ||
+	     inet_addr_type(dev_net(blockdev), htonl(key.ip_da)) == RTN_LOCAL)) {
+		why = GPON_FLOW_REF_LOCAL;
 		err = -EOPNOTSUPP;
 		goto out_put;
 	}

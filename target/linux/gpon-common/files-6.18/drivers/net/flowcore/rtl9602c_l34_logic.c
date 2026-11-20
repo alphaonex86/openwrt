@@ -2,6 +2,7 @@
 /* TIER: CHIP */
 /* See rtl9602c_l34_logic.h. Moved verbatim; no line was rewritten.
  */
+#include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/minmax.h>
 
@@ -10,24 +11,6 @@
  * re-spelling the shifts -- which is what it used to do. */
 #include "luna_gmac_logic.h"
 #include "rtl9602c_l34_logic.h"
-
-void l34_field_set(u32 *w, unsigned int lsp, unsigned int width, u32 val)
-{
-	unsigned int word = lsp / 32, bit = lsp % 32, take;
-
-	val &= (width >= 32) ? ~0u : ((1u << width) - 1);
-	while (width) {
-		take = min(width, 32 - bit);
-		w[word] &= ~((((take >= 32) ? ~0u : ((1u << take) - 1))) << bit);
-		w[word] |= (val & ((take >= 32) ? ~0u : ((1u << take) - 1))) << bit;
-		/* ⚠ `val >>= take` was UNDEFINED on the 32-bit-wide fields ...
-		 * dev/MEASURED-rtl9602c_l34_logic.c.md sec 1. */
-		val = (take >= 32) ? 0 : (val >> take);
-		width -= take;
-		word++;
-		bit = 0;
-	}
-}
 
 /* NAPT bucket hashes (clean-room: the arithmetic is ...
  * dev/MEASURED-rtl9602c_l34_logic.c.md sec 2. */
@@ -55,27 +38,6 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport)
 		 ^ (((dip >> 26) & 0x3f) + ((u32)(is_tcp & 1) << 9));
 
 	return (fold ^ mix) & 0x3ff;
-}
-
-/* Inverse of l34_field_set: extract a (possibly word-straddling) field.
- * Moved verbatim from rtl9602c_l34.c (2026-09-02) so the set/get pair shares
- * one home -- the SID2QID lesson: a wrong get mirroring a wrong set is
- * invisible when the two live apart. */
-u32 l34_field_get(const u32 *w, unsigned int lsp, unsigned int width)
-{
-	unsigned int word = lsp / 32, bit = lsp % 32, take, got = 0;
-	u32 val = 0;
-
-	while (width) {
-		take = min(width, 32 - bit);
-		val |= ((w[word] >> bit) & ((take >= 32) ? ~0u : ((1u << take) - 1)))
-		       << got;
-		got += take;
-		width -= take;
-		word++;
-		bit = 0;
-	}
-	return val;
 }
 
 /* ===== entry encoders, SPLIT from rtl9602c_l34.c ...
@@ -146,6 +108,25 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
 	l34_field_set(w, L34_RT_INT_LSP,     L34_RT_INT_W,     1);	/* LAN */
 	l34_field_set(w, L34_RT_DENTIF_LSP,  L34_RT_DENTIF_W,  netif_idx);
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
+}
+
+/* -> 0, or -EINVAL for a process that is not a forwarding one or an index past its field. */
+int l34_flrt_encode(u32 *w, u32 sip, u32 dip, u16 sport, u16 dport, bool is_tcp,
+		    u8 process, u8 nh)
+{
+	if ((process != L34_FLRT_LOCAL && process != L34_FLRT_GLOBAL) ||
+	    nh >= (1u << L34_FLRT_NH_W))
+		return -EINVAL;
+	l34_field_set(w, L34_FLRT_SIP_LSP, 32, sip);
+	l34_field_set(w, L34_FLRT_DIP_LSP, 32, dip);
+	l34_field_set(w, L34_FLRT_SP_LSP, 16, sport);
+	l34_field_set(w, L34_FLRT_DP_LSP, 16, dport);
+	l34_field_set(w, L34_FLRT_TCP_LSP, 1, is_tcp);
+	l34_field_set(w, L34_FLRT_NH_LSP, L34_FLRT_NH_W, nh);
+	l34_field_set(w, L34_FLRT_PROCESS_LSP, L34_FLRT_PROCESS_W, process);
+	l34_field_set(w, L34_FLRT_IPV4_LSP, 1, 1);
+	l34_field_set(w, L34_FLRT_VALID_LSP, 1, 1);
+	return 0;
 }
 
 /* WAN prefix via NEXTHOP; the caller uses two /1 entries for full IPv4 coverage. */

@@ -1169,6 +1169,26 @@ static void l34_proc_show_rt(struct seq_file *sf, struct rtl9602c_l34 *l,
 		   w[0], w[1]);
 }
 
+/* Valid rows a routed leg touches, raw from the silicon: two reads diff what a teardown left (L2: hash + CAM). */
+static void l34_proc_show_tables(struct seq_file *sf, struct rtl9602c_l34 *l)
+{
+	u32 w[L34_WORDS_MAX], i;
+	for (i = 0; i < 2 * L34_ARP_WAN_BASE; i++)
+		if (!l34_tbl_read(l, L34_TBL_ARP, i, w, L34_WORDS_ARP) &&
+		    l34_field_get(w, L34_ARP_VALID_LSP, L34_ARP_VALID_W))
+			seq_printf(sf, "arp[%3u] %08x %08x\n", i, w[0], w[1]);
+	for (i = 0; i < 16; i++)
+		if (!l34_tbl_read(l, L34_TBL_NEXTHOP, i, w, L34_WORDS_NEXTHOP) && w[0]) seq_printf(sf, "nexthop[%2u] %08x\n", i, w[0]);
+	for (i = 0; i < L34_FLRT_ROWS; i++)
+		if (!l34_tbl_read(l, L34_TBL_FLRT, i, w, L34_WORDS_FLRT) &&
+		    l34_field_get(w, L34_FLRT_VALID_LSP, 1))
+			seq_printf(sf, "flrt[%3u] %08x %08x %08x %08x\n", i, w[0], w[1], w[2], w[3]);
+	for (i = 0; i < 1088; i++)
+		if (l2uc_access(l, i, w, false, false) >= 0 &&
+		    l34_field_get(w, L2UC_VALID_LSP, L2UC_VALID_W))
+			seq_printf(sf, "l2[%4u] %08x %08x %08x\n", i, w[0], w[1], w[2]);
+}
+
 static void l34_proc_show_iface(struct seq_file *sf, struct rtl9602c_l34 *l)
 {
 	u32 netif[L34_WORDS_NETIF] = { 0 };
@@ -1266,6 +1286,7 @@ static void l34_proc_show_iface(struct seq_file *sf, struct rtl9602c_l34 *l)
 	 * of the default route landed there and could not be confirmed. */
 	for (i = 0; i < L34_RT_POOL_N; i++)
 		l34_proc_show_rt(sf, l, L34_RT_POOL_BASE + i);
+	l34_proc_show_tables(sf, l);
 
 }
 

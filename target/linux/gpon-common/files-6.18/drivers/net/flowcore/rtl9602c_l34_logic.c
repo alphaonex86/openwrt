@@ -110,6 +110,14 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
 }
 
+/* The second LAN subnet (a routed block) is a LAN route that TRAPS: with process ARP the engine dropped a WAN
+ * packet to a block host that matched no flow-route row (measured), and forwarding it would bypass fw4. */
+void l34_rt_lan2_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx)
+{
+	l34_rt_lan_encode(w, net, prefix, netif_idx);
+	l34_field_set(w, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W, L34_RT_PROCESS_CPU);
+}
+
 /* -> 0, or -EINVAL for a process that is not a forwarding one or an index past its field. */
 int l34_flrt_encode(u32 *w, u32 sip, u32 dip, u16 sport, u16 dport, bool is_tcp,
 		    u8 process, u8 nh)

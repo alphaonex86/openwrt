@@ -1022,7 +1022,7 @@ static int l34_lan2_route(struct rtl9602c_l34 *l, u32 net, u8 prefix)
 	int ret;
 
 	if (prefix)
-		l34_rt_lan_encode(w, net, prefix, L34_NETIF_LAN);
+		l34_rt_lan2_encode(w, net, prefix, L34_NETIF_LAN);
 	mutex_lock(&l->lock);
 	ret = l34_tbl_write(l, L34_TBL_L3ROUTE, L34_RT_LAN2_SLOT, w, L34_WORDS_L3ROUTE);
 	mutex_unlock(&l->lock);

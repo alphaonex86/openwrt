@@ -26,7 +26,6 @@ static const char * const gpon_flow_refusal_names[GPON_FLOW_REF__COUNT] = {
 	[GPON_FLOW_REF_ENGINE]		= "engine",
 	[GPON_FLOW_REF_BY_DESIGN]	= "by-design",
 	[GPON_FLOW_REF_TABLE_INSERT]	= "table-insert",
-	[GPON_FLOW_REF_LOCAL]		= "local",
 	[GPON_FLOW_REF_FULL]		= "table-full",
 };
 

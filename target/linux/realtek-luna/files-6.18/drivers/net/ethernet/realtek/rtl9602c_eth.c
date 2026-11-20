@@ -4,8 +4,8 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/eth_netdev_contract.h>
-#include "eth_pon_link.h"
-#include "eth_neigh_watch.h"	/* a moved neighbour retires the engine rows resolved through it */	/* the PON WAN netdev's ethtool link */
+#include "eth_pon_link.h"	/* the PON WAN netdev's ethtool link */
+#include "eth_neigh_watch.h"	/* the engine's rows follow the kernel neighbours they copied */
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/dma-mapping.h>
@@ -441,7 +441,8 @@ struct rtl9602c_eth {
 #ifdef CONFIG_GPON_FLOW_OFFLOAD
 	struct gpon_flow_offload *fo;	/* the COMMON TC lifecycle, drivers/net/gpon/ */
 	struct notifier_block l34_addr_nb;	/* releases the WAN rows when its address leaves */
-	struct eth_neigh_watch l34_neigh;	/* ...and every flow when a resolved neighbour moves */
+	struct eth_neigh_watch l34_neigh;	/* ...its rows follow the neighbours they copied */
+	struct notifier_block l34_routed_nb;	/* ...and are released when the routed switch changes */
 #endif
 	/* Host uplink port, learned from the RX descriptor src_port_num. All RX
 	 * arrives on the board's single connected LAN port, so this resolves to the
@@ -3284,10 +3285,14 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 				dev_warn(dev, "L34: no address notifier; a WAN that changes address keeps its stale tables\n");
 				ep->l34_addr_nb.notifier_call = NULL;
 			}
-			ep->l34_neigh.held = rtl9602c_l34_neigh_held;
-			ep->l34_neigh.flush = rtl9602c_l34_neigh_flush;
+			ep->l34_neigh.names = rtl9602c_l34_neigh_names;
+			ep->l34_neigh.sync = rtl9602c_l34_neigh_sync;
+			ep->l34_neigh.sync_all = rtl9602c_l34_neigh_sync_all;
 			if (ep->fo && eth_neigh_watch_start(&ep->l34_neigh))
 				dev_warn(dev, "L34: no neighbour notifier; a moved neighbour keeps its stale rows\n");
+			ep->l34_routed_nb.notifier_call = rtl9602c_l34_routed_event;
+			if (ep->fo && blocking_notifier_chain_register(&gpon_flow_routed_chain, &ep->l34_routed_nb))
+				dev_warn(dev, "L34: no routed-switch notifier; a switch change keeps the old tables\n");
 			if (!ep->fo) {
 				dev_warn(dev, "L34: the common TC lifecycle could not be created; software forwarding\n");
 			} else if (devm_add_action_or_reset(dev, rtl9602c_l34_fo_release,

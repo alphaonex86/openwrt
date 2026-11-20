@@ -9,21 +9,38 @@
 #include <linux/jiffies.h>
 #include <linux/list.h>
 #include <linux/moduleparam.h>
+#include <linux/notifier.h>
 #include <linux/netdevice.h>
 #include <linux/rhashtable.h>
 #include <linux/slab.h>
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
-#include <net/route.h>
 
 #include "gpon_flow_offload.h"
 
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "gpon_flow."
+/* NO firewall on that hardware path (no conntrack, no nft): correct only while the block's forward policy is an
+ * unconditional ACCEPT, hence default 0 and nothing turns it on. */
 bool gpon_flow_ipv4_routed;
 EXPORT_SYMBOL_GPL(gpon_flow_ipv4_routed);
-module_param_named(ipv4_routed, gpon_flow_ipv4_routed, bool, 0644);
-MODULE_PARM_DESC(ipv4_routed, "1: an engine that declares routed IPv4 (no NAT) is offered those flows; 0: they stay in software");
+BLOCKING_NOTIFIER_HEAD(gpon_flow_routed_chain);
+EXPORT_SYMBOL_GPL(gpon_flow_routed_chain);
+
+/* An engine provisioned under the old value is told, so its tables never outlive the switch. */
+static int gpon_flow_routed_set(const char *val, const struct kernel_param *kp)
+{
+	bool was = READ_ONCE(gpon_flow_ipv4_routed);
+	int ret = param_set_bool(val, kp);
+
+	if (!ret && was != READ_ONCE(gpon_flow_ipv4_routed))
+		blocking_notifier_call_chain(&gpon_flow_routed_chain, 0, NULL);
+	return ret;
+}
+
+static const struct kernel_param_ops gpon_flow_routed_ops = { .set = gpon_flow_routed_set, .get = param_get_bool };
+module_param_cb(ipv4_routed, &gpon_flow_routed_ops, &gpon_flow_ipv4_routed, 0644);
+MODULE_PARM_DESC(ipv4_routed, "1: an engine that routes an ISP block on the LAN without NAT does it in hardware; 0: the block stays in software");
 
 struct gpon_flow_entry {
 	struct rhash_head	node;
@@ -378,15 +395,6 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 		goto out_put;
 	if (act.routed && key.ip_ver != 6 && !(fo->ops->ipv4_routed && READ_ONCE(gpon_flow_ipv4_routed))) {
 		why = GPON_FLOW_REF_ROUTED_V4;
-		err = -EOPNOTSUPP;
-		goto out_put;
-	}
-	/* The flowtable offers forwarded flows only; a routed row naming one of
-	 * the unit's own addresses would take its management traffic away. */
-	if (act.routed && key.ip_ver != 6 &&
-	    (inet_addr_type(dev_net(blockdev), htonl(key.ip_sa)) == RTN_LOCAL ||
-	     inet_addr_type(dev_net(blockdev), htonl(key.ip_da)) == RTN_LOCAL)) {
-		why = GPON_FLOW_REF_LOCAL;
 		err = -EOPNOTSUPP;
 		goto out_put;
 	}

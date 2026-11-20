@@ -26,7 +26,7 @@
 
 #include "gpon_edge.h"	/* core: the router edge, read from the live kernel */
 #include "rtl9602c_l34_logic.h"	/* struct ipmc_sg, IPMC_VIFS */
-#include "eth_flow_rows.h"	/* core: the routed rows' owners and hit shadow */
+#include "eth_arp_rows.h"	/* core: the LAN ARP rows and their L2 mark */
 #include "eth_mc_filter.h"	/* core: the WAN's joins, the entry table kept equal to a list */
 
 /* Indirect table-access block (byte offsets within the ...
@@ -121,7 +121,6 @@ enum l34_tbl {
 #define L34_WORDS_NAPTR_IN	3
 #define L34_WORDS_NAPT_OUT	1
 #define L34_WORDS_ARP		2
-#define L34_FT_TRF		0x800030	/* FLOW ROUTE hit bits, row/32 words */
 
 #define L34_NAPT_ENTRIES	4096
 #define L34_NAPT_WAYS		4		/* 4-way bucket: index = (hash << 2) + way */
@@ -148,7 +147,7 @@ enum l34_tbl {
  * so l34_rt_pool_slot() refuses an index the pool cannot hold. */
 #define L34_RT_POOL_BASE	2
 #define L34_RT_POOL_N		6
-#define L34_RT_LAN2_SLOT	(L34_RT_POOL_BASE + L34_NETIF_LAN)	/* the second LAN subnet */
+#define L34_RT_BLOCK_SLOT	(L34_RT_POOL_BASE + L34_NETIF_LAN)	/* an ISP's routed block on the LAN */
 #define L34_ARP_WAN_BASE	64	/* the WAN half of the 128-entry ARP table */
 
 /* L2 unicast table (the gateway/peer destination MAC). ...
@@ -200,16 +199,8 @@ struct l34_flow {
 	bool	out_owned, in_owned;	/* index zero is valid; writes may time out */
 	bool	installed;		/* this flow's contribution to `installs` */
 	bool	neigh_owned;		/* downstream ARP reference at hw_index */
-	u16	flrt_index;		/* FLOW ROUTE row of a routed (no NAT) leg */
-	bool	flrt_owned;
 };
 
-struct l34_neigh {
-	u32 ip;
-	u16 l2idx, users;
-	u8 mac[6];
-	bool ready, arp_live, l2_pinned, arp_was_used;
-};
 
 /* Routed IPv4 multicast in the switch (rtl9602c_ipmc.c): what ipmr and the bridge
  * said, copied in atomic context, and the groups the LUT holds: the routed ones and
@@ -256,6 +247,7 @@ struct rtl9602c_l34 {
 	bool		ready;		/* table-access plumbing usable */
 	bool		engine_on;	/* NAT engine enabled (deferred, lazy) */
 	bool		provisioned;	/* the interface tables hold real values */
+	bool		block_on;	/* edge.lan2 is routed by the engine: block route, held rows, WAN NETIF IP 0 */
 	struct gpon_edge edge;		/* ...and THESE are the values they hold */
 	/* ★ AN INVALID HARDWARE ROW MAY STILL HAVE A LIVE OR PENDING OWNER, so
 	 * the free-way scan may not offer it again: the row reads invalid while
@@ -264,9 +256,10 @@ struct rtl9602c_l34 {
 	 * knows the difference. */
 	DECLARE_BITMAP(out_reserved, L34_NAPT_ENTRIES);
 	DECLARE_BITMAP(in_reserved, L34_NAPT_ENTRIES);
-	struct eth_flow_rows flrt;	/* FLOW ROUTE rows: the lookup is on while one is live */
-	u32		flrt_map[2][ETH_FLOW_ROWS_WORDS(L34_FLRT_ROWS)];
-	struct l34_neigh lan_neigh[L34_ARP_WAN_BASE];
+	struct eth_arp_row lan_neigh[L34_ARP_WAN_BASE];	/* ARP slot = index */
+	struct eth_arp_rows arp;
+	/* the routed block's hosts the engine could not take, by reason (l34_block_why) */
+	u32		block_refused[4];
 	u32		installs;	/* flows programmed into the engine	*/
 	u32		removals;
 	u32		hits_seen;	/* set hit bits observed -- see the node */
@@ -347,8 +340,10 @@ bool rtl9602c_l34_has_owners(struct rtl9602c_l34 *l);
 int  rtl9602c_l34_flow_add(struct rtl9602c_l34 *l, struct l34_flow *f);
 int  rtl9602c_l34_flow_del(struct rtl9602c_l34 *l, struct l34_flow *f);
 int  rtl9602c_l34_flow_hit(struct rtl9602c_l34 *l, u16 hw_index, bool *active);
-int  rtl9602c_l34_route_add(struct rtl9602c_l34 *l, struct l34_flow *f, bool ds);
-int  rtl9602c_l34_route_hit(struct rtl9602c_l34 *l, u16 row, bool *active);
+/* With the routed switch on, a routed leg provisions the engine and is refused under this name: the block route
+ * forwards its packets. */
+#define L34_ROUTED_NO_ROW "routed: forwarded by the block route, no row per flow"
+void rtl9602c_l34_lan_neigh(struct rtl9602c_l34 *l, u32 ip, const u8 *mac);
 void rtl9602c_l34_proc_init(struct rtl9602c_l34 *l);	/* bring-up test harness */
 
 #endif /* _RTL9602C_L34_H */

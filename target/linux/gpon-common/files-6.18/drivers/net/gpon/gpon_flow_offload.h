@@ -39,8 +39,9 @@ struct gpon_flow_ctx {
 };
 
 /* Routed IPv4 on an engine that declares it, at run time: gpon_flow.ipv4_routed=0|1 on the command line or
- * /sys/module/gpon_flow/parameters/ipv4_routed. Off by default until proven on silicon. */
+ * /sys/module/gpon_flow/parameters/ipv4_routed, off by default; a change calls gpon_flow_routed_chain. */
 extern bool gpon_flow_ipv4_routed;
+extern struct blocking_notifier_head gpon_flow_routed_chain;
 
 /* ⚠ `install` OWNS THE INDEX IT RETURNS. The core stores it ...
  * dev/MEASURED-gpon_flow_offload.h.md sec 4. */

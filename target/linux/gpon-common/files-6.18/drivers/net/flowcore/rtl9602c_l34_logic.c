@@ -2,7 +2,6 @@
 /* TIER: CHIP */
 /* See rtl9602c_l34_logic.h. Moved verbatim; no line was rewritten.
  */
-#include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/minmax.h>
 
@@ -110,31 +109,12 @@ void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx)
 	l34_field_set(w, L34_RT_VALID_LSP,   L34_RT_VALID_W,   1);
 }
 
-/* The second LAN subnet (a routed block) is a LAN route that TRAPS: with process ARP the engine dropped a WAN
- * packet to a block host that matched no flow-route row (measured), and forwarding it would bypass fw4. */
-void l34_rt_lan2_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx)
+/* An ISP's routed block on the LAN: an EXTERNAL route (INT 0) resolved by ARP on the LAN netif. With it the die
+ * routes block host <-> WAN both ways with no flow row (measured on the lab X111W, 2026-11-20). */
+void l34_rt_block_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx)
 {
 	l34_rt_lan_encode(w, net, prefix, netif_idx);
-	l34_field_set(w, L34_RT_PROCESS_LSP, L34_RT_PROCESS_W, L34_RT_PROCESS_CPU);
-}
-
-/* -> 0, or -EINVAL for a process that is not a forwarding one or an index past its field. */
-int l34_flrt_encode(u32 *w, u32 sip, u32 dip, u16 sport, u16 dport, bool is_tcp,
-		    u8 process, u8 nh)
-{
-	if ((process != L34_FLRT_LOCAL && process != L34_FLRT_GLOBAL) ||
-	    nh >= (1u << L34_FLRT_NH_W))
-		return -EINVAL;
-	l34_field_set(w, L34_FLRT_SIP_LSP, 32, sip);
-	l34_field_set(w, L34_FLRT_DIP_LSP, 32, dip);
-	l34_field_set(w, L34_FLRT_SP_LSP, 16, sport);
-	l34_field_set(w, L34_FLRT_DP_LSP, 16, dport);
-	l34_field_set(w, L34_FLRT_TCP_LSP, 1, is_tcp);
-	l34_field_set(w, L34_FLRT_NH_LSP, L34_FLRT_NH_W, nh);
-	l34_field_set(w, L34_FLRT_PROCESS_LSP, L34_FLRT_PROCESS_W, process);
-	l34_field_set(w, L34_FLRT_IPV4_LSP, 1, 1);
-	l34_field_set(w, L34_FLRT_VALID_LSP, 1, 1);
-	return 0;
+	l34_field_set(w, L34_RT_INT_LSP, L34_RT_INT_W, 0);
 }
 
 /* WAN prefix via NEXTHOP; the caller uses two /1 entries for full IPv4 coverage. */

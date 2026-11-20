@@ -162,23 +162,10 @@ u16 l34_hash_in(bool is_tcp, u32 dip, u16 dport);
 #define L34_RT_PROCESS_ARP	2
 #define L34_RT_PROCESS_NH	3
 
-/* FLOW ROUTE, IPv4 (type 12, 4 words, 256 rows): one routed 5-tuple, no address rewritten. PROCESS GLOBAL
- * egresses through NEXTHOP[nh]; LOCAL resolves the destination in the ARP table on NETIF[nh]. */
+/* FLOW ROUTE, IPv4 (type 12, 4 words, 256 rows): one routed 5-tuple; only dumped. */
 #define L34_FLRT_ROWS		256
 #define L34_WORDS_FLRT		4
 #define L34_FLRT_VALID_LSP	0
-#define L34_FLRT_IPV4_LSP	1
-#define L34_FLRT_SIP_LSP	2
-#define L34_FLRT_DIP_LSP	34
-#define L34_FLRT_SP_LSP		66
-#define L34_FLRT_DP_LSP		82
-#define L34_FLRT_TCP_LSP	98
-#define L34_FLRT_NH_LSP		99
-#define L34_FLRT_NH_W		4
-#define L34_FLRT_PROCESS_LSP	103
-#define L34_FLRT_PROCESS_W	2
-#define L34_FLRT_LOCAL		2
-#define L34_FLRT_GLOBAL		3
 
 /* L2_UC entry (3 words). The 48-bit MAC is packed octet[0] at the field MSB. */
 #define L2UC_MAC_LSP		0
@@ -208,7 +195,7 @@ void l34_napt_encode(u32 *w, u16 naptr_idx);
 void l34_netif_encode(u32 *w, const u8 *mac, u32 ip, u16 vlan);
 void l34_rt_wan_encode(u32 *w, u8 nh_idx);
 void l34_rt_lan_encode(u32 *w, u32 lan_net, u8 prefix, u8 netif_idx);
-void l34_rt_lan2_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx);
+void l34_rt_block_encode(u32 *w, u32 net, u8 prefix, u8 netif_idx);
 void l34_rt_wan_net_encode(u32 *w, u32 net, u8 prefix, u8 nh_idx);
 void l34_rt_cpu_encode(u32 *w, u32 own_ip, u8 netif_idx);
 void l34_nexthop_encode(u32 *w, u8 ifidx, unsigned int l2idx);
@@ -218,8 +205,6 @@ void l34_pppoe_encode(u32 *w, u16 sid);
 void l34_extip_encode(u32 *w, u32 wan_ip, u8 nhidx);
 void l34_arp_encode(u32 *w, u32 dst_ip, unsigned int l2idx);
 void l34_l2uc_encode(u32 *w, const u8 *mac, u8 port);
-int l34_flrt_encode(u32 *w, u32 sip, u32 dip, u16 sport, u16 dport, bool is_tcp,
-		    u8 process, u8 nh);
 int l34_l2uc_sts_index(u32 sts);
 
 /* L3 multicast route: the L2 table's IPv4 group entry (3 words, LSW-first). The

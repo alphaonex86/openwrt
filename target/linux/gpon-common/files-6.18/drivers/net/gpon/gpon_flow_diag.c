@@ -9,7 +9,7 @@
 static const char * const gpon_flow_refusal_names[GPON_FLOW_REF__COUNT] = {
 	[GPON_FLOW_OK]			= "ok",
 	[GPON_FLOW_REF_NO_ENGINE]	= "no-engine",
-	[GPON_FLOW_REF_DUP_COOKIE]	= "dup-cookie",
+	[GPON_FLOW_REF_DUPLICATE]	= "duplicate",
 	[GPON_FLOW_REF_BAD_ARGS]	= "bad-args",
 	[GPON_FLOW_REF_NOT_IPV4]	= "not-ipv4",
 	[GPON_FLOW_REF_NO_BASIC]	= "no-basic",
@@ -42,7 +42,7 @@ void gpon_flow_tally_note(struct gpon_flow_tally *t, enum gpon_flow_refusal r)
 	if (!t || (unsigned int)r >= GPON_FLOW_REF__COUNT)
 		return;
 	t->n[r]++;
-	if (r != GPON_FLOW_OK)
+	if (r != GPON_FLOW_OK && r != GPON_FLOW_REF_DUPLICATE)
 		t->last = r;
 }
 
@@ -70,7 +70,7 @@ static int diag_u32(char *out, size_t sz, const char *tag,
 int gpon_flow_diag_line(const struct gpon_flow_tally *t,
 			const struct gpon_flow_diag *d, char *out, size_t sz)
 {
-	unsigned int i, refused = 0, by_design = 0;
+	unsigned int i, refused = 0, by_design = 0, duplicate = 0;
 	int pos;
 
 	if (!out || !sz)
@@ -96,14 +96,19 @@ int gpon_flow_diag_line(const struct gpon_flow_tally *t,
 	 * it made `refused` read as a near-total refusal (14494 of 14502) of an
 	 * engine that was working exactly as designed.
 	 */
+	/* A DUPLICATE is the same request delivered again (every engine netdev's
+	 * block cb, or a re-offer of an installed flow): nothing was refused. */
 	by_design = t->n[GPON_FLOW_REF_BY_DESIGN];
+	duplicate = t->n[GPON_FLOW_REF_DUPLICATE];
 	for (i = GPON_FLOW_OK + 1; i < GPON_FLOW_REF__COUNT; i++)
-		if (i != GPON_FLOW_REF_BY_DESIGN)
+		if (i != GPON_FLOW_REF_BY_DESIGN && i != GPON_FLOW_REF_DUPLICATE)
 			refused += t->n[i];
 	pos += scnprintf(out + pos, sz - pos, " | installed=%u refused=%u",
 			 t->n[GPON_FLOW_OK], refused);
 	if (by_design)
 		pos += scnprintf(out + pos, sz - pos, " by-design=%u", by_design);
+	if (duplicate)
+		pos += scnprintf(out + pos, sz - pos, " duplicate=%u", duplicate);
 	pos += scnprintf(out + pos, sz - pos, " last=%s",
 			 (refused || by_design) ? gpon_flow_refusal_name(t->last)
 						: "none");

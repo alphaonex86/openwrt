@@ -46,6 +46,7 @@ struct gpon_flow_entry {
 	struct rhash_head	node;
 	struct list_head	link;		/* fo->entries */
 	unsigned long		cookie;
+	const void		*block;		/* the flow block it came through */
 	u32			idx;		/* the engine's, opaque */
 	bool			ds;
 	bool			installing, failed, removed;
@@ -310,6 +311,7 @@ static int gpon_flow_install_entry(struct gpon_flow_offload *fo,
 		return -ENOMEM;
 	}
 	entry->cookie = cookie;
+	entry->block = ctx->block;
 	entry->ds = ctx->ds_leg;
 	entry->installing = true;
 	/* Claim the cookie before hardware; an install may flush the old edge. */
@@ -335,8 +337,9 @@ static int gpon_flow_install_entry(struct gpon_flow_offload *fo,
 
 int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f,
-			      struct net_device *blockdev)
+			      const struct gpon_flow_bound *bound)
 {
+	struct net_device *blockdev = bound->dev;
 	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
 	struct gpon_flow_entry *entry;
 	struct gpon_flow_ctx ctx = {};
@@ -353,13 +356,13 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 	}
 
 	/* ⚠ NOT "the other direction": on 6.18 the cookie is the address of THIS
-	 * direction's own tuple, so the two legs never share one. A dup-cookie is
-	 * the SAME cookie delivered again -- most plausibly by the block-cb
-	 * fan-out. Refusing ... dev/MEASURED-gpon_flow_offload.c.md sec 7. */
+	 * direction's own tuple, so the two legs never share one. The SAME cookie
+	 * again is the block-cb fan-out (one cb per engine netdev) or a re-offer:
+	 * a duplicate, not a refusal -- dev/MEASURED-gpon_flow_offload.c.md sec 7. */
 	entry = rhashtable_lookup_fast(&fo->table, &f->cookie, gpon_flow_ht_params);
 	if (entry) {
 		if (!entry->failed) {
-			GPON_FLOW_NOTE(fo, GPON_FLOW_REF_DUP_COOKIE);
+			GPON_FLOW_NOTE(fo, GPON_FLOW_REF_DUPLICATE);
 			return -EEXIST;
 		}
 		err = gpon_flow_entry_retire(fo, entry);
@@ -367,6 +370,7 @@ int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 			return err;
 	}
 
+	ctx.block = bound->block;
 	err = gpon_flow_key_from_tc(rule, &key, &why);
 	if (err) {
 		GPON_FLOW_NOTE(fo, why);
@@ -453,6 +457,29 @@ int gpon_flow_offload_flush(struct gpon_flow_offload *fo)
 	return ret;
 }
 
+/* The kernel unbinds a dying flowtable's block BEFORE tearing its flows down, so their DESTROY reaches no
+ * callback: without this their entries stay, their rows outlive the conntrack, and the next flows (allocated
+ * at the freed addresses, i.e. the same cookies) are refused for good. */
+int gpon_flow_offload_unbind(struct gpon_flow_offload *fo, const void *block)
+{
+	struct gpon_flow_entry *e, *next;
+	int ret = 0;
+
+	if (!fo || !fo->table_ready)
+		return 0;
+
+	list_for_each_entry_safe(e, next, &fo->entries, link) {
+		int err;
+
+		if (e->block != block || e->installing)
+			continue;
+		err = gpon_flow_entry_retire(fo, e);
+		if (err && !ret)
+			ret = err;
+	}
+	return ret;
+}
+
 int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f)
 {
@@ -506,11 +533,11 @@ int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 }
 
 int gpon_flow_offload_tc(struct gpon_flow_offload *fo, struct flow_cls_offload *f,
-			 struct net_device *blockdev)
+			 const struct gpon_flow_bound *bound)
 {
 	switch (f->command) {
 	case FLOW_CLS_REPLACE:
-		return gpon_flow_offload_replace(fo, f, blockdev);
+		return gpon_flow_offload_replace(fo, f, bound);
 	case FLOW_CLS_DESTROY:
 		return gpon_flow_offload_destroy(fo, f);
 	case FLOW_CLS_STATS:

@@ -36,6 +36,13 @@ struct gpon_flow_ctx {
 	struct net_device *idev;	/* the rule's META ingress	*/
 	struct net_device *odev;	/* the REDIRECT target		*/
 	bool ds_leg;			/* the WAN->LAN reply leg	*/
+	const void *block;		/* the flow block it came through */
+};
+
+/* A block cb's private data: the netdev it was bound on and the block (a flowtable) it serves. */
+struct gpon_flow_bound {
+	struct net_device *dev;
+	const void *block;
 };
 
 /* Routed IPv4 on an engine that declares it, at run time: gpon_flow.ipv4_routed=0|1 on the command line or
@@ -116,18 +123,20 @@ void gpon_flow_offload_free(struct gpon_flow_offload *fo);
 /* Tear down EVERY installed flow. A family calls this when ...
  * dev/MEASURED-gpon_flow_offload.h.md sec 7. */
 int gpon_flow_offload_flush(struct gpon_flow_offload *fo);
+/* Retire every flow installed through `block`: a dying flowtable is unbound BEFORE its flows are torn down. */
+int gpon_flow_offload_unbind(struct gpon_flow_offload *fo, const void *block);
 
 /* The three TC verbs, dispatched by cookie. */
 int gpon_flow_offload_replace(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f,
-			      struct net_device *blockdev);
+			      const struct gpon_flow_bound *bound);
 int gpon_flow_offload_destroy(struct gpon_flow_offload *fo,
 			      struct flow_cls_offload *f);
 int gpon_flow_offload_stats(struct gpon_flow_offload *fo,
 			    struct flow_cls_offload *f);
 /* One TC_SETUP_CLSFLOWER command, dispatched to the verb above. */
 int gpon_flow_offload_tc(struct gpon_flow_offload *fo, struct flow_cls_offload *f,
-			 struct net_device *blockdev);
+			 const struct gpon_flow_bound *bound);
 
 /* Decode a rule's ACTIONS. Split out of replace() so a family ...
  * dev/MEASURED-gpon_flow_offload.h.md sec 8. */

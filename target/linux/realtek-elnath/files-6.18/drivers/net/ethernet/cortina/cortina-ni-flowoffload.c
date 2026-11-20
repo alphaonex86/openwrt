@@ -2525,7 +2525,7 @@ static int cn_setup_tc_block(struct net_device *dev,
 			     struct flow_block_offload *f)
 {
 	return gpon_flow_block_setup(dev, f, &cn_block_cb_list,
-				     cn_setup_tc_block_cb, NULL);
+				     cn_setup_tc_block_cb, NULL, cn_fo, &cn_flow_offload_mutex);
 }
 
 /* ndo_setup_tc hook for the cortina-ni netdevs (eth0 / gpon0) */

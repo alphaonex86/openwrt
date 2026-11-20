@@ -349,7 +349,7 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 				 void *cb_priv)
 {
 	struct flow_cls_offload *f = type_data;
-	struct net_device *dev = cb_priv;
+	struct net_device *dev = gpon_flow_bound_dev(cb_priv);
 	struct rtl9602c_eth *ep;
 	int err;
 
@@ -363,7 +363,7 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 	/* who refused is named by CONFIG_GPON_FLOW_DIAG at the point of refusal */
 	if (f->command == FLOW_CLS_REPLACE)
 		ep->l34.offered++;
-	err = gpon_flow_offload_tc(ep->fo, f, dev);
+	err = gpon_flow_offload_tc(ep->fo, f, cb_priv);
 	mutex_unlock(&rtl9602c_l34_tc_mutex);
 	return err;
 }
@@ -513,7 +513,8 @@ static int rtl9602c_l34_setup_block(struct net_device *dev,
 		return -EOPNOTSUPP;
 
 	return gpon_flow_block_setup(dev, f, &rtl9602c_l34_block_cb_list,
-				     rtl9602c_l34_block_cb, &ep->l34.binds);
+				     rtl9602c_l34_block_cb, &ep->l34.binds,
+				     ep->fo, &rtl9602c_l34_tc_mutex);
 }
 
 static int rtl9602c_l34_setup_tc(struct net_device *dev,

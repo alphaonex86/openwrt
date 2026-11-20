@@ -14,7 +14,7 @@
 enum gpon_flow_refusal {
 	GPON_FLOW_OK = 0,		/* installed                            */
 	GPON_FLOW_REF_NO_ENGINE,	/* no lifecycle / table not ready       */
-	GPON_FLOW_REF_DUP_COOKIE,	/* the other leg already holds it       */
+	GPON_FLOW_REF_DUPLICATE,	/* the same request again: not a refusal */
 	GPON_FLOW_REF_BAD_ARGS,		/* the caller handed us nothing to read */
 	GPON_FLOW_REF_NOT_IPV4,		/* the 5-tuple is not IPv4              */
 	GPON_FLOW_REF_NO_BASIC,		/* no BASIC dissector: no L4 proto      */

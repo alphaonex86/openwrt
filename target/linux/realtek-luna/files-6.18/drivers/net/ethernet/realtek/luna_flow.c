@@ -376,7 +376,7 @@ static const struct gpon_flow_ops luna_flow_ops = {
 
 static int luna_flow_block_cb(enum tc_setup_type type, void *data, void *cookie)
 {
-	struct luna_eth *ep = luna_flow_eth(cookie);
+	struct luna_eth *ep = luna_flow_eth(gpon_flow_bound_dev(cookie));
 	struct flow_cls_offload *f = data;
 	int ret;
 
@@ -403,7 +403,7 @@ static int luna_flow_setup_tc(struct net_device *dev, enum tc_setup_type type,
 	if (!ep || !ep->flow || (type != TC_SETUP_BLOCK && type != TC_SETUP_FT))
 		return -EOPNOTSUPP;
 	return gpon_flow_block_setup(dev, data, &luna_flow_blocks,
-				     luna_flow_block_cb, NULL);
+				     luna_flow_block_cb, NULL, ep->flow->fo, &luna_flow_mutex);
 }
 
 /* gpon0's own MAC pinned to the CPU port while gpon0 is up, flows or none: a WAN frame to it is

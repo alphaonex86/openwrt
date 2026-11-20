@@ -28,6 +28,7 @@
 #include <linux/uaccess.h>
 
 #include "luna_l34_acc.h"
+#include "luna_ctl_acl.h"
 #include "luna_gpon_nic.h"
 #include "rtl9602c_l34.h"
 #include "gpon_flow_offload.h"
@@ -139,11 +140,12 @@ static void l34_engine_on(struct rtl9602c_l34 *l)
 
 static const struct eth_arp_rows_hw l34_arp_hw;
 
-int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw)
+int rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw, const struct luna_ctl_acl *acl)
 {
 	if (!sw)
 		return -EINVAL;
 	l->sw = sw;
+	l->acl = acl && acl->trap_rule ? acl : NULL;
 	mutex_init(&l->lock);
 	l->arp = (struct eth_arp_rows){ .hw = &l34_arp_hw, .ctx = l, .row = l->lan_neigh,
 					.n = ARRAY_SIZE(l->lan_neigh) };
@@ -806,6 +808,7 @@ int rtl9602c_l34_lan_setup(struct rtl9602c_l34 *l, u8 idx, u32 lan_ip,
 	if (!l->engine_on)
 		l34_engine_on(l);
 	ret = l34_prog_run(step, ARRAY_SIZE(step), l34_prog_wr, l);
+	l->lan_on |= !ret;
 out:
 	mutex_unlock(&l->lock);
 	return ret;
@@ -936,6 +939,32 @@ static int l34_block_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e
 	return ret;
 }
 
+/* A second LAN subnet's hosts send to the LAN subnet through the unit: once the LAN rows are in the engine the die
+ * drops those frames (a source on no LAN route to a LAN-route destination), with or without the block's own route,
+ * in both routed switch arms. An ingress rule traps them to the CPU while the LAN holds a second subnet. */
+int rtl9602c_l34_lan_trap(struct rtl9602c_l34 *l, const struct gpon_edge *e)
+{
+	struct eth_tcam_trap t = { .sip = e->lan2_net, .dip = e->lan_net, .splen = e->lan2_prefix, .dplen = e->lan_prefix };
+	bool want = l->lan_on && e->lan2_prefix;
+	int step, ret = 0;
+
+	if (!l->acl)
+		return want ? -EOPNOTSUPP : 0;	/* a die without the rule cannot carry the block */
+	memcpy(t.mac, e->lan_mac, sizeof(t.mac));
+	mutex_lock(&l->lock);
+	step = eth_tcam_follow(&l->trap, &t, want);
+	if (step == ETH_TCAM_SET)
+		ret = luna_acl_trap_set(l->sw, l->acl, &t);	/* a failed write leaves the rule without its action */
+	else if (step == ETH_TCAM_CLEAR)
+		ret = luna_acl_off(l->sw, l->acl, l->acl->trap_rule);
+	eth_tcam_followed(&l->trap, &t, step, ret);
+	mutex_unlock(&l->lock);
+	if (ret)
+		pr_err("rtl9602c-l34: LAN trap rule for %pI4h/%u not %s (%d)\n", &e->lan2_net, e->lan2_prefix,
+		       want ? "set" : "cleared", ret);
+	return ret;
+}
+
 static const char * const l34_block_why[] = { "arp-rows-full", "no-l2-row", "l2-row-on-wan", "write-failed" };
 
 /* LAN neighbour @ip as the kernel holds it now: @mac, NULL once it is not valid. A block host's row follows it; a
@@ -978,7 +1007,8 @@ int rtl9602c_l34_provision(struct rtl9602c_l34 *l, const struct gpon_edge *e)
 	if (ret)
 		return ret;
 	ret = rtl9602c_l34_lan_setup(l, L34_NETIF_LAN, e->lan_ip, e->lan_mac,
-				     e->lan_net, e->lan_prefix, e->lan_vlan);
+				     e->lan_net, e->lan_prefix, e->lan_vlan) ?:
+	      rtl9602c_l34_lan_trap(l, e);
 	if (ret)
 		return ret;
 	l->edge = *e;
@@ -1406,8 +1436,9 @@ static int l34_proc_show(struct seq_file *sf, void *v)
 
 		for (i = 0; i < ARRAY_SIZE(l->lan_neigh); i++)
 			held += l->lan_neigh[i].held;
-		seq_printf(sf, "routed_block %s %pI4h/%u hosts %u refused", l->block_on ? "on" : "off",
-			   &l->edge.lan2_net, l->edge.lan2_prefix, held);
+		seq_printf(sf, "routed_block %s %pI4h/%u hosts %u trap_hits %u refused", l->block_on ? "on" : "off",
+			   &l->edge.lan2_net, l->edge.lan2_prefix, held,
+			   l->acl ? readl(l->sw + l->acl->trap_hits) : 0);	/* wraps */
 		for (i = 0; i < ARRAY_SIZE(l34_block_why); i++)
 			seq_printf(sf, " %s %u", l34_block_why[i], l->block_refused[i]);
 		seq_putc(sf, '\n');

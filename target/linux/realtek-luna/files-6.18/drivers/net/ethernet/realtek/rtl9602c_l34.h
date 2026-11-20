@@ -28,6 +28,7 @@
 #include "rtl9602c_l34_logic.h"	/* struct ipmc_sg, IPMC_VIFS */
 #include "eth_arp_rows.h"	/* core: the LAN ARP rows and their L2 mark */
 #include "eth_mc_filter.h"	/* core: the WAN's joins, the entry table kept equal to a list */
+#include "eth_tcam.h"	/* core: the LAN trap rule a second LAN subnet needs */
 
 /* Indirect table-access block (byte offsets within the ...
  * dev/MEASURED-rtl9602c_l34.h.md sec 7. */
@@ -178,6 +179,7 @@ enum l34_tbl {
 /* Per-flow programming request, filled by the flow-offload glue (endian-safe:
  * addresses/ports are kept in host order here and packed with explicit math). */
 struct gpon_flow_offload;
+struct luna_ctl_acl;
 
 struct l34_flow {
 	u8	l4proto;		/* IPPROTO_TCP / IPPROTO_UDP */
@@ -243,9 +245,12 @@ struct rtl9602c_ipmc {
 
 struct rtl9602c_l34 {
 	void __iomem	*sw;		/* switch-core MMIO base (offsets above are relative) */
+	const struct luna_ctl_acl *acl;	/* the ingress ACL whose trap rule serves the routed block, NULL = none */
 	struct mutex	lock;		/* serialises table ops */
 	bool		ready;		/* table-access plumbing usable */
 	bool		engine_on;	/* NAT engine enabled (deferred, lazy) */
+	bool		lan_on;		/* the LAN rows are in the engine (never released) */
+	struct eth_tcam_follow trap;	/* the LAN trap rule as written */
 	bool		provisioned;	/* the interface tables hold real values */
 	bool		block_on;	/* edge.lan2 is routed by the engine: block route, held rows, WAN NETIF IP 0 */
 	struct gpon_edge edge;		/* ...and THESE are the values they hold */
@@ -328,7 +333,7 @@ struct rtl9602c_l34 {
 };
 
 /* Public API (mainline flow-offload glue calls these). */
-int  rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw);
+int  rtl9602c_l34_init(struct rtl9602c_l34 *l, void __iomem *sw, const struct luna_ctl_acl *acl);
 int  rtl9602c_l34_wan_setup(struct rtl9602c_l34 *l, u8 idx, u32 wan_ip,
 			    const u8 *wan_mac, u32 gw_ip, const u8 *gw_mac,
 			    u8 wan_port, u16 vlan,
@@ -345,6 +350,7 @@ int  rtl9602c_l34_flow_hit(struct rtl9602c_l34 *l, u16 hw_index, bool *active);
  * forwards its packets. */
 #define L34_ROUTED_NO_ROW "routed: forwarded by the block route, no row per flow"
 void rtl9602c_l34_lan_neigh(struct rtl9602c_l34 *l, u32 ip, const u8 *mac);
+int  rtl9602c_l34_lan_trap(struct rtl9602c_l34 *l, const struct gpon_edge *e);
 void rtl9602c_l34_proc_init(struct rtl9602c_l34 *l);	/* bring-up test harness */
 
 #endif /* _RTL9602C_L34_H */

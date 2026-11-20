@@ -420,6 +420,11 @@ static const struct luna_ctl_acl rtl9602c_ctl_acl = {
 	.care_is_one = true,
 	.data_base = 128, .rule_tbl = 2, .act_tbl = 3, .act_words = 3, .rules = 96, .ports = 0xf,
 	.pri_shift = 11, .pri_groups = 2, .acl_weight_shift = 9, .addr_shift = 9,
+	.trap_rule = 2, .trap_tmpl = 1,
+	/* trap template: 7-bit codes, 4 a word: DMAC0..2 1 2 3, SIP0/1 0x10 0x11, DIP0/1 0x12 0x13 */
+	.trap_tmpl_words = { 0x0200c101, 0x0004c911 },
+	.trap_act = { 0x80000000, 0x60f },	/* FWDACT [42:41] 3 trap, POLICACT [36:35] 1 log, METER_IDX [34:30] 30 */
+	.trap_hits = 0x32600 + 4 * 30,		/* ACL log counter 30 (even: the low word in 64-bit mode too) */
 };
 static const struct luna_ctl_acl rtl9603cvd_ctl_acl = {
 	.tmpl = 0x15008, .en = 0x15048, .permit = 0x1504C, .act_ctrl = 0x15050, .pri_sel = 0x1C23C,

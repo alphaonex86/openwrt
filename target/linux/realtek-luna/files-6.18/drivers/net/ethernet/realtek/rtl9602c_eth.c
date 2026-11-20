@@ -3272,7 +3272,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	rtl9602c_l34_proc_init(&ep->l34);
 
 	if (hw_nat) {
-		if (rtl9602c_l34_init(&ep->l34, ep->sw)) {
+		if (rtl9602c_l34_init(&ep->l34, ep->sw, ep->swm->ctl_acl)) {
 			dev_warn(dev, "L34 hw-nat init failed; software forwarding\n");
 		} else {
 			dev_info(dev, "L34 hw-nat engine initialised\n");

@@ -148,6 +148,20 @@ static int gpon_edge_lan(struct net_device *lan, struct gpon_edge *e,
 	return 0;
 }
 
+/* The LAN half alone, as the kernel holds it now (no flow needed). -> 0, -EAGAIN no IPv4 address yet. */
+int gpon_edge_read_lan(struct net_device *lan, struct gpon_edge *e)
+{
+	const char *why;
+	int ret;
+
+	memset(e, 0, sizeof(*e));
+	rcu_read_lock();
+	ret = lan ? gpon_edge_lan(lan, e, &why) : -ENODEV;
+	rcu_read_unlock();
+	return ret;
+}
+EXPORT_SYMBOL_GPL(gpon_edge_read_lan);
+
 int gpon_edge_read_via(struct net_device *lan, struct net_device *wan,
 		       u32 peer, struct net_device *odev, const u8 *dmac,
 		       struct gpon_edge *e, const char **why)

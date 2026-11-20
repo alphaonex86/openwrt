@@ -1127,6 +1127,26 @@ static ssize_t l34_proc_write(struct file *fp, const char __user *ub,
 		mutex_unlock(&l->lock);
 		pr_info("rtl9602c_l34: raw write tbl %u idx %u words %u -> %d\n",
 			tbl, tidx, got - 2, ret);
+#if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
+	} else if (buf[0] == 'a') {	/* diag: ARP_USED of one valid L2 row */
+		unsigned int idx, on;
+		u32 w[L34_WORDS_L2UC] = { 0 };
+
+		if (sscanf(buf, "a %u %u", &idx, &on) != 2 || idx >= 1088 || on > 1)
+			return -EINVAL;
+		mutex_lock(&l->lock);
+		ret = l2uc_access(l, idx, w, false, false);
+		if (ret >= 0 && !l34_field_get(w, L2UC_VALID_LSP, L2UC_VALID_W))
+			ret = -ENOENT;
+		else if (ret >= 0) {
+			l34_field_set(w, L2UC_ARPUSED_LSP, L2UC_ARPUSED_W, on);
+			ret = l2uc_access(l, idx, w, false, true);
+		}
+		mutex_unlock(&l->lock);
+		pr_info("rtl9602c_l34: l2[%u] arp_used %u -> %d\n", idx, on, ret);
+		if (ret >= 0)
+			ret = ret == idx ? 0 : -ESTALE;
+#endif
 	} else {
 		return -EINVAL;
 	}

@@ -90,6 +90,14 @@ static inline const u8 *rtl_rx_own_bssid(const struct rtl_mac *mac)
 	return mac->opmode == NL80211_IFTYPE_AP ? mac->mac_addr : mac->bssid;
 }
 
+/* The BSSID register of an AP holds its own address, as stock programs it in every mode;
+ * BSS_CHANGED_BSSID never comes to an AP. Called once mac_addr is set. */
+static inline void rtl_set_own_bssid(struct ieee80211_hw *hw, const struct rtl_mac *mac)
+{
+	if (mac->opmode == NL80211_IFTYPE_AP)
+		rtl_priv(hw)->cfg->ops->set_hw_reg(hw, HW_VAR_BSSID, (u8 *)rtl_rx_own_bssid(mac));
+}
+
 /* -> the frame is of our BSS and decoded clean: it feeds the signal statistics (per-station
  * PWDB, DIG, the firmware rate adaptation). *toself: addressed to this interface, by its
  * address, not the EFUSE's that a board's own MAC replaces. */

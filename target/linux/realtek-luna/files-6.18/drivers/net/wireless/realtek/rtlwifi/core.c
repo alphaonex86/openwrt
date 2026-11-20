@@ -404,6 +404,7 @@ static int rtl_op_add_interface(struct ieee80211_hw *hw,
 	rtlpriv->cfg->ops->set_network_type(hw, vif->type);
 	memcpy(mac->mac_addr, vif->addr, ETH_ALEN);
 	rtlpriv->cfg->ops->set_hw_reg(hw, HW_VAR_ETHER_ADDR, mac->mac_addr);
+	rtl_set_own_bssid(hw, mac);
 
 	mac->retry_long = retry_limit;
 	mac->retry_short = retry_limit;

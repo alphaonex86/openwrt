@@ -711,6 +711,9 @@ static void rtl92ee_dm_dynamic_atc_switch(struct ieee80211_hw *hw)
 	int cfo_khz_a , cfo_khz_b , cfo_ave = 0, adjust_xtal = 0;
 	int cfo_ave_diff;
 
+	/* an AP serves many stations: its crystal follows none of them (it now sees their CFO) */
+	if (rtlpriv->mac80211.opmode == NL80211_IFTYPE_AP)
+		return;
 	if (rtlpriv->mac80211.link_state < MAC80211_LINKED) {
 		if (rtldm->atc_status == ATC_STATUS_OFF) {
 			rtl_set_bbreg(hw, ROFDM1_CFOTRACKING, BIT(11),

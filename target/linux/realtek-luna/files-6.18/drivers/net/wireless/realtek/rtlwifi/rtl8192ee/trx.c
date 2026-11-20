@@ -226,10 +226,8 @@ static void _rtl92ee_translate_rx_signal_stuff(struct ieee80211_hw *hw,
 					       struct rx_fwinfo *p_drvinfo)
 {
 	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
-	struct rtl_efuse *rtlefuse = rtl_efuse(rtl_priv(hw));
 	struct ieee80211_hdr *hdr;
 	u8 *tmp_buf;
-	u8 *praddr;
 	u8 *psaddr;
 	__le16 fc;
 	bool packet_matchbssid, packet_toself, packet_beacon;
@@ -239,21 +237,10 @@ static void _rtl92ee_translate_rx_signal_stuff(struct ieee80211_hw *hw,
 
 	hdr = (struct ieee80211_hdr *)tmp_buf;
 	fc = hdr->frame_control;
-	praddr = hdr->addr1;
 	psaddr = ieee80211_get_SA(hdr);
 	ether_addr_copy(pstatus->psaddr, psaddr);
 
-	packet_matchbssid = (!ieee80211_is_ctl(fc) &&
-			       (ether_addr_equal(mac->bssid,
-						ieee80211_has_tods(fc) ?
-						hdr->addr1 :
-						ieee80211_has_fromds(fc) ?
-						hdr->addr2 : hdr->addr3)) &&
-				(!pstatus->hwerror) && (!pstatus->crc) &&
-				(!pstatus->icv));
-
-	packet_toself = packet_matchbssid &&
-			 (ether_addr_equal(praddr, rtlefuse->dev_addr));
+	packet_matchbssid = rtl_rx_frame_ours(mac, hdr, pstatus, &packet_toself);
 
 	if (ieee80211_is_beacon(fc))
 		packet_beacon = true;
@@ -360,6 +347,7 @@ bool rtl92ee_rx_query_desc(struct ieee80211_hw *hw,
 	status->isampdu = (bool)(get_rx_desc_paggr(pdesc) == 1);
 	status->timestamp_low = get_rx_desc_tsfl(pdesc);
 	status->is_cck = RTL92EE_RX_HAL_IS_CCK_RATE(status->rate);
+	status->is_ht = rtl_desc_rate_is_ht(status->rate);
 
 	status->macid = get_rx_desc_macid(pdesc);
 	if (get_rx_status_desc_pattern_match(pdesc))

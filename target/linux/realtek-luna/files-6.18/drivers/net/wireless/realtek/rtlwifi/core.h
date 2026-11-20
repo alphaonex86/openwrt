@@ -82,6 +82,36 @@ static inline bool rtl_is_any_assoc_req(__le16 fc)
 	       cpu_to_le16(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ);
 }
 
+/* The BSSID our BSS's frames carry. An AP's is its own address: mac80211 never signals
+ * BSS_CHANGED_BSSID to an AP, so mac->bssid stays zero there. mac_addr is vif->addr, taken
+ * again by add_interface after every MAC change. */
+static inline const u8 *rtl_rx_own_bssid(const struct rtl_mac *mac)
+{
+	return mac->opmode == NL80211_IFTYPE_AP ? mac->mac_addr : mac->bssid;
+}
+
+/* -> the frame is of our BSS and decoded clean: it feeds the signal statistics (per-station
+ * PWDB, DIG, the firmware rate adaptation). *toself: addressed to this interface, by its
+ * address, not the EFUSE's that a board's own MAC replaces. */
+static inline bool rtl_rx_frame_ours(const struct rtl_mac *mac, const struct ieee80211_hdr *hdr,
+				     const struct rtl_stats *pstatus, bool *toself)
+{
+	__le16 fc = hdr->frame_control;
+	const u8 *bssid = ieee80211_has_tods(fc) ? hdr->addr1 :
+			  ieee80211_has_fromds(fc) ? hdr->addr2 : hdr->addr3;
+	bool ours = !ieee80211_is_ctl(fc) && ether_addr_equal(rtl_rx_own_bssid(mac), bssid) &&
+		    !pstatus->hwerror && !pstatus->crc && !pstatus->icv;
+
+	*toself = ours && ether_addr_equal(hdr->addr1, mac->mac_addr);
+	return ours;
+}
+
+/* An RX descriptor rate that is an HT MCS: mac80211 maps rate_idx as an MCS only when told. */
+static inline bool rtl_desc_rate_is_ht(u8 desc_rate)
+{
+	return desc_rate >= DESC_RATEMCS0 && desc_rate < DESC_RATEVHT1SS_MCS0;
+}
+
 /* rtlpriv->status bit beside RTL_STATUS_INTERFACE_START (wifi.h, bit 0) */
 #define RTL_STATUS_HW_RESTART		1
 void rtl_restart_hw(struct ieee80211_hw *hw);

@@ -26,8 +26,6 @@
 
 #define RX_MPDU_QUEUE					0
 
-#define IS_HT_RATE(_rate)	\
-	((_rate) >= DESC_RATEMCS0)
 #define IS_CCK_RATE(_rate)	\
 	((_rate) >= DESC_RATE1M && (_rate) <= DESC_RATE11M)
 #define IS_OFDM_RATE(_rate)	\

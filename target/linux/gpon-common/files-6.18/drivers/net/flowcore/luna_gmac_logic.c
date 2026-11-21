@@ -21,13 +21,13 @@ unsigned int luna_gmac_rxdesnum_entries(u32 desnum)
 	return ((desnum >> 24) & 0xff) + (((desnum >> 4) & 0xf) << 8) + 1;
 }
 
-/* R_RxCDO field packing: RxRingSize[15:8] low byte + [7:4] the high nibble.
+/* R_RxCDO field packing: RxRingSize [15:8] low byte + RxRingSize_h [3:0] the high nibble (live stock 0xff03 =
+ * 1024 slots; a nibble at [7:4] does not hold: a 1024 ring read back 0xff00, 256 slots declared).
  * RxCDO[31:16] is left 0 — hardware-owned, and the vendor RMWs to preserve it.
  * That RMW is the SHELL's, because it needs a read. */
 u32 luna_gmac_rxcdo_pack(unsigned int ring_size)
 {
-	return ((ring_size - 1) & 0xff) << 8 |
-	       (((ring_size - 1) >> 8) & 0xf) << 4;
+	return ((ring_size - 1) & 0xff) << 8 | (((ring_size - 1) >> 8) & 0xf);
 }
 
 /* May a TX frame be DMA'd from skb->data in place? Only a LINEAR frame of at

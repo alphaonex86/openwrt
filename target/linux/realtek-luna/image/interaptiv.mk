@@ -103,7 +103,7 @@ define Device/lanly_g24w
   # of the Realtek MIB container on this product). Declared here so the record
   # matches the image.
   DEVICE_PACKAGES := dnsmasq firewall4 odhcpd-ipv6only odhcp6c \
-	ppp ppp-mod-pppoe wpad-basic-mbedtls hostapd-common \
+	ppp ppp-mod-pppoe hostapd-basic-mbedtls hostapd-common \
 	wifi-scripts wireless-regdb gpon-provision
 endef
 TARGET_DEVICES += lanly_g24w

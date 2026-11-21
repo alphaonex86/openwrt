@@ -112,6 +112,14 @@ config TARGET_PREINIT_BROADCAST
 		Broadcast address to which to send preinit network messages, as
 		as failsafe messages
 
+config TARGET_VM_MIN_FREE_KBYTES
+	int "vm.min_free_kbytes of the image (0: the kernel's own)"
+	default 0
+	help
+		The reserve the image sets at boot (/etc/sysctl.d/11-min-free-kbytes.conf):
+		the board's own stock value when it is known, else 0 and the kernel
+		computes it from the RAM.
+
 
 menuconfig INITOPT
 	bool "Init configuration options" if IMAGEOPT

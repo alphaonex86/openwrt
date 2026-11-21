@@ -22,6 +22,7 @@ PKG_LICENSE:=GPL-2.0
 # Extend depends from version.mk
 PKG_CONFIG_DEPENDS += \
 	CONFIG_SIGNED_PACKAGES CONFIG_TARGET_INIT_PATH CONFIG_TARGET_PREINIT_DISABLE_FAILSAFE \
+	CONFIG_TARGET_VM_MIN_FREE_KBYTES \
 	CONFIG_NAND_SUPPORT \
 	CONFIG_LEGACY_SDCARD_SUPPORT \
 	CONFIG_EMMC_SUPPORT \
@@ -104,6 +105,10 @@ ifeq ($(CONFIG_TARGET_DEFAULT_LAN_IP_FROM_PREINIT),y)
 	echo 'json_select ..' >>$(1)/etc/board.d/99-lan-ip
 	echo 'json_select ..' >>$(1)/etc/board.d/99-lan-ip
 	echo 'board_config_flush' >>$(1)/etc/board.d/99-lan-ip
+endif
+ifneq ($(filter-out 0,$(CONFIG_TARGET_VM_MIN_FREE_KBYTES)),)
+	mkdir -p $(1)/etc/sysctl.d
+	echo 'vm.min_free_kbytes=$(CONFIG_TARGET_VM_MIN_FREE_KBYTES)' >$(1)/etc/sysctl.d/11-min-free-kbytes.conf
 endif
 endef
 

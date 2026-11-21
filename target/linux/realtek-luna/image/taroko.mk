@@ -31,17 +31,16 @@ define Device/hsgq_x111w
   #   odhcpd-ipv6only   - LAN IPv6 RA/DHCPv6 server (distributes the WAN PD)
   #   odhcp6c           - WAN DHCPv6 client (PD request toward the OLT)
   #   ppp ppp-mod-pppoe - PPPoE WAN client (alternative WAN proto to IPoE/DHCP)
-  #   wpad-basic-mbedtls - WiFi AP/STA daemon (hostapd+wpa_supplicant) for the
-  #     rtl8192fe AP: WPA2-PSK(psk2) + WPA3-SAE personal, no enterprise/EAP, no
-  #     mesh; mbedtls TLS (libmbedtls is already pulled by libustream-mbedtls, so
-  #     this adds only the ~1MB wpad binary, ~350k squashfs-compressed). This is
-  #     the smallest wpad variant that still does psk2 AP + PMF; wpad-mini lacks
-  #     SAE/802.11w. Listed here so 'make defconfig' keeps it tied to the device
+  #   hostapd-basic-mbedtls - WiFi AP daemon for the rtl8192fe AP: WPA2-PSK(psk2)
+  #     + WPA3-SAE personal + PMF, mbedtls TLS (libmbedtls is already pulled by
+  #     libustream-mbedtls). AP only: no board runs WiFi client mode, so no
+  #     wpa_supplicant runs beside it (wpad cost one more daemon, 0.6 MB, on the
+  #     X111W). Listed here so 'make defconfig' keeps it tied to the device
   #     profile (a bare .config regen would otherwise drop a manual selection).
   # (urngd is excluded target-wide in target/linux/realtek-luna/Makefile: it
   #  burned ~60s of boot CPU on this core for nothing - crng seeds itself.)
   DEVICE_PACKAGES := gpon-provision luci-app-gpon luci-base luci-mod-admin-full luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file \
-	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls
+	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe hostapd-basic-mbedtls
 endef
 TARGET_DEVICES += hsgq_x111w
 
@@ -63,7 +62,7 @@ define Device/vsol_v2801rgw
   IMAGE/sysupgrade.bin := append-rootfs | pad-rootfs | check-size | sysupgrade-tar rootfs=$$$$@ | append-metadata
   # The same router stack as the X111W (see its profile for the why of each package).
   DEVICE_PACKAGES := gpon-provision luci-app-gpon luci-base luci-mod-admin-full luci-theme-bootstrap uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file \
-	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe wpad-basic-mbedtls
+	dnsmasq firewall4 odhcpd-ipv6only odhcp6c ppp ppp-mod-pppoe hostapd-basic-mbedtls
 endef
 TARGET_DEVICES += vsol_v2801rgw
 

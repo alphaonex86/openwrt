@@ -106,7 +106,7 @@ define Device/realtek_rtl9607f_x400axf
   DEVICE_PACKAGES := dnsmasq firewall4 \
 	luci-base luci-mod-admin-full luci-theme-bootstrap \
 	uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file \
-	wpad-basic-mbedtls wifi-scripts wireless-regdb iw \
+	hostapd-basic-mbedtls wifi-scripts wireless-regdb iw \
 	ppp ppp-mod-pppoe kmod-ppp kmod-pppox kmod-pppoe \
 	miniupnpd-nftables \
 	odhcpd-ipv6only

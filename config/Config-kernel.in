@@ -1165,6 +1165,15 @@ config KERNEL_DMA_API_DEBUG
 	  maps one twice, or leaves one mapped when it unbinds. Costs several
 	  megabytes of RAM: diagnostic images only.
 
+config KERNEL_MEMTEST
+	bool "Early RAM pattern test at boot (memtest=N)"
+	default n
+	help
+	  build-openwrt.py variant "refurb": the boot word memtest=N writes and
+	  reads back N patterns over the free RAM before it is used, and
+	  /proc/meminfo EarlyMemtestBad says what was found. About 1.2 KB,
+	  nearly all freed after boot.
+
 config KERNEL_DEBUG_LIST
 	bool "Debug linked list manipulation"
 	select KERNEL_DEBUG_KERNEL

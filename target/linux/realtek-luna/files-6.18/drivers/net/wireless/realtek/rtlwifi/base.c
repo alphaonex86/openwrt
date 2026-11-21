@@ -381,6 +381,9 @@ static void _rtl_init_mac80211(struct ieee80211_hw *hw)
 	ieee80211_hw_set(hw, SUPPORTS_AMSDU_IN_AMPDU);
 	ieee80211_hw_set(hw, TX_AMSDU);
 	ieee80211_hw_set(hw, SUPPORT_FAST_XMIT);
+#ifdef CONFIG_RTLWIFI_LAB_FASTRX_BOUND
+	ieee80211_hw_set(hw, SUPPORTS_REORDERING_BUFFER);	/* lab bound only: no reorder */
+#endif
 
 	/* swlps or hwlps has been set in diff chip in init_sw_vars */
 	if (rtlpriv->psc.swctrl_lps) {

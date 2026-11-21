@@ -163,6 +163,15 @@ config RTLWIFI_TX_TIMING
 	  and the publish; read and reset in /sys/module/rtl_pci/parameters/tx_ns.
 	  The perf image only.
 
+config RTLWIFI_LAB_FASTRX_BOUND
+	bool "Lab bound: mac80211 fast-RX without a reorder buffer"
+	depends on RTLWIFI_PCI
+	default n
+	help
+	  Lab only, never shipped: claims SUPPORTS_REORDERING_BUFFER without
+	  reordering, so mac80211 keeps fast-RX on. It bounds what a driver
+	  reorder buffer can gain; frames of an A-MPDU may arrive out of order.
+
 config RTLWIFI_DEBUG
 	bool "Debugging output for rtlwifi driver family"
 	depends on RTLWIFI

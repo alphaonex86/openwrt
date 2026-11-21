@@ -1058,6 +1058,13 @@ config KERNEL_RTLWIFI_TX_TIMING
 	  build-openwrt.py variant "perf": where a transmitted WiFi frame spends
 	  its IRQ-off time.
 
+config KERNEL_RTLWIFI_LAB_FASTRX_BOUND
+	bool "rtlwifi: lab bound of mac80211 fast-RX (no reorder buffer)"
+	depends on TARGET_realtek_luna
+	default n
+	help
+	  build-openwrt.py variant "fastrx-bound": lab only, never shipped.
+
 config KERNEL_LUNA_DEBUG
 	bool "Luna bring-up markers and driver diagnostics"
 	depends on TARGET_realtek_luna

@@ -28,6 +28,7 @@ bool luna_gmac_rx_is_wan(const struct luna_rx_layout *rxl, u32 opts3, unsigned i
 u32 luna_gmac_rxdesnum_pack(unsigned int cpu_tail, unsigned int th_on,
 			    unsigned int th_off);
 unsigned int luna_gmac_rx_tail(unsigned int head, unsigned int armed, unsigned int n);
+u16 luna_gmac_cnt16_delta(u16 now, u16 *last);
 u32 luna_gmac_rxcdo_pack(unsigned int ring_size);
 unsigned int luna_gmac_rxcdo_entries(u32 rxcdo);
 bool luna_gmac_tx_zero_copy(bool nonlinear, unsigned int len,

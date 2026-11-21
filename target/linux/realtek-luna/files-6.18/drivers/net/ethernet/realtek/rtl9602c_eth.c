@@ -186,6 +186,7 @@ static_assert(R_RxMRingCDO(1) == 0x1394 && R_RxMRingCDO(5) == 0x13d4,
 #define R_MISSPKT	R_MIB16(4)	/* word = [MISSPKT:FAE]     */
 #define R_RXOKPHY	R_MIB16(8)	/* word = [RXOKPHY:RXOKBRD] */
 #define R_RXOKMUL	R_MIB16(10)	/* word = [RXOKMUL:TXABT]   */
+#define R_TXUNDRN	R_MIB16(12)	/* word = [TXUNDRN:RDUMISSPKT]: frames dropped with no armed descriptor */
 static_assert(R_TXOKCNT == 0x10 && R_TXERR == 0x14 && R_MISSPKT == 0x18 &&
 	      R_RXOKPHY == 0x20 && R_RXOKMUL == 0x24, "the GMAC MIB array moved");
 /* Live-stock 9602C operating values (read off a running stock ONU at O5). The
@@ -405,6 +406,7 @@ struct rtl9602c_eth {
 	struct work_struct recover_work;
 	struct work_struct rxw_work;	/* the RX window's allocations and frees */
 	unsigned int	rx_floor;	/* the data ring's smallest window, from the DRAM the board declares */
+	u16		rdu_last;	/* RDUMISSPKT at the last poll */
 	spinlock_t	rxw_lock;	/* rxq[0].w: the tick vs ethtool -G */
 	struct eth_core_recovery sw_recovery;	/* the switch core reset and its re-init */
 	struct luna_state_rd sw_rd[ETH_STATE_BLOCKS];
@@ -1801,6 +1803,12 @@ static void rtl9602c_rxw_tick(struct rtl9602c_eth *ep)
 		napi_schedule(&ep->napi);
 }
 
+/* Once per poll: the frames the GMAC dropped for want of an armed descriptor (RDUMISSPKT) -> rx_missed_errors. */
+static void rtl9602c_rx_missed_sample(struct rtl9602c_eth *ep)
+{
+	ep->ndev->stats.rx_missed_errors += luna_gmac_cnt16_delta(ep_rd(ep, R_TXUNDRN) & 0xffff, &ep->rdu_last);
+}
+
 static bool rtl9602c_eth_rx_waiting(const struct rtl9602c_eth *ep)
 {
 	return luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||
@@ -1816,6 +1824,7 @@ static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
 	int work;
 
 	ep->dbg_poll++;
+	rtl9602c_rx_missed_sample(ep);
 	eth_rx_window_ring_sample(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep, ep->rxq[0].head, ep->rxq[0].n);
 	/* control first, but at most half the budget: a trapped flood cannot starve the data */
 	work = ep->n_rxq > 1 ? rtl9602c_eth_rx(ep, &ep->rxq[1], budget / 2, true) : 0;
@@ -1881,6 +1890,7 @@ static void rtl9602c_eth_poll(struct timer_list *t)
 	unsigned long flags;
 
 	ep->dbg_poll++;
+	rtl9602c_rx_missed_sample(ep);
 	eth_rx_window_ring_sample(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep, ep->rxq[0].head, ep->rxq[0].n);
 	if (ep->n_rxq > 1)
 		rtl9602c_eth_rx(ep, &ep->rxq[1], ep->rxq[1].n, false);
@@ -2085,6 +2095,15 @@ static void rtl9602c_cpu_tag_arm(struct rtl9602c_eth *ep)
 	iowrite32(0x02160207, ep->sw + SW_FC_PON_GLB_LO_TH);
 }
 
+/* RX ring 0 from its first slot: base, CPU tail and flow-control thresholds, size; RDUMISSPKT's baseline. */
+static void rtl9602c_rx_ring0_program(struct rtl9602c_eth *ep)
+{
+	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
+	rtl9602c_rx_tail_publish(ep, &ep->rxq[0], true);
+	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rxq[0].n));
+	ep->rdu_last = ep_rd(ep, R_TXUNDRN) & 0xffff;
+}
+
 static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 {
 	struct net_device *ndev = ep->ndev;
@@ -2117,9 +2136,7 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		ep_wr(ep, R_TxFDP(k), ep->dummy_ring_dma | DMA_BUS_WINDOW);
 		iowrite16(0, ep->base + R_TxCDO(k));
 	}
-	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
-	rtl9602c_rx_tail_publish(ep, &ep->rxq[0], true);
-	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rxq[0].n));
+	rtl9602c_rx_ring0_program(ep);
 	if (ep->n_rxq > 1) {
 		ep_wr(ep, R_RxMRingCfg(1), ep->rxq[1].ring_dma | DMA_BUS_WINDOW);
 		ep_wr(ep, R_RxMRingCDO(1), CTL_RING_SIZE - 1);
@@ -2523,9 +2540,7 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 			iowrite16(0, ep->base + R_TxCDO(k));
 		}
 	}
-	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
-	rtl9602c_rx_tail_publish(ep, &ep->rxq[0], true);	/* the CPU tail + flow-control thresholds */
-	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rxq[0].n));
+	rtl9602c_rx_ring0_program(ep);
 	/* (Reverted: a prior experiment pointed rings 1-5 at ring 0's ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 101. */
 	ep_wr(ep, R_RCR, RCR_STOCK);

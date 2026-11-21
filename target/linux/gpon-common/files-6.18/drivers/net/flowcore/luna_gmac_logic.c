@@ -22,6 +22,16 @@ unsigned int luna_gmac_rx_tail(unsigned int head, unsigned int armed, unsigned i
 	return (head + armed - 1) % n;
 }
 
+/* What a 16-bit GMAC counter that wraps and is never cleared counted since `*last`, which takes `now`. Exact while
+ * it counts under 65536 between two reads. */
+u16 luna_gmac_cnt16_delta(u16 now, u16 *last)
+{
+	u16 d = now - *last;
+
+	*last = now;
+	return d;
+}
+
 /* R_RxCDO field packing: RxRingSize [15:8] low byte + RxRingSize_h [3:0] the high nibble (live stock 0xff03 =
  * 1024 slots; a nibble at [7:4] does not hold: a 1024 ring read back 0xff00, 256 slots declared).
  * RxCDO[31:16] is left 0 — hardware-owned, and the vendor RMWs to preserve it.

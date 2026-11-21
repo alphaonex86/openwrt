@@ -395,13 +395,8 @@ static int rtl9602c_l34_inetaddr_event(struct notifier_block *nb,
 	struct in_ifaddr *ifa = ptr;
 	unsigned int lan_n, lan_rows;
 	bool wan_left;
-	struct gpon_edge lan;
 	char what[48];
 
-	if (ep->fo) {	/* the LAN trap follows the LAN, provisioned or not (no address read: none) */
-		gpon_edge_read_lan(ep->ndev, &lan);
-		rtl9602c_l34_lan_trap(&ep->l34, &lan);
-	}
 	if (!ep->fo || !ep->l34.provisioned)
 		return NOTIFY_DONE;
 	wan_left = event == NETDEV_DOWN && ntohl(ifa->ifa_local) == ep->l34.edge.wan_ip;

@@ -46,7 +46,7 @@ struct gpon_flow_bound {
 };
 
 /* Routed IPv4 on an engine that declares it, at run time: gpon_flow.ipv4_routed=0|1 on the command line or
- * /sys/module/gpon_flow/parameters/ipv4_routed, on by default (0 = diagnostic arm); a change calls gpon_flow_routed_chain. */
+ * /sys/module/gpon_flow/parameters/ipv4_routed, off by default; a change calls gpon_flow_routed_chain. */
 extern bool gpon_flow_ipv4_routed;
 extern struct blocking_notifier_head gpon_flow_routed_chain;
 

@@ -207,6 +207,9 @@ struct rtl_pci {
 	struct sk_buff_head rx_inject;		/* driver-made frames for mac80211 */
 	bool rx_deferred;			/* RX sources masked until the ring drains */
 	u32 rx_partial, rx_oversize;		/* buffers dropped: part of a frame, a length past the buffer */
+	/* RX ring use: the largest backlog an RX pass found, and the ring-full events seen
+	 * (RDU: no descriptor left; RXFOVW: the chip's RX FIFO overflowed, frames dropped) */
+	u32 rx_peak, rx_rdu, rx_fovw;
 	u32 sys_irq_mask;
 
 	/*Bcn control register setting */

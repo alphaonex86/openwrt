@@ -96,6 +96,8 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	u64 addresses[RTL_PCI_MAX_TX_QUEUE_COUNT];
 	u32 bcn_irq, bcn_tasklet, bcn_late, txdma_err, txdma_status, hang_resets;
 	u32 rx_partial = rtlpci->rx_partial, rx_oversize = rtlpci->rx_oversize;
+	u32 rx_peak = READ_ONCE(rtlpci->rx_peak), rx_rdu = READ_ONCE(rtlpci->rx_rdu);
+	u32 rx_fovw = READ_ONCE(rtlpci->rx_fovw);
 	unsigned long flags;
 	int q;
 
@@ -133,6 +135,8 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 		   bcn_irq, bcn_tasklet, bcn_late, txdma_err, txdma_status,
 		   hang_resets);
 	seq_printf(m, "rx_partial %u rx_oversize %u\n", rx_partial, rx_oversize);
+	seq_printf(m, "rx_ring %u rx_peak %u rx_rdu %u rx_fovw %u\n", rtlpci->rxringcount, rx_peak,
+		   rx_rdu, rx_fovw);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rtl_pci_tx_queues);
@@ -859,10 +863,13 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 		u8 *buf;
 
 		if (rtlpriv->use_new_trx_flow) {
-			if (rx_remained_cnt == 0)
+			if (rx_remained_cnt == 0) {
 				rx_remained_cnt =
 				rtlpriv->cfg->ops->rx_desc_buff_remained_cnt(hw,
 								      hw_queue);
+				if (rx_remained_cnt > rtlpci->rx_peak)
+					rtlpci->rx_peak = rx_remained_cnt;
+			}
 			if (rx_remained_cnt == 0)
 				return done;
 			buffer_desc = &rtlpci->rx_ring[rxring_idx].buffer_desc[
@@ -1237,6 +1244,10 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
 	}
 
 	/*<3> Rx related: drained by rx_tasklet, the RX sources masked meanwhile */
+	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_RDU])
+		rtlpci->rx_rdu++;
+	if (intvec.intb & rtlpriv->cfg->maps[RTL_IMR_RXFOVW])
+		rtlpci->rx_fovw++;
 	if ((intvec.inta & _rtl_pci_rx_imr(rtlpriv, 0)) ||
 	    (intvec.intb & _rtl_pci_rx_imr(rtlpriv, 1))) {
 		rtlpci->irq_mask[0] &= ~_rtl_pci_rx_imr(rtlpriv, 0);

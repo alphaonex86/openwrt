@@ -37,7 +37,7 @@ void __init luna_gmac_quiesce_inherited(void)
 		pr_err("luna-gmac: the inherited DMA did not stop: IO_CMD %08x IO_CMD1 %08x\n",
 		       ioread32(LUNA_GMAC0 + R_IO_CMD), ioread32(LUNA_GMAC0 + R_IO_CMD1));
 	ring = ioread32(LUNA_GMAC0 + R_RxFDP) & LUNA_BUS_PHYS;
-	n = luna_gmac_rxdesnum_entries(ioread32(LUNA_GMAC0 + R_RxDesNum));
+	n = luna_gmac_rxcdo_entries(ioread32(LUNA_GMAC0 + R_RxCDO));	/* R_RxDesNum holds the tail, not the size */
 	if (!(ring & 15) && memblock_is_region_memory(ring, n * sizeof(struct rx_desc)))
 		eth_inherited_ring_walk(&r, (const u8 *)CKSEG1ADDR(ring), n, sizeof(struct rx_desc),
 					offsetof(struct rx_desc, opts1), offsetof(struct rx_desc, addr),

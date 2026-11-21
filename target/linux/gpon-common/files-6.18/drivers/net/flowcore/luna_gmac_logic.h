@@ -25,10 +25,11 @@ unsigned int luna_gmac_rx_reason(const struct luna_rx_layout *l, u32 opts2,
 				 u32 opts3);
 bool luna_gmac_rx_is_wan(const struct luna_rx_layout *rxl, u32 opts3, unsigned int pon_port);
 
-u32 luna_gmac_rxdesnum_pack(unsigned int ring_size, unsigned int th_on,
+u32 luna_gmac_rxdesnum_pack(unsigned int cpu_tail, unsigned int th_on,
 			    unsigned int th_off);
+unsigned int luna_gmac_rx_tail(unsigned int head, unsigned int armed, unsigned int n);
 u32 luna_gmac_rxcdo_pack(unsigned int ring_size);
-unsigned int luna_gmac_rxdesnum_entries(u32 desnum);
+unsigned int luna_gmac_rxcdo_entries(u32 rxcdo);
 bool luna_gmac_tx_zero_copy(bool nonlinear, unsigned int len,
 			    unsigned int min_len);
 bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,

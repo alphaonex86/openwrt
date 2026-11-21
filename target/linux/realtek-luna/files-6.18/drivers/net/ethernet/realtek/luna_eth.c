@@ -1950,7 +1950,7 @@ static void eth_hw_program(struct luna_eth *ep)
 	iowrite16(0, ep->base + R_TxCDO0);
 	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
 	/* Was this file's own spelling of the family packing -- the THIRD copy. */
-	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE, TH_ON_VAL, TH_OFF_VAL);
+	desnum = luna_gmac_rxdesnum_pack(RX_RING_SIZE - 1, TH_ON_VAL, TH_OFF_VAL);
 	ep_wr(ep, R_RxDesNum, desnum);
 	/* 32-BIT, like the vendor and like rtl9602c_eth.c -- NOT ...
 	 * dev/MEASURED-luna_eth.c.md sec 39. */

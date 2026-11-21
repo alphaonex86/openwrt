@@ -5,20 +5,21 @@
 #include <linux/types.h>
 #include "luna_gmac_logic.h"
 
-/* R_RxDesNum field packing: RX ring0 size plus the flow-control ON/OFF
- * thresholds, in the GMAC's field layout.  ⚠ The neighbouring R_RxCDO store was
- * the MEASURED 2026-08-23 16-bit-store defect, "a ring of size ZERO". */
-u32 luna_gmac_rxdesnum_pack(unsigned int ring_size, unsigned int th_on,
+/* R_RxDesNum: the CPU's TAIL (the last slot it armed) plus the flow-control ON/OFF thresholds; the GMAC pauses its
+ * switch port while it counts th_on or fewer slots armed from its position to the tail. Stock rewrites the tail
+ * after every arm and so does the boot loader (live stock: tail 0x3da at position 0x3db).
+ * ⚠ The neighbouring R_RxCDO store was the MEASURED 2026-08-23 16-bit-store defect, "a ring of size ZERO". */
+u32 luna_gmac_rxdesnum_pack(unsigned int cpu_tail, unsigned int th_on,
 			    unsigned int th_off)
 {
-	return ((ring_size - 1) & 0xff) << 24 | (th_on & 0xff) << 16 |
-	       (th_off & 0xff) << 8 | (((ring_size - 1) >> 8) & 0xf) << 4;
+	return (cpu_tail & 0xff) << 24 | (th_on & 0xff) << 16 |
+	       (th_off & 0xff) << 8 | ((cpu_tail >> 8) & 0xf) << 4;
 }
 
-/* The ring size a R_RxDesNum word declares, whoever wrote it: 1..4096. */
-unsigned int luna_gmac_rxdesnum_entries(u32 desnum)
+/* The last slot armed when `armed` slots from `head` hold a buffer, in a ring of `n`. */
+unsigned int luna_gmac_rx_tail(unsigned int head, unsigned int armed, unsigned int n)
 {
-	return ((desnum >> 24) & 0xff) + (((desnum >> 4) & 0xf) << 8) + 1;
+	return (head + armed - 1) % n;
 }
 
 /* R_RxCDO field packing: RxRingSize [15:8] low byte + RxRingSize_h [3:0] the high nibble (live stock 0xff03 =
@@ -28,6 +29,12 @@ unsigned int luna_gmac_rxdesnum_entries(u32 desnum)
 u32 luna_gmac_rxcdo_pack(unsigned int ring_size)
 {
 	return ((ring_size - 1) & 0xff) << 8 | (((ring_size - 1) >> 8) & 0xf);
+}
+
+/* The ring size a R_RxCDO word declares, whoever wrote it: 1..4096. */
+unsigned int luna_gmac_rxcdo_entries(u32 rxcdo)
+{
+	return ((rxcdo >> 8) & 0xff) + ((rxcdo & 0xf) << 8) + 1;
 }
 
 /* May a TX frame be DMA'd from skb->data in place? Only a LINEAR frame of at

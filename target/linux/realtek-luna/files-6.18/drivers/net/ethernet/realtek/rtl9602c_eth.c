@@ -164,7 +164,6 @@ MODULE_PARM_DESC(recover_rst, "1=CMD.RST soft-reset recovery instead of the IP-b
  * is the RxFDP/RxCDO pair below.  NOT a TX table -- a TX ring activates on TxFDP
  * + OWN(opts1) + kick.  Kept only to document the address. */
 #define R_RxMRingCfg(k)	(0x1380 + (k) * 16)	/* RX multiring k config block (stock stride 16) */
-#define R_RxCDO		0x13F4	/* RX ring0 current-descriptor offset */
 /* ★ RX multiring k's {FDP, CDO} pair sits at +0 / +4 of its 16-byte block --
  * the layout ring 0 has at R_RxFDP/R_RxCDO and every TX ring has at
  * R_TxFDP/R_TxCDO, and stock's own hw_reg dump lists RxFDPk/RxCDOk per ring
@@ -353,6 +352,8 @@ struct rtl9602c_rxq {
 	dma_addr_t	*buf_dma;
 	unsigned int	head;
 	unsigned int	n;		/* entries in use */
+	unsigned int	tail;		/* the CPU tail the GMAC was last given */
+	unsigned int	tail_reg;	/* where it reads it */
 };
 
 struct rtl9602c_eth {
@@ -1684,6 +1685,27 @@ static void rtl9602c_eth_tx_rekick(struct rtl9602c_eth *ep)
 	}
 }
 
+/* The GMAC pauses its switch port while it counts 16 or fewer slots armed from its position to the CPU tail
+ * (TH_ON_VAL): the tail follows the CPU once per poll, as stock writes it after each arm. A tail left at the
+ * ring end paused by ring position instead (X100DG live 0xff103000: tail 255 for ever). */
+static void rtl9602c_rx_tail_publish(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, bool force)
+{
+	unsigned int tail = luna_gmac_rx_tail(q->head, q->n, q->n);
+
+	if (tail == q->tail && !force)
+		return;
+	q->tail = tail;
+	ep_wr(ep, q->tail_reg, q == ep->rxq ? luna_gmac_rxdesnum_pack(tail, TH_ON_VAL, TH_OFF_VAL) : tail);
+}
+
+static void rtl9602c_rx_tails_publish(struct rtl9602c_eth *ep)
+{
+	unsigned int k;
+
+	for (k = 0; k < ep->n_rxq; k++)
+		rtl9602c_rx_tail_publish(ep, &ep->rxq[k], false);
+}
+
 static bool rtl9602c_eth_rx_waiting(const struct rtl9602c_eth *ep)
 {
 	return luna_rx_ready(ep->rxq[0].ring, ep->rxq[0].head) ||
@@ -1703,6 +1725,7 @@ static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
 	work = ep->n_rxq > 1 ? rtl9602c_eth_rx(ep, &ep->rxq[1], budget / 2, true) : 0;
 	ep->dbg_ctl_rx += work;
 	work += rtl9602c_eth_rx(ep, &ep->rxq[0], budget - work, true);	/* inside napi->poll */
+	rtl9602c_rx_tails_publish(ep);
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);
 	rtl9602c_eth_omci_reclaim(ep);
@@ -1762,6 +1785,7 @@ static void rtl9602c_eth_poll(struct timer_list *t)
 	if (ep->n_rxq > 1)
 		rtl9602c_eth_rx(ep, &ep->rxq[1], ep->rxq[1].n, false);
 	rtl9602c_eth_rx(ep, &ep->rxq[0], ep->rxq[0].n, false);	/* timer callback, NOT napi->poll */
+	rtl9602c_rx_tails_publish(ep);
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);	/* under tx_lock (races the OMCI inject's locked reclaim on shared ring 0) */
 	rtl9602c_eth_omci_reclaim(ep);
@@ -1934,7 +1958,6 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 {
 	struct net_device *ndev = ep->ndev;
 	unsigned int k, oring = rtl9602c_omci_hwring(omci_tx_ring);
-	u32 desnum;
 
 	iowrite8(0x0A, ep->base + R_CMD);	/* CMD: RxChkSum|RxJumboSupport */
 	ep_wr(ep, R_TCR, 0x00000C00);		/* TX pad ON (bit0=0) */
@@ -1964,13 +1987,12 @@ static void rtl9602c_hw_program(struct rtl9602c_eth *ep)
 		iowrite16(0, ep->base + R_TxCDO(k));
 	}
 	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
-	desnum = luna_gmac_rxdesnum_pack(ep->rxq[0].n, TH_ON_VAL, TH_OFF_VAL);
-	ep_wr(ep, R_RxDesNum, desnum);
+	rtl9602c_rx_tail_publish(ep, &ep->rxq[0], true);
 	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rxq[0].n));
 	if (ep->n_rxq > 1) {
 		ep_wr(ep, R_RxMRingCfg(1), ep->rxq[1].ring_dma | DMA_BUS_WINDOW);
 		ep_wr(ep, R_RxMRingCDO(1), CTL_RING_SIZE - 1);
-		ep_wr(ep, R_RxMRingCfg(1) + 8, CTL_RING_SIZE - 1);
+		rtl9602c_rx_tail_publish(ep, &ep->rxq[1], true);
 		ep_wr(ep, R_RxMRingCfg(1) + 12, (TH_ON_VAL << 16) | TH_OFF_VAL);
 	}
 	ep->ctl_ring_on = ep->n_rxq > 1;
@@ -2313,7 +2335,6 @@ static int rtl9602c_uboot_swcore_bringup(struct rtl9602c_eth *ep)
 static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 {
 	struct net_device *ndev = ep->ndev;
-	u32 desnum;
 	int ret;
 
 	ret = rtl9602c_eth_alloc_rings(ep);
@@ -2377,9 +2398,7 @@ static int rtl9602c_eth_hw_start(struct rtl9602c_eth *ep)
 		}
 	}
 	ep_wr(ep, R_RxFDP, ep->rxq[0].ring_dma | DMA_BUS_WINDOW);
-	/* RX ring0 size + flow-control thresholds (GMAC field packing). */
-	desnum = luna_gmac_rxdesnum_pack(ep->rxq[0].n, TH_ON_VAL, TH_OFF_VAL);
-	ep_wr(ep, R_RxDesNum, desnum);
+	rtl9602c_rx_tail_publish(ep, &ep->rxq[0], true);	/* the CPU tail + flow-control thresholds */
 	ep_wr(ep, R_RxCDO, luna_gmac_rxcdo_pack(ep->rxq[0].n));
 	/* (Reverted: a prior experiment pointed rings 1-5 at ring 0's ...
 	 * dev/MEASURED-rtl9602c_eth.c.md sec 101. */
@@ -3212,8 +3231,9 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	}
 	ep->rxq[0].skb = ep->rx_skb;
 	ep->rxq[0].buf_dma = ep->rx_buf_dma;
+	ep->rxq[0].tail_reg = R_RxDesNum;
 	ep->rxq[1] = (struct rtl9602c_rxq){ .skb = ep->ctl_skb, .buf_dma = ep->ctl_buf_dma,
-					    .n = CTL_RING_SIZE };
+					    .n = CTL_RING_SIZE, .tail_reg = R_RxMRingCfg(1) + 8 };
 	/* The board's own WAN MAC offset from its stock (X100DG: LAN+1). */
 	of_property_read_u32(dev->of_node, "realtek,wan-mac-offset", &wan_mac_offset);
 

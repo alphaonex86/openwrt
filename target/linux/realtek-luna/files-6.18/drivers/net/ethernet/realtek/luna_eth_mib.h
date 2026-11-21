@@ -11,6 +11,7 @@
 
 #include "eth_queue_watch.h"
 #include "eth_rx_geom.h"
+#include "eth_rx_window.h"
 
 struct luna_sw_map;
 struct mutex;
@@ -27,6 +28,16 @@ struct luna_phy_ops {
 
 int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
 		    const struct luna_sw_map *map, const struct luna_phy_ops *phy);
+
+/* A driver whose RX ring follows its use (eth_rx_window.h): ethtool -g/-G, and its window at the end of ethtool -S. */
+#define LUNA_RING_STATS	ETH_RX_WINDOW_STATS
+struct luna_ring_ops {
+	void (*get)(struct net_device *ndev, struct ethtool_ringparam *r);
+	int (*set)(struct net_device *ndev, const struct ethtool_ringparam *r);
+	void (*stats)(struct net_device *ndev, u64 *data);
+};
+/* After luna_mib_attach(), before the netdev registers. */
+int luna_mib_ring_attach(struct net_device *ndev, const struct luna_ring_ops *ops);
 void luna_mib_phy_reapply(struct net_device *ndev);
 
 #define LUNA_EFUSE_ENTRIES	128		/* [tier 1 on the RTL9602C: its stock reader refuses entry 128] */

@@ -876,10 +876,8 @@ static inline void luna_rx_rearm(struct rx_desc *ring, unsigned int idx,
  * luna_rx_rearm() instead.  Never NULL out skbs[idx] as a shortcut: the loops
  * have no !skb guard, so that converts the use-after-free into a NULL deref
  * and still leaves the stale dmas[idx] to be unmapped twice. */
-static inline struct sk_buff *luna_rx_alloc(struct net_device *ndev,
-					    struct device *dev,
-					    unsigned int buf_size,
-					    dma_addr_t *da)
+static inline struct sk_buff *luna_rx_alloc_gfp(struct net_device *ndev, struct device *dev,
+						unsigned int buf_size, dma_addr_t *da, gfp_t gfp)
 {
 	struct page *page;
 	struct sk_buff *skb;
@@ -889,7 +887,7 @@ static inline struct sk_buff *luna_rx_alloc(struct net_device *ndev,
 	BUILD_BUG_ON(NET_SKB_PAD + RX_BUF_SIZE > SKB_WITH_OVERHEAD(PAGE_SIZE));
 	if (WARN_ON_ONCE(buf_size > RX_BUF_SIZE))
 		return NULL;
-	page = dev_alloc_page();
+	page = __dev_alloc_page(gfp);
 	if (!page)
 		return NULL;
 	skb = build_skb(page_address(page), PAGE_SIZE);
@@ -905,6 +903,13 @@ static inline struct sk_buff *luna_rx_alloc(struct net_device *ndev,
 		return NULL;
 	}
 	return skb;
+}
+
+/* The poll's refill: atomic, it runs in softirq. A window that grows allocates with GFP_KERNEL, from its worker. */
+static inline struct sk_buff *luna_rx_alloc(struct net_device *ndev, struct device *dev,
+					    unsigned int buf_size, dma_addr_t *da)
+{
+	return luna_rx_alloc_gfp(ndev, dev, buf_size, da, GFP_ATOMIC | __GFP_NOWARN);
 }
 
 /* Install an already-allocated buffer in slot @idx and hand it to HW. */

@@ -11,6 +11,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/timer.h>
 #include <linux/of.h>
+#include <linux/of_address.h>	/* the DRAM the device tree declares: the RX window's floor */
 #include <linux/of_net.h>	/* of_get_mac_address() -- the DT rung of the ladder */
 #include <linux/io.h>
 #include <linux/mii.h>	/* BMCR_* -- the standard MII bit names */
@@ -20,6 +21,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include "eth_rx_csum.h"
+#include "eth_rx_window.h"	/* the RX ring's RAM follows its use */
 #include "luna_eth_regs.h"	/* the family MAC/switch register map + per-chip table */
 #include "luna_gpon_regs.h"	/* the family's luna_sw_io(): a struct hwio over the SWCORE base */
 #include "regtable.h"		/* flowcore: gpon_ind_poll() -- the ONE bounded busy-wait */
@@ -354,6 +356,7 @@ struct rtl9602c_rxq {
 	unsigned int	n;		/* entries in use */
 	unsigned int	tail;		/* the CPU tail the GMAC was last given */
 	unsigned int	tail_reg;	/* where it reads it */
+	struct eth_rx_window_ring rw;	/* its window (eth_rx_window.h); the tick decides under rxw_lock */
 };
 
 struct rtl9602c_eth {
@@ -398,6 +401,10 @@ struct rtl9602c_eth {
 	u32		tx_dropped;	/* frames a recovery dropped: never "sent" to the watch */
 	u32		dbg_rearm;	/* soft TxFDP re-arms (publish + watchdog) */
 	struct work_struct recover_work;
+	struct work_struct rxw_work;	/* the RX window's allocations and frees */
+	unsigned int	rx_floor;	/* the data ring's smallest window, from the DRAM the board declares */
+	spinlock_t	rxw_lock;	/* rxq[0].w: the tick vs ethtool -G */
+	unsigned long	rxw_next;	/* the next window decision, jiffies */
 	struct eth_core_recovery sw_recovery;	/* the switch core reset and its re-init */
 	struct luna_state_rd sw_rd[ETH_STATE_BLOCKS];
 	struct eth_reg_range sw_rg[ETH_STATE_BLOCKS][3];
@@ -1494,6 +1501,17 @@ static bool rtl9602c_omci_taken(struct rtl9602c_eth *ep, const struct rx_desc *d
 	return false;
 }
 
+/* The slot just taken gives its place to a buffer `armed` slots on: the window moves by one (the same slot when the
+ * window is the whole ring). */
+static void rtl9602c_rxq_rearm(struct rtl9602c_rxq *q, unsigned int i, struct sk_buff *skb, dma_addr_t dma)
+{
+	unsigned int j = eth_rx_window_slot(i, q->rw.armed, q->n);
+
+	if (j != i)
+		q->skb[i] = NULL;
+	luna_rx_arm(q->ring, q->skb, q->buf_dma, j, q->n, RX_BUF_SIZE, skb, dma);
+}
+
 static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int budget,
 			   bool napi_ctx)
 {
@@ -1517,7 +1535,7 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 		fresh = luna_rx_alloc(ndev, ep->dev, RX_BUF_SIZE, &fresh_dma);
 		if (!fresh) {
 			ndev->stats.rx_dropped++;
-			luna_rx_rearm(q->ring, i, q->n, RX_BUF_SIZE);
+			rtl9602c_rxq_rearm(q, i, q->skb[i], q->buf_dma[i]);
 			q->head = (i + 1) % q->n;
 			rx_done++;
 			continue;
@@ -1618,9 +1636,8 @@ static int rtl9602c_eth_rx(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, int 
 				netif_rx(skb);
 		}
 rx_rearm:
-		/* hand the slot back to HW with the buffer secured above */
-		luna_rx_arm(q->ring, q->skb, q->buf_dma, i,
-			    q->n, RX_BUF_SIZE, fresh, fresh_dma);
+		/* hand the buffer secured above to HW, at the window end */
+		rtl9602c_rxq_rearm(q, i, fresh, fresh_dma);
 		q->head = (i + 1) % q->n;
 		rx_done++;
 	}
@@ -1690,7 +1707,7 @@ static void rtl9602c_eth_tx_rekick(struct rtl9602c_eth *ep)
  * ring end paused by ring position instead (X100DG live 0xff103000: tail 255 for ever). */
 static void rtl9602c_rx_tail_publish(struct rtl9602c_eth *ep, struct rtl9602c_rxq *q, bool force)
 {
-	unsigned int tail = luna_gmac_rx_tail(q->head, q->n, q->n);
+	unsigned int tail = luna_gmac_rx_tail(q->head, q->rw.armed, q->n);
 
 	if (tail == q->tail && !force)
 		return;
@@ -1704,6 +1721,86 @@ static void rtl9602c_rx_tails_publish(struct rtl9602c_eth *ep)
 
 	for (k = 0; k < ep->n_rxq; k++)
 		rtl9602c_rx_tail_publish(ep, &ep->rxq[k], false);
+}
+
+/* The window engine's ops on the data ring (ctx = ep): called per poll, per tick or from the worker, never per frame. */
+static u32 rtl9602c_rxw_hw_pos(void *ctx)
+{
+	return ep_rd(ctx, R_RxCDO) >> 16;
+}
+
+static bool rtl9602c_rxw_arm(void *ctx, unsigned int slot, struct eth_rx_window_buf b)
+{
+	struct rtl9602c_rxq *q = &((struct rtl9602c_eth *)ctx)->rxq[0];
+
+	if (WARN_ON_ONCE(q->skb[slot]))
+		return false;
+	luna_rx_arm(q->ring, q->skb, q->buf_dma, slot, q->n, RX_BUF_SIZE, b.buf, b.dma);
+	return true;
+}
+
+static void rtl9602c_rxw_disarm(void *ctx, unsigned int slot, struct eth_rx_window_buf *b)
+{
+	struct rtl9602c_rxq *q = &((struct rtl9602c_eth *)ctx)->rxq[0];
+
+	q->ring[slot].opts1 = slot == q->n - 1 ? D_EOR : 0;	/* not OWN: the GMAC stops before it */
+	b->buf = q->skb[slot];
+	b->dma = q->buf_dma[slot];
+	q->skb[slot] = NULL;
+}
+
+static int rtl9602c_rxw_alloc(void *ctx, struct eth_rx_window_buf *b)
+{
+	struct rtl9602c_eth *ep = ctx;
+
+	b->buf = luna_rx_alloc_gfp(ep->ndev, ep->dev, RX_BUF_SIZE, &b->dma, GFP_KERNEL | __GFP_NOWARN);
+	return b->buf ? 0 : -ENOMEM;
+}
+
+static void rtl9602c_rxw_free(void *ctx, struct eth_rx_window_buf b)
+{
+	dma_unmap_single(((struct rtl9602c_eth *)ctx)->dev, b.dma, RX_BUF_SIZE, DMA_FROM_DEVICE);
+	dev_kfree_skb_any(b.buf);
+}
+
+static const struct eth_rx_window_ops rtl9602c_rxw_ops = {
+	.hw_pos = rtl9602c_rxw_hw_pos, .arm = rtl9602c_rxw_arm, .disarm = rtl9602c_rxw_disarm,
+	.alloc = rtl9602c_rxw_alloc, .free = rtl9602c_rxw_free,
+};
+
+static void rtl9602c_rxw_kick_poll(struct rtl9602c_eth *ep)
+{
+	if (ep->irq > 0) {
+		local_bh_disable();
+		napi_schedule(&ep->napi);
+		local_bh_enable();
+	}
+}
+
+static void rtl9602c_rxw_work(struct work_struct *work)
+{
+	struct rtl9602c_eth *ep = container_of(work, struct rtl9602c_eth, rxw_work);
+
+	if (eth_rx_window_ring_work(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep))
+		rtl9602c_rxw_kick_poll(ep);
+}
+
+/* Once per REKICK_INTERVAL from the driver's timer: the policy's decision, then whoever acts on it is woken. */
+static void rtl9602c_rxw_tick(struct rtl9602c_eth *ep)
+{
+	struct eth_rx_window_ring *r = &ep->rxq[0].rw;
+	unsigned int kick;
+
+	if (!eth_rx_window_ring_dynamic(r) || time_before(jiffies, ep->rxw_next))
+		return;
+	ep->rxw_next = jiffies + REKICK_INTERVAL;
+	spin_lock(&ep->rxw_lock);
+	kick = eth_rx_window_ring_tick(r, jiffies_to_msecs(jiffies));
+	spin_unlock(&ep->rxw_lock);
+	if (kick & ETH_RX_WINDOW_KICK_WORK)
+		schedule_work(&ep->rxw_work);
+	if ((kick & ETH_RX_WINDOW_KICK_POLL) && ep->irq > 0)
+		napi_schedule(&ep->napi);
 }
 
 static bool rtl9602c_eth_rx_waiting(const struct rtl9602c_eth *ep)
@@ -1721,10 +1818,13 @@ static int rtl9602c_eth_napi_poll(struct napi_struct *napi, int budget)
 	int work;
 
 	ep->dbg_poll++;
+	eth_rx_window_ring_sample(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep, ep->rxq[0].head, ep->rxq[0].n);
 	/* control first, but at most half the budget: a trapped flood cannot starve the data */
 	work = ep->n_rxq > 1 ? rtl9602c_eth_rx(ep, &ep->rxq[1], budget / 2, true) : 0;
 	ep->dbg_ctl_rx += work;
 	work += rtl9602c_eth_rx(ep, &ep->rxq[0], budget - work, true);	/* inside napi->poll */
+	if (eth_rx_window_ring_resize(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep, ep->rxq[0].head, ep->rxq[0].n))
+		schedule_work(&ep->rxw_work);
 	rtl9602c_rx_tails_publish(ep);
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);
@@ -1768,6 +1868,7 @@ static void rtl9602c_eth_rekick_timer(struct timer_list *t)
 		napi_schedule(&ep->napi);
 	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
 		rtl9602c_eth_msr_apply(ep, true);
+	rtl9602c_rxw_tick(ep);
 	if (!eth_core_recovery_busy(&ep->sw_recovery) &&
 	    luna_mib_port_egress_sample(ep->ndev, !rtl9602c_eth_rx_waiting(ep)))
 		eth_core_recovery_ask(&ep->sw_recovery);
@@ -1782,16 +1883,39 @@ static void rtl9602c_eth_poll(struct timer_list *t)
 	unsigned long flags;
 
 	ep->dbg_poll++;
+	eth_rx_window_ring_sample(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep, ep->rxq[0].head, ep->rxq[0].n);
 	if (ep->n_rxq > 1)
 		rtl9602c_eth_rx(ep, &ep->rxq[1], ep->rxq[1].n, false);
 	rtl9602c_eth_rx(ep, &ep->rxq[0], ep->rxq[0].n, false);	/* timer callback, NOT napi->poll */
+	if (eth_rx_window_ring_resize(&ep->rxq[0].rw, &rtl9602c_rxw_ops, ep, ep->rxq[0].head, ep->rxq[0].n))
+		schedule_work(&ep->rxw_work);
 	rtl9602c_rx_tails_publish(ep);
+	rtl9602c_rxw_tick(ep);
 	spin_lock_irqsave(&ep->tx_lock, flags);
 	rtl9602c_eth_tx_reclaim(ep);	/* under tx_lock (races the OMCI inject's locked reclaim on shared ring 0) */
 	rtl9602c_eth_omci_reclaim(ep);
 	rtl9602c_eth_tx_rekick(ep);	/* TDU-style keep-alive: un-park a stalled TX ring */
 	spin_unlock_irqrestore(&ep->tx_lock, flags);
 	mod_timer(&ep->poll_timer, jiffies + POLL_INTERVAL);
+}
+
+/* A GMAC restarted at slot 0 finds the window there: its buffers move with it and are armed again (what they
+ * held is dropped, as a restart always did). */
+static void rtl9602c_rxq_restart(struct rtl9602c_rxq *q)
+{
+	unsigned int i;
+
+	eth_rx_window_rotate(q->skb, q->n, sizeof(*q->skb), q->head);
+	eth_rx_window_rotate(q->buf_dma, q->n, sizeof(*q->buf_dma), q->head);
+	for (i = 0; i < q->n; i++) {
+		if (i < q->rw.armed) {
+			q->ring[i].addr = q->buf_dma[i] | DMA_BUS_WINDOW;
+			luna_rx_rearm(q->ring, i, q->n, RX_BUF_SIZE);
+		} else {
+			q->ring[i].opts1 = i == q->n - 1 ? D_EOR : 0;
+		}
+	}
+	q->head = 0;
 }
 
 static int rtl9602c_eth_alloc_rings(struct rtl9602c_eth *ep)
@@ -1843,10 +1967,18 @@ static int rtl9602c_eth_alloc_rings(struct rtl9602c_eth *ep)
 		ep->dummy_ring[i].opts1 = (i == DUMMY_RING_SIZE - 1) ? D_EOR : 0;
 		ep->dummy_ring[i].opts2 = 0;
 	}
-	for (k = 0; k < ep->n_rxq; k++)
-		for (i = 0; i < ep->rxq[k].n; i++)
-			if (rtl9602c_eth_refill(ep, &ep->rxq[k], i))
+	for (k = 0; k < ep->n_rxq; k++) {
+		struct rtl9602c_rxq *q = &ep->rxq[k];
+
+		/* the data ring opens at its floor, the control ring is fixed */
+		eth_rx_window_init(&q->rw.w, q->n, k ? q->n : ep->rx_floor, jiffies_to_msecs(jiffies));
+		q->rw.armed = q->rw.w.target;
+		for (i = 0; i < q->n; i++)
+			if (i >= q->rw.armed)
+				q->ring[i].opts1 = i == q->n - 1 ? D_EOR : 0;
+			else if (rtl9602c_eth_refill(ep, q, i))
 				return -ENOMEM;
+	}
 	return 0;
 }
 
@@ -1863,6 +1995,7 @@ static void rtl9602c_eth_free_rings(struct rtl9602c_eth *ep)
 				q->skb[i] = NULL;
 			}
 		}
+		eth_rx_window_ring_release(&q->rw, &rtl9602c_rxw_ops, ep);
 		if (q->ring)
 			dma_free_coherent(ep->dev, q->n * sizeof(struct rx_desc), q->ring, q->ring_dma);
 		q->ring = NULL;
@@ -2097,13 +2230,8 @@ static void rtl9602c_eth_recover_work(struct work_struct *work)
 		ep->tx_ring[i].opts1 = (i == TX_RING_SIZE - 1) ? D_EOR : 0;
 	for (i = 0; i < OTX_RING_SIZE; i++)
 		ep->otx_ring[i].opts1 = (i == OTX_RING_SIZE - 1) ? D_EOR : 0;
-	for (k = 0; k < ep->n_rxq; k++) {
-		struct rtl9602c_rxq *q = &ep->rxq[k];
-
-		for (i = 0; i < q->n; i++)
-			q->ring[i].opts1 = D_OWN | RX_BUF_SIZE | ((i == q->n - 1) ? D_EOR : 0);
-		q->head = 0;
-	}
+	for (k = 0; k < ep->n_rxq; k++)
+		rtl9602c_rxq_restart(&ep->rxq[k]);
 	wmb();				/* ring state before the engine restart */
 	rtl9602c_hw_program(ep);
 	rtl9602c_tx_align(ep);		/* the engine's slot 0 = the driver's next counter */
@@ -3190,11 +3318,68 @@ static const struct ethtool_ops rtl9602c_wan_ethtool_ops = {
 	.get_link_ksettings	= eth_pon_get_link_ksettings,
 };
 
+/* The DRAM the device tree declares, in MiB: the line eth_rx_window_floor() draws. */
+static unsigned int rtl9602c_dram_mib(void)
+{
+	struct device_node *np;
+	struct resource r;
+	u64 bytes = 0;
+	int i;
+
+	for_each_node_by_type(np, "memory")
+		for (i = 0; !of_address_to_resource(np, i, &r); i++)
+			bytes += resource_size(&r);
+	return bytes >> 20;
+}
+
+/* ethtool -g: rx = the window now, rx max = the ring; rx mini = the control ring; tx = the fixed TX ring. */
+static void rtl9602c_ring_get(struct net_device *ndev, struct ethtool_ringparam *r)
+{
+	struct rtl9602c_eth *ep = netdev_priv(ndev);
+
+	r->rx_max_pending = ep->rxq[0].n;
+	r->rx_pending = READ_ONCE(ep->rxq[0].rw.armed);
+	r->rx_mini_max_pending = r->rx_mini_pending = ep->n_rxq > 1 ? ep->rxq[1].n : 0;
+	r->tx_max_pending = r->tx_pending = TX_RING_SIZE;
+}
+
+/* ethtool -G rx N pins the window at N rounded up to a group, floor..ring, until the next boot. */
+static int rtl9602c_ring_set(struct net_device *ndev, const struct ethtool_ringparam *r)
+{
+	struct rtl9602c_eth *ep = netdev_priv(ndev);
+	struct rtl9602c_rxq *q = &ep->rxq[0];
+
+	if (!ep->hw_up)
+		return -EBUSY;
+	if (r->tx_pending != TX_RING_SIZE || r->rx_mini_pending != (ep->n_rxq > 1 ? ep->rxq[1].n : 0) ||
+	    r->rx_pending < q->rw.w.floor || r->rx_pending > q->n)
+		return -EINVAL;
+	spin_lock_bh(&ep->rxw_lock);
+	eth_rx_window_ring_pin(&q->rw, r->rx_pending);
+	spin_unlock_bh(&ep->rxw_lock);
+	schedule_work(&ep->rxw_work);
+	rtl9602c_rxw_kick_poll(ep);
+	return 0;
+}
+
+static void rtl9602c_ring_stats(struct net_device *ndev, u64 *data)
+{
+	struct rtl9602c_eth *ep = netdev_priv(ndev);
+	const struct rtl9602c_rxq *q = &ep->rxq[0];
+
+	eth_rx_window_ring_stats(&q->rw, data);
+}
+
+static const struct luna_ring_ops rtl9602c_ring_ops = {
+	.get = rtl9602c_ring_get, .set = rtl9602c_ring_set, .stats = rtl9602c_ring_stats,
+};
+
 static int rtl9602c_eth_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct net_device *ndev;
 	struct rtl9602c_eth *ep;
+	unsigned int dram_mib;
 	u8 mac[ETH_ALEN];
 	int ret;
 
@@ -3213,6 +3398,8 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->dev = dev;
 	spin_lock_init(&ep->tx_lock);
 	INIT_WORK(&ep->recover_work, rtl9602c_eth_recover_work);
+	INIT_WORK(&ep->rxw_work, rtl9602c_rxw_work);
+	spin_lock_init(&ep->rxw_lock);
 	eth_core_recovery_init(&ep->sw_recovery, ndev, ep, &rtl9602c_sw_recover_ops, rtl9602c_sw_begin, rtl9602c_sw_end,
 			       rtl9602c_sw_blocks);
 
@@ -3232,6 +3419,10 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->rxq[0].skb = ep->rx_skb;
 	ep->rxq[0].buf_dma = ep->rx_buf_dma;
 	ep->rxq[0].tail_reg = R_RxDesNum;
+	dram_mib = rtl9602c_dram_mib();
+	ep->rx_floor = eth_rx_window_floor(ep->rxq[0].n, dram_mib);
+	dev_info(dev, "RX ring %u slots, window %u..%u (DRAM %u MiB)\n", ep->rxq[0].n, ep->rx_floor,
+		 ep->rxq[0].n, dram_mib);
 	ep->rxq[1] = (struct rtl9602c_rxq){ .skb = ep->ctl_skb, .buf_dma = ep->ctl_buf_dma,
 					    .n = CTL_RING_SIZE, .tail_reg = R_RxMRingCfg(1) + 8 };
 	/* The board's own WAN MAC offset from its stock (X100DG: LAN+1). */
@@ -3337,6 +3528,9 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ret = luna_mib_attach(ndev, ep->sw, ep->swm, &rtl9602c_phy_ops);
 	if (ret)
 		return dev_err_probe(dev, ret, "switch statistics attach failed\n");
+	ret = luna_mib_ring_attach(ndev, &rtl9602c_ring_ops);
+	if (ret)
+		return dev_err_probe(dev, ret, "ring parameters attach failed\n");
 	ep->loop = luna_loop_attach(dev, ndev, ep->sw, ep->swm, &rtl9602c_loop_ops);
 	if (!ep->loop)
 		return -ENOMEM;
@@ -3363,7 +3557,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	WRITE_ONCE(g_ep, ep);
-	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, ETH_NO_get_ringparam);
+	ret = eth_devm_register_netdev(dev, ndev, &luna_ring_watch.w, 0);
 	if (ret)
 		return ret;
 

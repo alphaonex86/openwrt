@@ -107,11 +107,15 @@ struct luna_mib_state {
 	const struct luna_phy_ops *phy;
 	unsigned int		port;	/* the copper port ethtool shows and sets */
 	struct luna_port_mode	mode[LUNA_LINK_PORTS];
+	const struct luna_ring_ops *ring;
 };
 static struct luna_mib_state luna_mib;
 
 struct eth_rx_len luna_rx_len;
 EXPORT_SYMBOL_GPL(luna_rx_len);
+static const char *const luna_ring_names[LUNA_RING_STATS] = {
+	ETH_RX_WINDOW_STAT_NAMES
+};
 static const char *const luna_rx_len_names[] = {
 	"rx_len_long_lan", "rx_len_short_lan", "rx_len_long_wan", "rx_len_short_wan",
 };
@@ -284,7 +288,7 @@ static int luna_mib_count(const struct luna_mib_state *s)
 {
 	unsigned int n = luna_mib_ports(s);
 
-	return n ? LUNA_MIB_ROLES + n * luna_mib_per_port(s) : 0;
+	return n ? LUNA_MIB_ROLES + n * luna_mib_per_port(s) + (s->ring ? LUNA_RING_STATS : 0) : 0;
 }
 
 /* One 32-bit or 64-bit counter out of a per-port window. The ...
@@ -340,6 +344,9 @@ static void luna_mib_get_strings(struct net_device *ndev, u32 sset, u8 *data)
 			ethtool_sprintf(&data, "p%u_%s", port,
 					luna_mib_tx[i].name);
 	}
+	if (s->ring)
+		for (i = 0; i < LUNA_RING_STATS; i++)
+			ethtool_puts(&data, luna_ring_names[i]);
 }
 
 static void luna_mib_get_stats(struct net_device *ndev,
@@ -372,6 +379,8 @@ static void luna_mib_get_stats(struct net_device *ndev,
 			*data++ = luna_mib_read(s->sw, SW_STAT_PORT_TX_MIB,
 						port, &luna_mib_tx[i]);
 	}
+	if (s->ring)
+		s->ring->stats(ndev, data);
 }
 
 static void luna_mib_get_drvinfo(struct net_device *ndev,
@@ -767,6 +776,38 @@ static const struct ethtool_ops luna_mib_ethtool_ops = {
 	.get_regs		= luna_regs_get,
 };
 
+static void luna_ring_get(struct net_device *ndev, struct ethtool_ringparam *r,
+			  struct kernel_ethtool_ringparam *kr, struct netlink_ext_ack *ack)
+{
+	luna_mib.ring->get(ndev, r);
+}
+
+static int luna_ring_set(struct net_device *ndev, struct ethtool_ringparam *r,
+			 struct kernel_ethtool_ringparam *kr, struct netlink_ext_ack *ack)
+{
+	return luna_mib.ring->set(ndev, r);
+}
+
+/* The same table plus the ring sizes, for a driver that attached its ring (luna_mib_ring_attach). */
+static const struct ethtool_ops luna_mib_ring_ethtool_ops = {
+	.get_drvinfo		= luna_mib_get_drvinfo,
+	.get_link		= ethtool_op_get_link,
+	.get_sset_count		= luna_mib_get_sset_count,
+	.get_strings		= luna_mib_get_strings,
+	.get_ethtool_stats	= luna_mib_get_stats,
+	.get_link_ksettings	= luna_link_get,
+	.set_link_ksettings	= luna_link_set,
+	.nway_reset		= luna_link_nway_reset,
+	.get_pauseparam		= luna_pause_get,
+	.set_pauseparam		= luna_pause_set,
+	.get_eeprom_len		= luna_efuse_len,
+	.get_eeprom		= luna_efuse_get,
+	.get_regs_len		= luna_regs_len,
+	.get_regs		= luna_regs_get,
+	.get_ringparam		= luna_ring_get,
+	.set_ringparam		= luna_ring_set,
+};
+
 /* ★ THE NAME-LENGTH CHECK IS HERE AND NOT IN A COMMENT, ...
  * dev/MEASURED-luna_eth_mib.c.md sec 8. */
 static void luna_mib_check_names(struct device *dev, unsigned int ports)
@@ -832,4 +873,17 @@ int luna_mib_attach(struct net_device *ndev, void __iomem *sw,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(luna_mib_attach);
+
+int luna_mib_ring_attach(struct net_device *ndev, const struct luna_ring_ops *ops)
+{
+	struct luna_mib_state *s = &luna_mib;
+
+	if (!ops || !ops->get || !ops->set || !ops->stats || s->ndev != ndev ||
+	    ndev->ethtool_ops != &luna_mib_ethtool_ops || ndev->reg_state != NETREG_UNINITIALIZED)
+		return -EINVAL;
+	s->ring = ops;
+	ndev->ethtool_ops = &luna_mib_ring_ethtool_ops;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(luna_mib_ring_attach);
 MODULE_LICENSE("GPL");

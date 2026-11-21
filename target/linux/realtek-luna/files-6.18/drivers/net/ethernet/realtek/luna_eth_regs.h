@@ -47,7 +47,7 @@
 #include <linux/etherdevice.h>	/* ETH_ALEN, ether_addr_equal */
 #include <linux/delay.h>	/* udelay */
 #include <linux/dma-mapping.h>	/* dma_map_single, DMA_FROM_DEVICE */
-#include <linux/netdevice.h>	/* dev_alloc_page */
+#include <linux/netdevice.h>	/* struct net_device */
 #include <linux/skbuff.h>	/* struct sk_buff, dev_kfree_skb_any */
 #include <linux/io.h>		/* ioread32 / iowrite32 */
 #include <linux/kernel.h>	/* sscanf */

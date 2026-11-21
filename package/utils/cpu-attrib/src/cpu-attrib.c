@@ -213,8 +213,18 @@ int parse_wq_stats(const char *text, struct table *t)
 		struct row *r = &t->r[t->n];
 		const char *eol = strchr(line, '\n');
 
-		if (sscanf(line, "%63s %llu %llu %llu %llu", r->name, &r->v[0], &r->v[1], &r->v[2], &r->v[3]) == 5)
+		if (sscanf(line, "%63s %llu %llu %llu %llu", r->name, &r->v[0], &r->v[1], &r->v[2], &r->v[3]) == 5) {
+			size_t len = strlen(r->name);
+			int j, seen = 0;
+
+			/* 6.18 has two queues named "events": the n-th of a name is "name#n", so deltas pair them */
+			for (j = 0; j < t->n; j++)
+				seen += !strncmp(t->r[j].name, r->name, len) &&
+					(!t->r[j].name[len] || t->r[j].name[len] == '#');
+			if (seen)
+				snprintf(r->name + len, sizeof(r->name) - len, "#%d", seen + 1);
 			t->n++;
+		}
 		line = eol;
 	}
 	return t->n;

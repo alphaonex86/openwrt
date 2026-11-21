@@ -30,6 +30,27 @@ config KERNEL_BUILD_DOMAIN
 	  returned by 'uname -a' on running systems.
 	  If not set, uses system hostname at build time.
 
+config KERNEL_CMDLINE_APPEND
+	bool "Built-in kernel command line of this image"
+	default n
+	help
+	  Puts KERNEL_CMDLINE in the kernel image, so it reaches every boot
+	  route (flash, sysupgrade, RAM boot, simulation); MIPS appends it
+	  after the device tree and boot loader words. Off, nothing is written
+	  and the target config's own CONFIG_CMDLINE stays.
+
+config KERNEL_CMDLINE_BOOL
+	bool
+	default y if KERNEL_CMDLINE_APPEND
+
+config KERNEL_CMDLINE
+	string "Built-in kernel command line words"
+	depends on KERNEL_CMDLINE_APPEND
+	default ""
+	help
+	  The whole built-in line, the target's own words included: it
+	  replaces the target config's CONFIG_CMDLINE.
+
 config KERNEL_PRINTK
 	bool "Enable support for printk"
 	default y

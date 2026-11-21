@@ -103,6 +103,8 @@ module_param(omci_doorbell_bit, uint, 0644);
 MODULE_PARM_DESC(omci_doorbell_bit,
 		 "US-OMCI doorbell override (0xff=auto from HW ring, default auto)");
 
+ETH_RX_WINDOW_LAB_PARAM();
+
 /* GMAC bring-up mode. Stock latches the multi-ring fetch ...
  * dev/MEASURED-rtl9602c_eth.c.md sec 5. */
 static unsigned int gmac_reset = 1;	/* now safe to reset: rtl9602c_uboot_swcore_bringup() re-runs U-Boot's GMAC<->switch resync after the IP-block reset, breaking the old "reset kills egress" catch-22, and the stock GMAC init re-establishes the GMAC0-TX->US-NIC direct link */
@@ -1791,11 +1793,11 @@ static void rtl9602c_rxw_tick(struct rtl9602c_eth *ep)
 	struct eth_rx_window_ring *r = &ep->rxq[0].rw;
 	unsigned int kick;
 
-	if (!eth_rx_window_ring_dynamic(r) || time_before(jiffies, ep->rxw_next))
+	if (time_before(jiffies, ep->rxw_next))
 		return;
 	ep->rxw_next = jiffies + REKICK_INTERVAL;
 	spin_lock(&ep->rxw_lock);
-	kick = eth_rx_window_ring_tick(r, jiffies_to_msecs(jiffies));
+	kick = eth_rx_window_ring_tick(r, jiffies_to_msecs(jiffies), READ_ONCE(rx_window_lab));
 	spin_unlock(&ep->rxw_lock);
 	if (kick & ETH_RX_WINDOW_KICK_WORK)
 		schedule_work(&ep->rxw_work);

@@ -16,10 +16,12 @@
 #define ETH_RX_WINDOW_QUIET_MS		10000	/* backlog-free spell, and time since the last grow, before a shrink */
 #define ETH_RX_WINDOW_SHRINK_GAP_MS	1000
 #define ETH_RX_WINDOW_GUARD		16	/* slots past the hardware position never un-armed: its prefetch */
+#define ETH_RX_WINDOW_LAB_DEFAULT	false	/* the lab switch at boot: the board rule */
 
 struct eth_rx_window {
 	u16 cap;		/* descriptors in the ring */
 	u16 floor;		/* the window never goes below; == cap: a fixed ring */
+	u16 board_floor;	/* the floor the board rule gave: the lab switch off */
 	u16 group;
 	u16 target;		/* what the policy asks; the driver moves `armed` towards it */
 	bool pinned;		/* ethtool -G set it: the policy no longer moves it */
@@ -44,11 +46,26 @@ static inline unsigned int eth_rx_window_floor(unsigned int cap, unsigned int dr
 static inline void eth_rx_window_init(struct eth_rx_window *w, unsigned int cap, unsigned int floor, u32 now_ms)
 {
 	w->cap = cap;
-	w->floor = floor < cap ? floor : cap;
+	w->floor = w->board_floor = floor < cap ? floor : cap;
 	w->group = ETH_RX_WINDOW_GROUP;
 	w->target = w->floor;
 	w->pinned = false;
 	w->busy_ms = w->shrink_ms = now_ms;
+}
+
+/* The lab switch, RAM only (RX-WINDOW.md): true runs the window from one group up whatever the board's DRAM, false
+ * gives the board rule back. A running ring then moves by the policy alone, no quiesce; a fixed ring sampled no
+ * backlog, so the quiet spell starts at the flip. */
+static inline void eth_rx_window_lab(struct eth_rx_window *w, bool dynamic, u32 now_ms)
+{
+	unsigned int floor = dynamic && w->cap > w->group ? w->group : w->board_floor;
+
+	if (floor == w->floor)
+		return;
+	w->floor = floor;
+	w->busy_ms = now_ms;
+	if (w->target < floor)
+		WRITE_ONCE(w->target, floor);
 }
 
 /* The slot `k` places past the head of a ring of `n` slots. */
@@ -140,7 +157,8 @@ static inline void eth_rx_window_rotate(void *base, unsigned int n, unsigned int
 }
 
 /* ---- The engine: how a driver's ring moves its window. The driver gives five ops on its own descriptors; they are
- * called per poll, per tick or from the worker, never per frame. The includer provides the kernel's barriers. ---- */
+ * called per poll, per tick or from the worker, never per frame. The includer provides the kernel's barriers and
+ * <linux/moduleparam.h>. ---- */
 struct eth_rx_window_buf {
 	void		*buf;
 	dma_addr_t	dma;
@@ -169,6 +187,12 @@ struct eth_rx_window_ops {
 #define ETH_RX_WINDOW_STATS	5	/* ethtool -S, in this order: */
 #define ETH_RX_WINDOW_STAT_NAMES "rx_window", "rx_window_target", "rx_window_grows", "rx_window_shrinks", \
 	"rx_window_grow_fail"
+
+/* The lab switch of one driver, /sys/module/<driver>/parameters/rx_window_lab: written by the lab's test run only. */
+#define ETH_RX_WINDOW_LAB_PARAM()							\
+	static bool rx_window_lab = ETH_RX_WINDOW_LAB_DEFAULT;				\
+	module_param(rx_window_lab, bool, 0644);					\
+	MODULE_PARM_DESC(rx_window_lab, "RX window dynamic whatever the DRAM (lab only, until reboot)")
 
 static inline bool eth_rx_window_ring_dynamic(const struct eth_rx_window_ring *r)
 {
@@ -255,11 +279,13 @@ static __always_inline bool eth_rx_window_ring_work(struct eth_rx_window_ring *r
 	return true;
 }
 
-/* The tick, under the driver's lock against a pin: the policy's decision. -> who must act (ETH_RX_WINDOW_KICK_*). */
-static inline unsigned int eth_rx_window_ring_tick(struct eth_rx_window_ring *r, u32 now_ms)
+/* The tick, under the driver's lock against a pin, on every ring the lab switch may flip: the switch, then the
+ * policy's decision. -> who must act (ETH_RX_WINDOW_KICK_*). */
+static inline unsigned int eth_rx_window_ring_tick(struct eth_rx_window_ring *r, u32 now_ms, bool lab)
 {
 	unsigned int armed = READ_ONCE(r->armed), target, kick = 0;
 
+	eth_rx_window_lab(&r->w, lab, now_ms);
 	if (READ_ONCE(r->grow_failed)) {
 		WRITE_ONCE(r->grow_failed, false);
 		r->w.target = armed;

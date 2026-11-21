@@ -406,7 +406,6 @@ struct rtl9602c_eth {
 	struct work_struct rxw_work;	/* the RX window's allocations and frees */
 	unsigned int	rx_floor;	/* the data ring's smallest window, from the DRAM the board declares */
 	spinlock_t	rxw_lock;	/* rxq[0].w: the tick vs ethtool -G */
-	unsigned long	rxw_next;	/* the next window decision, jiffies */
 	struct eth_core_recovery sw_recovery;	/* the switch core reset and its re-init */
 	struct luna_state_rd sw_rd[ETH_STATE_BLOCKS];
 	struct eth_reg_range sw_rg[ETH_STATE_BLOCKS][3];
@@ -1787,15 +1786,12 @@ static void rtl9602c_rxw_work(struct work_struct *work)
 		rtl9602c_rxw_kick_poll(ep);
 }
 
-/* Once per REKICK_INTERVAL from the driver's timer: the policy's decision, then whoever acts on it is woken. */
+/* From the driver's timers (the engine decides once per ETH_RX_WINDOW_TICK_MS), then whoever acts is woken. */
 static void rtl9602c_rxw_tick(struct rtl9602c_eth *ep)
 {
 	struct eth_rx_window_ring *r = &ep->rxq[0].rw;
 	unsigned int kick;
 
-	if (time_before(jiffies, ep->rxw_next))
-		return;
-	ep->rxw_next = jiffies + REKICK_INTERVAL;
 	spin_lock(&ep->rxw_lock);
 	kick = eth_rx_window_ring_tick(r, jiffies_to_msecs(jiffies), READ_ONCE(rx_window_lab));
 	spin_unlock(&ep->rxw_lock);
@@ -3334,18 +3330,18 @@ static unsigned int rtl9602c_dram_mib(void)
 	return bytes >> 20;
 }
 
-/* ethtool -g: rx = the window now, rx max = the ring; rx mini = the control ring; tx = the fixed TX ring. */
+/* ethtool -g: rx = the window now, rx max = the largest window (the ring less one); rx mini = the control ring's; tx = the fixed TX ring. */
 static void rtl9602c_ring_get(struct net_device *ndev, struct ethtool_ringparam *r)
 {
 	struct rtl9602c_eth *ep = netdev_priv(ndev);
 
-	r->rx_max_pending = ep->rxq[0].n;
+	r->rx_max_pending = ep->rxq[0].rw.w.cap;
 	r->rx_pending = READ_ONCE(ep->rxq[0].rw.armed);
-	r->rx_mini_max_pending = r->rx_mini_pending = ep->n_rxq > 1 ? ep->rxq[1].n : 0;
+	r->rx_mini_max_pending = r->rx_mini_pending = ep->n_rxq > 1 ? ep->rxq[1].rw.w.cap : 0;
 	r->tx_max_pending = r->tx_pending = TX_RING_SIZE;
 }
 
-/* ethtool -G rx N pins the window at N rounded up to a group, floor..ring, until the next boot. */
+/* ethtool -G rx N pins the window at N rounded up to a group, floor..cap, until the next boot. */
 static int rtl9602c_ring_set(struct net_device *ndev, const struct ethtool_ringparam *r)
 {
 	struct rtl9602c_eth *ep = netdev_priv(ndev);
@@ -3353,8 +3349,8 @@ static int rtl9602c_ring_set(struct net_device *ndev, const struct ethtool_ringp
 
 	if (!ep->hw_up)
 		return -EBUSY;
-	if (r->tx_pending != TX_RING_SIZE || r->rx_mini_pending != (ep->n_rxq > 1 ? ep->rxq[1].n : 0) ||
-	    r->rx_pending < q->rw.w.floor || r->rx_pending > q->n)
+	if (r->tx_pending != TX_RING_SIZE || r->rx_mini_pending != (ep->n_rxq > 1 ? ep->rxq[1].rw.w.cap : 0) ||
+	    r->rx_pending < q->rw.w.floor || r->rx_pending > q->rw.w.cap)
 		return -EINVAL;
 	spin_lock_bh(&ep->rxw_lock);
 	eth_rx_window_ring_pin(&q->rw, r->rx_pending);
@@ -3424,7 +3420,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	dram_mib = rtl9602c_dram_mib();
 	ep->rx_floor = eth_rx_window_floor(ep->rxq[0].n, dram_mib);
 	dev_info(dev, "RX ring %u slots, window %u..%u (DRAM %u MiB)\n", ep->rxq[0].n, ep->rx_floor,
-		 ep->rxq[0].n, dram_mib);
+		 eth_rx_window_cap(ep->rxq[0].n), dram_mib);
 	ep->rxq[1] = (struct rtl9602c_rxq){ .skb = ep->ctl_skb, .buf_dma = ep->ctl_buf_dma,
 					    .n = CTL_RING_SIZE, .tail_reg = R_RxMRingCfg(1) + 8 };
 	/* The board's own WAN MAC offset from its stock (X100DG: LAN+1). */

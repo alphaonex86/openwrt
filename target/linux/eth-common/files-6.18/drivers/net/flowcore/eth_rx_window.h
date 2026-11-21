@@ -17,9 +17,10 @@
 #define ETH_RX_WINDOW_SHRINK_GAP_MS	1000
 #define ETH_RX_WINDOW_GUARD		16	/* slots past the hardware position never un-armed: its prefetch */
 #define ETH_RX_WINDOW_LAB_DEFAULT	false	/* the lab switch at boot: the board rule */
+#define ETH_RX_WINDOW_TICK_MS		100	/* one decision per tick, however often the driver calls it */
 
 struct eth_rx_window {
-	u16 cap;		/* descriptors in the ring */
+	u16 cap;		/* the largest window: one slot less than the ring, so a full ring never reads as empty */
 	u16 floor;		/* the window never goes below; == cap: a fixed ring */
 	u16 board_floor;	/* the floor the board rule gave: the lab switch off */
 	u16 group;
@@ -27,6 +28,7 @@ struct eth_rx_window {
 	bool pinned;		/* ethtool -G set it: the policy no longer moves it */
 	u32 busy_ms;		/* the last grow, or the last decision whose backlog forbade a shrink */
 	u32 shrink_ms;
+	u32 tick_ms;		/* the last decision */
 };
 
 static inline bool eth_rx_window_before(u32 now_ms, u32 then_ms, u32 span_ms)
@@ -34,17 +36,26 @@ static inline bool eth_rx_window_before(u32 now_ms, u32 then_ms, u32 span_ms)
 	return (s32)(now_ms - then_ms) < (s32)span_ms;
 }
 
-/* The smallest window a board runs: the group (it must exceed the ring's pause de-assert threshold) when its DRAM
- * is below the line, else the whole ring. */
-static inline unsigned int eth_rx_window_floor(unsigned int cap, unsigned int dram_mib)
+/* The largest window on a ring of `n` descriptors: one slot less, so a full window is never read as an empty one
+ * (eth_rx_window_backlog). */
+static inline unsigned int eth_rx_window_cap(unsigned int n)
 {
-	if (dram_mib >= ETH_RX_WINDOW_DYNAMIC_BELOW_MIB || cap < ETH_RX_WINDOW_GROUP)
-		return cap;
+	return n - 1;
+}
+
+/* The smallest window a board runs on a ring of `n` slots: the group (it must exceed the ring's pause de-assert
+ * threshold) when its DRAM is below the line, else the largest. */
+static inline unsigned int eth_rx_window_floor(unsigned int n, unsigned int dram_mib)
+{
+	if (dram_mib >= ETH_RX_WINDOW_DYNAMIC_BELOW_MIB || n <= ETH_RX_WINDOW_GROUP)
+		return eth_rx_window_cap(n);
 	return ETH_RX_WINDOW_GROUP;
 }
 
-static inline void eth_rx_window_init(struct eth_rx_window *w, unsigned int cap, unsigned int floor, u32 now_ms)
+static inline void eth_rx_window_init(struct eth_rx_window *w, unsigned int n, unsigned int floor, u32 now_ms)
 {
+	unsigned int cap = eth_rx_window_cap(n);
+
 	w->cap = cap;
 	w->floor = w->board_floor = floor < cap ? floor : cap;
 	w->group = ETH_RX_WINDOW_GROUP;
@@ -75,7 +86,7 @@ static inline unsigned int eth_rx_window_slot(unsigned int head, unsigned int k,
 }
 
 /* Frames the hardware wrote and the CPU has not taken: from the head to the hardware position, at most the window.
- * A window as long as the ring cannot tell a full ring from an empty one: it reads 0 (its policy is fixed). */
+ * The window is shorter than the ring, so a full window is never read as an empty one. */
 static inline unsigned int eth_rx_window_backlog(unsigned int hw_pos, unsigned int head, unsigned int armed,
 						 unsigned int n)
 {
@@ -279,12 +290,17 @@ static __always_inline bool eth_rx_window_ring_work(struct eth_rx_window_ring *r
 	return true;
 }
 
-/* The tick, under the driver's lock against a pin, on every ring the lab switch may flip: the switch, then the
- * policy's decision. -> who must act (ETH_RX_WINDOW_KICK_*). */
+/* The tick, under the driver's lock against a pin, on every ring the lab switch may flip: at most one per
+ * ETH_RX_WINDOW_TICK_MS, the switch, then the policy's decision. -> who must act (ETH_RX_WINDOW_KICK_*). */
 static inline unsigned int eth_rx_window_ring_tick(struct eth_rx_window_ring *r, u32 now_ms, bool lab)
 {
 	unsigned int armed = READ_ONCE(r->armed), target, kick = 0;
 
+	/* unsigned: a stale or never-set tick_ms waits one tick at most, whatever the clock's start (jiffies does
+	 * not start at 0) */
+	if (now_ms - r->w.tick_ms < ETH_RX_WINDOW_TICK_MS)
+		return 0;
+	r->w.tick_ms = now_ms;
 	eth_rx_window_lab(&r->w, lab, now_ms);
 	if (READ_ONCE(r->grow_failed)) {
 		WRITE_ONCE(r->grow_failed, false);

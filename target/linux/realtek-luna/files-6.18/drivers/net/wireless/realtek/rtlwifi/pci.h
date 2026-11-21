@@ -5,6 +5,7 @@
 #define __RTL_PCI_H__
 
 #include <linux/pci.h>
+#include "eth_rx_window.h"
 /* 1: MSDU packet queue,
  * 2: Rx Command Queue
  */
@@ -19,6 +20,7 @@
  * dev/FINDING-wifi-rx-rings-to-the-ht-floor-2026-09-15.md
  */
 #define RTL_PCI_MAX_RX_COUNT			384/*upstream: 512*/
+#define RTL_PCI_RXBD_IDX			0x3B4	/* RX BD indices: [26:16] the chip's, [10:0] the limit */
 
 /* ONE receive request serves every sub-driver built from this file: 4042 for
  * the RTL8192FE and the RTL8192EE (both sized to the 3839-byte A-MSDU and
@@ -176,7 +178,8 @@ struct rtl8192_rx_ring {
 	struct rtl_rx_buf sink;
 	/*add for new trx flow*/
 	struct rtl_rx_buffer_desc *buffer_desc; /*rx buffer descriptor*/
-	u16 next_rx_rp; /* next_rx_read_point */
+	struct eth_rx_window_ring rw;	/* rw.armed slots from idx hold a buffer, the rest point at the sink */
+	bool hw_moved;			/* a leading chip's index has left 0 since the start */
 };
 
 struct rtl_pci {
@@ -204,6 +207,7 @@ struct rtl_pci {
 	u8 irq_alloc;
 	u32 irq_mask[4];	/* 0-1: normal, 2: unused, 3: h2c */
 	struct tasklet_struct rx_tasklet;	/* drains the RX ring, pci.c */
+	struct work_struct rxw_work;	/* allocates and frees the RX window's buffers */
 	struct sk_buff_head rx_inject;		/* driver-made frames for mac80211 */
 	bool rx_deferred;			/* RX sources masked until the ring drains */
 	u32 rx_partial, rx_oversize;		/* buffers dropped: part of a frame, a length past the buffer */
@@ -332,6 +336,18 @@ static inline void pci_write32_async(struct rtl_priv *rtlpriv,
 				     u32 addr, u32 val)
 {
 	writel(val, (u8 __iomem *)rtlpriv->io.pci_mem_start + addr);
+}
+
+/* The chip's RX limit at 0x3B4: it writes up to the slot before this one, so one past the window end. */
+static inline u16 rtl_pci_rx_doorbell(const struct rtl8192_rx_ring *ring)
+{
+	return (ring->idx + ring->rw.armed + 1) % RTL_PCI_MAX_RX_COUNT;
+}
+
+/* The 2 s watchdog runs the RX pass, so the window's tick also comes at idle. */
+static inline void rtl_pci_rx_window_kick(struct ieee80211_hw *hw)
+{
+	tasklet_schedule(&rtl_pcidev(rtl_pcipriv(hw))->rx_tasklet);
 }
 
 static inline u16 calc_fifo_space(u16 rp, u16 wp, u16 size)

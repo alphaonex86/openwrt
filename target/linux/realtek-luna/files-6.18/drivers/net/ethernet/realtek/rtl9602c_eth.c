@@ -3316,19 +3316,7 @@ static const struct ethtool_ops rtl9602c_wan_ethtool_ops = {
 	.get_link_ksettings	= eth_pon_get_link_ksettings,
 };
 
-/* The DRAM the device tree declares, in MiB: the line eth_rx_window_floor() draws. */
-static unsigned int rtl9602c_dram_mib(void)
-{
-	struct device_node *np;
-	struct resource r;
-	u64 bytes = 0;
-	int i;
-
-	for_each_node_by_type(np, "memory")
-		for (i = 0; !of_address_to_resource(np, i, &r); i++)
-			bytes += resource_size(&r);
-	return bytes >> 20;
-}
+ETH_RX_WINDOW_DRAM_MIB();
 
 /* ethtool -g: rx = the window now, rx max = the largest window (the ring less one); rx mini = the control ring's; tx = the fixed TX ring. */
 static void rtl9602c_ring_get(struct net_device *ndev, struct ethtool_ringparam *r)
@@ -3417,7 +3405,7 @@ static int rtl9602c_eth_probe(struct platform_device *pdev)
 	ep->rxq[0].skb = ep->rx_skb;
 	ep->rxq[0].buf_dma = ep->rx_buf_dma;
 	ep->rxq[0].tail_reg = R_RxDesNum;
-	dram_mib = rtl9602c_dram_mib();
+	dram_mib = eth_rx_window_dram_mib();
 	ep->rx_floor = eth_rx_window_floor(ep->rxq[0].n, dram_mib);
 	dev_info(dev, "RX ring %u slots, window %u..%u (DRAM %u MiB)\n", ep->rxq[0].n, ep->rx_floor,
 		 eth_rx_window_cap(ep->rxq[0].n), dram_mib);

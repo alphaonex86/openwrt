@@ -12,6 +12,7 @@
 #include <linux/ktime.h>
 #include <linux/export.h>
 #include <linux/module.h>
+#include <linux/of_address.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 
@@ -137,6 +138,14 @@ static int rtl_pci_tx_queues_show(struct seq_file *m, void *unused)
 	seq_printf(m, "rx_partial %u rx_oversize %u\n", rx_partial, rx_oversize);
 	seq_printf(m, "rx_ring %u rx_peak %u rx_rdu %u rx_fovw %u\n", rtlpci->rxringcount, rx_peak,
 		   rx_rdu, rx_fovw);
+	{
+		const struct eth_rx_window_ring *rw = &rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE].rw;
+		u64 v[ETH_RX_WINDOW_STATS];
+
+		eth_rx_window_ring_stats(rw, v);
+		seq_printf(m, "rx_window %llu target %llu floor %u cap %u grows %llu shrinks %llu grow_fail %llu\n",
+			   v[0], v[1], READ_ONCE(rw->w.floor), rw->w.cap, v[2], v[3], v[4]);
+	}
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rtl_pci_tx_queues);
@@ -728,6 +737,154 @@ static void _rtl_pci_rx_buf_free(struct ieee80211_hw *hw, struct rtl_rx_buf *rb)
 }
 
 /* A descriptor handed back to the chip with the mapped buffer `dma`. */
+static void _rtl_pci_prepare_rxdesc(struct ieee80211_hw *hw, u8 *entry, dma_addr_t dma);
+
+ETH_RX_WINDOW_LAB_PARAM();
+ETH_RX_WINDOW_DRAM_MIB();
+
+static u8 *_rtl_pci_rx_entry(struct rtl_priv *rtlpriv, struct rtl8192_rx_ring *ring, unsigned int slot)
+{
+	return rtlpriv->use_new_trx_flow ? (u8 *)&ring->buffer_desc[slot] : (u8 *)&ring->desc[slot];
+}
+
+/* The slot the chip writes next: its index at 0x3B4 [26:16] less the chip's lead. A leading chip reads 0 until its
+ * first frame, which then is no backlog. */
+static u32 _rtl_pci_rxw_hw_pos(void *ctx)
+{
+	struct ieee80211_hw *hw = ctx;
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl8192_rx_ring *ring = &rtl_pcidev(rtl_pcipriv(hw))->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+	u32 pos = (rtl_read_dword(rtlpriv, RTL_PCI_RXBD_IDX) >> 16) & 0x7ff;
+	u8 lead = rtlpriv->cfg->rx_bd_lead;
+
+	if (lead && !ring->hw_moved) {
+		if (!pos)
+			return ring->idx;
+		ring->hw_moved = true;
+	}
+	return (pos + RTL_PCI_MAX_RX_COUNT - lead) % RTL_PCI_MAX_RX_COUNT;
+}
+
+static bool _rtl_pci_rxw_arm(void *ctx, unsigned int slot, struct eth_rx_window_buf b)
+{
+	struct ieee80211_hw *hw = ctx;
+	struct rtl8192_rx_ring *ring = &rtl_pcidev(rtl_pcipriv(hw))->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+	struct rtl_rx_buf *rb = &ring->rx_buf[slot];
+
+	if (WARN_ON_ONCE(rb->page))
+		return false;
+	rb->page = b.buf;
+	rb->dma = b.dma;
+	_rtl_pci_prepare_rxdesc(hw, _rtl_pci_rx_entry(rtl_priv(hw), ring, slot), rb->dma);
+	return true;
+}
+
+static void _rtl_pci_rxw_disarm(void *ctx, unsigned int slot, struct eth_rx_window_buf *b)
+{
+	struct ieee80211_hw *hw = ctx;
+	struct rtl8192_rx_ring *ring = &rtl_pcidev(rtl_pcipriv(hw))->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+	struct rtl_rx_buf *rb = &ring->rx_buf[slot];
+
+	_rtl_pci_prepare_rxdesc(hw, _rtl_pci_rx_entry(rtl_priv(hw), ring, slot), ring->sink.dma);
+	b->buf = rb->page;
+	b->dma = rb->dma;
+	rb->page = NULL;
+}
+
+static int _rtl_pci_rxw_alloc(void *ctx, struct eth_rx_window_buf *b)
+{
+	struct rtl_rx_buf rb;
+
+	if (_rtl_pci_rx_buf_alloc(ctx, &rb))
+		return -ENOMEM;
+	b->buf = rb.page;
+	b->dma = rb.dma;
+	return 0;
+}
+
+static void _rtl_pci_rxw_free(void *ctx, struct eth_rx_window_buf b)
+{
+	struct rtl_rx_buf rb = { .page = b.buf, .dma = b.dma };
+
+	_rtl_pci_rx_buf_free(ctx, &rb);
+}
+
+static const struct eth_rx_window_ops _rtl_pci_rxw_ops = {
+	.hw_pos = _rtl_pci_rxw_hw_pos,
+	.arm = _rtl_pci_rxw_arm,
+	.disarm = _rtl_pci_rxw_disarm,
+	.alloc = _rtl_pci_rxw_alloc,
+	.free = _rtl_pci_rxw_free,
+};
+
+/* The slot just taken gives its buffer to the slot `armed` on: the window moves by one, the slot left behind points
+ * at the sink. */
+static void _rtl_pci_rx_rearm(struct ieee80211_hw *hw, struct rtl8192_rx_ring *ring, unsigned int i)
+{
+	unsigned int j = eth_rx_window_slot(i, ring->rw.armed, RTL_PCI_MAX_RX_COUNT);
+	struct eth_rx_window_buf b;
+
+	if (j == i) {
+		_rtl_pci_prepare_rxdesc(hw, _rtl_pci_rx_entry(rtl_priv(hw), ring, i), ring->rx_buf[i].dma);
+		return;
+	}
+	_rtl_pci_rxw_disarm(hw, i, &b);
+	if (!_rtl_pci_rxw_arm(hw, j, b))	/* j held one: never while the window keeps its invariant (WARN) */
+		_rtl_pci_rxw_free(hw, b);
+}
+
+/* Frames the chip wrote and the RX pass has not taken; the largest is kept for the debugfs and the window. */
+static unsigned int _rtl_pci_rx_backlog(struct ieee80211_hw *hw, struct rtl8192_rx_ring *ring)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	unsigned int b = eth_rx_window_backlog(_rtl_pci_rxw_hw_pos(hw), ring->idx, ring->rw.armed,
+					       RTL_PCI_MAX_RX_COUNT);
+
+	if (b > ring->rw.peak)
+		WRITE_ONCE(ring->rw.peak, b);
+	if (b > rtlpci->rx_peak)
+		rtlpci->rx_peak = b;
+	return b;
+}
+
+/* After the RX pass, its only descriptor writer: the window grows or gives slots back at its end, then the chip's
+ * limit is written once. A shrink moves that limit backwards, only past slots the chip cannot have reached. */
+static void _rtl_pci_rx_window_publish(struct ieee80211_hw *hw, struct rtl8192_rx_ring *ring, int done)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	unsigned int armed = ring->rw.armed;
+
+	if (eth_rx_window_ring_resize(&ring->rw, &_rtl_pci_rxw_ops, hw, ring->idx, RTL_PCI_MAX_RX_COUNT))
+		schedule_work(&rtl_pcidev(rtl_pcipriv(hw))->rxw_work);
+	if (!done && armed == ring->rw.armed)
+		return;
+	wmb();		/* the descriptors before the limit that hands them to the chip */
+	rtlpriv->io.write16(rtlpriv, RTL_PCI_RXBD_IDX, rtl_pci_rx_doorbell(ring));
+}
+
+/* From every RX tasklet run (the engine decides once per ETH_RX_WINDOW_TICK_MS): the window's decision. */
+static void _rtl_pci_rx_window_tick(struct ieee80211_hw *hw)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+
+	if (!ring->armed || !rtl_priv(hw)->use_new_trx_flow)
+		return;
+	if (eth_rx_window_ring_tick(&ring->rw, jiffies_to_msecs(jiffies), READ_ONCE(rx_window_lab)) &
+	    ETH_RX_WINDOW_KICK_WORK)
+		schedule_work(&rtlpci->rxw_work);
+}
+
+static void _rtl_pci_rx_window_work(struct work_struct *work)
+{
+	struct rtl_pci *rtlpci = container_of(work, struct rtl_pci, rxw_work);
+
+	if (eth_rx_window_ring_work(&rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE].rw, &_rtl_pci_rxw_ops,
+				    pci_get_drvdata(rtlpci->pdev)))
+		tasklet_schedule(&rtlpci->rx_tasklet);
+}
+
+/* A descriptor handed back to the chip with the mapped buffer `dma`. */
 static void _rtl_pci_prepare_rxdesc(struct ieee80211_hw *hw, u8 *entry,
 				    dma_addr_t dma)
 {
@@ -752,7 +909,7 @@ static void _rtl_pci_prepare_rxdesc(struct ieee80211_hw *hw, u8 *entry,
 	}
 }
 
-/* Every descriptor at its own buffer while the ring is armed, else at the sink: the chip can
+/* Every descriptor of the window at its own buffer while the ring is armed, else at the sink: the chip can
  * only ever reach memory mapped for it. */
 static void _rtl_pci_rx_point(struct ieee80211_hw *hw, int rxring_idx)
 {
@@ -764,9 +921,8 @@ static void _rtl_pci_rx_point(struct ieee80211_hw *hw, int rxring_idx)
 	int i;
 
 	for (i = 0; i < rtlpci->rxringcount; i++) {
-		entry = rtlpriv->use_new_trx_flow ? (u8 *)&ring->buffer_desc[i] :
-						    (u8 *)&ring->desc[i];
-		_rtl_pci_prepare_rxdesc(hw, entry, ring->armed ?
+		entry = _rtl_pci_rx_entry(rtlpriv, ring, i);
+		_rtl_pci_prepare_rxdesc(hw, entry, ring->armed && ring->rx_buf[i].page ?
 					ring->rx_buf[i].dma : ring->sink.dma);
 	}
 	if (!rtlpriv->use_new_trx_flow)
@@ -774,26 +930,41 @@ static void _rtl_pci_rx_point(struct ieee80211_hw *hw, int rxring_idx)
 					    &tmp_one);
 }
 
-/* ifup: the ring's buffers, all or none. The descriptors leave the sink only once every slot
- * holds its buffer, so a failure leaves nothing the chip or the RX pass can reach. */
+/* ifup: the window's buffers, from slot 0 up to its floor, all or none. The descriptors leave the sink only once
+ * every slot of the window holds its buffer, so a failure leaves nothing the chip or the RX pass can reach. A new
+ * flow chip keeps one slot from itself (its limit is the slot before the doorbell): the engine's cap, the ring less one;
+ * an old-flow chip owns each descriptor by its OWN bit and takes the whole ring. */
 static int _rtl_pci_rx_arm(struct ieee80211_hw *hw)
 {
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+	unsigned int n = rtlpci->rxringcount + !rtlpriv->use_new_trx_flow;
+	bool fixed = rtlpriv->cfg->rx_window_fixed || !rtlpriv->use_new_trx_flow;
 	int i;
 
-	if (ring->armed)
+	if (ring->armed) {	/* a start after a failed hw_init: the window moves to slot 0 with the chip */
+		eth_rx_window_rotate(ring->rx_buf, rtlpci->rxringcount, sizeof(ring->rx_buf[0]), ring->idx);
+		ring->idx = 0;
+		ring->hw_moved = false;
+		_rtl_pci_rx_point(hw, RTL_PCI_RX_MPDU_QUEUE);
 		return 0;
-	for (i = 0; i < rtlpci->rxringcount; i++)
+	}
+	ring->idx = 0;
+	ring->hw_moved = false;
+	eth_rx_window_init(&ring->rw.w, n, fixed ? eth_rx_window_cap(n) : eth_rx_window_floor(n, eth_rx_window_dram_mib()),
+			   jiffies_to_msecs(jiffies));
+	for (i = 0; i < ring->rw.w.target; i++)
 		if (_rtl_pci_rx_buf_alloc(hw, &ring->rx_buf[i]))
 			goto unwind;
+	ring->rw.armed = ring->rw.w.target;
 	ring->armed = true;
 	_rtl_pci_rx_point(hw, RTL_PCI_RX_MPDU_QUEUE);
 	return 0;
 
 unwind:
 	pr_err("rtlwifi: no memory for RX buffer %d of %d: the interface stays down\n",
-	       i + 1, rtlpci->rxringcount);
+	       i + 1, ring->rw.w.target);
 	while (i--)
 		_rtl_pci_rx_buf_free(hw, &ring->rx_buf[i]);
 	return -ENOMEM;
@@ -812,6 +983,8 @@ static void _rtl_pci_rx_release(struct ieee80211_hw *hw, int rxring_idx)
 	}
 	for (i = 0; i < rtlpci->rxringcount; i++)
 		_rtl_pci_rx_buf_free(hw, &ring->rx_buf[i]);
+	eth_rx_window_ring_release(&ring->rw, &_rtl_pci_rxw_ops, hw);
+	ring->rw.armed = 0;
 }
 
 /*hsisr interrupt handler*/
@@ -840,6 +1013,7 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 	bool unicast;
 	u8 hw_queue = 0;
 	unsigned int rx_remained_cnt = 0;
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[rxring_idx];
 	struct rtl_stats stats = {
 		.signal = 0,
 		.rate = 0,
@@ -863,15 +1037,10 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 		u8 *buf;
 
 		if (rtlpriv->use_new_trx_flow) {
-			if (rx_remained_cnt == 0) {
-				rx_remained_cnt =
-				rtlpriv->cfg->ops->rx_desc_buff_remained_cnt(hw,
-								      hw_queue);
-				if (rx_remained_cnt > rtlpci->rx_peak)
-					rtlpci->rx_peak = rx_remained_cnt;
-			}
 			if (rx_remained_cnt == 0)
-				return done;
+				rx_remained_cnt = _rtl_pci_rx_backlog(hw, ring);
+			if (rx_remained_cnt == 0)
+				break;
 			buffer_desc = &rtlpci->rx_ring[rxring_idx].buffer_desc[
 				rtlpci->rx_ring[rxring_idx].idx];
 		} else {	/* rx descriptor */
@@ -882,7 +1051,7 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 							      false,
 							      HW_DESC_OWN);
 			if (own) /* wait data to be filled by hardware */
-				return done;
+				break;
 		}
 
 		/* the chip filled this slot, so the ring is armed */
@@ -991,30 +1160,15 @@ new_trx_end:
 		/* only what was read can be stale in the cache when the slot refills */
 		dma_sync_single_for_device(&rtlpci->pdev->dev, rb->dma, used,
 					   DMA_FROM_DEVICE);
-		if (rtlpriv->use_new_trx_flow) {
-			rtlpci->rx_ring[hw_queue].next_rx_rp += 1;
-			rtlpci->rx_ring[hw_queue].next_rx_rp %=
-					RTL_PCI_MAX_RX_COUNT;
-
+		if (rtlpriv->use_new_trx_flow)
 			rx_remained_cnt--;
-		}
 		if (((rtlpriv->link_info.num_rx_inperiod +
 		      rtlpriv->link_info.num_tx_inperiod) > 8) ||
 		      rtlpriv->link_info.num_rx_inperiod > 2)
 			_rtl_pci_lps_leave(hw);
 		if (rtlpriv->use_new_trx_flow) {
-			_rtl_pci_prepare_rxdesc(hw, (u8 *)buffer_desc, rb->dma);
-			/* ★ THE SLOT IS HANDED BACK ONLY ONCE IT HOLDS ITS NEW, MAPPED
-			 * BUFFER (Codex, 2026-09-28): the host index at 0x3B4 used to be
-			 * published BEFORE this refill, so the device was given a slot
-			 * whose descriptor still pointed at the buffer just unmapped and
-			 * handed up -- the vendor writes the BD info, then the index
-			 * (Hal88XXRxDesc / UpdateRXBDHostIdx). The barrier orders the
-			 * descriptor write before the doorbell. */
-			wmb();
-			/* no read-back: one more MMIO round trip per frame */
-			rtlpriv->io.write16(rtlpriv, 0x3B4,
-					    rtlpci->rx_ring[hw_queue].next_rx_rp);
+			/* the chip gets the window's new end with the limit after the pass */
+			_rtl_pci_rx_rearm(hw, ring, ring->idx);
 		} else {
 			_rtl_pci_prepare_rxdesc(hw, (u8 *)pdesc, rb->dma);
 			if (rtlpci->rx_ring[rxring_idx].idx ==
@@ -1029,6 +1183,8 @@ new_trx_end:
 				rtlpci->rxringcount;
 		done++;
 	}
+	if (rtlpriv->use_new_trx_flow)
+		_rtl_pci_rx_window_publish(hw, ring, done);
 	return done;
 }
 
@@ -1082,6 +1238,7 @@ static void _rtl_pci_rx_tasklet(struct tasklet_struct *t)
 
 	while ((skb = skb_dequeue(&rtlpci->rx_inject)))
 		ieee80211_rx(hw, skb);
+	_rtl_pci_rx_window_tick(hw);
 	rcu_read_lock();
 	done = _rtl_pci_rx_interrupt(hw, RTL_PCI_RX_BUDGET, &stack);
 	rcu_read_unlock();
@@ -1408,6 +1565,7 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
 
 	/*task */
 	tasklet_setup(&rtlpci->rx_tasklet, _rtl_pci_rx_tasklet);
+	INIT_WORK(&rtlpci->rxw_work, _rtl_pci_rx_window_work);
 	skb_queue_head_init(&rtlpci->rx_inject);
 	tasklet_setup(&rtlpriv->works.irq_tasklet, _rtl_pci_irq_tasklet);
 	tasklet_setup(&rtlpriv->works.tx_tasklet, rtl_tx_tasklet);
@@ -2108,6 +2266,7 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
 
 	synchronize_irq(rtlpci->pdev->irq);
 	tasklet_kill(&rtlpci->rx_tasklet);
+	cancel_work_sync(&rtlpci->rxw_work);
 	skb_queue_purge(&rtlpci->rx_inject);
 	tasklet_kill(&rtlpriv->works.irq_tasklet);
 	tasklet_kill(&rtlpriv->works.tx_tasklet);
@@ -2235,8 +2394,9 @@ static void rtl_pci_stop(struct ieee80211_hw *hw)
 	spin_unlock_irqrestore(&rtlpriv->locks.rf_ps_lock, flags);
 
 	rtlpriv->cfg->ops->hw_disable(hw);
-	/* the chip's DMA is off: only now may its receive buffers go, with no RX pass meanwhile */
+	/* the chip's DMA is off: only now may its receive buffers go, with no RX pass or worker meanwhile */
 	tasklet_disable(&rtlpci->rx_tasklet);
+	cancel_work_sync(&rtlpci->rxw_work);
 	_rtl_pci_rx_release(hw, RTL_PCI_RX_MPDU_QUEUE);
 	tasklet_enable(&rtlpci->rx_tasklet);
 	/* some things are not needed if firmware not available */
@@ -2842,6 +3002,40 @@ int rtl_pci_resume(struct device *dev)
 EXPORT_SYMBOL(rtl_pci_resume);
 #endif /* CONFIG_PM_SLEEP */
 
+/* ethtool -g: rx = the window now, rx max = its cap; tx = the BE ring, fixed. */
+static void rtl_pci_rx_ring_get(struct ieee80211_hw *hw, u32 *tx, u32 *tx_max, u32 *rx, u32 *rx_max)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	const struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+
+	*tx = *tx_max = rtlpci->txringcount[BE_QUEUE];
+	*rx = READ_ONCE(ring->rw.armed);
+	*rx_max = ring->rw.w.cap;
+}
+
+/* ethtool -G rx N pins the window at N rounded up to a group, floor..cap, while the interface stays up. */
+static int rtl_pci_rx_ring_pin(struct ieee80211_hw *hw, u32 tx, u32 rx)
+{
+	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+	struct rtl8192_rx_ring *ring = &rtlpci->rx_ring[RTL_PCI_RX_MPDU_QUEUE];
+
+	if (!ring->armed)
+		return -EBUSY;
+	if (tx != rtlpci->txringcount[BE_QUEUE] || rx < ring->rw.w.floor || rx > ring->rw.w.cap)
+		return -EINVAL;
+	tasklet_disable(&rtlpci->rx_tasklet);	/* the window's tick runs in it */
+	eth_rx_window_ring_pin(&ring->rw, rx);
+	tasklet_enable(&rtlpci->rx_tasklet);
+	schedule_work(&rtlpci->rxw_work);
+	tasklet_schedule(&rtlpci->rx_tasklet);
+	return 0;
+}
+
+static void rtl_pci_rx_ring_stats(struct ieee80211_hw *hw, u64 *data)
+{
+	eth_rx_window_ring_stats(&rtl_pcidev(rtl_pcipriv(hw))->rx_ring[RTL_PCI_RX_MPDU_QUEUE].rw, data);
+}
+
 const struct rtl_intf_ops rtl_pci_ops = {
 	.adapter_start = rtl_pci_start,
 	.adapter_stop = rtl_pci_stop,
@@ -2852,4 +3046,8 @@ const struct rtl_intf_ops rtl_pci_ops = {
 
 	.disable_aspm = rtl_pci_disable_aspm,
 	.enable_aspm = rtl_pci_enable_aspm,
+
+	.rx_ring_get = rtl_pci_rx_ring_get,
+	.rx_ring_pin = rtl_pci_rx_ring_pin,
+	.rx_ring_stats = rtl_pci_rx_ring_stats,
 };

@@ -2193,8 +2193,6 @@ struct rtl_hal_ops {
 				struct ieee80211_sta *sta, u8 rssi_leve,
 				bool update_bw);
 	void (*update_rate_mask)(struct ieee80211_hw *hw, u8 rssi_level);
-	u16 (*rx_desc_buff_remained_cnt)(struct ieee80211_hw *hw,
-					 u8 queue_index);
 	/* -> the buffer holds one whole frame: first and last segment */
 	bool (*rx_check_dma_ok)(struct ieee80211_hw *hw, u8 *header_desc,
 				u8 queue_index);
@@ -2298,6 +2296,10 @@ struct rtl_intf_ops {
 	/*pci */
 	void (*disable_aspm)(struct ieee80211_hw *hw);
 	void (*enable_aspm)(struct ieee80211_hw *hw);
+	/* ethtool -g/-G/-S on the RX window (RX-WINDOW.md) */
+	void (*rx_ring_get)(struct ieee80211_hw *hw, u32 *tx, u32 *tx_max, u32 *rx, u32 *rx_max);
+	int (*rx_ring_pin)(struct ieee80211_hw *hw, u32 tx, u32 rx);
+	void (*rx_ring_stats)(struct ieee80211_hw *hw, u64 *data);	/* ETH_RX_WINDOW_STATS values */
 
 	/*usb */
 };
@@ -2377,7 +2379,8 @@ struct rtl_hal_cfg {
 	 * defined int HAL but used in MAIN
 	 */
 	u32 maps[RTL_VAR_MAP_MAX];
-
+	u8 rx_bd_lead;		/* the RX BD index leads the slot the chip writes next by this */
+	bool rx_window_fixed;	/* the RX window stays the whole ring until a lab run proves it */
 };
 
 struct rtl_locks {

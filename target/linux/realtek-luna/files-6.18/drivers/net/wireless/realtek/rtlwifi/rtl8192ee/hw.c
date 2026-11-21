@@ -895,6 +895,9 @@ dma64_end:
 
 	bytetmp = rtl_read_byte(rtlpriv, REG_PCIE_CTRL_REG + 3);
 	rtl_write_byte(rtlpriv, REG_PCIE_CTRL_REG + 3, bytetmp | 0xF7);
+	/* the indices are 0 and RX is already on: the window's end before a frame can land */
+	rtl_write_word(rtlpriv, REG_RXQ_TXBD_IDX,
+		       rtl_pci_rx_doorbell(&rtlpci->rx_ring[RX_MPDU_QUEUE]));
 
 	rtl_write_dword(rtlpriv, REG_INT_MIG, 0);
 

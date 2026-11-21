@@ -206,7 +206,6 @@ static const struct rtl_hal_ops rtl8192ee_hal_ops = {
 	.get_hw_reg = rtl92ee_get_hw_reg,
 	.set_hw_reg = rtl92ee_set_hw_reg,
 	.update_rate_tbl = rtl92ee_update_hal_rate_tbl,
-	.rx_desc_buff_remained_cnt = rtl92ee_rx_desc_buff_remained_cnt,
 	.rx_check_dma_ok = rtl92ee_rx_check_dma_ok,
 	.fill_tx_desc = rtl92ee_tx_fill_desc,
 	.fill_tx_cmddesc = rtl92ee_tx_fill_cmddesc,
@@ -255,6 +254,8 @@ static const struct rtl_hal_cfg rtl92ee_hal_cfg = {
 	.bar_id = 2,
 	.write_readback = true,
 	.name = "rtl92ee_pci",
+	.rx_bd_lead = 1,
+	.rx_window_fixed = true,	/* until a lab V2801RGW run proves its window (RX-WINDOW.md) */
 	.ops = &rtl8192ee_hal_ops,
 	.mod_params = &rtl92ee_mod_params,
 

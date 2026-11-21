@@ -168,8 +168,8 @@ static inline void eth_rx_window_rotate(void *base, unsigned int n, unsigned int
 }
 
 /* ---- The engine: how a driver's ring moves its window. The driver gives five ops on its own descriptors; they are
- * called per poll, per tick or from the worker, never per frame. The includer provides the kernel's barriers and
- * <linux/moduleparam.h>. ---- */
+ * called per poll, per tick or from the worker, never per frame. The includer provides the kernel's barriers,
+ * <linux/moduleparam.h> and <linux/of_address.h>. ---- */
 struct eth_rx_window_buf {
 	void		*buf;
 	dma_addr_t	dma;
@@ -204,6 +204,21 @@ struct eth_rx_window_ops {
 	static bool rx_window_lab = ETH_RX_WINDOW_LAB_DEFAULT;				\
 	module_param(rx_window_lab, bool, 0644);					\
 	MODULE_PARM_DESC(rx_window_lab, "RX window dynamic whatever the DRAM (lab only, until reboot)")
+
+/* The DRAM the device tree declares, in MiB: the line eth_rx_window_floor() draws. */
+#define ETH_RX_WINDOW_DRAM_MIB()							\
+	static unsigned int eth_rx_window_dram_mib(void)				\
+	{										\
+		struct device_node *np;							\
+		struct resource r;							\
+		u64 bytes = 0;								\
+		int i;									\
+											\
+		for_each_node_by_type(np, "memory")					\
+			for (i = 0; !of_address_to_resource(np, i, &r); i++)		\
+				bytes += resource_size(&r);				\
+		return bytes >> 20;							\
+	}
 
 static inline bool eth_rx_window_ring_dynamic(const struct eth_rx_window_ring *r)
 {

@@ -741,8 +741,6 @@ struct rx_desc {
 
 bool rtl92ee_rx_check_dma_ok(struct ieee80211_hw *hw, u8 *header_desc,
 			     u8 queue_index);
-u16	rtl92ee_rx_desc_buff_remained_cnt(struct ieee80211_hw *hw,
-					  u8 queue_index);
 u16 rtl92ee_get_available_desc(struct ieee80211_hw *hw, u8 queue_index);
 
 void rtl92ee_tx_fill_desc(struct ieee80211_hw *hw,

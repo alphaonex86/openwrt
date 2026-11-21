@@ -12,6 +12,7 @@
 #include <linux/firmware.h>
 #include <linux/export.h>
 #include <net/cfg80211.h>
+#include "eth_rx_window.h"
 
 /* TX A-MPDU as stock does: without it every 60 B frame pays a whole PPDU (the Luna
  * downlink deficit). The 2026-07 "wedge" predates the BD segment layout fix; X111W
@@ -2107,6 +2108,36 @@ void rtl_lamp_unregister(struct ieee80211_hw *hw)
 }
 EXPORT_SYMBOL(rtl_lamp_unregister);
 
+static void rtl_op_get_ringparam(struct ieee80211_hw *hw, u32 *tx, u32 *tx_max, u32 *rx, u32 *rx_max)
+{
+	rtl_priv(hw)->intf_ops->rx_ring_get(hw, tx, tx_max, rx, rx_max);
+}
+
+static int rtl_op_set_ringparam(struct ieee80211_hw *hw, u32 tx, u32 rx)
+{
+	return rtl_priv(hw)->intf_ops->rx_ring_pin(hw, tx, rx);
+}
+
+static const char rtl_et_strings[][ETH_GSTRING_LEN] = { ETH_RX_WINDOW_STAT_NAMES };
+
+static int rtl_op_get_et_sset_count(struct ieee80211_hw *hw, struct ieee80211_vif *vif, int sset)
+{
+	BUILD_BUG_ON(ARRAY_SIZE(rtl_et_strings) != ETH_RX_WINDOW_STATS);
+	return sset == ETH_SS_STATS ? ETH_RX_WINDOW_STATS : 0;
+}
+
+static void rtl_op_get_et_strings(struct ieee80211_hw *hw, struct ieee80211_vif *vif, u32 sset, u8 *data)
+{
+	if (sset == ETH_SS_STATS)
+		memcpy(data, rtl_et_strings, sizeof(rtl_et_strings));
+}
+
+static void rtl_op_get_et_stats(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ethtool_stats *stats,
+				u64 *data)
+{
+	rtl_priv(hw)->intf_ops->rx_ring_stats(hw, data);
+}
+
 const struct ieee80211_ops rtl_ops = {
 	.add_chanctx = ieee80211_emulate_add_chanctx,
 	.remove_chanctx = ieee80211_emulate_remove_chanctx,
@@ -2141,6 +2172,11 @@ const struct ieee80211_ops rtl_ops = {
 	.sta_remove = rtl_op_sta_remove,
 	.flush = rtl_op_flush,
 	.set_tim = rtl_op_set_tim,
+	.get_ringparam = rtl_op_get_ringparam,
+	.set_ringparam = rtl_op_set_ringparam,
+	.get_et_sset_count = rtl_op_get_et_sset_count,
+	.get_et_strings = rtl_op_get_et_strings,
+	.get_et_stats = rtl_op_get_et_stats,
 };
 EXPORT_SYMBOL_GPL(rtl_ops);
 

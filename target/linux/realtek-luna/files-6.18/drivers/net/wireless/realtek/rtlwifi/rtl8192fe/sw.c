@@ -209,7 +209,6 @@ static const struct rtl_hal_ops rtl8192fe_hal_ops = {
 	.get_hw_reg = rtl92fe_get_hw_reg,
 	.set_hw_reg = rtl92fe_set_hw_reg,
 	.update_rate_tbl = rtl92fe_update_hal_rate_tbl,
-	.rx_desc_buff_remained_cnt = rtl92fe_rx_desc_buff_remained_cnt,
 	.rx_check_dma_ok = rtl92fe_rx_check_dma_ok,
 	.fill_tx_desc = rtl92fe_tx_fill_desc,
 	.fill_tx_cmddesc = rtl92fe_tx_fill_cmddesc,

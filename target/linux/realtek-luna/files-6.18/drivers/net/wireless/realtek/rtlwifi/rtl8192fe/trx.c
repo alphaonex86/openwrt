@@ -477,40 +477,6 @@ bool rtl92fe_rx_check_dma_ok(struct ieee80211_hw *hw, u8 *header_desc8,
 	return get_rx_buffer_desc_fs(&w) && get_rx_buffer_desc_ls(&w);
 }
 
-u16 rtl92fe_rx_desc_buff_remained_cnt(struct ieee80211_hw *hw, u8 queue_index)
-{
-	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	u16 read_point, write_point, remind_cnt;
-	u32 tmp_4byte;
-
-	tmp_4byte = rtl_read_dword(rtlpriv, REG_RXQ_TXBD_IDX);
-	read_point = (u16)((tmp_4byte >> 16) & 0x7ff);
-	write_point = (u16)(tmp_4byte & 0x7ff);
-
-	if (write_point != rtlpci->rx_ring[queue_index].next_rx_rp) {
-		rtl_dbg(rtlpriv, COMP_RXDESC, DBG_DMESG,
-			"write point is 0x%x, reg value is 0x%x\n",
-			write_point, tmp_4byte);
-		tmp_4byte = rtl_read_dword(rtlpriv, REG_RXQ_TXBD_IDX);
-		read_point = (u16)((tmp_4byte >> 16) & 0x7ff);
-		write_point = (u16)(tmp_4byte & 0x7ff);
-	}
-
-	/* RX indices delimit completed slots; unlike TX free space, no slot
-	 * is reserved. Native RX drains until host and hardware indices match.
-	 */
-	remind_cnt = (read_point + RTL_PCI_MAX_RX_COUNT - write_point) %
-		     RTL_PCI_MAX_RX_COUNT;
-
-	if (remind_cnt == 0)
-		return 0;
-
-	rtlpci->rx_ring[queue_index].next_rx_rp = write_point;
-
-	return remind_cnt;
-}
-
 static u16 get_desc_addr_fr_q_idx(u16 queue_index)
 {
 	u16 desc_address;

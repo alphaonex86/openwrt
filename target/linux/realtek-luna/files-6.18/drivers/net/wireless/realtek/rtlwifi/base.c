@@ -2072,6 +2072,8 @@ static void rtl_watchdog_wq_callback(struct work_struct *work)
 
 	if (is_hal_stop(rtlhal))
 		return;
+	if (rtlhal->interface == INTF_PCI)
+		rtl_pci_rx_window_kick(hw);
 
 	/* <1> Determine if action frame is allowed */
 	if (mac->link_state > MAC80211_NOLINK) {

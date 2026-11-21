@@ -1142,10 +1142,8 @@ static int _rtl_pci_rx_interrupt(struct ieee80211_hw *hw, int budget,
 			    rtlpriv->cfg->ops->txbf_assoc_req)
 				rtlpriv->cfg->ops->txbf_assoc_req(hw, skb->data,
 								 skb->len - FCS_LEN);
-			if (rtlpriv->mac80211.opmode == NL80211_IFTYPE_AP &&
-			    rtlpriv->rtlhal.current_bandtype == BAND_ON_2_4G &&
-			    (ieee80211_is_beacon(fc) ||
-			     ieee80211_is_probe_resp(fc))) {
+			if (rtl_rx_drop_neighbour_bss(&rtlpriv->mac80211,
+						      rtlpriv->rtlhal.current_bandtype, fc)) {
 				dev_kfree_skb_any(skb);
 			} else if (unlikely(!rtl_action_proc(hw, skb, false))) {
 				dev_kfree_skb_any(skb);

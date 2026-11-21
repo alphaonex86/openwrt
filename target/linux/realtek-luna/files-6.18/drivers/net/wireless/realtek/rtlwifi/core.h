@@ -120,6 +120,14 @@ static inline bool rtl_desc_rate_is_ht(u8 desc_rate)
 	return desc_rate >= DESC_RATEMCS0 && desc_rate < DESC_RATEVHT1SS_MCS0;
 }
 
+/* An AP on 2.4 GHz drops its neighbours' beacons and probe responses, except during a scan
+ * (iw scan ap-force, hostapd's 20/40 MHz neighbour scan), which has only these frames. */
+static inline bool rtl_rx_drop_neighbour_bss(const struct rtl_mac *mac, enum band_type band, __le16 fc)
+{
+	return mac->opmode == NL80211_IFTYPE_AP && !mac->act_scanning && band == BAND_ON_2_4G &&
+	       (ieee80211_is_beacon(fc) || ieee80211_is_probe_resp(fc));
+}
+
 /* rtlpriv->status bit beside RTL_STATUS_INTERFACE_START (wifi.h, bit 0) */
 #define RTL_STATUS_HW_RESTART		1
 void rtl_restart_hw(struct ieee80211_hw *hw);

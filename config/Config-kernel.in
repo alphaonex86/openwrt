@@ -420,6 +420,14 @@ config KERNEL_KALLSYMS
 	help
 	  This will give you more information in stack traces from kernel oopses.
 
+config KERNEL_KALLSYMS_UNCOMPRESSED
+	bool "Store the symbol names uncompressed"
+	depends on KERNEL_KALLSYMS
+	default y
+	help
+	  The names compress better in the kernel image, but stay that big in RAM:
+	  a board short of RAM turns it off.
+
 config KERNEL_FTRACE
 	bool "Compile the kernel with tracing support"
 	depends on !TARGET_uml
@@ -1008,6 +1016,90 @@ config KERNEL_SLUB_TINY
 	help
 	  For 16-32 MB boards: no per-CPU partial lists and no slab sysfs
 	  (/sys/kernel/slab was 3764 of the X100DG's 7419 kernfs nodes).
+
+config KERNEL_SYSVIPC
+	bool "System V IPC"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_CRYPTO_CCM
+	bool "CCM (WiFi CCMP)"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_CRYPTO_GCM
+	bool "GCM (WiFi GCMP)"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_CRYPTO_CMAC
+	bool "CMAC (WiFi BIP)"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_CRYPTO_GHASH
+	bool "GHASH (WiFi GCMP)"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_CRYPTO_CTR
+	bool "CTR mode (WiFi CCMP/GCMP)"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_NF_TABLES_ARP
+	bool "nftables arp family"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_NF_CONNTRACK_AMANDA
+	bool "Amanda conntrack helper"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_NF_CONNTRACK_IRC
+	bool "IRC conntrack helper"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_NF_CONNTRACK_NETBIOS_NS
+	bool "NetBIOS name service conntrack helper"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_NF_CONNTRACK_SNMP
+	bool "SNMP conntrack helper"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
+
+config KERNEL_NF_CONNTRACK_SANE
+	bool "SANE conntrack helper"
+	depends on TARGET_realtek_luna
+	default y
+	help
+	  Built in by the target kernel config; a board whose layer never uses it turns it off.
 
 config KERNEL_MTD_LUNA_NOR
 	bool "Luna SPI-NOR flash"

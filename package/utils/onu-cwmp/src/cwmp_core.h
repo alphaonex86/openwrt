@@ -27,14 +27,24 @@ struct param {
 struct model {
 	struct param *p;
 	size_t n, cap;
-	char reboot_key[256];		/* the CommandKey of the last Reboot asked */
 };
 
-/* Placeholders a model value may carry, filled at answer time. */
+/* Placeholders a model value may carry, filled at answer time. A value "{uci:<option>}" lives in UCI: get -> 0
+ * with it, set stages a new one (a NULL value reverts what was staged), so the unit itself changes. */
 struct live {
 	const char *ip;			/* the CPE's management address */
 	const char *uptime;		/* seconds */
 	const char *now;		/* ISO 8601, the CurrentTime of an Inform */
+	int (*uci_get)(const char *option, char *out, size_t len);
+	int (*uci_set)(const char *option, const char *value);
+};
+
+/* What the ACS asked for that the CPE does once the session is over. */
+struct todo {
+	int reboot, factory_reset, uci_changed;
+	char reboot_key[256];
+	char download_key[256], url[1024], user[256], pass[256];	/* a firmware Download: url empty when none */
+	long size;
 };
 
 int model_load(struct model *m, const char *path);
@@ -52,8 +62,12 @@ void soap_inform(struct buf *b, const char *id, const struct model *m, const str
 		 const char *const *events, size_t n_events, const char *const *inform_names, size_t n_names,
 		 unsigned int retry);
 
-/* The answer to one ACS request; @reboot set when it asked for one. -> 0, or -1 when not understood. */
+/* The answer to one ACS request; @t gathers what it asked for after the session. -> 0, or -1 when not understood. */
 int soap_answer(struct buf *b, struct model *m, const struct live *lv, const char *body, const char *id,
-		int *reboot, int *changed);
+		struct todo *t, int *changed);
+
+/* The TransferComplete of the Download @key: @fault 0 when it succeeded. */
+void soap_transfer_complete(struct buf *b, const char *id, const char *key, int fault, const char *why,
+			    const char *start, const char *complete);
 
 #endif

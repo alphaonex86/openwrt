@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The ACS a WAN DHCP server hands in option 43 to a client sending option 60 "dslforum.org" (TR-069 3.1: sub-option
+# 1 the URL, 2 the ProvisioningCode) becomes this CPE's own, as on the unit's stock firmware -- unless the OLT gave
+# one over OMCI (gpon-acs), which rules. An unchanged offer rewrites nothing: what the ACS set since stays.
+case "$1" in bound|renew) ;; *) exit 0 ;; esac
+[ -n "$opt43" ] || exit 0
+
+# Sub-option $1 of option 43 (udhcpc hands it as hex), as text.
+opt43_sub() {
+	local hex="$opt43" code len
+	while [ ${#hex} -ge 4 ]; do
+		code=$((0x$(echo "$hex" | cut -c1-2)))
+		len=$((0x$(echo "$hex" | cut -c3-4)))
+		[ "$code" = "$1" ] && { printf '%b' "$(echo "$hex" | cut -c5-$((4 + 2 * len)) | sed 's/../\\x&/g')"; return; }
+		hex=$(echo "$hex" | cut -c$((5 + 2 * len))-)
+	done
+}
+
+url=$(opt43_sub 1)
+code=$(opt43_sub 2)
+case "$url" in
+http://*) ;;
+https://*) logger -t onu-cwmp "the DHCP ACS $url is HTTPS, which onu-cwmp does not speak: not applied"; exit 0 ;;
+*) logger -t onu-cwmp "DHCP option 43 carries no ACS URL: ignored"; exit 0 ;;
+esac
+[ "$(uci -q get cwmp.acs.source)" = omci ] && exit 0
+[ "$(uci -q get cwmp.acs.dhcp_url)" = "$url" ] && [ "$(uci -q get cwmp.acs.dhcp_code)" = "$code" ] && exit 0
+if ! uci -q set cwmp.acs.dhcp_url="$url" || ! uci -q set cwmp.acs.dhcp_code="$code" ||
+	! uci -q set cwmp.acs.url="$url" || ! uci -q set cwmp.acs.provisioning_code="$code" ||
+	! uci -q set cwmp.acs.interface="$INTERFACE" || ! uci -q set cwmp.acs.source=dhcp ||
+	! uci -q set cwmp.acs.enabled=1 || ! uci -q commit cwmp; then
+	logger -t onu-cwmp "the DHCP ACS $url could not be written to the cwmp config"
+	exit 1
+fi
+logger -t onu-cwmp "ACS from DHCP option 43 on $INTERFACE: $url"
+/etc/init.d/onu-cwmp restart

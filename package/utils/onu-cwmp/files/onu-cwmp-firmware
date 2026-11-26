@@ -1,0 +1,47 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The firmware a TR-069 Download fetched ($1): refused unless sysupgrade accepts it for this unit, written unless
+# the flash already holds it. Exit 0: the flash holds it (nothing written, or sysupgrade reboots into it); 1: refused,
+# the reason on stdout. --same <image>: exit 0 when the flash holds it, nothing else done.
+same=
+[ "$1" = --same ] && { same=1; shift; }
+img="$1"
+
+# The mtdblock of the partition named $1.
+part_block() {
+	local d
+	for d in /sys/class/mtd/mtd[0-9]*; do
+		[ "$(cat "$d/name" 2>/dev/null)" = "$1" ] && { echo "/dev/mtdblock${d##*mtd}"; return 0; }
+	done
+	return 1
+}
+
+# Does partition $1 begin with the first $3 bytes of the image's member $2 (all of it when $3 is empty)?
+holds() {
+	local block member size
+	block=$(part_block "$1") || return 1
+	member=$(tar tf "$img" 2>/dev/null | grep -m 1 "^sysupgrade-[^/]*/$2\$") || return 1
+	size=${3:-$(tar xf "$img" "$member" -O | wc -c)}
+	[ "$(tar xf "$img" "$member" -O | head -c "$size" | sha256sum | cut -d' ' -f1)" = \
+		"$(head -c "$size" "$block" | sha256sum | cut -d' ' -f1)" ]
+}
+
+# The squashfs's own length (superblock bytes_used, little endian at 40): r0 holds the overlay past it.
+squashfs_used() {
+	set -- $(tar xf "$img" "$(tar tf "$img" | grep -m 1 '^sysupgrade-[^/]*/root$')" -O | head -c 48 |
+		tail -c 8 | hexdump -v -e '8/1 "%02x "')
+	[ $# = 8 ] && echo $((0x$8$7$6$5$4$3$2$1))
+}
+
+flash_holds_it() {
+	local used
+	used=$(squashfs_used) && [ "${used:-0}" -gt 0 ] && holds k0 kernel && holds r0 root "$used"
+}
+
+if [ -n "$same" ]; then
+	flash_holds_it
+	exit
+fi
+why=$(sysupgrade -T "$img" 2>&1) || { echo "not a firmware for this unit: $(echo "$why" | tail -n 1)"; exit 1; }
+flash_holds_it && { echo "the flash already holds this firmware: nothing written"; exit 0; }
+exec sysupgrade "$img"

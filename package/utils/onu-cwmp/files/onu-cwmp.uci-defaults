@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The WAN's DHCP client asks for its ACS as the stock firmwares do (option 60 "dslforum.org", option 43 back: TR-069
+# 3.1), on a fresh image and on one upgraded with its configuration kept; a vendor class already set stays.
+uci -q get network.wan > /dev/null || exit 0
+[ -n "$(uci -q get network.wan.vendorid)" ] || uci -q set network.wan.vendorid=dslforum.org || exit 1
+case " $(uci -q get network.wan.reqopts) " in
+*" 43 "*) ;;
+*) uci -q add_list network.wan.reqopts=43 || exit 1 ;;
+esac
+uci -q commit network

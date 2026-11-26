@@ -1,12 +1,78 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-or-later
-# The TR-069 CPE a unit answers its ISP's ACS with, on that ISP's management interface alone.
+# The TR-069 CPE a unit answers its ISP's ACS with, on that ISP's management interface alone. Its data model is
+# the ISP's own (/etc/cwmp/model.tsv, installed by a refurbish), else this unit's native TR-098 one.
 
 START=99
 USE_PROCD=1
 
+RUN=/var/run/onu-cwmp
+P=InternetGatewayDevice
+
+row() { printf '%s\t%s\t%s\t%s\n' "$@"; }
+
+# The GPON serial the unit ranges with, else its MAC (said in the log).
+unit_serial() {
+	local f sn
+	for f in /sys/module/*/parameters/onu_sn; do
+		sn=$(cat "$f" 2>/dev/null) && [ -n "$sn" ] && { echo "$sn"; return; }
+	done
+	logger -t onu-cwmp "no GPON serial readable: the SerialNumber is the MAC $1"
+	echo "$1"
+}
+
+# This unit's TR-098 model into $2 and its Inform's names into $3; $1 is the management device.
+native_model() {
+	local model maker mac sn sw i=0 n
+	model=$(cat /tmp/sysinfo/model 2>/dev/null)
+	maker=${model%% *}
+	mac=$(tr -d : < "/sys/class/net/$1/address" | tr a-f A-F)
+	sn=$(unit_serial "$mac")
+	[ -f /lib/functions/onu-identity.sh ] && . /lib/functions/onu-identity.sh && sw=$(owrt_version)
+	[ -n "$sw" ] || sw=$(. /etc/openwrt_release && echo "$DISTRIB_REVISION")
+	{
+		row "$P." 0
+		row "$P.DeviceSummary" 0 xsd:string "$P:1.4[](Baseline:1)"
+		row "$P.DeviceInfo." 0
+		row "$P.DeviceInfo.Manufacturer" 0 xsd:string "$maker"
+		row "$P.DeviceInfo.ManufacturerOUI" 0 xsd:string "$(echo "$mac" | cut -c1-6)"
+		row "$P.DeviceInfo.ModelName" 0 xsd:string "${model#"$maker" }"
+		row "$P.DeviceInfo.ProductClass" 0 xsd:string "${model#"$maker" }"
+		row "$P.DeviceInfo.SerialNumber" 0 xsd:string "$sn"
+		row "$P.DeviceInfo.HardwareVersion" 0 xsd:string "$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+		row "$P.DeviceInfo.SoftwareVersion" 0 xsd:string "$sw"
+		row "$P.DeviceInfo.SpecVersion" 0 xsd:string 1.0
+		row "$P.DeviceInfo.ProvisioningCode" 1 xsd:string "{uci:cwmp.acs.provisioning_code}"
+		row "$P.DeviceInfo.UpTime" 0 xsd:unsignedInt "{uptime}"
+		row "$P.ManagementServer." 0
+		row "$P.ManagementServer.URL" 1 xsd:string "{uci:cwmp.acs.url}"
+		row "$P.ManagementServer.Username" 1 xsd:string "{uci:cwmp.acs.username}"
+		row "$P.ManagementServer.PeriodicInformEnable" 1 xsd:boolean 1
+		row "$P.ManagementServer.PeriodicInformInterval" 1 xsd:unsignedInt 3600
+		row "$P.ManagementServer.ParameterKey" 0 xsd:string ""
+		row "$P.ManagementServer.ConnectionRequestURL" 0 xsd:string "http://{ip}:7547/"
+		row "$P.ManagementServer.ConnectionRequestUsername" 1 xsd:string ""
+		row "$P.ManagementServer.ConnectionRequestPassword" 1 xsd:string ""
+		row "$P.Time." 0
+		row "$P.Time.CurrentLocalTime" 0 xsd:dateTime "{now}"
+		row "$P.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1." 0
+		row "$P.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress" 0 xsd:string "{ip}"
+		n=$(uci -q show wireless | grep -c '^wireless\.@wifi-iface\[[0-9]*\]=wifi-iface$')
+		[ "$n" -gt 0 ] && row "$P.LANDevice.1.WLANConfiguration." 0
+		while [ "$i" -lt "$n" ]; do
+			row "$P.LANDevice.1.WLANConfiguration.$((i + 1)).SSID" 1 xsd:string "{uci:wireless.@wifi-iface[$i].ssid}"
+			i=$((i + 1))
+		done
+	} > "$2" || return 1
+	for i in DeviceSummary DeviceInfo.HardwareVersion DeviceInfo.SoftwareVersion DeviceInfo.ProvisioningCode \
+		ManagementServer.ConnectionRequestURL ManagementServer.ParameterKey \
+		WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress; do
+		echo "$P.$i"
+	done > "$3"
+}
+
 start_service() {
-	local enabled url user pass iface agent dev dns
+	local enabled url user pass iface agent dev dns model=/etc/cwmp/model.tsv names=/etc/cwmp/inform-names.txt
 
 	config_load cwmp
 	config_get_bool enabled acs enabled 0
@@ -16,14 +82,18 @@ start_service() {
 	config_get pass acs password
 	config_get iface acs interface
 	config_get agent acs user_agent onu-cwmp
-	[ -s /etc/cwmp/model.tsv ] || { logger -t onu-cwmp "no data model in /etc/cwmp/model.tsv"; return 0; }
 	. /lib/functions/network.sh
 	network_get_device dev "$iface" || { logger -t onu-cwmp "interface $iface is not up: started when it is"; return 0; }
-	# the management DNS the PPP link gave, kept out of the system resolver (peerdns 0)
+	if [ ! -s "$model" ]; then
+		model=$RUN/model.tsv names=$RUN/inform-names.txt
+		mkdir -p "$RUN" && native_model "$dev" "$model" "$names" ||
+			{ logger -t onu-cwmp "the native data model could not be written to $RUN"; return 1; }
+	fi
+	# the management DNS the link gave, kept out of the system resolver (peerdns 0)
 	dns=$(ifstatus "$iface" | jsonfilter -e '@["dns-server"][0]' -e '@.inactive["dns-server"][0]' | head -1)
 	procd_open_instance
-	procd_set_param command /usr/sbin/onu-cwmp -u "$url" -U "$user" -P "$pass" -m /etc/cwmp/model.tsv \
-		-n /etc/cwmp/inform-names.txt -i "$dev" -a "$agent" ${dns:+-d "$dns"}
+	procd_set_param command /usr/sbin/onu-cwmp -u "$url" -U "$user" -P "$pass" -m "$model" \
+		-n "$names" -i "$dev" -a "$agent" ${dns:+-d "$dns"}
 	procd_set_param respawn 3600 30 0
 	procd_close_instance
 }

@@ -1,6 +1,6 @@
 #
-# A TR-069 (CWMP) CPE answering from a data model file: what a unit presenting an ISP's own ONU tells
-# that ISP's ACS. Off unless /etc/config/cwmp enables it.
+# A TR-069 (CWMP) CPE answering from a data model file (an ISP's own, else the unit's native TR-098 one). Off
+# unless /etc/config/cwmp enables it: the OLT over OMCI (gpon-acs) or the WAN's DHCP option 43 does.
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 include $(TOPDIR)/rules.mk
@@ -35,8 +35,12 @@ define Build/Compile
 endef
 
 define Package/onu-cwmp/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/libexec $(1)/etc/init.d $(1)/etc/config $(1)/etc/udhcpc.user.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/onu-cwmp $(1)/usr/sbin/onu-cwmp
+	$(INSTALL_BIN) ./files/onu-cwmp-firmware $(1)/usr/libexec/onu-cwmp-firmware
+	$(INSTALL_DATA) ./files/onu-cwmp-acs.udhcpc $(1)/etc/udhcpc.user.d/onu-cwmp-acs
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_DATA) ./files/onu-cwmp.uci-defaults $(1)/etc/uci-defaults/90-onu-cwmp-dhcp
 	$(INSTALL_BIN) ./files/onu-cwmp.init $(1)/etc/init.d/onu-cwmp
 	$(INSTALL_CONF) ./files/cwmp.config $(1)/etc/config/cwmp
 endef

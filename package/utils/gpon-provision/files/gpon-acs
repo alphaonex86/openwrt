@@ -21,10 +21,10 @@ user=$(get username)
 pass=$(get password)
 [ "$(uci -q get cwmp.acs.enabled)" = 1 ] && [ "$(uci -q get cwmp.acs.url)" = "$url" ] &&
 	[ "$(uci -q get cwmp.acs.username)" = "$user" ] && [ "$(uci -q get cwmp.acs.password)" = "$pass" ] &&
-	[ "$(uci -q get cwmp.acs.interface)" = "$iface" ] && exit 0
+	[ "$(uci -q get cwmp.acs.interface)" = "$iface" ] && [ "$(uci -q get cwmp.acs.source)" = omci ] && exit 0
 if ! uci -q set cwmp.acs.url="$url" || ! uci -q set cwmp.acs.username="$user" ||
 	! uci -q set cwmp.acs.password="$pass" || ! uci -q set cwmp.acs.interface="$iface" ||
-	! uci -q set cwmp.acs.enabled=1 || ! uci -q commit cwmp; then
+	! uci -q set cwmp.acs.enabled=1 || ! uci -q set cwmp.acs.source=omci || ! uci -q commit cwmp; then
 	logger -t gpon-acs "the OLT's ACS $url could not be written to the cwmp config"
 	exit 1
 fi

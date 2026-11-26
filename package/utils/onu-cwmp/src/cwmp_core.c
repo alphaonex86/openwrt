@@ -214,7 +214,8 @@ int model_save_sets(const struct model *m, const char *path)
 
 const char *model_value(const struct model *m, const struct param *p, const struct live *lv, char *out, size_t len)
 {
-	const char *s = p->value;
+	const char *s = p->value, *end;
+	char uv[1024];
 	size_t n = 0;
 
 	(void)m;
@@ -222,12 +223,20 @@ const char *model_value(const struct model *m, const struct param *p, const stru
 		const char *rep = NULL;
 		size_t skip = 0;
 
-		if (!strncmp(s, "{ip}", 4))
+		if (!strncmp(s, "{ip}", 4)) {
 			rep = lv->ip, skip = 4;
-		else if (!strncmp(s, "{uptime}", 8))
+		} else if (!strncmp(s, "{uptime}", 8)) {
 			rep = lv->uptime, skip = 8;
-		else if (!strncmp(s, "{now}", 5))
+		} else if (!strncmp(s, "{now}", 5)) {
 			rep = lv->now, skip = 5;
+		} else if (!strncmp(s, "{uci:", 5) && (end = strchr(s + 5, '}'))) {
+			char opt[256];
+
+			snprintf(opt, sizeof(opt), "%.*s", (int)(end - s - 5), s + 5);
+			if (!lv->uci_get || lv->uci_get(opt, uv, sizeof(uv)))
+				uv[0] = 0;
+			rep = uv, skip = end + 1 - s;
+		}
 		if (skip) {
 			n += snprintf(out + n, len - n, "%s", rep ? rep : "");
 			s += skip;
@@ -554,11 +563,45 @@ static void set_param_key(struct model *m, const char *body)
 	free(key);
 }
 
-static int spv(struct buf *b, struct model *m, const char *body, const char *id, int *changed)
+/* The UCI option a value is bound to as a whole, "{uci:<option>}" -> 1 with it in @opt. */
+static int uci_bound(const struct param *p, char *opt, size_t len)
 {
-	const char *s = body;
+	size_t n = strlen(p->value);
+
+	if (n < 7 || strncmp(p->value, "{uci:", 5) || strchr(p->value + 5, '}') != p->value + n - 1)
+		return 0;
+	snprintf(opt, len, "%.*s", (int)(n - 6), p->value + 5);
+	return 1;
+}
+
+/* Stage every UCI-bound value; one refused reverts those staged. -> the refused name, or NULL. */
+static const char *spv_uci(struct model *m, const struct live *lv, char **names, char **values, size_t n,
+			   struct todo *t)
+{
+	size_t i, j;
+	char opt[256];
+
+	for (i = 0; i < n; i++) {
+		if (!uci_bound(model_find(m, names[i]), opt, sizeof(opt)))
+			continue;
+		if (lv->uci_set && !lv->uci_set(opt, values[i]))
+			continue;
+		for (j = 0; lv->uci_set && j < i; j++)
+			if (uci_bound(model_find(m, names[j]), opt, sizeof(opt)))
+				lv->uci_set(opt, NULL);
+		return names[i];
+	}
+	for (i = 0; i < n; i++)
+		t->uci_changed |= uci_bound(model_find(m, names[i]), opt, sizeof(opt));
+	return NULL;
+}
+
+static int spv(struct buf *b, struct model *m, const struct live *lv, const char *body, const char *id,
+	       struct todo *t, int *changed)
+{
+	const char *s = body, *refused = NULL;
 	struct buf bad = { 0 };
-	char *names[256], *values[256];
+	char *names[256], *values[256], opt[256];
 	size_t n = 0, i;
 
 	while (n < 256) {
@@ -582,11 +625,18 @@ static int spv(struct buf *b, struct model *m, const char *body, const char *id,
 				 "Attempt to set a non-writable parameter");
 		}
 	}
+	if (!bad.n && (refused = spv_uci(m, lv, names, values, n, t))) {
+		buf_add(&bad, "<SetParameterValuesFault>\n<ParameterName>");
+		buf_add_xml(&bad, refused);
+		buf_add(&bad, "</ParameterName>\n<FaultCode>9002</FaultCode>\n<FaultString>Internal error</FaultString>\n"
+			"</SetParameterValuesFault>\n");
+	}
 	if (bad.n) {
-		fault(b, id, 9003, "Invalid arguments", &bad);
+		fault(b, id, refused ? 9002 : 9003, refused ? "Internal error" : "Invalid arguments", &bad);
 	} else {
 		for (i = 0; i < n; i++)
-			param_set(model_find(m, names[i]), values[i]);
+			if (!uci_bound(model_find(m, names[i]), opt, sizeof(opt)))
+				param_set(model_find(m, names[i]), values[i]);
 		set_param_key(m, body);
 		*changed = 1;
 		envelope_open(b, id);
@@ -713,8 +763,61 @@ static int delete_object(struct buf *b, struct model *m, const char *body, const
 	return 0;
 }
 
+/* A firmware Download over HTTP, done after the session: DownloadResponse Status 1, a TransferComplete follows. */
+static int download(struct buf *b, const char *body, const char *id, struct todo *t)
+{
+	static const char *const tags[] = { "CommandKey", "FileType", "URL", "Username", "Password", "FileSize" };
+	char *v[6];
+	int code = 0, k;
+	const char *why = "";
+
+	for (k = 0; k < 6; k++) {
+		const char *s = body;
+
+		v[k] = xml_take(&s, tags[k]);
+	}
+	if (!v[2] || strncmp(v[2], "http://", 7) || strlen(v[2]) >= sizeof(t->url))
+		code = 9013, why = "Unsupported protocol for file transfer";
+	else if (!v[1] || strcmp(v[1], "1 Firmware Upgrade Image"))
+		code = 9001, why = "Unsupported file type";
+	else if (t->url[0])
+		code = 9004, why = "Resources exceeded";
+	if (code) {
+		fault(b, id, code, why, NULL);
+	} else {
+		snprintf(t->download_key, sizeof(t->download_key), "%s", v[0] ? v[0] : "");
+		snprintf(t->url, sizeof(t->url), "%s", v[2]);
+		snprintf(t->user, sizeof(t->user), "%s", v[3] ? v[3] : "");
+		snprintf(t->pass, sizeof(t->pass), "%s", v[4] ? v[4] : "");
+		t->size = v[5] ? atol(v[5]) : 0;
+		envelope_open(b, id);
+		buf_add(b, "<cwmp:DownloadResponse>\n<Status>1</Status>\n<StartTime>0001-01-01T00:00:00Z</StartTime>\n"
+			"<CompleteTime>0001-01-01T00:00:00Z</CompleteTime>\n</cwmp:DownloadResponse>\n");
+		envelope_close(b);
+	}
+	for (k = 0; k < 6; k++)
+		free(v[k]);
+	return 0;
+}
+
+void soap_transfer_complete(struct buf *b, const char *id, const char *key, int fault_code, const char *why,
+			    const char *start, const char *complete)
+{
+	envelope_open(b, id);
+	buf_add(b, "<cwmp:TransferComplete>\n<CommandKey>");
+	buf_add_xml(b, key);
+	buf_addf(b, "</CommandKey>\n<FaultStruct>\n<FaultCode>%d</FaultCode>\n<FaultString>", fault_code);
+	buf_add_xml(b, why);
+	buf_add(b, "</FaultString>\n</FaultStruct>\n<StartTime>");
+	buf_add_xml(b, start);
+	buf_add(b, "</StartTime>\n<CompleteTime>");
+	buf_add_xml(b, complete);
+	buf_add(b, "</CompleteTime>\n</cwmp:TransferComplete>\n");
+	envelope_close(b);
+}
+
 int soap_answer(struct buf *b, struct model *m, const struct live *lv, const char *body, const char *id,
-		int *reboot, int *changed)
+		struct todo *t, int *changed)
 {
 	static const char *const methods[] = { "GetRPCMethods", "SetParameterValues", "GetParameterValues",
 		"GetParameterNames", "SetParameterAttributes", "GetParameterAttributes", "AddObject", "DeleteObject",
@@ -731,13 +834,15 @@ int soap_answer(struct buf *b, struct model *m, const struct live *lv, const cha
 	if (!strcmp(rpc, "GetParameterValues"))
 		return gpv(b, m, lv, body, id);
 	if (!strcmp(rpc, "SetParameterValues"))
-		return spv(b, m, body, id, changed);
+		return spv(b, m, lv, body, id, t, changed);
 	if (!strcmp(rpc, "GetParameterAttributes"))
 		return gpa(b, m, body, id);
 	if (!strcmp(rpc, "AddObject"))
 		return add_object(b, m, body, id, changed);
 	if (!strcmp(rpc, "DeleteObject"))
 		return delete_object(b, m, body, id, changed);
+	if (!strcmp(rpc, "Download"))
+		return download(b, body, id, t);
 	envelope_open(b, id);
 	if (!strcmp(rpc, "SetParameterAttributes")) {
 		buf_add(b, "<cwmp:SetParameterAttributesResponse/>\n");
@@ -751,14 +856,16 @@ int soap_answer(struct buf *b, struct model *m, const struct live *lv, const cha
 		const char *s = body;
 		char *key = xml_take(&s, "CommandKey");
 
-		snprintf(m->reboot_key, sizeof(m->reboot_key), "%s", key ? key : "");
+		snprintf(t->reboot_key, sizeof(t->reboot_key), "%s", key ? key : "");
 		free(key);
 		buf_add(b, "<cwmp:RebootResponse/>\n");
-		*reboot = 1;
+		t->reboot = 1;
+	} else if (!strcmp(rpc, "FactoryReset")) {
+		buf_add(b, "<cwmp:FactoryResetResponse/>\n");
+		t->factory_reset = 1;
 	} else {
 		b->n = 0;
-		fault(b, id, !strcmp(rpc, "Download") || !strcmp(rpc, "Upload") || !strcmp(rpc, "FactoryReset") ?
-		      9001 : 9000, "Request denied", NULL);
+		fault(b, id, !strcmp(rpc, "Upload") ? 9001 : 9000, "Request denied", NULL);
 		return 0;
 	}
 	envelope_close(b);

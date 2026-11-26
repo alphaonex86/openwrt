@@ -67,6 +67,15 @@ CONFIG_HZ_100=y
 CONFIG_HZ=100
 
 #
+# Tickless idle: the interAptiv idles in WAIT (r4k_wait) and the otto timer is
+# oneshot, so an idle CPU stops its tick. No CPU_IDLE: cpuidle-cps registers no
+# state without a Coherence Manager, and the RTL9603CVD has none.
+#
+# CONFIG_HZ_PERIODIC is not set
+CONFIG_NO_HZ_COMMON=y
+CONFIG_NO_HZ_IDLE=y
+
+#
 # 512 MB DDR3 used as 320 MB of low memory; high memory disabled.
 #
 # CONFIG_HIGHMEM is not set

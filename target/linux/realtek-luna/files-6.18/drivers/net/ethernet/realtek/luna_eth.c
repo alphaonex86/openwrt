@@ -83,6 +83,12 @@ static unsigned int backstop_ms = 10;
 module_param(backstop_ms, uint, 0644);
 MODULE_PARM_DESC(backstop_ms, "RX/TX drain backstop poll period (catches a missed IRQ)");
 
+/* An idle ring needs no 10 ms drain: at HZ=100 it held CPU0's tick on (G24W 2026-11-26). Every watch the
+ * backstop samples is judged in ms (2 s and more), so the slow period keeps them, and a missed IRQ waits it out. */
+static unsigned int backstop_idle_ms = 250;
+module_param(backstop_idle_ms, uint, 0644);
+MODULE_PARM_DESC(backstop_idle_ms, "backstop period once a whole period saw no RX taken, none waiting and no TX in flight");
+
 /* OMCI ME2 MIB-Data-Sync boot seed.  Same value and same purpose as the
  * sibling shell's: this ONU holds no persistent MIB, so a seed in 1..30
  * deliberately FAILS the OLT's ME2 audit (its gate reads rsync<31 as
@@ -457,6 +463,7 @@ struct luna_eth {
 	struct luna_rxq		rxq[2];		/* [0] data, [1] control */
 	unsigned int		n_rxq;
 	u32			rx_taken;	/* descriptors consumed, free running: the ring watch */
+	u32			backstop_taken;	/* rx_taken at the last backstop: activity since */
 
 	struct tx_desc		*tx_ring;
 	dma_addr_t		tx_ring_dma;
@@ -2322,6 +2329,17 @@ static irqreturn_t eth_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/* Racy reads by design: a wrong guess costs one period, never a frame. */
+static bool eth_backstop_busy(struct luna_eth *ep)
+{
+	u32 taken = READ_ONCE(ep->rx_taken);
+	bool busy = taken != ep->backstop_taken || eth_rx_waiting(ep) ||
+		    READ_ONCE(ep->tx_dirty) != READ_ONCE(ep->tx_head);
+
+	ep->backstop_taken = taken;
+	return busy;
+}
+
 /* Backstop drain: catches a missed/unrouted IRQ so the datapath always makes
  * progress during bring-up (ping does not need IRQ latency). */
 static void eth_backstop(struct timer_list *t)
@@ -2333,7 +2351,7 @@ static void eth_backstop(struct timer_list *t)
 	if (ep->wan_ndev && luna_mib_pon_egress_sample(ep->wan_ndev, (u32)ep->wan_ndev->stats.tx_packets))
 		luna_eth_msr_apply(ep, true);
 	luna_mib_port_egress_sample(ep->ndev, !eth_rx_waiting(ep));	/* off without an established core reset */
-	mod_timer(&ep->backstop, jiffies + msecs_to_jiffies(backstop_ms));
+	mod_timer(&ep->backstop, jiffies + msecs_to_jiffies(eth_backstop_busy(ep) ? backstop_ms : backstop_idle_ms));
 }
 
 /* Transmit one frame on shared ring 0, for whichever netdev ...

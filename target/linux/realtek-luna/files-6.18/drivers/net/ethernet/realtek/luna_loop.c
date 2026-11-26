@@ -68,6 +68,7 @@ struct luna_loop {
 	struct lan_loop_hold		hold;
 	bool				engine;
 	u8				id[LAN_LOOP_ID_LEN];
+	u8				addr[ETH_ALEN];	/* the address the engine probes from */
 };
 
 static u32 loop_lan_mask(const struct luna_loop *l)
@@ -91,21 +92,38 @@ static int loop_set(struct luna_loop *l, u32 reg, u32 mask, u32 val)
 	return -EIO;
 }
 
+/* The engine sends from the switch's address (all-zero until set) with that
+ * address as its magic. The netdev's address may change after the start (the
+ * unit's own MAC is set once provisioned): a stale one sends probes no loop
+ * test recognises, so every period follows it. */
+static int loop_engine_addr(struct luna_loop *l)
+{
+	u8 mac[ETH_ALEN];
+	u32 hi, lo;
+	int rc;
+
+	ether_addr_copy(mac, l->ndev->dev_addr);
+	if (ether_addr_equal(mac, l->addr))
+		return 0;
+	hi = mac[0] << 8 | mac[1];
+	lo = (u32)mac[2] << 24 | mac[3] << 16 | mac[4] << 8 | mac[5];
+	rc = loop_set(l, l->map->switch_mac, 0xffff, hi);
+	rc = rc ?: loop_set(l, l->map->switch_mac + 4, ~0u, lo);
+	rc = rc ?: loop_set(l, RLDP_MAGIC_HI, 0xffff, hi);
+	rc = rc ?: loop_set(l, RLDP_MAGIC_LO, ~0u, lo);
+	if (!rc)
+		ether_addr_copy(l->addr, mac);
+	return rc;
+}
+
 static int loop_engine_arm(struct luna_loop *l)
 {
-	const u8 *mac = l->ndev->dev_addr;
 	u32 ports = GENMASK(l->map->rldp_ports - 1, 0);
 	int rc;
 
-	/* The engine sends from the switch's address, all-zero until set. */
-	rc = loop_set(l, l->map->switch_mac, 0xffff, mac[0] << 8 | mac[1]);
-	rc = rc ?: loop_set(l, l->map->switch_mac + 4, ~0u,
-			    (u32)mac[2] << 24 | mac[3] << 16 | mac[4] << 8 | mac[5]);
+	rc = loop_engine_addr(l);
 	rc = rc ?: loop_set(l, RLDP_CHECK, GENMASK(23, 0), RLDP_TIMING);
 	rc = rc ?: loop_set(l, RLDP_HOLD, GENMASK(23, 0), RLDP_TIMING);
-	rc = rc ?: loop_set(l, RLDP_MAGIC_HI, 0xffff, mac[0] << 8 | mac[1]);
-	rc = rc ?: loop_set(l, RLDP_MAGIC_LO, ~0u,
-			    (u32)mac[2] << 24 | mac[3] << 16 | mac[4] << 8 | mac[5]);
 	rc = rc ?: loop_set(l, RLDP_TX_EN, ports, loop_lan_mask(l));
 	if (rc)
 		return rc;
@@ -120,6 +138,8 @@ static u32 loop_engine_read(struct luna_loop *l, bool on)
 {
 	u32 lan = loop_lan_mask(l), looped;
 
+	if (on)
+		loop_engine_addr(l);
 	if (loop_set(l, RLDP_CTRL, BIT(0), on) || !on)
 		return 0;
 	looped = (ioread32(l->sw + RLDP_ENTER) | ioread32(l->sw + RLDP_LOOPING)) & lan;

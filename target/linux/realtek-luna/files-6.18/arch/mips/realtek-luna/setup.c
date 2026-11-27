@@ -65,12 +65,10 @@ static void luna_machine_restart(char *command)
 		cpu_relax();
 }
 
+/* The watchdog is stopped by then: a halt that spun would stay dead (ONU_HALT_RESET panics before this). */
 static void luna_machine_halt(void)
 {
-	local_irq_disable();
-	pr_emerg("System halted.\n");
-	while (1)
-		cpu_relax();
+	luna_machine_restart(NULL);
 }
 
 #ifdef CONFIG_MIPS_CM

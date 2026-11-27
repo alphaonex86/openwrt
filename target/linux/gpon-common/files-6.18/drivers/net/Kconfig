@@ -549,6 +549,13 @@ source "drivers/net/fddi/Kconfig"
 # --- end GPON common layer ----------------------------------------------
 source "drivers/net/gpon/Kconfig"
 
+# Not network: the ONU board policy, kept in the one tree every ONU target compiles.
+config ONU_HALT_RESET
+	bool "A halt or power-off restarts the ONU, with a crash record"
+	help
+	  An ONU has nobody to power it back on: halt and power-off panic
+	  instead (the crash record), and panic_timeout resets the chip.
+
 # The virtual unit's PON MAC (realtek-*/virt only), and an OLT VM's.
 source "drivers/net/ponvirt/Kconfig"
 

@@ -2857,7 +2857,16 @@ static unsigned long luna_optic_last_at;
 
 static void luna_optic_read_now(void)
 {
+	struct gpon_optic_reading prev = luna_optic_last;
+
 	luna_selftest_read(&luna_optic_last);
+	/* The MPD sees the laser only inside a burst: a read that fell between bursts
+	 * keeps the last TX level, as ANI-G does: stock's Test Result always carries TX
+	 * (lab X100DG 2026-11-26: 2 reads in 6 had no MPD sample). */
+	if (!(luna_optic_last.have & GPON_OPTIC_TX) && (prev.have & GPON_OPTIC_TX)) {
+		luna_optic_last.tx_cdbm = prev.tx_cdbm;
+		luna_optic_last.have |= GPON_OPTIC_TX;
+	}
 	luna_optic_last_at = jiffies ?: 1;
 }
 

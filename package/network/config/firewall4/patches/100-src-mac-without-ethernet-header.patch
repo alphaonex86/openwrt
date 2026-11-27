@@ -1,0 +1,68 @@
+From: Herman Brule <brule.herman@confiared.com>
+Subject: firewall4: a source-MAC match on a device without an Ethernet header
+
+nft compiles `ether saddr` with an implicit `meta iiftype ether`, so on a
+PPPoE WAN (pppoe-wan, ARPHRD_PPP) a rule or redirect with src_mac never
+matched: a DHCPv6 reply allowed by its source MAC was rejected and the WAN
+had no IPv6. Each such rule is also emitted without the MAC, restricted to
+devices without an Ethernet header (`meta iiftype != ether`), where it
+applies on its other matches.
+
+--- a/root/usr/share/firewall4/templates/mangle-rule.uc
++++ b/root/usr/share/firewall4/templates/mangle-rule.uc
+@@ -26,6 +26,8 @@
+ 	ether saddr {{ fw4.set(rule.smacs_pos) }} {%+ endif -%}
+ {%+ if (rule.smacs_neg): -%}
+ 	ether saddr != {{ fw4.set(rule.smacs_neg) }} {%+ endif -%}
++{%+ if (rule.no_ether): -%}
++	meta iiftype != ether {%+ endif -%}
+ {%+ if (rule.icmp_types): -%}
+ 	{{ (rule.family == 4) ? "icmp" : "icmpv6" }} type {{ fw4.set(rule.icmp_types) }} {%+ endif -%}
+ {%+ if (rule.icmp_codes): -%}
+--- a/root/usr/share/firewall4/templates/redirect.uc
++++ b/root/usr/share/firewall4/templates/redirect.uc
+@@ -30,6 +30,8 @@
+ 	ether saddr {{ fw4.set(redirect.smacs_pos) }} {%+ endif -%}
+ {%+ if (redirect.smacs_neg): -%}
+ 	ether saddr != {{ fw4.set(redirect.smacs_neg) }} {%+ endif -%}
++{%+ if (redirect.no_ether): -%}
++	meta iiftype != ether {%+ endif -%}
+ {%+ if (redirect.helper): -%}
+ 	ct helper{% if (redirect.helper.invert): %} !={% endif %} {{ fw4.quote(redirect.helper.name, true) }} {%+ endif -%}
+ {%+ if (redirect.limit): -%}
+--- a/root/usr/share/firewall4/templates/rule.uc
++++ b/root/usr/share/firewall4/templates/rule.uc
+@@ -30,6 +30,8 @@
+ 	ether saddr {{ fw4.set(rule.smacs_pos) }} {%+ endif -%}
+ {%+ if (rule.smacs_neg): -%}
+ 	ether saddr != {{ fw4.set(rule.smacs_neg) }} {%+ endif -%}
++{%+ if (rule.no_ether): -%}
++	meta iiftype != ether {%+ endif -%}
+ {%+ if (rule.icmp_types): -%}
+ 	{{ (rule.family == 4) ? "icmp" : "icmpv6" }} type {{ fw4.set(rule.icmp_types) }} {%+ endif -%}
+ {%+ if (rule.icmp_codes): -%}
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -2514,6 +2514,11 @@
+ 				r[r.direction ? "oifnames" : "iifnames"] = [ r.device.device ];
+ 
+ 			push(this.state.rules ||= [], r);
++
++			/* a device without an Ethernet header (PPPoE, a tunnel) has no source MAC: there the rule
++			 * applies on its other matches, by a copy restricted to such devices */
++			if (r.smacs_pos || r.smacs_neg)
++				push(this.state.rules, { ...r, smacs_pos: null, smacs_neg: null, no_ether: true });
+ 		};
+ 
+ 		for (let proto in rule.proto) {
+@@ -2824,6 +2829,10 @@
+ 			}
+ 
+ 			push(this.state.redirects ||= [], r);
++
++			/* the source-MAC copy for devices without an Ethernet header, as for rules */
++			if (r.smacs_pos || r.smacs_neg)
++				push(this.state.redirects, { ...r, smacs_pos: null, smacs_neg: null, no_ether: true });
+ 		};
+ 
+ 		let to_hostaddr = (a) => {

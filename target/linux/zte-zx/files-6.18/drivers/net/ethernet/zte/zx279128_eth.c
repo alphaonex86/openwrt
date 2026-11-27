@@ -334,8 +334,10 @@ static int sched_opc_init(struct zx_eth *e)
  * tm_protocol_pkt_limit_map_set), read live from a stock unit, and the protocol limiter's own table. */
 static int classifier_init(struct zx_eth *e)
 {
-	/* extra index table row r: key bytes 16r..16r+15, then this word */
-	static const u32 index_word4[16] = { 0x190000, 0x190007, 0x190007, 0x190007, 0x190007, 0x190000, 0x190000,
+	/* extra index table row r: key bytes 16r..16r+15, then this word. LAN ports 1-4: stock ends at 0x190007, its
+	 * third rule row being the port's default flow into the output processor, written after its TM init; until
+	 * ours offloads a flow, 0x15 (stock's rows 9 and 10) keeps what no rule matches on the CPU, two rows valid */
+	static const u32 index_word4[16] = { 0x190000, 0x150003, 0x150003, 0x150003, 0x150003, 0x190000, 0x190000,
 					     0x190000, 0x19003f, 0x150001, 0x150004, 0x190000, 0x190000, 0x190000,
 					     0x190000, 0x190000 };
 	/* extra rule table (1) and hash table (2) rows: { table << 22 | index, words } */
@@ -899,6 +901,7 @@ static int zx_probe(struct platform_device *pdev)
 	struct reserved_mem *tables;
 	struct device_node *np;
 	struct zx_eth *e;
+	void *clear;
 	int irq, pon_irq, ret, i;
 
 	e = devm_kzalloc(dev, sizeof(*e), GFP_KERNEL);
@@ -936,6 +939,12 @@ static int zx_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL, "no reserved memory-region of %u bytes for the packet processor's tables\n",
 				     PP_ACL_BYTES + PP_OPC_PM_BYTES);
 	e->tables = tables->base;
+	/* the classifier's flow table: the DDR does not power on as zeros, and a stale row is a rule */
+	clear = memremap(tables->base, PP_ACL_BYTES + PP_OPC_PM_BYTES, MEMREMAP_WC);
+	if (!clear)
+		return dev_err_probe(dev, -ENOMEM, "the packet processor's tables cannot be mapped to clear them\n");
+	memset(clear, 0, PP_ACL_BYTES + PP_OPC_PM_BYTES);
+	memunmap(clear);
 	for (i = 0; i < NORMAL_BUFS; i++)
 		e->lists[i] = cpu_to_be16(i);
 	for (i = 0; i < JUMBO_BUFS; i++)

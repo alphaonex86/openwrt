@@ -86,7 +86,7 @@ config LUNA_GPON
 
 config LUNA_ETH
 	tristate "Realtek Luna (interAptiv) GMAC + switch"
-	depends on REALTEK_LUNA
+	depends on REALTEK_LUNA && !RTL9602C_ETH	# one shell, two TUs: the same exported glue
 	select LUNA_ETH_MIB
 	select LUNA_LOOP
 	default y

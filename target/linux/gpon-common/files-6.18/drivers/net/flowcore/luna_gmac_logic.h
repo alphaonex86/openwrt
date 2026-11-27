@@ -33,17 +33,19 @@ u32 luna_gmac_rxcdo_pack(unsigned int ring_size);
 unsigned int luna_gmac_rxcdo_entries(u32 rxcdo);
 bool luna_gmac_tx_zero_copy(bool nonlinear, unsigned int len,
 			    unsigned int min_len);
-bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
-			    u32 hdr_floor, u32 buf_size);
+bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len, unsigned int cpu_prefix, u32 buf_size);
 bool luna_gmac_rx_cpu_tag_present(const u8 *data, u32 len,
 				  unsigned int tag_len);
 
 /* The family's cpu-tag descriptor decisions. Every one of ...
  * dev/MEASURED-luna_gmac_logic.h.md sec 3. */
-bool luna_gmac_rx_is_ds_omci(const struct luna_rx_layout *rxl,
-			     bool trap_on, u32 opts2, u32 opts3, u32 len,
-			     unsigned int omci_reason,
-			     unsigned int cpu_prefix, u32 buf_size);
+enum luna_gmac_ds_omci { LUNA_GMAC_DS_OMCI_NONE, LUNA_GMAC_DS_OMCI_TRAPPED, LUNA_GMAC_DS_OMCI_LOOKALIKE };
+enum luna_gmac_ds_omci luna_gmac_rx_ds_omci(const struct luna_rx_layout *rxl, bool trap_on, u32 opts2, u32 opts3,
+					    const u8 *data, u32 len, unsigned int pon_port, unsigned int omci_reason,
+					    unsigned int cpu_prefix, u32 buf_size);
+/* The US-OMCI HW TX ring behind the omci_tx_ring knob, and the doorbell that kicks it (-> true: R_IO_CMD1). */
+unsigned int luna_gmac_omci_hwring(unsigned int omci_tx_ring);
+bool luna_gmac_omci_doorbell(unsigned int omci_tx_ring, unsigned int doorbell_ovr, unsigned int *hwring, u32 *mask);
 /* The cpu-tag TX steering word2 for an EXPLICIT egress port ...
  * dev/MEASURED-luna_gmac_logic.h.md sec 8. */
 u32 luna_gmac_cputag_txd_pmask(u32 port_mask);

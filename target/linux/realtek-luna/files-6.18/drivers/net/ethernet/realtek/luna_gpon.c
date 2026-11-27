@@ -7400,7 +7400,7 @@ static void luna_omci_report_alarm(void)
 	spin_unlock_irqrestore(&luna_omci_lock, flags);
 }
 
-#if IS_ENABLED(CONFIG_RTL9602C_ETH)	/* the RTL9602C Ethernet driver is the only caller */
+#if IS_ENABLED(CONFIG_RTL9602C_ETH) || IS_ENABLED(CONFIG_LUNA_ETH)	/* the Luna Ethernet shell is the only caller */
 void luna_omci_rx_errors(u32 *bad_mic, u32 *runt)
 {
 	unsigned long flags;

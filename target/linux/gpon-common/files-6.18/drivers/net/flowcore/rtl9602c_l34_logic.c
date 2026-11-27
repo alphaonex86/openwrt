@@ -390,23 +390,6 @@ void rtl9602c_wan_mac_add(u8 *out, const u8 *base, unsigned int add)
 	}
 }
 
-/* DS-OMCI classifier + length guard, SPLIT from ...
- * dev/MEASURED-rtl9602c_l34_logic.c.md sec 7. */
-enum rtl9602c_ds_omci rtl9602c_rx_ds_omci(const struct luna_rx_layout *rxl,
-					  bool trap_on, u32 opts2, u32 opts3,
-					  const u8 *data, u32 len, unsigned int pon_port,
-					  unsigned int omci_reason,
-					  unsigned int cpu_prefix, u32 buf_size)
-{
-	if (!trap_on || len < cpu_prefix + 8 || len > buf_size)
-		return RTL9602C_DS_OMCI_NONE;
-	if (luna_gmac_rx_reason(rxl, opts2, opts3) == omci_reason &&
-	    luna_gmac_rx_src_port(rxl, opts3) == pon_port)
-		return RTL9602C_DS_OMCI_TRAPPED;
-	return (data[cpu_prefix + 3] == 0x0a || data[cpu_prefix + 3] == 0x0b) &&
-	       !(data[cpu_prefix + 2] & 0x80) ? RTL9602C_DS_OMCI_LOOKALIKE : RTL9602C_DS_OMCI_NONE;
-}
-
 /* WAN demux verdict, SPLIT from rtl9602c_eth_rx(): does this ...
  * dev/MEASURED-rtl9602c_l34_logic.c.md sec 8. */
 bool rtl9602c_rx_wan_demux(const struct luna_rx_layout *rxl, u32 opts3,
@@ -423,33 +406,6 @@ bool rtl9602c_rx_wan_demux(const struct luna_rx_layout *rxl, u32 opts3,
 		if (dst[i] != wan_mac[i])
 			return false;
 	return true;
-}
-
-/* The HW ring h behind the omci_tx_ring module param: instances >5 clamp to
- * ring 4.  Was spelled seven times across the shell (xmit, rekick, align,
- * hw_program, open x2, diag). */
-unsigned int rtl9602c_omci_hwring(unsigned int omci_tx_ring)
-{
-	return omci_tx_ring > 5 ? 4 : omci_tx_ring;
-}
-
-/* Which doorbell kicks HW ring h, SPLIT from ... -- dev/MEASURED-rtl9602c_l34_logic.c.md sec 9. */
-bool rtl9602c_omci_doorbell(unsigned int omci_tx_ring,
-			    unsigned int doorbell_ovr,
-			    unsigned int *hwring, u32 *mask)
-{
-	unsigned int h = rtl9602c_omci_hwring(omci_tx_ring);
-	unsigned int dbit = (doorbell_ovr == 0xff)
-		? (h & 0x1f)	/* R_IO_CMD bit number == HW ring (h<4) */
-		: doorbell_ovr;
-
-	*hwring = h;
-	if (h == 4 && doorbell_ovr == 0xff) {
-		*mask = 0x100;	/* R_IO_CMD1 TX_POLL5 (bit8 = 0x100) */
-		return true;
-	}
-	*mask = 1u << dbit;
-	return false;
 }
 
 /* rtl9602c_rxdesnum_pack / rtl9602c_rxcdo_pack MOVED to ...
@@ -475,14 +431,4 @@ u32 rtl9602c_omci_txd_word2(u32 ovr)
 u32 rtl9602c_omci_txd_word3(u32 ovr, unsigned int sid)
 {
 	return ovr ? ovr : TXD3_OMCI_9602C(sid);
-}
-
-/* Bad-frame verdict, SPLIT from rtl9602c_eth_rx(): is a ...
- * dev/MEASURED-rtl9602c_l34_logic.c.md sec 11. */
-bool rtl9602c_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
-			   unsigned int cpu_prefix, u32 buf_size)
-{
-	return (opts1 & err_mask) ||
-	       len < 60 + cpu_prefix ||	/* 60 = ETH_ZLEN, the min Ethernet frame */
-	       len > buf_size;
 }

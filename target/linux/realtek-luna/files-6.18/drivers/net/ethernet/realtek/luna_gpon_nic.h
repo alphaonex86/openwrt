@@ -79,7 +79,7 @@ u32 rtl9602c_eth_omci_tx_dirty(void);
 
 /* US-OMCI responses the shell's TX ring REFUSED. Read beside ...
  * dev/MEASURED-luna_gpon_nic.h.md sec 5. */
-#if IS_ENABLED(CONFIG_LUNA_ETH)
+#if IS_ENABLED(CONFIG_LUNA_ETH) || IS_ENABLED(CONFIG_RTL9602C_ETH)
 u32 rtl9602c_eth_omci_tx_dropped(void);
 #else
 static inline u32 rtl9602c_eth_omci_tx_dropped(void) { return 0; }
@@ -91,7 +91,7 @@ static inline u32 rtl9602c_eth_omci_tx_dropped(void) { return 0; }
 void rtl9602c_eth_omci_selftest(void);
 
 /* Full PON US/DS-NIC + PBO bring-up (defined in luna_gpon.c). Non-__init: also
- * re-run from rtl9602c_eth_open() after the GMAC IP-block reset so the US-NIC RX
+ * re-run from luna_eth_open() after the GMAC IP-block reset so the US-NIC RX
  * engine re-latches against the freshly-reset GMAC (stock order: GMAC reset -> NIC). */
 void gpon_pbo_init(void);
 

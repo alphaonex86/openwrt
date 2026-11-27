@@ -11,17 +11,17 @@
 
 /* ★ THE INSTALL REFUSED UNCONDITIONALLY UNTIL 2026-09-11, AND ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 2. */
-static const struct net_device_ops rtl9602c_eth_netdev_ops;
+static const struct net_device_ops luna_eth_netdev_ops;
 
 /* The driver behind a netdev. ⚠ THE TWO NETDEVS DO NOT STORE ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 3. */
-static struct rtl9602c_eth *rtl9602c_eth_of(struct net_device *dev)
+static struct luna_eth *rtl9602c_eth_of(struct net_device *dev)
 {
 	if (!dev)
 		return NULL;
-	if (dev->netdev_ops == &rtl9602c_eth_wan_ops)
-		return *(struct rtl9602c_eth **)netdev_priv(dev);
-	if (dev->netdev_ops == &rtl9602c_eth_netdev_ops)
+	if (dev->netdev_ops == &luna_eth_wan_ops)
+		return *(struct luna_eth **)netdev_priv(dev);
+	if (dev->netdev_ops == &luna_eth_netdev_ops)
 		return netdev_priv(dev);
 	return NULL;
 }
@@ -40,7 +40,7 @@ static bool rtl9602c_l34_is_lan_side(void *sh, struct net_device *dev)
 	 * (X100DG, 2026-10-05: every such leg was decoded as upstream and refused). */
 	if (dev && is_vlan_dev(dev))
 		dev = vlan_dev_real_dev(dev);
-	return dev && dev->netdev_ops != &rtl9602c_eth_wan_ops;
+	return dev && dev->netdev_ops != &luna_eth_wan_ops;
 }
 
 /* The upstream leg owns NAPT; the downstream leg owns its LAN neighbour. */
@@ -90,14 +90,14 @@ static void l34_flow_key(struct l34_flow *f, const struct gpon_flow_key *k)
 	f->orig_dport = k->l4_dport;
 }
 
-static void l34_block_sync_all(struct rtl9602c_eth *ep);
+static void l34_block_sync_all(struct luna_eth *ep);
 
 static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 				   const struct gpon_flow_act *a,
 				   const struct gpon_flow_ctx *ctx, void *priv,
 				   u32 *idx_out)
 {
-	struct rtl9602c_eth *ep = sh;
+	struct luna_eth *ep = sh;
 	struct rtl9602c_l34_priv *p = priv;
 	struct l34_flow *f = &p->f;
 	struct gpon_edge edge;
@@ -105,12 +105,12 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	int ret;
 
 	*idx_out = 0;
-	if (!ep || !ep->l34.ready)
+	if (!ep || !ep->cs.l34.ready)
 		return -ENODEV;
 	/* Record the key BEFORE any refusal: a flow that is declined is exactly
 	 * the one nothing else names.  See struct l34_offer. */
 	{
-		struct l34_offer *o = &ep->l34.recent_offer[ep->l34.offer_n %
+		struct l34_offer *o = &ep->cs.l34.recent_offer[ep->cs.l34.offer_n %
 							    L34_RECENT];
 
 		o->sip   = k->ip_sa;
@@ -120,20 +120,20 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		o->proto = k->ip_protocol;
 		o->ds_leg = ctx->ds_leg;
 		strscpy(o->iif, ctx->idev ? ctx->idev->name : "-", sizeof(o->iif));
-		ep->l34.offer_n++;
+		ep->cs.l34.offer_n++;
 	}
 	/* The tables describe one LAN subnet; once the engine runs, the switch drops every frame of another one
 	 * (measured on a unit: a second subnet went silent after the first NAT flow). */
 	if (gpon_edge_lan_addrs(ep->ndev) > 1u + READ_ONCE(gpon_flow_ipv4_routed))
-		return l34_refuse(&ep->l34, "the LAN holds an address the engine has no row for");
+		return l34_refuse(&ep->cs.l34, "the LAN holds an address the engine has no row for");
 	if (ctx->ds_leg || a->nat_is_da) {
-		ep->l34.ds_legs++;
+		ep->cs.l34.ds_legs++;
 		if (!a->dmac_valid || !ctx->odev ||
 		    !rtl9602c_l34_is_lan_side(sh, ctx->odev))
 			return -EOPNOTSUPP;
 		if (a->routed)
-			return l34_refuse(&ep->l34, L34_ROUTED_NO_ROW);
-		ret = l34_neigh_add(&ep->l34, f, a->nat_addr, a->gw_dmac);
+			return l34_refuse(&ep->cs.l34, L34_ROUTED_NO_ROW);
+		ret = l34_neigh_add(&ep->cs.l34, f, a->nat_addr, a->gw_dmac);
 		if (!ret) {
 			*idx_out = f->hw_index;
 			p->last_hit = jiffies;
@@ -151,7 +151,7 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	ret = gpon_edge_read_via(ep->ndev, ep->wan_ndev, k->ip_da, ctx->odev,
 				 a->dmac_valid ? a->gw_dmac : NULL, &edge, &why);
 	if (ret)
-		return l34_refuse(&ep->l34, why);
+		return l34_refuse(&ep->cs.l34, why);
 	/* ★ THE SESSION COMES FROM THE FLOW, NOT FROM THE NETDEVICE. `gpon_edge`
 	 * reads the live kernel, and the kernel offers no portable way to ask a
 	 * ppp device for its session id -- but the flowtable already parsed it
@@ -163,23 +163,23 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	/* The tag comes from the flow too: on PPPoE over gpon0.<vid> the routed
 	 * device is the ppp one, which carries no VID of its own. */
 	if (gpon_flow_wan_vid(a, edge.wan_vlan, &edge.wan_vlan))
-		return l34_refuse(&ep->l34,
+		return l34_refuse(&ep->cs.l34,
 				  "the rule's VLAN push disagrees with the WAN "
 				  "device's own tag");
 
 	/* The rule's own next hop and NAT address must be the ones ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 8. */
 	if (a->dmac_valid && !ether_addr_equal(a->gw_dmac, edge.gw_mac))
-		return l34_refuse(&ep->l34,
+		return l34_refuse(&ep->cs.l34,
 				  "the rule's next hop is not the WAN gateway "
 				  "the interface tables describe");
 	if (a->routed ? !gpon_edge_on_lan(&edge, k->ip_sa) : a->nat_addr != edge.wan_ip)
-		return l34_refuse(&ep->l34, a->routed ?
+		return l34_refuse(&ep->cs.l34, a->routed ?
 				  "a routed flow from an address of no LAN subnet" :
 				  "the rule NATs to an address the WAN "
 				  "interface does not hold");
 
-	if (!ep->l34.provisioned || !gpon_edge_same(&edge, &ep->l34.edge)) {
+	if (!ep->cs.l34.provisioned || !gpon_edge_same(&edge, &ep->cs.l34.edge)) {
 		/* ⚠ THE INSTALLED FLOWS BELONG TO THE OLD EDGE. A NAPTR's ...
 		 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 9. */
 		/* ⚠⚠ ONE NEXT HOP, AND AN ON-LINK PEER WANTS ITS OWN.  Since the
@@ -194,32 +194,32 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 		 * ⇒ WHAT WOULD LIFT IT is a per-peer NEXTHOP/ARP allocator --
 		 * l34_flow already carries a `nexthop` index for it -- which is
 		 * a feature, not this repair. */
-		if (ep->l34.provisioned &&
-		    gpon_edge_same_iface(&edge, &ep->l34.edge) &&
-		    rtl9602c_l34_has_owners(&ep->l34))
-			return l34_refuse(&ep->l34,
+		if (ep->cs.l34.provisioned &&
+		    gpon_edge_same_iface(&edge, &ep->cs.l34.edge) &&
+		    rtl9602c_l34_has_owners(&ep->cs.l34))
+			return l34_refuse(&ep->cs.l34,
 					  "this destination needs its own next "
 					  "hop and the interface tables hold one");
-		if (ep->l34.provisioned) {
-			ret = gpon_flow_offload_flush(ep->fo);
+		if (ep->cs.l34.provisioned) {
+			ret = gpon_flow_offload_flush(ep->cs.fo);
 			/* A flow that would not retire STILL FORWARDS, and it
 			 * forwards through the interface tables we are about to
 			 * re-point at the new edge.  Re-pointing them now sends
 			 * that live flow to a gateway it was never NAT'd for. */
 			if (ret)
-				return l34_refuse(&ep->l34,
+				return l34_refuse(&ep->cs.l34,
 						  "a flow installed for the "
 						  "previous edge would not "
 						  "retire, so its hardware "
 						  "entry still forwards");
 		}
-		ret = rtl9602c_l34_provision(&ep->l34, &edge);
-		if (!ret && ep->l34.block_on)
+		ret = rtl9602c_l34_provision(&ep->cs.l34, &edge);
+		if (!ret && ep->cs.l34.block_on)
 			l34_block_sync_all(ep);
 		if (ret) {
 			pr_warn_ratelimited("rtl9602c-l34: the interface tables would not program (%d); staying on software forwarding\n",
 				ret);
-			return l34_refuse(&ep->l34,
+			return l34_refuse(&ep->cs.l34,
 					  "the interface tables would not "
 					  "program (see dmesg)");
 		}
@@ -229,16 +229,16 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 10. */
 	/* a routed leg only provisions: the block route forwards its packets, no row is written */
 	if (a->routed)
-		return l34_refuse(&ep->l34, L34_ROUTED_NO_ROW);
+		return l34_refuse(&ep->cs.l34, L34_ROUTED_NO_ROW);
 	l34_flow_key(f, k);
 	f->egress_netif = L34_NETIF_WAN;
 	f->nexthop      = L34_NETIF_WAN;
 	f->nat_sip    = a->nat_addr;
 	f->nat_sport  = a->nat_port;
 
-	ret = rtl9602c_l34_flow_add(&ep->l34, f);
+	ret = rtl9602c_l34_flow_add(&ep->cs.l34, f);
 	if (ret) {
-		l34_refuse(&ep->l34, ret == -ENOSPC
+		l34_refuse(&ep->cs.l34, ret == -ENOSPC
 			   ? "every way of the flow's hash bucket is taken"
 			   : "the engine refused the NAPT entry");
 		return ret;
@@ -259,14 +259,14 @@ static int rtl9602c_l34_op_install(void *sh, const struct gpon_flow_key *k,
 	 * is not an idle one. */
 	p->last_hit = jiffies;
 	/* Remember it so the dump can read the entry back -- see L34_RECENT. */
-	ep->l34.recent_idx[ep->l34.recent_n % L34_RECENT] = (u16)f->hw_index;
-	ep->l34.recent_n++;
+	ep->cs.l34.recent_idx[ep->cs.l34.recent_n % L34_RECENT] = (u16)f->hw_index;
+	ep->cs.l34.recent_n++;
 	return 0;
 }
 
 static int rtl9602c_l34_op_remove(void *sh, u32 idx, void *priv)
 {
-	struct rtl9602c_eth *ep = sh;
+	struct luna_eth *ep = sh;
 	struct rtl9602c_l34_priv *p = priv;
 
 	/* ⚠ `idx` IS THE CORE'S PUBLISHED INDEX AND IT IS NOT AN IDENTITY.  This
@@ -277,19 +277,19 @@ static int rtl9602c_l34_op_remove(void *sh, u32 idx, void *priv)
 	(void)idx;
 	if (!p->f.out_owned && !p->f.in_owned && !p->f.neigh_owned)
 		return 0;	/* nothing claimed: cleanup succeeds, engine or not */
-	if (!ep || !ep->l34.ready)
+	if (!ep || !ep->cs.l34.ready)
 		return -ENODEV;
-	return rtl9602c_l34_flow_del(&ep->l34, &p->f);
+	return rtl9602c_l34_flow_del(&ep->cs.l34, &p->f);
 }
 
 static int rtl9602c_l34_op_stats(void *sh, u32 idx, void *priv,
 				 unsigned long *lastused)
 {
-	struct rtl9602c_eth *ep = sh;
+	struct luna_eth *ep = sh;
 	struct rtl9602c_l34_priv *p = priv;
 	bool active = false;
 
-	if (!ep || !ep->l34.ready)
+	if (!ep || !ep->cs.l34.ready)
 		return -ENODEV;
 	if (p->f.neigh_owned) {
 		*lastused = p->last_hit;
@@ -297,7 +297,7 @@ static int rtl9602c_l34_op_stats(void *sh, u32 idx, void *priv,
 	}
 	/* The engine reports LIVENESS, not counters -- the same shape ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 11. */
-	if (!rtl9602c_l34_flow_hit(&ep->l34, (u16)idx, &active) && active)
+	if (!rtl9602c_l34_flow_hit(&ep->cs.l34, (u16)idx, &active) && active)
 		p->last_hit = jiffies;
 	*lastused = p->last_hit;
 	return 0;
@@ -307,25 +307,25 @@ static int rtl9602c_l34_op_stats(void *sh, u32 idx, void *priv,
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 12. */
 static void rtl9602c_l34_fo_release(void *data)
 {
-	struct rtl9602c_eth *ep = data;
+	struct luna_eth *ep = data;
 
-	unregister_inetaddr_notifier(&ep->l34_addr_nb);
-	eth_neigh_watch_stop(&ep->l34_neigh);
-	blocking_notifier_chain_unregister(&gpon_flow_routed_chain, &ep->l34_routed_nb);
-	gpon_flow_offload_free(ep->fo);
-	ep->fo = NULL;
+	unregister_inetaddr_notifier(&ep->cs.l34_addr_nb);
+	eth_neigh_watch_stop(&ep->cs.l34_neigh);
+	blocking_notifier_chain_unregister(&gpon_flow_routed_chain, &ep->cs.l34_routed_nb);
+	gpon_flow_offload_free(ep->cs.fo);
+	ep->cs.fo = NULL;
 }
 
 /* ★★ THE CORE OFFERS THIS ATTRIBUTION AND THIS FAMILY THREW ...
  * dev/MEASURED-rtl9602c_l34_tc.c.md sec 13. */
 static void rtl9602c_l34_op_note_vlan(void *sh, bool ds_leg, u16 vid)
 {
-	struct rtl9602c_eth *ep = sh;
+	struct luna_eth *ep = sh;
 
 	if (!ep)
 		return;
-	ep->l34.vlan_refused++;
-	ep->l34.vlan_refused_vid = vid;
+	ep->cs.l34.vlan_refused++;
+	ep->cs.l34.vlan_refused_vid = vid;
 }
 
 static const struct gpon_flow_ops rtl9602c_l34_flow_ops = {
@@ -350,35 +350,35 @@ static int rtl9602c_l34_block_cb(enum tc_setup_type type, void *type_data,
 {
 	struct flow_cls_offload *f = type_data;
 	struct net_device *dev = gpon_flow_bound_dev(cb_priv);
-	struct rtl9602c_eth *ep;
+	struct luna_eth *ep;
 	int err;
 
 	if (type != TC_SETUP_CLSFLOWER)
 		return -EOPNOTSUPP;
 	ep = rtl9602c_eth_of(dev);
-	if (!ep || !ep->fo)
+	if (!ep || !ep->cs.fo)
 		return -EOPNOTSUPP;
 
 	mutex_lock(&rtl9602c_l34_tc_mutex);
 	/* who refused is named by CONFIG_GPON_FLOW_DIAG at the point of refusal */
 	if (f->command == FLOW_CLS_REPLACE)
-		ep->l34.offered++;
-	err = gpon_flow_offload_tc(ep->fo, f, cb_priv);
+		ep->cs.l34.offered++;
+	err = gpon_flow_offload_tc(ep->cs.fo, f, cb_priv);
 	mutex_unlock(&rtl9602c_l34_tc_mutex);
 	return err;
 }
 
 /* Retire every flow and release the WAN rows, so the next flow provisions the edge the kernel holds now. */
-static void l34_retire_all(struct rtl9602c_eth *ep, const char *what)
+static void l34_retire_all(struct luna_eth *ep, const char *what)
 {
 	int ret;
 
 	mutex_lock(&rtl9602c_l34_tc_mutex);
 	/* under this mutex no install is in flight, so a flush that succeeded
 	 * left the core's table empty */
-	ret = gpon_flow_offload_flush(ep->fo);
-	if (!ret && ep->l34.provisioned)
-		ret = rtl9602c_l34_wan_release(&ep->l34, true);
+	ret = gpon_flow_offload_flush(ep->cs.fo);
+	if (!ret && ep->cs.l34.provisioned)
+		ret = rtl9602c_l34_wan_release(&ep->cs.l34, true);
 	mutex_unlock(&rtl9602c_l34_tc_mutex);
 	if (ret)
 		netdev_warn(ep->ndev, "L34: %s and the tables were NOT released (%d)\n", what, ret);
@@ -391,17 +391,17 @@ static void l34_retire_all(struct rtl9602c_eth *ep, const char *what)
 static int rtl9602c_l34_inetaddr_event(struct notifier_block *nb,
 				       unsigned long event, void *ptr)
 {
-	struct rtl9602c_eth *ep = container_of(nb, struct rtl9602c_eth, l34_addr_nb);
+	struct luna_eth *ep = container_of(nb, struct luna_eth, cs.l34_addr_nb);
 	struct in_ifaddr *ifa = ptr;
 	unsigned int lan_n, lan_rows;
 	bool wan_left;
 	char what[48];
 
-	if (!ep->fo || !ep->l34.provisioned)
+	if (!ep->cs.fo || !ep->cs.l34.provisioned)
 		return NOTIFY_DONE;
-	wan_left = event == NETDEV_DOWN && ntohl(ifa->ifa_local) == ep->l34.edge.wan_ip;
+	wan_left = event == NETDEV_DOWN && ntohl(ifa->ifa_local) == ep->cs.l34.edge.wan_ip;
 	lan_n = gpon_edge_lan_addrs(ep->ndev);
-	lan_rows = 1u + !!ep->l34.edge.lan2_prefix;
+	lan_rows = 1u + !!ep->cs.l34.edge.lan2_prefix;
 	if (!wan_left && !(event == NETDEV_UP ? lan_n > lan_rows :
 			   event == NETDEV_DOWN && READ_ONCE(gpon_flow_ipv4_routed) && lan_n != lan_rows))
 		return NOTIFY_DONE;
@@ -413,9 +413,9 @@ static int rtl9602c_l34_inetaddr_event(struct notifier_block *nb,
 /* The routed switch changed: the tables provisioned under the old value are released; the next flow provisions. */
 static int rtl9602c_l34_routed_event(struct notifier_block *nb, unsigned long event, void *ptr)
 {
-	struct rtl9602c_eth *ep = container_of(nb, struct rtl9602c_eth, l34_routed_nb);
+	struct luna_eth *ep = container_of(nb, struct luna_eth, cs.l34_routed_nb);
 
-	if (ep->fo && ep->l34.provisioned)
+	if (ep->cs.fo && ep->cs.l34.provisioned)
 		l34_retire_all(ep, "the routed switch changed");
 	return NOTIFY_DONE;
 }
@@ -424,8 +424,8 @@ static int rtl9602c_l34_routed_event(struct notifier_block *nb, unsigned long ev
  * hop); a LAN host's row follows it. */
 static void rtl9602c_l34_neigh_sync(struct eth_neigh_watch *w, u32 ip, int ifindex)
 {
-	struct rtl9602c_eth *ep = container_of(w, struct rtl9602c_eth, l34_neigh);
-	struct rtl9602c_l34 *l = &ep->l34;
+	struct luna_eth *ep = container_of(w, struct luna_eth, cs.l34_neigh);
+	struct rtl9602c_l34 *l = &ep->cs.l34;
 	struct net_device *dev = dev_get_by_index(&init_net, ifindex);
 	u8 mac[ETH_ALEN] = {}, state;
 	char what[112];
@@ -451,7 +451,7 @@ static void rtl9602c_l34_neigh_sync(struct eth_neigh_watch *w, u32 ip, int ifind
 /* Atomic context. Off with the routed switch: the engine then behaves as before the watch existed. */
 static bool rtl9602c_l34_neigh_names(struct eth_neigh_watch *w, u32 ip)
 {
-	struct rtl9602c_l34 *l = &container_of(w, struct rtl9602c_eth, l34_neigh)->l34;
+	struct rtl9602c_l34 *l = &container_of(w, struct luna_eth, cs.l34_neigh)->cs.l34;
 	u8 p = READ_ONCE(l->edge.lan2_prefix);
 	unsigned int i;
 
@@ -466,7 +466,7 @@ static bool rtl9602c_l34_neigh_names(struct eth_neigh_watch *w, u32 ip)
 }
 
 struct l34_seen_all {
-	struct rtl9602c_eth	*ep;
+	struct luna_eth	*ep;
 	struct eth_neigh_seen	seen[L34_ARP_WAN_BASE];
 	unsigned int		n;
 };
@@ -476,12 +476,12 @@ static void l34_seen_one(struct neighbour *n, void *cookie)
 	struct l34_seen_all *a = cookie;
 	u32 ip = ntohl(*(__be32 *)n->primary_key);
 
-	if (a->n < ARRAY_SIZE(a->seen) && rtl9602c_l34_neigh_names(&a->ep->l34_neigh, ip))
+	if (a->n < ARRAY_SIZE(a->seen) && rtl9602c_l34_neigh_names(&a->ep->cs.l34_neigh, ip))
 		a->seen[a->n++] = (struct eth_neigh_seen){ .ip = ip, .ifindex = n->dev->ifindex };
 }
 
 /* Every neighbour the tables name, re-read: at provisioning (the block's hosts) and when the queue overflowed. */
-static void l34_block_sync_all(struct rtl9602c_eth *ep)
+static void l34_block_sync_all(struct luna_eth *ep)
 {
 	struct l34_seen_all *a = kzalloc(sizeof(*a), GFP_KERNEL);
 	unsigned int i;
@@ -493,32 +493,31 @@ static void l34_block_sync_all(struct rtl9602c_eth *ep)
 	a->ep = ep;
 	neigh_for_each(&arp_tbl, l34_seen_one, a);
 	for (i = 0; i < a->n; i++)
-		rtl9602c_l34_neigh_sync(&ep->l34_neigh, a->seen[i].ip, a->seen[i].ifindex);
+		rtl9602c_l34_neigh_sync(&ep->cs.l34_neigh, a->seen[i].ip, a->seen[i].ifindex);
 	kfree(a);
 }
 
 static void rtl9602c_l34_neigh_sync_all(struct eth_neigh_watch *w)
 {
-	l34_block_sync_all(container_of(w, struct rtl9602c_eth, l34_neigh));
+	l34_block_sync_all(container_of(w, struct luna_eth, cs.l34_neigh));
 }
 
 static int rtl9602c_l34_setup_block(struct net_device *dev,
 				    struct flow_block_offload *f)
 {
-	struct rtl9602c_eth *ep = rtl9602c_eth_of(dev);
+	struct luna_eth *ep = rtl9602c_eth_of(dev);
 
 	/* ★ DO NOT CLAIM A BLOCK WE CANNOT HONOUR. `hw_nat` defaults ...
 	 * dev/MEASURED-rtl9602c_l34_tc.c.md sec 16. */
-	if (!ep || !ep->fo)
+	if (!ep || !ep->cs.fo)
 		return -EOPNOTSUPP;
 
 	return gpon_flow_block_setup(dev, f, &rtl9602c_l34_block_cb_list,
-				     rtl9602c_l34_block_cb, &ep->l34.binds,
-				     ep->fo, &rtl9602c_l34_tc_mutex);
+				     rtl9602c_l34_block_cb, &ep->cs.l34.binds,
+				     ep->cs.fo, &rtl9602c_l34_tc_mutex);
 }
 
-static int rtl9602c_l34_setup_tc(struct net_device *dev,
-				 enum tc_setup_type type, void *type_data)
+static int luna_chip_setup_tc(struct net_device *dev, enum tc_setup_type type, void *type_data)
 {
 	switch (type) {
 	case TC_SETUP_BLOCK:

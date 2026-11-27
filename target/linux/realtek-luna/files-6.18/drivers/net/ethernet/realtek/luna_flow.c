@@ -46,12 +46,12 @@ static const struct net_device_ops luna_eth_netdev_ops, luna_eth_wan_ops;
 
 static u32 luna_flow_rd(struct luna_eth *ep, u32 offset)
 {
-	return readl(ep->flow->sram.sw + offset);
+	return readl(ep->cs.flow->sram.sw + offset);
 }
 
 static void luna_flow_wr(struct luna_eth *ep, u32 offset, u32 value)
 {
-	writel(value, ep->flow->sram.sw + offset);
+	writel(value, ep->cs.flow->sram.sw + offset);
 }
 
 /* The OUT (forwarded) half of one flow MIB counter: packets in word 3, octets
@@ -59,7 +59,7 @@ static void luna_flow_wr(struct luna_eth *ep, u32 offset, u32 value)
 static void luna_flow_mib_read(struct luna_eth *ep, unsigned int n,
 			       u64 *bytes, u32 *packets)
 {
-	u32 base = ep->c->flow->mib_base + 24 * n, hi, lo;
+	u32 base = ep->cs.c->flow->mib_base + 24 * n, hi, lo;
 
 	do {
 		hi = luna_flow_rd(ep, base + 20);
@@ -102,7 +102,7 @@ static int luna_flow_reset(struct luna_eth *ep)
 
 static int luna_flow_initialize(struct luna_eth *ep)
 {
-	struct luna_flow_engine *e = ep->flow;
+	struct luna_flow_engine *e = ep->cs.flow;
 	u32 v;
 	int ret;
 	unsigned int i;
@@ -135,7 +135,7 @@ static int luna_flow_initialize(struct luna_eth *ep)
  */
 static void luna_flow_hits(struct luna_eth *ep)
 {
-	struct luna_flow_engine *e = ep->flow;
+	struct luna_flow_engine *e = ep->cs.flow;
 	unsigned int count = luna_flow_entry_count(&e->sram.hash), base, bit;
 
 	if (e->hits_at && time_before(jiffies, e->hits_at + HZ / 4))
@@ -161,7 +161,7 @@ static void luna_flow_hits(struct luna_eth *ep)
 
 static int luna_flow_provision(struct luna_eth *ep, const struct gpon_edge *edge)
 {
-	struct luna_flow_engine *e = ep->flow;
+	struct luna_flow_engine *e = ep->cs.flow;
 	struct luna_flow_netif n = {
 		.valid = true, .check_mtu = true,
 	};
@@ -171,22 +171,22 @@ static int luna_flow_provision(struct luna_eth *ep, const struct gpon_edge *edge
 
 	n.address = edge->lan_ip;
 	/* SPA is checked against the egress NETIF's allowed ingress ports. */
-	n.ports = BIT(ep->c->sw_map->pon_port);
+	n.ports = BIT(ep->cs.c->sw_map->pon_port);
 	n.mtu = ep->ndev->mtu;
 	n.pppoe = edge->wan_pppoe_sid ? LUNA_FLOW_PPPOE_REMOVE : LUNA_FLOW_PPPOE_KEEP;
 	ether_addr_copy(n.mac, edge->lan_mac);
-	ret = luna_flow_netif_encode(&n, ep->c->flow->port_bits,
-				     ep->c->flow->external_port_bits, words[0]);
+	ret = luna_flow_netif_encode(&n, ep->cs.c->flow->port_bits,
+				     ep->cs.c->flow->external_port_bits, words[0]);
 	if (ret)
 		return ret;
 	n.address = edge->wan_ip;
-	n.ports = ep->lan_flood_mask;
+	n.ports = ep->cs.lan_flood_mask;
 	n.mtu = ep->wan_ndev->mtu - (edge->wan_pppoe_sid ? 8 : 0);
 	n.pppoe_sid = edge->wan_pppoe_sid;
 	n.pppoe = edge->wan_pppoe_sid ? LUNA_FLOW_PPPOE_ADD : LUNA_FLOW_PPPOE_KEEP;
 	ether_addr_copy(n.mac, edge->wan_mac);
-	ret = luna_flow_netif_encode(&n, ep->c->flow->port_bits,
-				     ep->c->flow->external_port_bits, words[1]);
+	ret = luna_flow_netif_encode(&n, ep->cs.c->flow->port_bits,
+				     ep->cs.c->flow->external_port_bits, words[1]);
 	if (ret)
 		return ret;
 	e->provisioned = false;
@@ -202,7 +202,7 @@ static int luna_flow_provision(struct luna_eth *ep, const struct gpon_edge *edge
 			return ret;
 		ret = luna_flow_local_get(&e->macs, &e->local[i],
 					  i ? edge->wan_mac : edge->lan_mac,
-					  ep->c->sw_map->cpu_port);
+					  ep->cs.c->sw_map->cpu_port);
 		if (ret)
 			return ret;
 	}
@@ -217,7 +217,7 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 			     u32 *index)
 {
 	struct luna_eth *ep = sh;
-	struct luna_flow_engine *e = ep->flow;
+	struct luna_flow_engine *e = ep->cs.flow;
 	struct luna_flow_priv *p = priv;
 	struct luna_flow_path5 a = { .locked = true };
 	struct gpon_edge edge;
@@ -288,7 +288,7 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 	if (ret)
 		return ret;
 	ret = luna_flow_mac_get(&e->macs, &p->mac, act->gw_dmac,
-				ds ? ep->lan_flood_mask : BIT(ep->c->sw_map->pon_port));
+				ds ? ep->cs.lan_flood_mask : BIT(ep->cs.c->sw_map->pon_port));
 	if (ret)
 		return ret;
 	a.ingress_if = ds ? 1 : 0;
@@ -300,7 +300,7 @@ static int luna_flow_install(void *sh, const struct gpon_flow_key *key,
 	a.ingress_pppoe = ds && e->edge.wan_pppoe_sid;
 	a.set_stream = !ds;
 	a.stream_id = ds ? 0 : GPON_DATA_FLOW;
-	if (ep->c->flow->mib_base && ~e->mibs_used) {
+	if (ep->cs.c->flow->mib_base && ~e->mibs_used) {
 		a.count = true;
 		a.counter = ffz(e->mibs_used);
 		e->mibs_used |= BIT(a.counter);
@@ -323,14 +323,14 @@ static int luna_flow_remove(void *sh, u32 index, void *priv)
 	struct luna_flow_priv *p = priv;
 	int ret;
 
-	ret = luna_flow_sram_del(&ep->flow->sram, &p->slot);
+	ret = luna_flow_sram_del(&ep->cs.flow->sram, &p->slot);
 	if (ret)
 		return ret;
 	if (p->mib) {
-		ep->flow->mibs_used &= ~BIT(p->mib - 1);
+		ep->cs.flow->mibs_used &= ~BIT(p->mib - 1);
 		p->mib = 0;
 	}
-	return luna_flow_mac_put(&ep->flow->macs, &p->mac);
+	return luna_flow_mac_put(&ep->cs.flow->macs, &p->mac);
 }
 
 static int luna_flow_counters(void *sh, u32 index, void *priv, u64 *bytes,
@@ -380,14 +380,14 @@ static int luna_flow_block_cb(enum tc_setup_type type, void *data, void *cookie)
 	struct flow_cls_offload *f = data;
 	int ret;
 
-	if (type != TC_SETUP_CLSFLOWER || !ep || !ep->flow)
+	if (type != TC_SETUP_CLSFLOWER || !ep || !ep->cs.flow)
 		return -EOPNOTSUPP;
 	mutex_lock(&luna_flow_mutex);
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
 	if (f->command == FLOW_CLS_REPLACE)
-		ep->flow->offered++;
+		ep->cs.flow->offered++;
 #endif
-	ret = gpon_flow_offload_tc(ep->flow->fo, f, cookie);
+	ret = gpon_flow_offload_tc(ep->cs.flow->fo, f, cookie);
 	if (ret && ret != -EOPNOTSUPP && ret != -ENOENT &&
 	    ret != -EEXIST && ret != -EAGAIN && ret != -ENOSPC)
 		pr_warn_ratelimited("luna-flow: operation %u failed: %d\n", f->command, ret);
@@ -400,10 +400,10 @@ static int luna_flow_setup_tc(struct net_device *dev, enum tc_setup_type type,
 {
 	struct luna_eth *ep = luna_flow_eth(dev);
 
-	if (!ep || !ep->flow || (type != TC_SETUP_BLOCK && type != TC_SETUP_FT))
+	if (!ep || !ep->cs.flow || (type != TC_SETUP_BLOCK && type != TC_SETUP_FT))
 		return -EOPNOTSUPP;
 	return gpon_flow_block_setup(dev, data, &luna_flow_blocks,
-				     luna_flow_block_cb, NULL, ep->flow->fo, &luna_flow_mutex);
+				     luna_flow_block_cb, NULL, ep->cs.flow->fo, &luna_flow_mutex);
 }
 
 /* gpon0's own MAC pinned to the CPU port while gpon0 is up, flows or none: a WAN frame to it is
@@ -412,13 +412,13 @@ static void luna_flow_wan_pin(struct luna_eth *ep, const u8 *mac)
 {
 	int ret;
 
-	if (!ep->flow)
+	if (!ep->cs.flow)
 		return;
 	mutex_lock(&luna_flow_mutex);
-	ret = luna_flow_local_put(&ep->flow->macs, &ep->flow->wan_pin);
+	ret = luna_flow_local_put(&ep->cs.flow->macs, &ep->cs.flow->wan_pin);
 	if (!ret && mac)
-		ret = luna_flow_local_get(&ep->flow->macs, &ep->flow->wan_pin, mac,
-					  ep->c->sw_map->cpu_port);
+		ret = luna_flow_local_get(&ep->cs.flow->macs, &ep->cs.flow->wan_pin, mac,
+					  ep->cs.c->sw_map->cpu_port);
 	mutex_unlock(&luna_flow_mutex);
 	if (ret)
 		netdev_err(ep->ndev, "WAN MAC lookup pin failed: %d\n", ret);
@@ -429,17 +429,17 @@ static void luna_flow_stop(struct luna_eth *ep)
 	int ret;
 	unsigned int i;
 
-	if (!ep->flow)
+	if (!ep->cs.flow)
 		return;
 	mutex_lock(&luna_flow_mutex);
-	ret = gpon_flow_offload_flush(ep->flow->fo);
+	ret = gpon_flow_offload_flush(ep->cs.flow->fo);
 	if (!ret) {
-		ep->flow->provisioned = false;
-		ep->flow->initialized = false;
+		ep->cs.flow->provisioned = false;
+		ep->cs.flow->initialized = false;
 		ret = luna_flow_reset(ep);
 	}
 	for (i = 0; !ret && i < 2; i++)
-		ret = luna_flow_local_put(&ep->flow->macs, &ep->flow->local[i]);
+		ret = luna_flow_local_put(&ep->cs.flow->macs, &ep->cs.flow->local[i]);
 	if (ret)
 		netdev_err(ep->ndev, "flow shutdown failed: %d\n", ret);
 	mutex_unlock(&luna_flow_mutex);
@@ -469,7 +469,7 @@ static void luna_flow_show_row(struct seq_file *m, struct luna_flow_engine *e,
 static int luna_flow_show(struct seq_file *m, void *v)
 {
 	struct luna_eth *ep = m->private;
-	struct luna_flow_engine *e = ep->flow;
+	struct luna_flow_engine *e = ep->cs.flow;
 	struct gpon_flow_diag d = { .valid = GPON_FDIAG_HAS_ALL };
 	char line[768];
 	unsigned int i;
@@ -507,22 +507,22 @@ static void luna_flow_release(void *data)
 	unsigned int i;
 
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
-	proc_remove(ep->flow->proc);
+	proc_remove(ep->cs.flow->proc);
 #endif
 	ret = luna_flow_reset(ep);
 	if (ret)
 		netdev_err(ep->ndev, "flow hardware reset failed during release: %d\n", ret);
 	for (i = 0; i < 2; i++) {
-		ret = luna_flow_local_put(&ep->flow->macs, &ep->flow->local[i]);
+		ret = luna_flow_local_put(&ep->cs.flow->macs, &ep->cs.flow->local[i]);
 		if (ret)
 			netdev_err(ep->ndev, "local MAC restore failed: %d\n", ret);
 	}
-	ret = luna_flow_local_put(&ep->flow->macs, &ep->flow->wan_pin);
+	ret = luna_flow_local_put(&ep->cs.flow->macs, &ep->cs.flow->wan_pin);
 	if (ret)
 		netdev_err(ep->ndev, "WAN MAC pin restore failed: %d\n", ret);
-	gpon_flow_offload_free(ep->flow->fo);
-	kfree(ep->flow);
-	ep->flow = NULL;
+	gpon_flow_offload_free(ep->cs.flow->fo);
+	kfree(ep->cs.flow);
+	ep->cs.flow = NULL;
 }
 
 static int luna_flow_probe(struct luna_eth *ep)
@@ -530,30 +530,30 @@ static int luna_flow_probe(struct luna_eth *ep)
 	struct luna_flow_engine *e;
 	int ret;
 
-	if (!hw_nat || !ep->c->flow)
+	if (!hw_nat || !ep->cs.c->flow)
 		return 0;
-	if (!ep->c->flow->acc || !ep->c->flow->mac || !ep->c->flow->mac->l2 ||
-	    ep->c->flow->window_size < 0x8011a0 ||
-	    (ep->c->flow->sram_bits != 10 && ep->c->flow->sram_bits != 12))
+	if (!ep->cs.c->flow->acc || !ep->cs.c->flow->mac || !ep->cs.c->flow->mac->l2 ||
+	    ep->cs.c->flow->window_size < 0x8011a0 ||
+	    (ep->cs.c->flow->sram_bits != 10 && ep->cs.c->flow->sram_bits != 12))
 		return -EINVAL;
 	e = kzalloc(sizeof(*e), GFP_KERNEL);
 	if (!e)
 		return -ENOMEM;
-	e->sram.sw = devm_ioremap(ep->dev, SWCORE_PHYS, ep->c->flow->window_size);
+	e->sram.sw = devm_ioremap(ep->dev, SWCORE_PHYS, ep->cs.c->flow->window_size);
 	if (!e->sram.sw) {
 		kfree(e);
 		return -ENOMEM;
 	}
 	e->macs.sw = e->sram.sw;
-	e->sram.acc = e->macs.acc = ep->c->flow->acc;
-	e->sram.hash.sram_bits = ep->c->flow->sram_bits;
-	e->macs.layout = ep->c->flow->mac;
+	e->sram.acc = e->macs.acc = ep->cs.c->flow->acc;
+	e->sram.hash.sram_bits = ep->cs.c->flow->sram_bits;
+	e->macs.layout = ep->cs.c->flow->mac;
 	e->fo = gpon_flow_offload_new(&luna_flow_ops, ep);
 	if (!e->fo) {
 		kfree(e);
 		return -ENOMEM;
 	}
-	ep->flow = e;
+	ep->cs.flow = e;
 #if IS_ENABLED(CONFIG_GPON_FLOW_DIAG)
 	e->proc = proc_create_single_data("flowdump", 0444, NULL, luna_flow_show, ep);
 	if (!e->proc)

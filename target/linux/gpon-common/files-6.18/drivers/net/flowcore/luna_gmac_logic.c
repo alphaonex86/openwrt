@@ -56,12 +56,13 @@ bool luna_gmac_tx_zero_copy(bool nonlinear, unsigned int len,
 	return !nonlinear && len >= min_len;
 }
 
-/* Bad-frame verdict, SPLIT from luna_eth.c eth_rx(): is a ...
- * dev/MEASURED-luna_gmac_logic.c.md sec 1. */
-bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len,
-			    u32 hdr_floor, u32 buf_size)
+/* Bad-frame verdict: a receive error, a frame under the Ethernet minimum after the CPU prefix, or one past the buffer.
+ * dev/MEASURED-rtl9602c_l34_logic.c.md sec 11. */
+bool luna_gmac_rx_frame_bad(u32 opts1, u32 err_mask, u32 len, unsigned int cpu_prefix, u32 buf_size)
 {
-	return (opts1 & err_mask) || len <= hdr_floor || len > buf_size;
+	return (opts1 & err_mask) ||
+	       len < 60 + cpu_prefix ||	/* 60 = ETH_ZLEN, the min Ethernet frame */
+	       len > buf_size;
 }
 
 /* In-band switch CPU-tag classifier, SPLIT from luna_eth.c ...
@@ -73,15 +74,47 @@ bool luna_gmac_rx_cpu_tag_present(const u8 *data, u32 len,
 	       data[12] == 0x88 && data[13] == 0x99;
 }
 
-/* ─── CPU-side OMCI (OMCC) datapath, family tier ... -- dev/MEASURED-luna_gmac_logic.c.md sec 3. */
-bool luna_gmac_rx_is_ds_omci(const struct luna_rx_layout *rxl,
-			     bool trap_on, u32 opts2, u32 opts3, u32 len,
-			     unsigned int omci_reason,
-			     unsigned int cpu_prefix, u32 buf_size)
+/* DS-OMCI classifier + length guard: OMCI only when the switch trapped it from the PON port; a frame whose bytes merely
+ * look like an OMCI header is forwarded and named a lookalike (field X111W 2026-11-17: HTTP text was eaten as OMCI).
+ * dev/MEASURED-rtl9602c_l34_logic.c.md sec 7. */
+enum luna_gmac_ds_omci luna_gmac_rx_ds_omci(const struct luna_rx_layout *rxl, bool trap_on, u32 opts2, u32 opts3,
+					    const u8 *data, u32 len, unsigned int pon_port, unsigned int omci_reason,
+					    unsigned int cpu_prefix, u32 buf_size)
 {
 	if (!trap_on || len < cpu_prefix + 8 || len > buf_size)
-		return false;
-	return luna_gmac_rx_reason(rxl, opts2, opts3) == omci_reason;
+		return LUNA_GMAC_DS_OMCI_NONE;
+	if (luna_gmac_rx_reason(rxl, opts2, opts3) == omci_reason &&
+	    luna_gmac_rx_src_port(rxl, opts3) == pon_port)
+		return LUNA_GMAC_DS_OMCI_TRAPPED;
+	return (data[cpu_prefix + 3] == 0x0a || data[cpu_prefix + 3] == 0x0b) &&
+	       !(data[cpu_prefix + 2] & 0x80) ? LUNA_GMAC_DS_OMCI_LOOKALIKE : LUNA_GMAC_DS_OMCI_NONE;
+}
+
+/* The HW ring h behind the omci_tx_ring module param: instances >5 clamp to
+ * ring 4.  Was spelled seven times across the shell (xmit, rekick, align,
+ * hw_program, open x2, diag). */
+unsigned int luna_gmac_omci_hwring(unsigned int omci_tx_ring)
+{
+	return omci_tx_ring > 5 ? 4 : omci_tx_ring;
+}
+
+/* Which doorbell kicks HW ring h, SPLIT from ... -- dev/MEASURED-rtl9602c_l34_logic.c.md sec 9. */
+bool luna_gmac_omci_doorbell(unsigned int omci_tx_ring,
+			    unsigned int doorbell_ovr,
+			    unsigned int *hwring, u32 *mask)
+{
+	unsigned int h = luna_gmac_omci_hwring(omci_tx_ring);
+	unsigned int dbit = (doorbell_ovr == 0xff)
+		? (h & 0x1f)	/* R_IO_CMD bit number == HW ring (h<4) */
+		: doorbell_ovr;
+
+	*hwring = h;
+	if (h == 4 && doorbell_ovr == 0xff) {
+		*mask = 0x100;	/* R_IO_CMD1 TX_POLL5 (bit8 = 0x100) */
+		return true;
+	}
+	*mask = 1u << dbit;
+	return false;
 }
 
 /* US-OMCI TX steering, word2 (opts2): CPUTAG + the egress ...

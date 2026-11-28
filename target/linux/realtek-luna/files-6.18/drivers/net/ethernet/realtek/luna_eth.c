@@ -1930,6 +1930,8 @@ hw_ready:
 
 	ep->hw_up = true;
 	luna_gpon_nic_reset_end();
+	/* a frame filled before the ISR ack above lost its latch: drain it now, not at the 2 s stall watch */
+	luna_rxw_kick_poll(ep);
 	return 0;
 
 fail:

@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <gpon_range_gate.h>
 #include <gn25l95_cal_logic.h>
+#include <rtl8290b_startup_logic.h>
 #include "gpon_sn.h"	/* the common G.984.3 ONU-SN codec */
 #include "gpon_ploam.h"	/* the core PLOAM FSM + its shell contract */
 #include "gpon_ploam_diag.h"	/* the core's activation diagnostic: WHAT to read at Assign/Ranging/Deact */
@@ -1315,13 +1316,6 @@ static u8 gpon_last_ds_type;
 static bool force_laser;
 module_param(force_laser, bool, 0444);
 MODULE_PARM_DESC(force_laser, "force US laser CW on (US_CFG FS_LON) — SerDes-TX emission diagnostic");
-/* Laser burst bias/mod DACs: THIS unit's 12-bit codes from its own rtl8290b.data
- * (CAL_IBIAS/CAL_IMOD, code = uA * 4096 / 50000), set by the provisioning or the
- * command line; 0 keeps the golden seed. A compiled value would be one unit's
- * calibration shipped to every unit. Registered with their setter beside
- * luna_laser_dac_apply(). dev/MEASURED-luna_gpon.c.md sec 34. */
-static unsigned int laser_bias;
-static unsigned int laser_mod;
 /* rev-A bring-up US-TX SerDes CMU/PLL + TX-LA-LDO writes ...
  * dev/MEASURED-luna_gpon.c.md sec 35. */
 static unsigned int serdes_modev1_tx;	/* default 0: TESTED (COM_REG02/03/08/24/25 applied+readback-confirmed) =
@@ -1497,22 +1491,6 @@ MODULE_PARM_DESC(gpio_pad_9603cvd,
 static bool laser_off;		/* default false; set via luna_gpon.laser_off=1 for the isolation test */
 module_param(laser_off, bool, 0444);
 MODULE_PARM_DESC(laser_off, "skip laser TX-enable+APC (DS-RX-vs-laser isolation: laser-on deafens DS RX)");
-/* DEFAULT TRUE = THE RANGING FIX. Skip our clean-room APC ...
- * dev/MEASURED-luna_gpon.c.md sec 56. */
-static bool apc_off = true;	/* apc_off=false was RE-TESTED and BREAKS ranging: the ~3 s CW
-			 * seating loop deafens the shared-BOSA DS-RX, so the OLT only ever sees
-			 * "Initial" and never O5. And the apc_off=true laser is NOT weak: bias
-			 * stable at 0x19, no fault, EN_L=0 throughout, O5 reached and held ~8 s
-			 * before the OLT sends Deactivate=LOS. So the LOS is not a bias-seat
-			 * problem -- it is the upstream BURST not being decodable despite a
-			 * healthy laser, the same wall as rxsid=0. */
-module_param(apc_off, bool, 0444);
-MODULE_PARM_DESC(apc_off, "skip bosa_apc_calibrate (1=A4 image alone; 0=run APC to seat OFFK laser bias)");
-/* RTL8290B B-variant APC/OFFK ignition. DEFAULT FALSE so the ...
- * dev/MEASURED-luna_gpon.c.md sec 57. */
-static bool apc_offk;		/* default OFF: OFFK converges (R29=0x3f) but does NOT lift WAN rate; not the WAN root cause */
-module_param(apc_offk, bool, 0444);
-MODULE_PARM_DESC(apc_offk, "run rtl8290b_apc_init B-variant OFFK ignition (completes modulator offset cal; default 0 = unchanged)");
 /* TEMP default true (LAN+WiFi ACCESS build): hold the ONU FSM ...
  * dev/MEASURED-luna_gpon.c.md sec 279. */
 static bool gpon_hold;	/* default false: range to O5 normally (so the O5 selftest fires) */
@@ -2537,22 +2515,6 @@ static u8 bosa_get_field(u16 reg, u8 mask)
 	return (r & mask) >> __ffs(mask);
 }
 
-/* Bounded poll of a BOSA status bit. Returns 1 if the bit reached @want before
- * the cap, 0 on timeout. @us is the per-iteration delay. */
-static int bosa_poll_bit(u16 reg, u8 bit, int want, unsigned int us, int cap)
-{
-	int i;
-
-	for (i = 0; i < cap; i++) {
-		int r = bosa_read_reg(reg);
-
-		if (r >= 0 && !!(r & (1u << bit)) == !!want)
-			return 1;
-		udelay(us);
-	}
-	return 0;
-}
-
 /* RTL8290B optical DDM: raw ADC -> calibrated dBm / temp / ...
  * dev/MEASURED-luna_gpon.c.md sec 81. */
 #define BOSA_RX_CDBM_NA		S32_MIN
@@ -3021,7 +2983,7 @@ static void __init bosa_rx_enable(void)
 }
 
 /* Upstream-laser (TX) operating point -- the values a ... -- dev/MEASURED-luna_gpon.c.md sec 89. */
-static const struct { u16 reg; u8 val; } bosa_tx_golden[] __initconst = {
+static const struct { u16 reg; u8 val; } bosa_tx_golden[] = {
 	{ BOSA_W(46), 0xb0 },	/* TX bias power + APC clocks  */
 	{ BOSA_W(54), 0x19 },	/* laser BIAS DAC high          */
 	{ BOSA_W(55), 0x67 },	/* laser MOD DAC high           */
@@ -3036,7 +2998,7 @@ static const struct { u16 reg; u8 val; } bosa_tx_golden[] __initconst = {
 
 /* BOSA full register image -- the values a registered unit ...
  * dev/MEASURED-luna_gpon.c.md sec 90. */
-static const struct { u16 reg; u8 val; } bosa_init_golden[] __initconst = {
+static const struct { u16 reg; u8 val; } bosa_init_golden[] = {
 	/* page 0 (I2C slave 0x50): SFF-8472 A0 identification-page ...
 	 * dev/MEASURED-luna_gpon.c.md sec 91. */
 	{BOSA_A0(0),0x02}, {BOSA_A0(1),0x04}, {BOSA_A0(2),0x0b}, {BOSA_A0(3),0xff},
@@ -3233,10 +3195,10 @@ static const struct { u16 reg; u8 val; } bosa_init_golden[] __initconst = {
 	{BOSA_W(55),0x67},	/* laser MOD DAC high (= bosa_tx_golden) */
 	{BOSA_W(56),0x22},	/* BIAS/MOD DAC low bits (= bosa_tx_golden) */
 	{BOSA_W(57),0x2d},	/* APCDIG bias DAC power (= bosa_tx_golden) */
-	{BOSA_W(58),0x62},	/* DCL P0 -- bosa_apc_calibrate overwrites (0x26) */
-	{BOSA_W(59),0xcf},	/* DCL P1 -- bosa_apc_calibrate overwrites (0x50) */
+	{BOSA_W(58),0x62},	/* IAVG -- the start-up sets it from the unit's block */
+	{BOSA_W(59),0xcf},	/* ER | APC/ERC timers -- the start-up sets it */
 	{BOSA_W(60),0x03},	/* TIA power config (= bosa_tx_golden) */
-	{BOSA_W(61),0xa2},	/* DCL Pavg -- bosa_apc_calibrate overwrites (0x50) */
+	{BOSA_W(61),0xa2},	/* laser-on delay | settle -- the start-up sets it */
 	{BOSA_W(62),0xfc}, {BOSA_W(63),0xfd}, {BOSA_W(64),0x02}, {BOSA_W(65),0x57},
 	{BOSA_W(66),0xd0},
 	{BOSA_W(67),0x80},	/* bit7 = APC hardware-servo enable */
@@ -3367,27 +3329,33 @@ static const struct { u16 reg; u8 val; } bosa_init_golden[] __initconst = {
 	{BOSA_R(252),0x00}, {BOSA_R(253),0x00}, {BOSA_R(254),0x00}, {BOSA_R(255),0x00},
 };
 
-static void __init bosa_tx_enable(void)
+/* -> the number of refused writes (the caller refuses the laser on any). */
+static unsigned int bosa_tx_enable(void)
 {
+	unsigned int failed = 0;
 	int i;
 
 	/* Load the A4 register image (0x200-BOSA_W(80)) + base/control ...
 	 * dev/MEASURED-luna_gpon.c.md sec 94. */
 	for (i = 0; i < ARRAY_SIZE(bosa_init_golden); i++)
-		bosa_write_reg(bosa_init_golden[i].reg, bosa_init_golden[i].val);
+		failed += bosa_write_reg(bosa_init_golden[i].reg, bosa_init_golden[i].val) != 0;
 	mdelay(2);
 	pr_info("luna-gpon: A4 image loaded: st1=0x%02x(cksum_err=%d) st2=0x%02x\n",
 		bosa_read_reg(0x382) & 0xff,
 		!!(bosa_read_reg(0x382) & 0x20), bosa_read_reg(0x383) & 0xff);
 
 	for (i = 0; i < ARRAY_SIZE(bosa_tx_golden); i++)
-		bosa_write_reg(bosa_tx_golden[i].reg, bosa_tx_golden[i].val);
+		failed += bosa_write_reg(bosa_tx_golden[i].reg, bosa_tx_golden[i].val) != 0;
 	mdelay(10);
 	pr_info("luna-gpon: BOSA TX/laser config %s (bias=0x%02x mod=0x%02x w46=0x%02x w48=0x%02x)\n",
 		(bosa_not_8290b || bosa_id_num != 0x8290) ? "NOT APPLIED (writes refused)"
 							  : "applied",
 		bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x237) & 0xff,
 		bosa_read_reg(0x22e) & 0xff, bosa_read_reg(0x230) & 0xff);
+	if (failed)
+		pr_err("luna-gpon: BOSA register image: %u of %zu writes refused\n", failed,
+		       ARRAY_SIZE(bosa_init_golden) + ARRAY_SIZE(bosa_tx_golden));
+	return failed;
 }
 
 /* Set once the cold ignition has run, so the periodic fault-service (driven from
@@ -3395,53 +3363,167 @@ static void __init bosa_tx_enable(void)
 static int bosa_laser_up;
 static int luna_laser_restrobe_owed;	/* each O3 entry: dev/MEASURED-luna_gpon.c.md sec 337 */
 
-/* Program the burst bias/mod DACs from laser_bias/laser_mod (0 = golden seed):
- * hi-8 into 0x236/0x237, the low nibbles into 0x238, each latched by the 0x23d
- * strobe. Caller holds bosa_lock. */
-static void luna_laser_dac_apply(void)
+/* Re-issue the 0x23d strobe over the DAC codes the shadow registers hold now,
+ * the shape that recovered a post-O5-deactivation "Laser out" (sec 337). Caller
+ * holds bosa_lock. */
+static void luna_laser_restrobe(void)
 {
-	unsigned int bias = laser_bias ? laser_bias : 0x190;
-	unsigned int mod = laser_mod ? laser_mod : 0x670;
+	int bias = bosa_read_reg(0x236), mod = bosa_read_reg(0x237);
+	int lo = bosa_read_reg(0x238), ctl = bosa_read_reg(0x23d);
+	struct { u16 reg; int val; } seq[] = {
+		{ 0x23d, ctl & ~0x80 }, { 0x236, bias }, { 0x238, lo }, { 0x23d, ctl | 0x80 },
+		{ 0x23d, ctl & ~0x80 }, { 0x237, mod }, { 0x238, lo }, { 0x23d, ctl | 0x80 },
+	};
+	unsigned int i, failed = 0;
 
-	bosa_set_bit(0x23d, 7, 0);
-	bosa_set_field(0x236, 0xff, bias >> 4);
-	bosa_set_field(0x238, 0x0f, bias & 0x0f);
-	bosa_set_bit(0x23d, 7, 1);
-	bosa_set_bit(0x23d, 7, 0);
-	bosa_set_field(0x237, 0xff, mod >> 4);
-	bosa_set_field(0x238, 0xf0, (mod & 0x0f) << 4);
-	bosa_set_bit(0x23d, 7, 1);
-	mdelay(2);
-	pr_info("luna-gpon: laser DAC bias=0x%03x mod=0x%03x -> readback 0x236=0x%02x 0x237=0x%02x 0x238=0x%02x R30=0x%02x\n",
-		bias, mod, bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x237) & 0xff,
-		bosa_read_reg(0x238) & 0xff, bosa_read_reg(0x31e) & 0xff);
+	if (bias < 0 || mod < 0 || lo < 0 || ctl < 0) {
+		luna_log("laser re-strobe skipped: DAC shadow unreadable (0x236=%d 0x237=%d 0x238=%d 0x23d=%d)\n",
+			 bias, mod, lo, ctl);
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(seq); i++)
+		failed += bosa_write_reg(seq[i].reg, seq[i].val) != 0;
+	if (failed)
+		luna_log("laser re-strobe: %u/%zu BOSA writes failed\n", failed, ARRAY_SIZE(seq));
 }
 
-/* The provisioning writes the unit's codes after the driver started: apply them now. */
-static int laser_dac_set(const char *val, const struct kernel_param *kp)
-{
-	unsigned int code;
+/* Once the start-up ran the FSU, the worker (50 ms) asks the MCU whether it
+ * settled (0x24d=0xb0, then 0x31d[5:2] all set) and then stops it as stock's
+ * steady state holds it (0x20e b7=0, 0x27c b4=0), within LASER_FSU_POLLS. */
+#define LASER_FSU_POLLS	200
+static int laser_fsu_polls;	/* > 0: FSU running, polls left */
+static int laser_fsu_latched;
 
-	if (kstrtouint(val, 0, &code) || code > 0xfff)
-		return -EINVAL;
-	mutex_lock(&bosa_lock);
-	*(unsigned int *)kp->arg = code;
-	if (bosa_laser_up)
-		luna_laser_dac_apply();
-	mutex_unlock(&bosa_lock);
+static void luna_laser_fsu_poll(void)
+{
+	int r = bosa_write_reg(BOSA_REG_W77, 0xb0);
+
+	r = r ? r : bosa_read_reg(BOSA_REG_R29);
+	if (r >= 0 && (r & 0x3c) == 0x3c) {
+		int fsu = bosa_read_reg(0x20e), ctl = bosa_read_reg(BOSA_W(80));
+
+		laser_fsu_polls = 0;
+		r = fsu < 0 ? fsu : ctl < 0 ? ctl : bosa_write_reg(0x20e, fsu & 0x7f);
+		r = r ? r : bosa_write_reg(BOSA_W(80), ctl & ~0x10);
+		laser_fsu_latched = !r;
+		luna_log("laser FSU settled (0x31d[5:2]=0xf): stop %s (%d)\n", r ? "FAILED" : "done", r);
+		return;
+	}
+	if (r < 0)
+		luna_log("laser FSU poll: BOSA access failed (%d)\n", r);
+	if (!--laser_fsu_polls)
+		luna_log("laser FSU NOT settled after %d polls (last 0x31d=%d): left running\n",
+			 LASER_FSU_POLLS, r);
+}
+
+/* The laser start-up, run once per boot when the provisioning hands this unit's
+ * parameter block (rtl8290b_startup_logic.h) to laser_param: the register image,
+ * then the start-up the block drives. Until then, or when it is refused, the
+ * laser stays off and activation refuses (luna_activate_locked). */
+static u8 laser_block[RTL8290B_PARAM_LEN];
+static struct rtl8290b_startup_res laser_startup_res = { .err = -ENODATA };
+
+static int luna_su_rd(void *ctx, u16 reg, u8 *val)
+{
+	int r = bosa_read_reg(reg);
+
+	(void)ctx;
+	if (r < 0)
+		return r;
+	*val = r;
 	return 0;
 }
 
-static const struct kernel_param_ops laser_dac_ops = {
-	.set = laser_dac_set,
-	.get = param_get_uint,
+static int luna_su_wr(void *ctx, u16 reg, u8 val)
+{
+	(void)ctx;
+	return bosa_write_reg(reg, val);
+}
+
+static void luna_su_delay(void *ctx, unsigned int us)
+{
+	(void)ctx;
+	usleep_range(us, us + us / 8);
+}
+
+static const struct rtl8290b_io luna_su_io = {
+	.rd = luna_su_rd, .wr = luna_su_wr, .delay_us = luna_su_delay,
 };
-module_param_cb(laser_bias, &laser_dac_ops, &laser_bias, 0644);
-module_param_cb(laser_mod, &laser_dac_ops, &laser_mod, 0644);
-MODULE_PARM_DESC(laser_bias, "burst bias DAC, this unit's 12-bit code (rtl8290b.data CAL_IBIAS uA*4096/50000); 0 = golden seed");
-MODULE_PARM_DESC(laser_mod, "burst modulation DAC, this unit's 12-bit code (rtl8290b.data CAL_IMOD uA*4096/50000); 0 = golden seed");
-static int apc_offk_armed;	/* rtl8290b_apc_init armed FSU/OFFK; servo will latch */
-static int apc_offk_latched;	/* runtime servo latched OFFK (R29 0x31d &0x3c==0x3c) */
+
+static int laser_param_set(const char *val, const struct kernel_param *kp)
+{
+	struct rtl8290b_startup_res *res = &laser_startup_res;
+	size_t n = strcspn(val, "\n");
+	int ret;
+
+	(void)kp;
+	if (n != 2 * RTL8290B_PARAM_LEN || hex2bin(laser_block, val, RTL8290B_PARAM_LEN)) {
+		pr_err("luna-gpon: laser_param refused: want %u hex bytes, got %zu chars; laser stays off\n",
+		       RTL8290B_PARAM_LEN, n);
+		return -EINVAL;
+	}
+	mutex_lock(&bosa_lock);
+	if (!bosa_regs_live() || skip_bosa || laser_off) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (bosa_laser_up) {
+		ret = -EBUSY;	/* one start-up per boot: never re-run under a live laser */
+		goto out;
+	}
+	/* The whole block is checked before the first write; a refusal or a bus
+	 * failure leaves bosa_laser_up 0, so activation refuses and TX_DISABLE holds. */
+	ret = rtl8290b_startup(NULL, laser_block, RTL8290B_PARAM_LEN, res);
+	if (!ret && bosa_tx_enable())
+		ret = res->err = -EIO;
+	if (!ret)
+		ret = rtl8290b_startup(&luna_su_io, laser_block, RTL8290B_PARAM_LEN, res);
+	if (ret) {
+		pr_err("luna-gpon: laser start-up refused: err=%d param=0x%02x reg=0x%03x bus %u/%u failed; laser off\n",
+		       ret, res->param, res->reg, res->failed, res->accesses);
+		goto out;
+	}
+	bosa_laser_up = 1;
+	laser_fsu_polls = res->fsu_on ? LASER_FSU_POLLS : 0;
+	pr_info("luna-gpon: laser start-up from this unit's block: iavg=0x%02x loop=%u 0x31d=%*phN bus %u/0 failed\n",
+		laser_block[0x1a], rtl8290b_loop_mode_of(bosa_get_field(0x27c, 0xff)),
+		RTL8290B_STARTUP_WALKS, res->r29, res->accesses);
+out:
+	mutex_unlock(&bosa_lock);
+	return ret;
+}
+
+static int laser_param_get(char *buf, const struct kernel_param *kp)
+{
+	const struct rtl8290b_startup_res *res = &laser_startup_res;
+
+	(void)kp;
+	return sysfs_emit(buf, "err=%d param=0x%02x reg=0x%03x accesses=%u failed=%u up=%d\n",
+			  res->err, res->param, res->reg, res->accesses, res->failed, bosa_laser_up);
+}
+
+static const struct kernel_param_ops laser_param_ops = {
+	.set = laser_param_set,
+	.get = laser_param_get,
+};
+module_param_cb(laser_param, &laser_param_ops, NULL, 0644);
+MODULE_PARM_DESC(laser_param, "this unit's RTL8290B parameter block, 150 bytes of rtl8290b.data at 1400 as hex: runs the laser start-up once");
+
+/* The in-service bias/modulation re-centring from the same block, polled by the
+ * optical worker under bosa_lock; outside O5 it is disarmed. */
+static struct rtl8290b_ibim laser_ibim;
+
+static void luna_laser_ibim_poll(bool in_o5)
+{
+	int was = laser_ibim.err;
+
+	rtl8290b_ibim_poll(&luna_su_io, laser_block, RTL8290B_PARAM_LEN, &laser_ibim,
+			   jiffies_to_msecs(jiffies), in_o5);
+	if (laser_ibim.err != was)
+		luna_log("laser re-centring: err=%d (was %d) reg=0x%03x bias=%u mod=%u uA, bus %u/%u failed\n",
+			 laser_ibim.err, was, laser_ibim.reg, laser_ibim.bias_ua, laser_ibim.mod_ua,
+			 laser_ibim.failed, laser_ibim.accesses);
+}
 static u32 bosa_maint_faults;		/* recovery attempts (see the print below) */
 #define BOSA_MAINT_NONE		0xffffffffu
 static u32 bosa_maint_last = BOSA_MAINT_NONE;	/* last (0x383,0x389,R30) printed */
@@ -3519,383 +3601,6 @@ static void bosa_laser_maint(void)
 		}
 	}
 	bosa_fault_rearm();
-}
-
-/* The W77 MCU command walk, once. The RTL8290B's on-chip 8051 ...
- * dev/MEASURED-luna_gpon.c.md sec 97. */
-static const u8 bosa_w77_batch1[] = {
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_BACKUP_B3,		/* 0xa8 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN,		/* 0xb0 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN,	/* 0xd0 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN
-		| BOSA_W77_BACKUP_B3,							/* 0xd8 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN
-		| BOSA_W77_BACKUP_B3,							/* 0xe8 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN,		/* 0xe0 */
-};
-static const u8 bosa_w77_batch2[] = {
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN,		/* 0xb0 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN,	/* 0xd0 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN
-		| BOSA_W77_BACKUP_B3,							/* 0xb8 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN,		/* 0xb0 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN,	/* 0xd0 */
-	BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN,					/* 0xc0 */
-};
-/* The named form MUST reproduce the stock bytes -- one line per distinct
- * command, so a re-defined bit cannot silently move a write. */
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_BACKUP_B3) == 0xa8, "W77 0xa8");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN) == 0xb0, "W77 0xb0");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN | BOSA_W77_MOD_MAX_LOADIN | BOSA_W77_BACKUP_B3) == 0xb8, "W77 0xb8");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN) == 0xc0, "W77 0xc0");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN) == 0xd0, "W77 0xd0");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_LOADIN | BOSA_W77_BACKUP_B3) == 0xd8, "W77 0xd8");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN) == 0xe0, "W77 0xe0");
-static_assert((BOSA_W77_BIAS_MAX_EN | BOSA_W77_BIAS_MAX_LOADIN | BOSA_W77_MOD_MAX_EN | BOSA_W77_BACKUP_B3) == 0xe8, "W77 0xe8");
-
-static void bosa_w77_walk(const u8 *cmds, unsigned int n, unsigned int settle_ms)
-{
-	unsigned int i;
-
-	for (i = 0; i < n; i++) {
-		bosa_write_reg(BOSA_REG_W77, cmds[i]);	/* the MCU command */
-		mdelay(settle_ms);
-		bosa_read_reg(BOSA_REG_R29);		/* status; the MCU consumes the read */
-	}
-}
-
-/* Cold laser ignition -- the RTL8290B's MCU-driven APC ...
- * dev/MEASURED-luna_gpon.c.md sec 98. */
-static void __init bosa_apc_calibrate(void)
-{
-	int i, k, locked = 0;
-	u8 v;
-
-	/* APC power setpoints (DCL P0/P1/Pavg) — the laser power ...
-	 * dev/MEASURED-luna_gpon.c.md sec 99. */
-	bosa_write_reg(0x23a, 0x26);		/* W58 DCL P0   */
-	bosa_write_reg(0x23b, 0x50);		/* W59 DCL P1   */
-	bosa_write_reg(0x23d, 0x50);		/* W61 DCL Pavg */
-
-	/* MCU power-on gate: wait for the BOSA core boot/power-on-reset to finish
-	 * (STATUS_2 0x383: LVCMP_TX_VALID(7) + TEMP_VALID(6); DEBUG_MODE(5) stays 0 in
-	 * normal operation) plus the page-3 reset-done bit; then a 15ms settle. */
-	for (i = 0; i < 2000; i++) {
-		int s = bosa_read_reg(0x383);
-
-		if (s >= 0 && (s & 0xc0) == 0xc0)
-			break;
-		udelay(1000);
-	}
-	if (i == 2000)
-		pr_warn("luna-gpon: BOSA MCU power-on (0x383&0xc0) not ready\n");
-	bosa_poll_bit(0x301, 7, 0, 1000, 2000);		/* page-3 reset-done clears */
-	mdelay(15);
-
-	/* --- APC-enable flow, step order 0,1,2,3,4,6,5,7 --- */
-	bosa_set_bit(0x3c0, 0, 1);			/* idx0: entry reset/disable */
-
-	/* idx1 CHECK_READY: STATUS_1(0x382) bit2 = READY_STATUS */
-	if (!bosa_poll_bit(0x382, 2, 1, 1000, 2000))
-		pr_warn("luna-gpon: BOSA APC CHECK_READY (0x382 bit2) timeout\n");
-
-	/* idx2 BIAS_POWER_ON: arm the analog bias front-end + the APC bias targets.
-	 * bias-max W72(0x248)=0x86 then 0x87, bias-min W73(0x249)=0x06 are the
-	 * ignition ceilings; the servo converges the live bias well below them. */
-	bosa_set_field(0x245, 0xff, 0x10);
-	bosa_set_field(0x245, 0x0c, 0x00);		/* W6932 field (default 0) */
-	bosa_write_reg(BOSA_W(88), 0x01);
-	bosa_write_reg(BOSA_W(80), 0x08);
-	bosa_write_reg(0x247, 0x05);
-	bosa_write_reg(0x248, 0x86);			/* W72 bias-max */
-	bosa_write_reg(0x239, 0xfc);
-	bosa_set_bit(0x24a, 3, 1);
-	bosa_write_reg(0x249, 0x06);			/* W73 bias-min */
-	bosa_write_reg(0x24c, 0x71);
-	bosa_write_reg(0x24c, 0x72);
-	bosa_write_reg(0x247, 0x06);
-	bosa_write_reg(0x248, 0x87);			/* W72 bias-max final */
-	/* loop_mode 0 (W69=0x00): 0x23e source = !(0x239 bit3) */
-	v = bosa_get_field(0x239, BIT(3)) ^ 1;
-	bosa_set_field(0x23e, 0xff, v);
-	bosa_write_reg(0x232, 0x07);
-	bosa_write_reg(0x244, 0xf8);
-	bosa_set_bit(0x252, 3, 1);			/* W82 DAC/loop commit */
-
-	bosa_set_field(0x239, 0xff, 0xfc);		/* idx3 */
-	bosa_set_field(0x23c, 0xff, 0xfd);		/* idx4 */
-
-	/* RTL8290B MCU bias/mod-MAX loadin handshake (the APC-init ...
-	 * dev/MEASURED-luna_gpon.c.md sec 100. */
-	{
-		bosa_set_bit(0x24e, 7, 1);		/* W78 b7 (apc_init prefix) */
-		bosa_w77_walk(bosa_w77_batch1, ARRAY_SIZE(bosa_w77_batch1), 10);
-		bosa_set_bit(0x243, 7, 1);		/* W67 b7 */
-		bosa_set_field(BOSA_W(80), 0x08, 0x00);	/* W80 clear bit3 */
-		bosa_w77_walk(bosa_w77_batch2, ARRAY_SIZE(bosa_w77_batch2), 10);
-		pr_info("luna-gpon: DBG post-W77hs: EN_L=%d bias=0x%02x R29=0x%02x R33=0x%02x 0x383=0x%02x R30=0x%02x\n",
-			!!(bosa_read_reg(0x204) & 0x10), bosa_read_reg(0x236) & 0xff,
-			bosa_read_reg(0x31d) & 0xff, bosa_read_reg(0x321) & 0xff,
-			bosa_read_reg(0x383) & 0xff, bosa_read_reg(0x31e) & 0xff);
-	}
-
-	v = bosa_get_field(0x31f, 0x03);		/* idx6 */
-	bosa_set_field(0x232, 0xc0, v);
-	bosa_set_field(0x249, 0x18, v);
-
-	/* TEST: pre-load this board's calibrated laser bias/mod (per-board optical
-	 * calibration LUT @25C = 0x18/0x34, 12-bit DAC = byte<<4) BEFORE turning the
-	 * laser on, so it ignites at the right optical power instead of the hotter
-	 * default that trips MPD_VHIGH at DIGITAL_POWER_ON. */
-	bosa_set_bit(0x23d, 7, 0);
-	bosa_set_field(0x236, 0xff, 0x18);		/* bias hi-8 (calibrated LUT @25C). NOTE: lowering to 0x0a did NOT save DS RX — laser-on deafens RX independent of optical power; the fix is burst-gating, not bias level. */
-	bosa_set_field(0x238, 0x0f, 0x00);
-	bosa_set_bit(0x23d, 7, 1);
-	bosa_set_bit(0x23d, 7, 0);
-	bosa_set_field(0x237, 0xff, 0x34);		/* mod hi-8 */
-	bosa_set_field(0x238, 0xf0, 0x00);
-	bosa_set_bit(0x23d, 7, 1);
-
-	/* Disarm W53/0x235 fault-detect for the rest of ignition (after the W77
-	 * handshake — disarming it BEFORE the handshake regressed O3->O1). Keeps a
-	 * (false) MPD_VHIGH from latching 0x383 b4 at DPO and zeroing the bias; the safe
-	 * subset is re-armed at txEnableFlow end. */
-	bosa_set_field(0x235, 0xff, 0x00);
-
-	/* idx5 DIGITAL_POWER_ON: turn on the digital/laser power, then blind settle */
-	bosa_set_bit(BOSA_W(80), 4, 1);			/* W80 bit4 = 1 */
-	bosa_set_bit(0x380, 0, 1);
-	mdelay(101);
-	pr_info("luna-gpon: DBG post-DPO: bias(0x236)=0x%02x 0x389=0x%02x 0x383=0x%02x R30=0x%02x\n",
-		bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x389) & 0xff,
-		bosa_read_reg(0x383) & 0xff, bosa_read_reg(0x31e) & 0xff);
-
-	bosa_set_bit(0x23c, 0, 1);			/* idx7 */
-	bosa_set_bit(BOSA_REG_CONTROL2, 3, 1);			/* CONTROL2 bit3 = 1 */
-	mdelay(5);
-
-	/* HYPOTHESIS TEST: disable the laser TX (CONTROL2/0x254 bit7=1) during the
-	 * offset-K calibration so the ADC zero-offset is measured with no emission and
-	 * the TX path can't trip TX_FAULT while the analog block is mid-cal. The
-	 * txEnableFlow below re-enables TX (0x254 bit7=0). */
-	bosa_set_bit(BOSA_REG_CONTROL2, 7, 1);
-
-	/* RTL8290B FSU (Field Setup Unit) offset/gain auto-cal plus ...
-	 * dev/MEASURED-luna_gpon.c.md sec 101. */
-	bosa_set_field(BOSA_W(80), 0xc0, 0x03);	/* apcLoopMode DCL: W80[7:6]=3 */
-	bosa_set_bit(BOSA_W(80), 5, 0);		/* FSU arm: W80 b5 low */
-	bosa_set_bit(BOSA_W(80), 4, 1);		/*          W80 b4 high */
-	bosa_set_bit(0x20e, 7, 1);		/*          W14 b7 high (LOADIN) */
-	bosa_set_bit(BOSA_W(80), 5, 1);		/*          W80 b5 high (path strobe) */
-	bosa_set_bit(0x241, 6, 0);		/* fsuMode 0: W65 b6 */
-	bosa_write_reg(BOSA_REG_W77, BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN |
-		       BOSA_W77_MOD_MAX_LOADIN);	/* W77=0xb0 arms the done-check */
-	for (k = 0; k < 250; k++) {
-		int r29 = bosa_read_reg(BOSA_REG_R29);
-
-		if (r29 >= 0 && (r29 & 0x3c) == 0x3c) {
-			locked = 1;
-			break;
-		}
-		udelay(200);
-	}
-	bosa_set_bit(0x20e, 7, 0);		/* finalize: de-assert W14 LOADIN */
-	bosa_set_bit(BOSA_W(80), 4, 0);		/*           de-assert W80 b4 -> latch */
-	pr_info("luna-gpon: DBG post-FSU: done=%d R29=0x%02x bias=0x%02x R33=0x%02x 0x383=0x%02x BOSA_W(80)=0x%02x\n",
-		locked, bosa_read_reg(0x31d) & 0xff, bosa_read_reg(0x236) & 0xff,
-		bosa_read_reg(0x321) & 0xff, bosa_read_reg(0x383) & 0xff,
-		bosa_read_reg(BOSA_W(80)) & 0xff);
-
-	/* txEnableFlow (B-flow: laser output enable AFTER FSU ...
-	 * dev/MEASURED-luna_gpon.c.md sec 284. */
-	bosa_set_field(BOSA_REG_CONTROL2, 0xff, 0x8d);
-
-	/* The laser bias/mod LUT -- the PER-BOARD calibrated ...
-	 * dev/MEASURED-luna_gpon.c.md sec 102. */
-	{
-		u8 lut_bias = 0x18, lut_mod = 0x34;	/* laser LUT @ 25C (calibrated). lowering bias to 0x0a did NOT save DS RX (laser-on deafens RX regardless of optical power) -> the fix is burst-gating the TX path, not the bias level */
-
-		bosa_set_bit(0x23d, 7, 0);		/* bias DAC: strobe low */
-		bosa_set_field(0x236, 0xff, lut_bias);	/* W54 bias hi-8 (= bias12[11:4]) */
-		bosa_set_field(0x238, 0x0f, 0x00);	/* W56 bias12[3:0] (LUT<<4 -> 0) */
-		bosa_set_bit(0x23d, 7, 1);		/* latch */
-		bosa_set_bit(0x23d, 7, 0);		/* mod DAC: strobe low */
-		bosa_set_field(0x237, 0xff, lut_mod);	/* W55 mod hi-8 (= mod12[11:4]) */
-		bosa_set_field(0x238, 0xf0, 0x00);	/* W56 mod12[3:0] (LUT<<4 -> 0) */
-		bosa_set_bit(0x23d, 7, 1);		/* latch */
-	}
-
-	/* (removed an idx4 0x245 loop_mode write — the RTL8290B loop mode is W80[7:6],
-	 * set by FSU/DCL) */
-	bosa_set_field(0x230, 0xff, 0x00);		/* idx5 */
-	bosa_set_field(BOSA_W(80), 0xff, 0xe9);		/* W80=0xe9: converged (DCL[7:6]=3 + b5 + 0x09) */
-	mdelay(51);					/* idx6 */
-	/* (removed a 0x24d low-nibble write — W77 owned by the FSU ...
-	 * dev/MEASURED-luna_gpon.c.md sec 103. */
-	bosa_set_field(BOSA_REG_CONTROL2, 0x40, 0x00);		/* CONTROL2 bit6 LOS_PIN_TRI = 0 */
-	bosa_set_bit(BOSA_REG_W4, 4, 1);			/* W4 EN_L = 1: laser booster ON */
-	mdelay(200);					/* 200ms laser-bias settle */
-	bosa_set_field(BOSA_REG_CONTROL2, 0x40, 0x40);		/* CONTROL2 bit6 LOS_PIN_TRI = 1 */
-
-	bosa_set_field(BOSA_REG_CONTROL2, 0x80, 0x00);		/* idx8 CONTROL2 bit7 = 0 */
-	/* W53 fault-detect enables. The device default arms ALL ...
-	 * dev/MEASURED-luna_gpon.c.md sec 104. */
-	bosa_set_field(0x235, 0xff, 0xfc);		/* idx7: arm faults, MPD hi/lo OFF */
-	bosa_set_field(0x25f, 0xff, 0x02);
-	bosa_set_field(0x260, 0xff, 0x00);
-
-	/* Post-enable settle + diagnostic. NO init re-arm loop here: ...
-	 * dev/MEASURED-luna_gpon.c.md sec 285. */
-	mdelay(50);
-	pr_info("luna-gpon: post-txen: 0x389=0x%02x 0x383=0x%02x R30=0x%02x bias=0x%02x R33=0x%02x mod=0x%02x EN_L=%d\n",
-		bosa_read_reg(0x389) & 0xff, bosa_read_reg(0x383) & 0xff,
-		bosa_read_reg(0x31e) & 0xff, bosa_read_reg(0x236) & 0xff,
-		bosa_read_reg(0x321) & 0xff, bosa_read_reg(0x320) & 0xff,
-		!!(bosa_read_reg(0x204) & 0x10));
-
-	/* BURST-GATE the laser. EN_L is the booster OUTPUT-enable: ...
-	 * dev/MEASURED-luna_gpon.c.md sec 105. */
-	bosa_set_bit(BOSA_REG_W4, 4, 0);			/* EN_L = 0: burst-gate (0x8e) */
-	mdelay(5);
-	pr_info("luna-gpon: burst-gate EN_L=0 -> 0x204=0x%02x R33=0x%02x R30=0x%02x 0x383=0x%02x\n",
-		bosa_read_reg(0x204) & 0xff, bosa_read_reg(0x321) & 0xff,
-		bosa_read_reg(0x31e) & 0xff, bosa_read_reg(0x383) & 0xff);
-
-	/* Hand off to the continuous fault-service driven from the GPON FSM timer. */
-	bosa_laser_up = 1;
-
-	pr_info("luna-gpon: laser ignite: lock=%d R30=0x%02x(offk_done=%d txsd=%d) bias=0x%02x mod=0x%02x mpd=%02x/%02x\n",
-		locked, bosa_read_reg(0x31e) & 0xff,
-		!!(bosa_read_reg(0x31e) & BIT(7)), !!(bosa_read_reg(0x31e) & BIT(6)),
-		bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x238) & 0xff,
-		bosa_read_reg(0x320) & 0xff, bosa_read_reg(0x321) & 0xff);
-}
-
-/* RTL8290B B-variant laser APC/OFFK ignition -- the flow ...
- * dev/MEASURED-luna_gpon.c.md sec 106. */
-static void __init rtl8290b_apc_init(void)
-{
-	/* Exact stock B-variant laser APC init behavior (GPON/pon=1), ...
-	 * dev/MEASURED-luna_gpon.c.md sec 107. */
-	int i;
-	u8 t8;
-
-	pr_info("luna-gpon: rtl8290b_apc_init: B-variant OFFK (exact stock seq, base 0x578)\n");
-
-	/* step 1: MCU power-on kick + gate + ~11ms settle */
-	bosa_write_reg(0x380, 0x01);
-	if ((bosa_read_reg(0x380) & 0xff) != 1) {
-		pr_warn("luna-gpon: rtl8290b_apc_init: MCU power-on (0x380!=1) -> abort\n");
-		return;
-	}
-	for (i = 0; i < 11; i++)
-		udelay(1000);
-
-	/* CHECK_READY: (0x383&0xe0)==0xc0, then (0x301 b7) */
-	for (i = 0; i < 20000; i++) {
-		int sret = bosa_read_reg(0x383);
-
-		if (sret >= 0 && (sret & 0xe0) == 0xc0)
-			break;
-		udelay(50);
-	}
-	bosa_poll_bit(0x301, 7, 1, 50, 20000);
-
-	/* step 2: OFFK enable trio (W78 b7; W62=W63=0xfd full bytes) */
-	bosa_set_bit(0x24e, 7, 1);
-	bosa_write_reg(0x23e, 0xfd);
-	bosa_write_reg(0x23f, 0xfd);
-
-	/* step 3: per-field config (optics-cfg table @0x578, pon=1 values) */
-	bosa_write_reg(0x23a, 0x00);		/* apcIavg = 0			*/
-	bosa_set_field(0x23b, 0xf0, 0x02);	/* apcEr (optics-cfg[0x1e]=2)		*/
-	bosa_set_field(0x23b, 0x0c, 0x03);	/* apcApcTimer = 3		*/
-	bosa_set_field(0x23b, 0x03, 0x03);	/* apcErcTimer = 3		*/
-	bosa_set_field(0x240, 0x03, 0x00);	/* apcLpfBw = 0			*/
-	bosa_set_bit(0x23e, 0, 0);		/* txsdMode = 0			*/
-	bosa_set_field(0x24c, 0xe0, 0x01);	/* txsdTh = 1			*/
-	bosa_set_bit(0x24c, 4, 1);		/* txsdTiaGain = 1		*/
-	bosa_set_bit(0x24c, 3, 1);		/* txsdHighLoopGain = 1		*/
-	for (i = 0; i < 11; i++)
-		udelay(1000);
-	bosa_read_reg(0x31d);
-
-	/* step 4: W77 (0x24d) MCU-command walk BATCH 1 */
-	bosa_w77_walk(bosa_w77_batch1, ARRAY_SIZE(bosa_w77_batch1), 11);
-
-	/* step 5: ERC chopper + W80 b3 toggle */
-	bosa_set_bit(0x243, 7, 1);
-	bosa_set_bit(BOSA_W(88), 6, 1);
-	bosa_set_bit(BOSA_W(88), 5, 1);
-	bosa_set_bit(BOSA_W(88), 4, 1);		/* apcErcChopperEn = 1 (b6/b5/b4) */
-	t8 = bosa_read_reg(BOSA_W(80)) & 0xff;
-	bosa_write_reg(BOSA_W(80), t8 & 0xf7);
-	bosa_write_reg(BOSA_W(80), t8 | 0x08);
-
-	/* step 6: W77 walk BATCH 2 */
-	bosa_w77_walk(bosa_w77_batch2, ARRAY_SIZE(bosa_w77_batch2), 11);
-
-	/* step 7: OFFK offset compute+write -- STOCK SKIPS IT (optics-cfg[0x72]=0). */
-
-	/* step 8: bias/mod init-code seeds (optics-cfg[0x65]=0 -> manual path) + loop mode */
-	bosa_set_bit(0x23d, 7, 0);
-	bosa_set_field(0x236, 0xff, 0x10);	/* Ibias init 0x100 >> 4 (stock seed)	*/
-	bosa_set_field(0x238, 0x0f, 0x00);	/* Ibias[3:0] = 0		*/
-	bosa_set_bit(0x23d, 7, 1);
-	bosa_set_bit(0x23d, 7, 0);
-	bosa_set_field(0x237, 0xff, 0x20);	/* Imod init 0x200 >> 4 (stock seed)	*/
-	bosa_set_field(0x238, 0xf0, 0x00);	/* Imod[3:0] = 0		*/
-	bosa_set_bit(0x23d, 7, 1);
-	bosa_set_field(BOSA_W(80), 0xc0, 0x03);	/* apcLoopMode DCL (remap 1->3)	*/
-	bosa_set_bit(0x24a, 4, 0);		/* apcLoopModeEx = 0		*/
-	bosa_set_field(0x23d, 0x70, 0x04);	/* apcLaserOnDelay = 4		*/
-	bosa_set_field(0x23d, 0x03, 0x02);	/* apcSettleCnt = 2		*/
-	bosa_set_field(0x239, 0x38, 0x05);	/* apcApcLoopGain = 5		*/
-	bosa_set_field(0x23c, 0x07, 0x00);	/* apcCmpd = 0			*/
-	bosa_set_field(0x239, 0x07, 0x03);	/* apcErcLoopGain = 3		*/
-	bosa_set_field(0x23c, 0xf8, 0x05);	/* apcErTrim = 5		*/
-
-	/* step 9: FSU config (the previously-guessed block, now exact) */
-	bosa_set_bit(0x241, 6, 1);		/* fsuMode = 1			*/
-	bosa_set_field(0x241, 0x30, 0x01);	/* fsuApcLoopGain = 1 (b4-5)	*/
-	bosa_set_field(0x241, 0x0c, 0x01);	/* fsuApcRampb = 1 (b2-3)	*/
-	bosa_set_field(0x241, 0x03, 0x03);	/* fsuApcRampm = 3		*/
-	bosa_set_bit(0x242, 7, 1);		/* fsuRstCount = 1		*/
-	bosa_set_field(0x242, 0x60, 0x02);	/* fsuSettleCount = 2 (b5-6)	*/
-	bosa_set_field(0x242, 0x18, 0x02);	/* fsuErcLoopGain = 2 (b3-4)	*/
-	bosa_set_field(0x242, 0x06, 0x00);	/* fsuErcRampm = 0 (b1-2)	*/
-
-	/* step 10: txsd off-rst */
-	bosa_set_bit(BOSA_W(80), 3, 1);		/* txsdOffRstCount = 1		*/
-
-	/* step 11: ceilings + enables (modmax 0xcc, biasmax 0x4d, biasmin 0x01) */
-	bosa_set_bit(0x246, 2, 0);
-	bosa_set_field(0x247, 0xff, 0xcc);
-	bosa_set_bit(0x246, 2, 1);		/* apcModMax = 0xcc		*/
-	bosa_set_bit(0x246, 1, 0);
-	bosa_set_field(0x248, 0xff, 0x4d);
-	bosa_set_bit(0x246, 1, 1);		/* apcBiasMax = 0x4d		*/
-	bosa_set_bit(BOSA_W(88), 7, 0);		/* apcCrossEn = 0		*/
-	bosa_set_bit(0x246, 0, 0);
-	bosa_set_field(0x249, 0xff, 0x01);
-	bosa_set_bit(0x246, 0, 1);		/* apcBiasMin = 0x01		*/
-	bosa_set_bit(0x246, 5, 1);		/* apcModMaxEn = 1		*/
-	bosa_set_bit(0x246, 3, 1);		/* apcBiasMinEn = 1		*/
-	bosa_set_field(0x283, 0xff, 0x01);	/* apcCrossStr = 1		*/
-
-	/* step 12: FSU ARM (BOSA_W(80) b5=0->b4=1->0x20e b7=1->BOSA_W(80) b5=1) + commit */
-	bosa_set_bit(BOSA_W(80), 5, 0);
-	bosa_set_bit(BOSA_W(80), 4, 1);
-	bosa_set_bit(0x20e, 7, 1);
-	bosa_set_bit(BOSA_W(80), 5, 1);
-	bosa_write_reg(0x232, 0xc0);
-	bosa_write_reg(0x24a, 0x60);
-
-	apc_offk_armed = 1;
-	pr_info("luna-gpon: rtl8290b_apc_init: armed; post-cfg R29=0x%02x R30=0x%02x 0x241=0x%02x 0x242=0x%02x 0x247=0x%02x 0x248=0x%02x; servo latches at O5\n",
-		bosa_read_reg(0x31d) & 0xff, bosa_read_reg(0x31e) & 0xff,
-		bosa_read_reg(0x241) & 0xff, bosa_read_reg(0x242) & 0xff,
-		bosa_read_reg(0x247) & 0xff, bosa_read_reg(0x248) & 0xff);
 }
 
 static void __init bosa_probe(void)
@@ -6402,9 +6107,11 @@ static int gpon_proc_show_locked(struct seq_file *s, void *v)
 			   bosa_read_reg(0x236) & 0xff, bosa_read_reg(0x238) & 0xff,
 			   bosa_read_reg(0x239) & 0xff, bosa_read_reg(0x24d) & 0xff,
 			   bosa_read_reg(BOSA_W(88)) & 0xff);
-		seq_printf(s, "bosa_apc: W69_245=%02x(loopmode) W58_23a=%02x(iavg) W72_248=%02x(biasmax) W73_249=%02x(biasmin 0x2a)\n",
-			   bosa_read_reg(0x245) & 0xff, bosa_read_reg(0x23a) & 0xff,
-			   bosa_read_reg(0x248) & 0xff, bosa_read_reg(0x249) & 0xff);
+		seq_printf(s, "bosa_apc: loop_mode=%u(0x27c[7:6]) W58_23a=%02x(iavg) W72_248=%02x(biasmax) W73_249=%02x(biasmin 0x2a) startup_err=%d fsu_settled=%d fsu_polls_left=%d ibim_evals=%u ibim_kicks=%u ibim_err=%d ibim_bias_ua=%u ibim_mod_ua=%u\n",
+			   rtl8290b_loop_mode_of(bosa_get_field(0x27c, 0xff)), bosa_read_reg(0x23a) & 0xff,
+			   bosa_read_reg(0x248) & 0xff, bosa_read_reg(0x249) & 0xff,
+			   laser_startup_res.err, laser_fsu_latched, laser_fsu_polls, laser_ibim.evals,
+			   laser_ibim.kicks, laser_ibim.err, laser_ibim.bias_ua, laser_ibim.mod_ua);
 	}
 	/* SerDes/serializer run-state vs LIVE working-stock O5 ...
 	 * dev/MEASURED-luna_gpon.c.md sec 312. */
@@ -9943,28 +9650,16 @@ static void gpon_optical_work_fn(struct work_struct *w)
 	mutex_lock(&bosa_lock);
 	if (luna_driver_ready && !luna_stopping) {
 		if (bosa_regs_live() && !laser_off && !skip_bosa) {
-			if (bosa_laser_up && xchg(&luna_laser_restrobe_owed, 0) &&
-			    (laser_bias || laser_mod))
-				luna_laser_dac_apply();
+			if (bosa_laser_up && xchg(&luna_laser_restrobe_owed, 0))
+				luna_laser_restrobe();
 			if (bosa_laser_up)
 				bosa_laser_maint();
-			/* OFFK runtime servo (stock europa_LoopMon equivalent): latch ...
-			 * dev/MEASURED-luna_gpon.c.md sec 329. */
-			if (apc_offk_armed && !apc_offk_latched) {
-				int r;
-
-				bosa_write_reg(BOSA_REG_W77, BOSA_W77_BIAS_MAX_EN | BOSA_W77_MOD_MAX_EN |
-					       BOSA_W77_MOD_MAX_LOADIN);	/* 0xb0, as the done-check */
-				r = bosa_read_reg(BOSA_REG_R29);
-				if (r >= 0 && (r & 0x3c) == 0x3c) {
-					bosa_set_bit(0x20e, 7, 0);
-					bosa_set_bit(BOSA_W(80), 4, 0);
-					apc_offk_latched = 1;
-					luna_log("OFFK LATCHED: R29(0x31d)=0x%02x (modulator nulled)\n",
-						r & 0xff);
-				}
-			}
+			if (bosa_laser_up && laser_fsu_polls > 0)
+				luna_laser_fsu_poll();
 		}
+		if (bosa_laser_up)
+			luna_laser_ibim_poll(bosa_regs_live() && !laser_off && !skip_bosa &&
+					     READ_ONCE(gpon_fsm_state) == 5);
 		if (optical_poll && (bosa_regs_live() || bosa_cal_ready || optics_self_managed) &&
 		    time_after_eq(jiffies, optical_next)) {
 			if (settle_left > 0 && !luna_apc_settled()) {
@@ -10501,22 +10196,10 @@ static int __init rtl9602c_gpon_init(void)
 	if (!laser_off)
 		bosa_vmpd_dark_calibrate();
 
-	/* Power on the BOSA optical transmitter so the ONU can send upstream PLOAM
-	 * bursts during activation. The APC offset calibration is deferred until
-	 * after the PON-IP datapath and MAC reset: the APC digital block only clocks
-	 * once the PON TX clock runs, so calibrating earlier leaves OFFK_DONE dead. */
-	if (!laser_off) {
-		bosa_tx_enable();
-		/* This unit's burst bias/mod, when the command line already carries them. */
-		if (laser_bias || laser_mod)
-			luna_laser_dac_apply();
-		/* bosa_laser_maint() (the ~50 ms fault re-ignite) is gated on ...
-		 * dev/MEASURED-luna_gpon.c.md sec 263. */
-		if (bosa_regs_live())
-			bosa_laser_up = 1;
-		else
-			pr_warn("luna-gpon: laser NOT marked up -- the BOSA register writes were refused (no positive RTL8290B id), so nothing was applied and the ~50ms TX-fault maintenance stays OFF rather than servicing a part it does not fit\n");
-	}
+	/* The transmitter starts when this unit's parameter block arrives
+	 * (laser_param, after the PON TX clock runs): no unit's numbers before. */
+	if (!laser_off)
+		pr_info("luna-gpon: laser off until this unit's RTL8290B parameter block arrives (laser_param)\n");
 
 skip_bosa_init:
 	mutex_unlock(&bosa_lock);
@@ -10549,15 +10232,6 @@ skip_bosa_init:
 	gpon_field(GPON_GTC_DS_LOS_CFG_STS, 1, 1, 1);	/* OPTIC_LOS_POLAR = 1  */
 	pr_info("luna-gpon: optical-LOS monitor enabled (los_cfg=0x%08x)\n",
 		gpon_rd(GPON_GTC_DS_LOS_CFG_STS));
-
-	/* Now that the PON-IP/MAC (and thus the SerDes TX clock) are running, run
-	 * the laser APC offset calibration so the laser actually biases. */
-	mutex_lock(&bosa_lock);
-	if (bosa_regs_live() && !skip_bosa && !laser_off && apc_offk)
-		rtl8290b_apc_init();		/* B-variant: completes OFFK (DS-safe) */
-	else if (bosa_regs_live() && !skip_bosa && !laser_off && !apc_off)
-		bosa_apc_calibrate();		/* legacy non-B flow (A/B fallback) */
-	mutex_unlock(&bosa_lock);
 
 	if (omci_meter_init(&luna_meter, &luna_meter_ops, NULL))
 		pr_err("luna-gpon: the OMCI core refused the meter table, ME 280 is not applied\n");

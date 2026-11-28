@@ -241,24 +241,24 @@ optics_backend() {
 	sed -n 's/^optics_backend: //p' "$GPON_HEALTH" 2>/dev/null
 }
 
-# RTL8290B: THIS unit's laser currents, handed to the driver before the serial
-# that starts ranging -- two units on one image never share a calibration.
+# RTL8290B: THIS unit's laser parameter block, handed to the driver before the
+# serial that starts ranging; the driver runs the laser start-up from it (and
+# keeps the laser off without it) -- two units never share a calibration.
 laser_from_unit() {
-	local part="$1" out key val
+	local part="$1" out
 	case "$2" in RTL8290B|'') ;; *) return 0 ;; esac
-	[ -w "$LASER_PARAM_DIR/laser_bias" ] || return 0
-	out=$("$RTK" -p "$part" laser_cal 2>/dev/null) || {
-		log "no RTL8290B laser calibration on '$part'"
-		return 0
+	[ -w "$LASER_PARAM_DIR/laser_param" ] || return 0
+	grep -q ' up=1' "$LASER_PARAM_DIR/laser_param" 2>/dev/null && return 0	# once per boot
+	out=$("$RTK" -p "$part" laser_cal 2>/dev/null | sed -n 's/^param_block=//p')
+	[ -n "$out" ] || {
+		log "no RTL8290B laser parameter block on '$part'; laser stays off"
+		return 1
 	}
-	for key in laser_bias laser_mod; do
-		val=$(echo "$out" | sed -n "s/^${key}_dac=//p")	# the full 12-bit DAC code
-		{ [ -n "$val" ] && echo "$val" > "$LASER_PARAM_DIR/$key"; } || {
-			log "could not hand $key='$val' to the driver; not activating GPON"
-			return 1
-		}
-	done
-	log "laser from this unit: $(echo $out)"
+	echo "$out" > "$LASER_PARAM_DIR/laser_param" || {
+		log "the driver refused this unit's laser parameter block ($(cat "$LASER_PARAM_DIR/laser_param" 2>/dev/null)); not activating GPON"
+		return 1
+	}
+	log "laser start-up from this unit's block: $(cat "$LASER_PARAM_DIR/laser_param" 2>/dev/null)"
 }
 
 # RTL8290B: THIS unit's DDM coefficients over the driver's compiled ones. Readings only:

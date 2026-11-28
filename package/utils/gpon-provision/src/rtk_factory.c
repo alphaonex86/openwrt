@@ -788,48 +788,33 @@ static int do_optical_cal(const char *part)
 }
 
 /*
- * laser_cal: THIS unit's RTL8290B laser bias and modulation currents, read from
- * its own rtl8290b.data (CAL_IBIAS / CAL_IMOD, big-endian uA at 0x606 / 0x60a;
- * the bench X111W holds 9960 / 36694 uA there). Printed beside the hi-8 code of
- * the 12-bit DAC over 50 mA full scale, which luna_gpon's laser_bias / laser_mod
- * take, and the full 12-bit code (its low nibble is per unit too). A value the
- * DAC cannot express is refused: a laser is never programmed
- * from another unit's numbers or from a guess.
+ * laser_cal: THIS unit's RTL8290B laser parameter block, the 150 bytes of its own
+ * rtl8290b.data at 1400 that luna_gpon's laser_param takes and drives the laser
+ * start-up from. The driver range-checks every field; absent or short is refused
+ * here, so a laser never starts from another unit's numbers or a guess.
  */
-#define CAL_IBIAS_OFF	0x606
-#define CAL_IMOD_OFF	0x60a
-#define DAC_FULL_UA	50000u
-
-static unsigned int dac12(uint32_t ua)
-{
-	return (unsigned int)((uint64_t)ua * 4096 / DAC_FULL_UA);
-}
+#define LASER_PARAM_OFF	1400
+#define LASER_PARAM_LEN	150
 
 static int do_laser_cal(const char *part)
 {
 	char devpath[256];
-	uint32_t ibias, imod;
 	ssize_t got;
 	long flen;
+	int i;
 
 	got = part_read(part, devpath, sizeof devpath);
 	if (got < 0)
 		return 1;
 	flen = jffs2_read_file(partbuf, (uint32_t)got, "rtl8290b.data");
-	if (flen < CAL_IMOD_OFF + 4) {
+	if (flen < LASER_PARAM_OFF + LASER_PARAM_LEN) {
 		fprintf(stderr, "rtk_factory: rtl8290b.data absent or too short (%ld)\n", flen);
 		return 1;
 	}
-	ibias = be32(filebuf + CAL_IBIAS_OFF);
-	imod = be32(filebuf + CAL_IMOD_OFF);
-	if (ibias >= DAC_FULL_UA || imod >= DAC_FULL_UA || dac12(ibias) < 16 || dac12(imod) < 16) {
-		fprintf(stderr, "rtk_factory: rtl8290b.data CAL_IBIAS %u / CAL_IMOD %u uA "
-			"is outside the DAC's range - refusing it\n", ibias, imod);
-		return 1;
-	}
-	printf("ibias_ua=%u\nimod_ua=%u\nlaser_bias=0x%02x\nlaser_mod=0x%02x\n"
-	       "laser_bias_dac=0x%03x\nlaser_mod_dac=0x%03x\n", ibias, imod,
-	       dac12(ibias) >> 4, dac12(imod) >> 4, dac12(ibias), dac12(imod));
+	printf("param_block=");
+	for (i = 0; i < LASER_PARAM_LEN; i++)
+		printf("%02x", filebuf[LASER_PARAM_OFF + i]);
+	printf("\n");
 	return 0;
 }
 

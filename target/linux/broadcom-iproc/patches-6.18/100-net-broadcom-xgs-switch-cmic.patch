@@ -1,8 +1,8 @@
 From: Confiared <contact@confiared.com>
 Subject: [PATCH] net: broadcom: the XGS switch CMIC core and the BCM56150 switch init
 
-The CMIC core (S-Channel, MIIM, init table replay) and the BCM56150
-switch-core driver that replays its init table at probe.
+The CMIC core (S-Channel and MIIM accessors) and the BCM56150
+switch-core driver that runs stock's init sequence through them at probe.
 
 Signed-off-by: Confiared <contact@confiared.com>
 ---
@@ -16,7 +16,7 @@ Signed-off-by: Confiared <contact@confiared.com>
 +	tristate
 +	help
 +	  The CMIC of a Broadcom XGS switch core: its S-Channel, its MIIM
-+	  master and the replay of a chip's init table.
++	  master, one call per register, memory or PHY write.
 +
 +config BCM56150_SWITCH
 +	tristate "BCM56150 (Hurricane2) switch core init"
@@ -24,7 +24,7 @@ Signed-off-by: Confiared <contact@confiared.com>
 +	select BCM_CMIC
 +	help
 +	  Brings up the switch core of a BCM56150 iProc host (V-SOL V1600G)
-+	  at probe, from the init table generated from its stock firmware.
++	  at probe, with stock's own init sequence.
 +
  endif # NET_VENDOR_BROADCOM
 --- a/drivers/net/ethernet/broadcom/Makefile

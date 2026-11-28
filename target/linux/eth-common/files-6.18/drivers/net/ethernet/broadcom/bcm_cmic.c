@@ -2,8 +2,8 @@
 /* TIER: VENDOR */
 /*
  * The CMIC of a Broadcom XGS switch core, the host's window on the switch: its S-Channel carries one register or
- * memory entry per message, its MIIM master reaches the switch's PHYs and SerDes. bcm_cmic_run() replays a chip's
- * init table through them, step by step, and stops at the first step the hardware refuses.
+ * memory entry per message, its MIIM master reaches the switch's PHYs and SerDes. A chip's init calls the accessors
+ * below in order; the first operation the hardware refuses stops the rest.
  */
 
 #include <linux/bits.h>
@@ -98,70 +98,90 @@ static int cmic_poll(void __iomem *cmic, u32 blk, u32 addr, u32 mask)
 	return ret ?: err;
 }
 
-static int cmic_step(void __iomem *cmic, const struct bcm_cmic_table *t, const struct bcm_cmic_step *s)
+/* Counts @ret as the operation just done; the first failure is logged and kept. */
+static void cmic_account(struct bcm_cmic *c, int ret, const char *what, u32 blk, u32 addr)
 {
-	int ret = 0;
-
-	switch (s->op) {
-	case BCM_CMIC_WR:
-		writel(s->val, cmic + s->addr);
-		return 0;
-	case BCM_CMIC_REG:
-		return cmic_schan(cmic, SCHAN_WRITE_REG, s->blk, s->addr, s->words == 1 ? &s->val : t->words + s->val,
-				  s->words, 4 * s->words, NULL);
-	case BCM_CMIC_MEM:
-		for (u32 i = 0; i < s->count && !ret; i++)
-			ret = cmic_schan(cmic, SCHAN_WRITE_MEM, s->blk, s->addr + i, t->words + s->val + i * s->words,
-					 s->words, 4 * s->words, NULL);
-		return ret;
-	case BCM_CMIC_POLL:
-		return cmic_poll(cmic, s->blk, s->addr, s->val);
-	case BCM_CMIC_MIIM:
-		return cmic_miim_write(cmic, s->addr, s->val);
-	}
-	return -EINVAL;
-}
-
-/* -> 0, or why the table is not one bcm_cmic_run() can replay. */
-static int cmic_table_check(const struct bcm_cmic_table *t, resource_size_t size, unsigned int *bad)
-{
-	for (*bad = 0; *bad < t->n_steps; (*bad)++) {
-		const struct bcm_cmic_step *s = &t->steps[*bad];
-		bool inline_val = s->op != BCM_CMIC_MEM && !(s->op == BCM_CMIC_REG && s->words > 1);
-
-		if (s->op > BCM_CMIC_MIIM || !s->words || s->words > CMIC_SCHAN_DATA_WORDS)
-			return -EINVAL;
-		if (s->op == BCM_CMIC_WR && (s->addr & 3 || (u64)s->addr + 4 > size))
-			return -ERANGE;
-		if (!inline_val && (u64)s->val + (u64)s->count * s->words > t->n_words)
-			return -ERANGE;
-	}
-	return 0;
-}
-
-int bcm_cmic_run(struct device *dev, void __iomem *cmic, resource_size_t size, const struct bcm_cmic_table *t)
-{
-	unsigned int i;
-	int ret = cmic_table_check(t, size, &i);
-
 	if (ret) {
-		dev_err(dev, "init table step %u is malformed: %d\n", i, ret);
-		return ret;
+		c->err = ret;
+		dev_err(c->dev, "init op %u (%s blk %u addr 0x%08x) failed: %d\n", c->ops, what, blk, addr, ret);
 	}
-	for (i = 0; i < t->n_steps; i++) {
-		const struct bcm_cmic_step *s = &t->steps[i];
-
-		ret = cmic_step(cmic, t, s);
-		if (ret) {
-			dev_err(dev, "init step %u/%u (op %u blk %u addr 0x%08x val 0x%08x) failed: %d\n",
-				i, t->n_steps, s->op, s->blk, s->addr, s->val, ret);
-			return ret;
-		}
-	}
-	dev_info(dev, "switch init: %u steps replayed\n", t->n_steps);
-	return 0;
+	c->ops++;
 }
-EXPORT_SYMBOL_GPL(bcm_cmic_run);
 
-MODULE_DESCRIPTION("Broadcom XGS switch CMIC: S-Channel, MIIM and init table replay");
+void bcm_cmic_write(struct bcm_cmic *c, u32 off, u32 val)
+{
+	if (c->err)
+		return;
+	if (off & 3 || (u64)off + 4 > c->size) {
+		cmic_account(c, -ERANGE, "write", 0, off);
+		return;
+	}
+	writel(val, c->base + off);
+	cmic_account(c, 0, "write", 0, off);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_write);
+
+static void cmic_schan_write(struct bcm_cmic *c, u32 op, u8 blk, u32 addr, const u32 *data, unsigned int words)
+{
+	if (!c->err)
+		cmic_account(c, cmic_schan(c->base, op, blk, addr, data, words, 4 * words, NULL),
+			     op == SCHAN_WRITE_MEM ? "mem" : "reg", blk, addr);
+}
+
+void bcm_cmic_reg(struct bcm_cmic *c, u8 blk, u32 addr, u32 val)
+{
+	cmic_schan_write(c, SCHAN_WRITE_REG, blk, addr, &val, 1);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_reg);
+
+void bcm_cmic_reg64(struct bcm_cmic *c, u8 blk, u32 addr, u64 val)
+{
+	u32 data[2] = { lower_32_bits(val), upper_32_bits(val) };
+
+	cmic_schan_write(c, SCHAN_WRITE_REG, blk, addr, data, 2);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_reg64);
+
+void bcm_cmic_mem(struct bcm_cmic *c, u8 blk, u32 addr, const u32 *entry, unsigned int words)
+{
+	cmic_schan_write(c, SCHAN_WRITE_MEM, blk, addr, entry, words);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_mem);
+
+void bcm_cmic_mem32(struct bcm_cmic *c, u8 blk, u32 addr, u32 val)
+{
+	cmic_schan_write(c, SCHAN_WRITE_MEM, blk, addr, &val, 1);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_mem32);
+
+void bcm_cmic_poll(struct bcm_cmic *c, u8 blk, u32 addr, u32 mask)
+{
+	if (!c->err)
+		cmic_account(c, cmic_poll(c->base, blk, addr, mask), "poll", blk, addr);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_poll);
+
+void bcm_cmic_miim(struct bcm_cmic *c, u16 phy, u8 reg, u16 val)
+{
+	if (!c->err)
+		cmic_account(c, cmic_miim_write(c->base, (u32)phy << 16 | reg, val), "miim", phy, reg);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_miim);
+
+void bcm_cmic_miim_seq(struct bcm_cmic *c, u16 phy, const struct bcm_cmic_mii_wr *seq, unsigned int n)
+{
+	for (unsigned int i = 0; i < n; i++)
+		bcm_cmic_miim(c, phy, seq[i].reg, seq[i].val);
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_miim_seq);
+
+int bcm_cmic_done(struct bcm_cmic *c)
+{
+	if (!c->err)
+		dev_info(c->dev, "switch init: %u operations\n", c->ops);
+	return c->err;
+}
+EXPORT_SYMBOL_GPL(bcm_cmic_done);
+
+MODULE_DESCRIPTION("Broadcom XGS switch CMIC: S-Channel and MIIM accessors");
 MODULE_LICENSE("GPL");

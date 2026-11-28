@@ -4,41 +4,38 @@
 #define BCM_CMIC_H
 
 #include <linux/device.h>
+#include <linux/kernel.h>
 #include <linux/types.h>
 
-/* One step of a switch init table (virt/broadcom_switch_fold.py writes a chip's). */
-enum bcm_cmic_op {
-	BCM_CMIC_WR,	/* CMIC register `addr` = `val` */
-	BCM_CMIC_REG,	/* switch register (`blk`, `addr`) = `val`, or `words` words from the table's words at `val` */
-	BCM_CMIC_MEM,	/* `count` entries of `words` words from the table's words at `val`, the first at (`blk`, `addr`) */
-	BCM_CMIC_POLL,	/* until switch register (`blk`, `addr`) has every bit of `val` */
-	BCM_CMIC_MIIM,	/* PHY `addr` >> 16 (bus 7:5, id 4:0, 0x200 internal) register `addr` & 0xffff = `val` */
+/* A switch init through the CMIC: the first failure is logged, then every later operation is skipped. */
+struct bcm_cmic {
+	struct device *dev;
+	void __iomem *base;
+	resource_size_t size;
+	unsigned int ops;
+	int err;
 };
 
-struct bcm_cmic_step {
-	u32 addr;
-	u32 val;
-	u16 count;
-	u8 op;
-	u8 blk;
-	u8 words;
+/* One write of a PHY register by the MIIM master. */
+struct bcm_cmic_mii_wr {
+	u8 reg;
+	u16 val;
 };
 
-struct bcm_cmic_table {
-	const struct bcm_cmic_step *steps;
-	unsigned int n_steps;
-	const u32 *words;
-	unsigned int n_words;
-};
+void bcm_cmic_write(struct bcm_cmic *c, u32 off, u32 val);
+void bcm_cmic_reg(struct bcm_cmic *c, u8 blk, u32 addr, u32 val);
+void bcm_cmic_reg64(struct bcm_cmic *c, u8 blk, u32 addr, u64 val);
+void bcm_cmic_mem(struct bcm_cmic *c, u8 blk, u32 addr, const u32 *entry, unsigned int words);
+void bcm_cmic_mem32(struct bcm_cmic *c, u8 blk, u32 addr, u32 val);
+void bcm_cmic_poll(struct bcm_cmic *c, u8 blk, u32 addr, u32 mask);
+/* @phy: bus 7:5, id 4:0, 0x200 for an internal SerDes */
+void bcm_cmic_miim(struct bcm_cmic *c, u16 phy, u8 reg, u16 val);
+void bcm_cmic_miim_seq(struct bcm_cmic *c, u16 phy, const struct bcm_cmic_mii_wr *seq, unsigned int n);
+/* -> 0, or the first failure's error */
+int bcm_cmic_done(struct bcm_cmic *c);
 
-#define CMIC_WR(a, v)			{ (a), (v), 1, BCM_CMIC_WR, 0, 1 }
-#define CMIC_REG(b, a, v)		{ (a), (v), 1, BCM_CMIC_REG, (b), 1 }
-#define CMIC_REGN(b, a, n, at)		{ (a), (at), 1, BCM_CMIC_REG, (b), (n) }
-#define CMIC_MEM(b, a, n, cnt, at)	{ (a), (at), (cnt), BCM_CMIC_MEM, (b), (n) }
-#define CMIC_POLL(b, a, mask)		{ (a), (mask), 1, BCM_CMIC_POLL, (b), 1 }
-#define CMIC_MIIM(phy, reg, v)		{ (phy) << 16 | (reg), (v), 1, BCM_CMIC_MIIM, 0, 1 }
-
-/* Replays @t through the CMIC mapped at @cmic (@size bytes); stops at the first step the hardware refuses. */
-int bcm_cmic_run(struct device *dev, void __iomem *cmic, resource_size_t size, const struct bcm_cmic_table *t);
+#define BCM_CMIC_MEM(c, blk, addr, ...) \
+	bcm_cmic_mem(c, blk, addr, (const u32[]){ __VA_ARGS__ }, ARRAY_SIZE(((const u32[]){ __VA_ARGS__ })))
+#define BCM_CMIC_MIIM_SEQ(c, phy, seq)	bcm_cmic_miim_seq(c, phy, seq, ARRAY_SIZE(seq))
 
 #endif /* BCM_CMIC_H */
